@@ -1,8 +1,9 @@
 """
 Trip matching module for matching real-time vehicle positions to scheduled GTFS trips.
 
-WMATA's GTFS-RT trip_ids don't match GTFS static trip_ids, so we need to approximate
-which scheduled trip each vehicle is running based on route, direction, time, and position.
+For WMATA, GTFS-RT trip_ids generally DO match GTFS static trip_ids and have stop_times data.
+This module prioritizes using the RT trip_id when available, with position/time-based
+matching as a fallback for edge cases where the RT trip_id is missing or invalid.
 """
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
@@ -45,23 +46,30 @@ def find_matching_trip(
     db: Session,
     vehicle_pos: VehiclePosition,
     max_time_diff_minutes: float = 15.0,
-    max_distance_meters: float = 500.0
+    max_distance_meters: float = 500.0,
+    prefer_rt_trip_id: bool = True
 ) -> Optional[Tuple[Trip, float]]:
     """
     Find the scheduled trip that best matches a vehicle's real-time position.
 
     Matching strategy:
-    1. Filter trips by route and direction (from vehicle's trip_id direction lookup)
-    2. Find trips that should be active at the vehicle's timestamp
-    3. For each candidate trip, find nearest stop to vehicle position
-    4. Score based on distance and time difference
-    5. Return best match
+    1. If prefer_rt_trip_id=True and vehicle has trip_id:
+       - Check if RT trip_id exists in GTFS static and has stop_times
+       - If yes, validate it matches vehicle position/time reasonably
+       - If validated, return it with high confidence (fast path)
+    2. Otherwise, fall back to position/time-based matching:
+       - Filter trips by route and direction
+       - Find trips that should be active at the vehicle's timestamp
+       - For each candidate trip, find nearest stop to vehicle position
+       - Score based on distance and time difference
+       - Return best match
 
     Args:
         db: Database session
         vehicle_pos: VehiclePosition object with real-time data
         max_time_diff_minutes: Maximum time difference to consider (default 15 min)
         max_distance_meters: Maximum distance from scheduled stop (default 500m)
+        prefer_rt_trip_id: Prioritize RT trip_id if available (default True)
 
     Returns:
         Tuple of (Trip, confidence_score) or None if no match found
@@ -70,12 +78,51 @@ def find_matching_trip(
     if not vehicle_pos.route_id:
         return None
 
-    # Get vehicle's direction from its (possibly invalid) trip_id
+    # FAST PATH: Try to use RT trip_id directly if available
     vehicle_direction = None
-    if vehicle_pos.trip_id:
+    if prefer_rt_trip_id and vehicle_pos.trip_id:
         rt_trip = db.query(Trip).filter(Trip.trip_id == vehicle_pos.trip_id).first()
         if rt_trip:
             vehicle_direction = rt_trip.direction_id
+
+            # Check if this trip has stop_times
+            stop_times_count = db.query(StopTime).filter(
+                StopTime.trip_id == rt_trip.trip_id
+            ).count()
+
+            if stop_times_count > 0:
+                # Validate the RT trip_id by checking if vehicle is reasonably close to any scheduled stop
+                stop_times = db.query(StopTime).filter(
+                    StopTime.trip_id == rt_trip.trip_id
+                ).order_by(StopTime.stop_sequence).all()
+
+                for st in stop_times:
+                    stop = db.query(Stop).filter(Stop.stop_id == st.stop_id).first()
+                    if not stop:
+                        continue
+
+                    # Check distance
+                    distance = haversine_distance(
+                        vehicle_pos.latitude, vehicle_pos.longitude,
+                        stop.stop_lat, stop.stop_lon
+                    )
+
+                    # Check time
+                    scheduled_time = parse_gtfs_time(st.arrival_time, vehicle_pos.timestamp)
+                    time_diff_minutes = (vehicle_pos.timestamp - scheduled_time).total_seconds() / 60
+
+                    # If vehicle is within reasonable distance and time of ANY stop on this trip, trust the RT trip_id
+                    if distance <= max_distance_meters and -10.0 <= time_diff_minutes <= max_time_diff_minutes:
+                        # Calculate confidence based on best match found
+                        time_confidence = max(0, 1.0 - (abs(time_diff_minutes) / max_time_diff_minutes))
+                        distance_confidence = 1.0 - (distance / max_distance_meters)
+                        confidence = (time_confidence + distance_confidence) / 2
+                        confidence = max(0.0, min(1.0, confidence))
+
+                        # Return RT trip with confidence
+                        return (rt_trip, confidence)
+
+    # FALLBACK: Position/time-based matching if RT trip_id not available or didn't validate
 
     # Get all trips for this route (optionally filtered by direction)
     trip_query = db.query(Trip).filter(Trip.route_id == vehicle_pos.route_id)

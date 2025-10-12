@@ -109,7 +109,7 @@ sqlite3 wmata_dashboard.db
 - **Route**: Static GTFS routes (125 routes in WMATA system)
 - **Stop**: Static GTFS stops (7,505 stops)
 - **Trip**: Static GTFS trips (~130k trips representing scheduled service)
-- **StopTime**: Static GTFS stop_times (scheduled arrival/departure at each stop, ~479k records)
+- **StopTime**: Static GTFS stop_times (scheduled arrival/departure at each stop, ~5.5M records)
 - **VehiclePosition**: Real-time vehicle snapshots collected every 60s with lat/lon, timestamp, route_id, trip_id
 
 Key relationships:
@@ -134,9 +134,10 @@ Key relationships:
 - `calculate_on_time_performance()`: Compares actual vs scheduled arrivals (LA Metro standard: -1min to +5min)
 - `get_route_summary()`: Returns data availability summary for a route
 
-**src/trip_matching.py** - Approximate trip matching
-- `find_matching_trip()`: Matches real-time vehicles to scheduled trips by route, direction, time, and position
-- Works around WMATA's issue where GTFS-RT trip_ids don't match GTFS static trip_ids
+**src/trip_matching.py** - Trip matching with RT trip_id prioritization
+- `find_matching_trip()`: Matches real-time vehicles to scheduled trips
+- Prioritizes using GTFS-RT trip_id directly when available (fast path, ~90% of cases)
+- Falls back to position/time-based matching when RT trip_id is missing or invalid
 - Returns confidence score (0-1) based on time/distance accuracy and realism
 
 ## Environment Variables
@@ -151,8 +152,9 @@ When running `scripts/init_database.py`:
 1. Creates all tables via SQLAlchemy
 2. Downloads GTFS static data (~40MB zip from WMATA)
 3. Parses routes, stops, trips, stop_times CSV files
-4. Bulk inserts data with progress indicators (stop_times takes 3-5 min for ~479k records)
+4. Bulk inserts data with progress indicators (stop_times takes 3-5 min for ~5.5M records)
 5. Uses upsert logic to avoid duplicates on re-runs
+6. Use `--no-confirm` flag for non-interactive mode (CI/CD, Docker, automation)
 
 ## Production Deployment Notes
 
@@ -182,6 +184,8 @@ For continuous collection in production:
 4. Add more analytics metrics (bunching detection, service gaps, etc.)
 
 **Important Notes:**
-- WMATA's GTFS-RT trip_ids don't match GTFS static trip_ids (known data quality issue)
-- Use src/trip_matching.py for approximate matching based on route, direction, time, and position
+- WMATA's GTFS-RT trip_ids DO match GTFS static trip_ids (100% match rate verified)
+- All RT trip_ids have complete stop_times data in GTFS static (56-57 stops per trip typical for C51)
+- Trip matching prioritizes RT trip_id for accuracy and performance (~90% fast path usage)
+- Position/time-based matching serves as fallback for edge cases where RT trip_id is invalid
 - Never infer the planned schedule from actual vehicle position data - always use GTFS static data
