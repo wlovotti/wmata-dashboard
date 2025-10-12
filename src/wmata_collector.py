@@ -8,8 +8,8 @@ import csv
 from datetime import datetime
 from google.transit import gtfs_realtime_pb2
 from sqlalchemy.orm import Session
-from database import get_session, init_db
-from models import Route, Stop, Trip, StopTime, VehiclePosition
+from src.database import get_session, init_db
+from src.models import Route, Stop, Trip, StopTime, VehiclePosition
 
 # Load environment variables from .env file
 load_dotenv()

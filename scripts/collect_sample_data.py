@@ -1,12 +1,27 @@
 """
-C53 data collector - runs for 30 cycles (30 minutes) to collect data for OTP testing
+Sample data collector - runs multiple collection cycles for testing/development
+Collects vehicle positions for a specified route in batches with delays between each collection
+
+Usage:
+    python collect_sample_data.py [route_id] [num_cycles]
+
+Examples:
+    python collect_sample_data.py C51 20      # Collect C51 for 20 cycles
+    python collect_sample_data.py C53 30      # Collect C53 for 30 cycles
+    python collect_sample_data.py             # Default: C51 for 20 cycles
 """
 import os
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
+
+# Add parent directory to path so we can import from src/
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from dotenv import load_dotenv
-from wmata_collector import WMATADataCollector
-from database import get_session, init_db
+from src.wmata_collector import WMATADataCollector
+from src.database import get_session, init_db
 
 # Load environment variables
 load_dotenv()
@@ -17,14 +32,14 @@ if not API_KEY:
     raise ValueError("WMATA_API_KEY not found in environment variables")
 
 
-def collect_once(cycle_num, total_cycles, route_id='C53'):
+def collect_once(cycle_num, total_cycles, route_id):
     """
     Collect vehicle positions once for specified route
 
     Args:
         cycle_num: Current cycle number
         total_cycles: Total number of cycles
-        route_id: Route to collect (default: C53)
+        route_id: Route to collect (e.g., 'C51', 'C53')
     """
     db = get_session()
 
@@ -54,18 +69,18 @@ def collect_once(cycle_num, total_cycles, route_id='C53'):
 
 
 def main():
-    # Number of collection cycles (30 minutes)
-    NUM_CYCLES = 30
+    # Parse command line arguments
+    route_id = sys.argv[1] if len(sys.argv) > 1 else 'C51'
+    num_cycles = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+
     DELAY_SECONDS = 60  # Wait 60 seconds between collections
-    ROUTE = 'C53'
 
     print("=" * 70)
-    print(f"WMATA {ROUTE} Data Collector")
+    print("WMATA Sample Data Collector")
     print("=" * 70)
-    print(f"Collecting {ROUTE} vehicle positions {NUM_CYCLES} times")
+    print(f"Collecting {route_id} vehicle positions {num_cycles} times")
     print(f"Delay between collections: {DELAY_SECONDS} seconds")
-    print(f"Estimated time: ~{(NUM_CYCLES * DELAY_SECONDS) / 60:.0f} minutes")
-    print(f"Route {ROUTE} runs 24/7 (1am-1am), so data collection at this hour is valid")
+    print(f"Estimated time: ~{(num_cycles * DELAY_SECONDS) / 60:.1f} minutes")
     print("Press Ctrl+C to stop early")
     print("=" * 70)
     print()
@@ -74,33 +89,33 @@ def main():
     init_db()
 
     try:
-        for i in range(1, NUM_CYCLES + 1):
-            collect_once(i, NUM_CYCLES, ROUTE)
+        for i in range(1, num_cycles + 1):
+            collect_once(i, num_cycles, route_id)
 
             # Don't sleep after the last collection
-            if i < NUM_CYCLES:
+            if i < num_cycles:
                 print(f"  Waiting {DELAY_SECONDS} seconds until next collection...")
                 time.sleep(DELAY_SECONDS)
 
         print()
         print("=" * 70)
-        print(f"✓ {ROUTE} data collection complete!")
+        print("✓ Sample data collection complete!")
         print("=" * 70)
 
         # Show summary
         db = get_session()
         try:
-            from models import VehiclePosition
+            from src.models import VehiclePosition
             total_records = db.query(VehiclePosition).count()
-            route_records = db.query(VehiclePosition).filter_by(route_id=ROUTE).count()
+            route_records = db.query(VehiclePosition).filter_by(route_id=route_id).count()
             unique_vehicles = db.query(VehiclePosition.vehicle_id).filter_by(
-                route_id=ROUTE
+                route_id=route_id
             ).distinct().count()
 
             print(f"\nDatabase Summary:")
             print(f"  Total vehicle positions: {total_records}")
-            print(f"  {ROUTE} vehicle positions: {route_records}")
-            print(f"  {ROUTE} unique vehicles: {unique_vehicles}")
+            print(f"  {route_id} vehicle positions: {route_records}")
+            print(f"  {route_id} unique vehicles: {unique_vehicles}")
         finally:
             db.close()
 

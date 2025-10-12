@@ -7,8 +7,8 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 import math
 
-from models import VehiclePosition, Route, Trip, StopTime, Stop
-from database import get_session
+from src.models import VehiclePosition, Route, Trip, StopTime, Stop
+from src.database import get_session
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -468,7 +468,7 @@ def calculate_on_time_performance(
     Returns:
         Dictionary with on-time performance statistics
     """
-    from trip_matching import find_matching_trip
+    from src.trip_matching import find_matching_trip
 
     # Get vehicle positions
     positions = get_vehicle_positions(db, route_id, start_time, end_time)

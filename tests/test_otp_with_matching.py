@@ -1,8 +1,8 @@
 """
 Test OTP calculation with trip matching
 """
-from database import get_session
-from analytics import calculate_on_time_performance, get_route_summary
+from src.database import get_session
+from src.analytics import calculate_on_time_performance, get_route_summary
 
 db = get_session()
 

@@ -2,8 +2,8 @@
 Debug direction filtering for headway calculation
 """
 from datetime import datetime
-from database import get_session
-from models import VehiclePosition, Trip
+from src.database import get_session
+from src.models import VehiclePosition, Trip
 
 db = get_session()
 

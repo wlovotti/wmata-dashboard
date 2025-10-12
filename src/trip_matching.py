@@ -9,8 +9,8 @@ from typing import Optional, List, Tuple
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from models import Trip, StopTime, Stop, VehiclePosition
-from analytics import haversine_distance
+from src.models import Trip, StopTime, Stop, VehiclePosition
+from src.analytics import haversine_distance
 
 
 def parse_gtfs_time(time_str: str, reference_datetime: datetime) -> datetime:
@@ -225,7 +225,7 @@ def match_vehicles_to_trips(
 
 if __name__ == "__main__":
     # Test the matching function
-    from database import get_session
+    from src.database import get_session
 
     db = get_session()
 

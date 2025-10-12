@@ -2,8 +2,8 @@
 Test the improved analytics functions with today's C51 data
 """
 from datetime import datetime, timedelta
-from database import get_session
-from analytics import calculate_headways, get_route_summary, get_route_service_hours
+from src.database import get_session
+from src.analytics import calculate_headways, get_route_summary, get_route_service_hours
 
 db = get_session()
 
