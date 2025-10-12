@@ -1,9 +1,9 @@
 """
 Debug OTP calculation to understand why so many buses appear early
 """
-from database import get_session
-from analytics import calculate_on_time_performance
-from models import VehiclePosition
+from src.database import get_session
+from src.analytics import calculate_on_time_performance
+from src.models import VehiclePosition
 from datetime import datetime
 
 db = get_session()

@@ -4,8 +4,8 @@ Run this once to set up the database and load GTFS static data
 """
 import os
 from dotenv import load_dotenv
-from wmata_collector import WMATADataCollector
-from database import get_session, init_db
+from src.wmata_collector import WMATADataCollector
+from src.database import get_session, init_db
 
 load_dotenv()
 

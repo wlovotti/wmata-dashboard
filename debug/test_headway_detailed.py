@@ -2,9 +2,9 @@
 Detailed test of headway calculation showing reference stop and vehicle passages
 """
 from datetime import datetime
-from database import get_session
-from analytics import calculate_headways, find_reference_stop
-from models import Stop
+from src.database import get_session
+from src.analytics import calculate_headways, find_reference_stop
+from src.models import Stop
 
 db = get_session()
 

@@ -2,8 +2,8 @@
 Check how many vehicle positions have trip_ids with actual stop_times
 """
 from datetime import datetime
-from database import get_session
-from models import VehiclePosition, StopTime
+from src.database import get_session
+from src.models import VehiclePosition, StopTime
 
 db = get_session()
 

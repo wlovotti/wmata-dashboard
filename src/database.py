@@ -1,7 +1,7 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from models import Base
+from src.models import Base
 
 # Database configuration from environment variables
 # Default to SQLite if no PostgreSQL connection string provided

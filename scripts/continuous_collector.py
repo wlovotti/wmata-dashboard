@@ -5,8 +5,8 @@ import os
 import time
 from datetime import datetime
 from dotenv import load_dotenv
-from wmata_collector import WMATADataCollector
-from database import get_session, init_db
+from src.wmata_collector import WMATADataCollector
+from src.database import get_session, init_db
 
 # Load environment variables
 load_dotenv()
