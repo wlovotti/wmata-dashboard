@@ -9,7 +9,7 @@ from datetime import datetime
 from google.transit import gtfs_realtime_pb2
 from sqlalchemy.orm import Session
 from src.database import get_session, init_db
-from src.models import Route, Stop, Trip, StopTime, VehiclePosition
+from src.models import Route, Stop, Trip, StopTime, VehiclePosition, BusPosition
 
 # Load environment variables from .env file
 load_dotenv()
@@ -362,6 +362,97 @@ class WMATADataCollector:
         self.db.commit()
         if saved_count > 0:
             print(f"  Saved {saved_count} vehicle positions to database")
+
+    def get_bus_positions(self, route_id=None, timeout=10):
+        """
+        Fetch real-time bus positions from WMATA's BusPositions API.
+
+        This API provides richer data than GTFS-RT including:
+        - Schedule deviation (Deviation field)
+        - Trip start/end times
+        - Block numbers
+        - Direction information
+
+        Args:
+            route_id: Optional route to filter (e.g., 'C51'). If None, gets all buses.
+            timeout: Request timeout in seconds
+
+        Returns:
+            List of bus position dictionaries
+        """
+        print("\nFetching bus positions from WMATA API...")
+        sys.stdout.flush()
+
+        url = "https://api.wmata.com/Bus.svc/json/jBusPositions"
+        params = {}
+        if route_id:
+            params['RouteID'] = route_id
+
+        try:
+            response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
+
+            if response.status_code != 200:
+                print(f"✗ Error fetching bus positions: {response.status_code}")
+                return []
+
+            data = response.json()
+            positions = data.get('BusPositions', [])
+
+            print(f"  ✓ Found {len(positions)} buses" + (f" on route {route_id}" if route_id else ""))
+            return positions
+
+        except requests.exceptions.Timeout:
+            print(f"✗ Timeout: Request took longer than {timeout} seconds")
+            return []
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Network error: {e}")
+            return []
+        except Exception as e:
+            print(f"✗ Error parsing bus positions: {e}")
+            return []
+
+    def _save_bus_positions(self, positions):
+        """Save bus positions from WMATA API to database"""
+        saved_count = 0
+        for pos_data in positions:
+            # Parse datetime strings
+            dt = datetime.fromisoformat(pos_data['DateTime'].replace('Z', '+00:00'))
+            trip_start = None
+            trip_end = None
+
+            if pos_data.get('TripStartTime'):
+                try:
+                    trip_start = datetime.fromisoformat(pos_data['TripStartTime'].replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    pass
+
+            if pos_data.get('TripEndTime'):
+                try:
+                    trip_end = datetime.fromisoformat(pos_data['TripEndTime'].replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    pass
+
+            bus_pos = BusPosition(
+                vehicle_id=pos_data['VehicleID'],
+                route_id=pos_data['RouteID'],
+                trip_id=pos_data.get('TripID'),
+                latitude=pos_data['Lat'],
+                longitude=pos_data['Lon'],
+                deviation=pos_data.get('Deviation'),
+                timestamp=dt,
+                direction_num=pos_data.get('DirectionNum'),
+                direction_text=pos_data.get('DirectionText'),
+                trip_headsign=pos_data.get('TripHeadsign'),
+                trip_start_time=trip_start,
+                trip_end_time=trip_end,
+                block_number=pos_data.get('BlockNumber')
+            )
+            self.db.add(bus_pos)
+            saved_count += 1
+
+        self.db.commit()
+        if saved_count > 0:
+            print(f"  Saved {saved_count} bus positions to database")
 
 
 def main():

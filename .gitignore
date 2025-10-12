@@ -30,6 +30,9 @@ build/
 *.zip
 *.pb
 
+# Visualization outputs
+visualizations/output/
+
 # IDE
 .vscode/
 .idea/

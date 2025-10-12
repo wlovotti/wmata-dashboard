@@ -13,6 +13,10 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg>=3.1.0"]
+viz = [
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+]
 
 [build-system]
 requires = ["hatchling"]
