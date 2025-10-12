@@ -14,6 +14,41 @@ WMATA Performance Dashboard - A transit metrics dashboard for Washington DC Metr
 - **GTFS & GTFS-RT** for transit data (static schedules + real-time positions)
 - **protobuf** for parsing GTFS-RT vehicle position feeds
 
+## Repository Structure
+
+```
+wmata-dashboard/
+├── src/                    # Core application modules
+│   ├── __init__.py
+│   ├── database.py        # Database connection and session management
+│   ├── models.py          # SQLAlchemy ORM models
+│   ├── wmata_collector.py # GTFS/GTFS-RT data collection
+│   ├── analytics.py       # Headway and OTP calculations
+│   └── trip_matching.py   # Match real-time vehicles to scheduled trips
+│
+├── scripts/               # Runnable scripts
+│   ├── init_database.py   # Initialize database and load GTFS data
+│   ├── collect_sample_data.py  # Collect data for testing
+│   └── continuous_collector.py # Production data collector
+│
+├── tests/                 # Test files
+│   ├── test_analytics.py
+│   └── test_otp_with_matching.py
+│
+├── debug/                 # Debug and exploration scripts
+│   ├── debug_otp.py
+│   ├── debug_directions.py
+│   ├── check_valid_trips.py
+│   └── test_headway_detailed.py
+│
+├── .github/workflows/     # CI/CD workflows
+│   └── test.yml          # Basic test workflow
+│
+├── .env                   # Environment variables (not in git)
+├── pyproject.toml        # Python dependencies
+└── wmata_dashboard.db    # SQLite database (not in git)
+```
+
 ## Development Commands
 
 ### Initial Setup
@@ -25,7 +60,7 @@ brew install uv
 uv sync
 
 # Initialize database and load GTFS static data (run once, takes 5-10 minutes)
-python init_database.py
+uv run python scripts/init_database.py
 
 # For PostgreSQL in production, add to .env:
 # DATABASE_URL=postgresql://user:pass@host/dbname
@@ -33,11 +68,22 @@ python init_database.py
 
 ### Running Data Collection
 ```bash
-# Quick test - collect C51 route vehicle positions once
-python wmata_collector.py
+# Collect sample data for a specific route
+uv run python scripts/collect_sample_data.py C51 20    # 20 cycles of C51 data
+uv run python scripts/collect_sample_data.py C53 30    # 30 cycles of C53 data
 
 # Continuous collection - runs every 60 seconds (for production)
-python continuous_collector.py
+uv run python scripts/continuous_collector.py
+```
+
+### Running Analytics
+```bash
+# Test analytics with collected data
+uv run python tests/test_analytics.py
+uv run python tests/test_otp_with_matching.py
+
+# Debug specific issues
+uv run python debug/debug_otp.py
 ```
 
 ### Database Access
@@ -58,7 +104,7 @@ sqlite3 wmata_dashboard.db
 3. **Database** → Stores both static schedule data and real-time position snapshots
 4. **Future**: Analytics layer to calculate headways and on-time performance
 
-### Database Models (`models.py`)
+### Database Models (`src/models.py`)
 
 - **Route**: Static GTFS routes (125 routes in WMATA system)
 - **Stop**: Static GTFS stops (7,505 stops)
@@ -70,22 +116,28 @@ Key relationships:
 - Routes → Trips → StopTimes → Stops (static schedule data)
 - VehiclePosition → Route/Trip (real-time observations)
 
-### Key Files
+### Core Modules
 
-- **models.py**: SQLAlchemy ORM models (see above)
-- **database.py**: Database connection factory, supports both SQLite and PostgreSQL via `DATABASE_URL` env var
-- **wmata_collector.py**: Main WMATADataCollector class with methods for fetching GTFS static/RT data
-- **init_database.py**: One-time setup script that downloads ~40MB GTFS zip and loads into database
-- **continuous_collector.py**: Production collector that runs indefinitely, polling every 60s
-- **.env**: Contains `WMATA_API_KEY` (required, get from https://developer.wmata.com)
+**src/database.py** - Database connection factory
+- `get_session()`: Returns new database session
+- `init_db()`: Creates all tables
+- Supports both SQLite (dev) and PostgreSQL (prod) via `DATABASE_URL` env var
 
-### WMATADataCollector Class
+**src/wmata_collector.py** - GTFS/GTFS-RT data collection
+- `download_gtfs_static()`: Downloads and parses GTFS static zip file
+- `get_realtime_vehicle_positions()`: Fetches GTFS-RT protobuf feed
+- `get_route_vehicles()`: Filters vehicles by route_id
+- `_save_vehicle_positions()`: Bulk inserts vehicle positions
 
-The collector (`wmata_collector.py`) provides:
-- `download_gtfs_static()`: Downloads and parses GTFS static zip file, saves to database
-- `get_realtime_vehicle_positions()`: Fetches GTFS-RT protobuf feed, returns list of vehicle dicts
-- `get_route_vehicles()`: Filters vehicles by route_id, saves to database
-- `_save_vehicle_positions()`: Bulk inserts vehicle positions to database
+**src/analytics.py** - Transit performance metrics
+- `calculate_headways()`: Measures time between consecutive buses at reference stops
+- `calculate_on_time_performance()`: Compares actual vs scheduled arrivals (LA Metro standard: -1min to +5min)
+- `get_route_summary()`: Returns data availability summary for a route
+
+**src/trip_matching.py** - Approximate trip matching
+- `find_matching_trip()`: Matches real-time vehicles to scheduled trips by route, direction, time, and position
+- Works around WMATA's issue where GTFS-RT trip_ids don't match GTFS static trip_ids
+- Returns confidence score (0-1) based on time/distance accuracy and realism
 
 ## Environment Variables
 
@@ -95,7 +147,7 @@ Required in `.env` file:
 
 ## Database Initialization Details
 
-When running `init_database.py`:
+When running `scripts/init_database.py`:
 1. Creates all tables via SQLAlchemy
 2. Downloads GTFS static data (~40MB zip from WMATA)
 3. Parses routes, stops, trips, stop_times CSV files
@@ -107,21 +159,29 @@ When running `init_database.py`:
 For continuous collection in production:
 1. Deploy to cloud server (DigitalOcean, AWS EC2, etc.)
 2. Set up PostgreSQL and configure `DATABASE_URL` in `.env`
-3. Run `python init_database.py` to load initial GTFS data
-4. Run `python continuous_collector.py` as a systemd service or similar
+3. Run `uv run python scripts/init_database.py` to load initial GTFS data
+4. Run `uv run python scripts/continuous_collector.py` as a systemd service or similar
 5. Consider setting up cron job to refresh GTFS static data weekly (WMATA updates schedules periodically)
 
 ## Current Status & Roadmap
 
 **Completed:**
-- GTFS static data loading and database storage
-- Real-time vehicle position collection and storage
-- SQLite local development setup
-- PostgreSQL production-ready architecture
+- ✅ GTFS static data loading and database storage
+- ✅ Real-time vehicle position collection and storage
+- ✅ SQLite local development setup
+- ✅ PostgreSQL production-ready architecture
+- ✅ Analytics layer with headway calculation
+- ✅ On-time performance calculation with trip matching
+- ✅ Repository restructuring (src/, scripts/, tests/, debug/)
+- ✅ Basic CI/CD with GitHub Actions
 
 **Next Steps:**
-1. Calculate headways from collected vehicle positions (time between consecutive buses)
-2. Calculate on-time performance (compare vehicle positions to scheduled stop_times)
-3. Build FastAPI backend with REST endpoints
-4. Create React dashboard frontend with charts/maps
-- Never infer the planned schedule from the actual vehicle position data.
+1. Build FastAPI backend with REST API endpoints
+2. Create React dashboard frontend with charts/maps
+3. Deploy to production environment
+4. Add more analytics metrics (bunching detection, service gaps, etc.)
+
+**Important Notes:**
+- WMATA's GTFS-RT trip_ids don't match GTFS static trip_ids (known data quality issue)
+- Use src/trip_matching.py for approximate matching based on route, direction, time, and position
+- Never infer the planned schedule from actual vehicle position data - always use GTFS static data

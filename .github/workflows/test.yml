@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install uv
+      run: pip install uv
+
+    - name: Install dependencies
+      run: uv sync
+
+    - name: Test imports
+      run: |
+        uv run python -c "from src.database import get_session; print('✓ Imports work')"
+        uv run python -c "from src.analytics import calculate_headways; print('✓ Analytics module loads')"
+        uv run python -c "from src.trip_matching import find_matching_trip; print('✓ Trip matching module loads')"
+
+    - name: Check code structure
+      run: |
+        test -d src && echo "✓ src/ directory exists"
+        test -d scripts && echo "✓ scripts/ directory exists"
+        test -d tests && echo "✓ tests/ directory exists"
+        test -f src/__init__.py && echo "✓ src/__init__.py exists"
