@@ -311,7 +311,7 @@ wheels = [
 [[package]]
 name = "wmata-dashboard"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "gtfs-realtime-bindings" },
     { name = "python-dotenv" },
