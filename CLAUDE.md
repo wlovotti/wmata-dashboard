@@ -21,30 +21,42 @@ wmata-dashboard/
 ├── src/                    # Core application modules
 │   ├── __init__.py
 │   ├── database.py        # Database connection and session management
-│   ├── models.py          # SQLAlchemy ORM models
+│   ├── models.py          # SQLAlchemy ORM models (VehiclePosition, BusPosition, etc.)
 │   ├── wmata_collector.py # GTFS/GTFS-RT data collection
-│   ├── analytics.py       # Headway and OTP calculations
+│   ├── analytics.py       # Multi-level OTP and headway calculations
 │   └── trip_matching.py   # Match real-time vehicles to scheduled trips
 │
 ├── scripts/               # Runnable scripts
 │   ├── init_database.py   # Initialize database and load GTFS data
-│   ├── collect_sample_data.py  # Collect data for testing
+│   ├── collect_sample_data.py  # Collect data (supports "all" for system-wide)
 │   └── continuous_collector.py # Production data collector
 │
 ├── tests/                 # Test files
 │   ├── test_analytics.py
-│   └── test_otp_with_matching.py
+│   ├── test_otp_with_matching.py
+│   └── test_multi_level_otp.py  # Test stop/time-period/line level OTP
 │
 ├── debug/                 # Debug and exploration scripts
+│   ├── check_early_arrivals.py      # Analyze early arrival distribution
+│   ├── compare_route_otp.py         # Compare OTP across routes
+│   ├── test_bus_positions.py        # Test WMATA BusPositions API
+│   ├── test_collect_bus_positions.py # Test BusPos collection
+│   ├── test_otp_bus_positions.py    # Test BusPos OTP calculation
+│   ├── validate_deviation.py        # Validate WMATA deviation (CRITICAL)
 │   ├── debug_otp.py
 │   ├── debug_directions.py
 │   ├── check_valid_trips.py
 │   └── test_headway_detailed.py
 │
+├── docs/                  # Documentation
+│   ├── OTP_METHODOLOGY.md # Detailed OTP calculation methodology
+│   └── SESSION_SUMMARY.md # Session notes and findings
+│
 ├── .github/workflows/     # CI/CD workflows
 │   └── test.yml          # Basic test workflow
 │
 ├── .env                   # Environment variables (not in git)
+├── CLAUDE.md             # This file - project context for Claude Code
 ├── pyproject.toml        # Python dependencies
 └── wmata_dashboard.db    # SQLite database (not in git)
 ```
@@ -72,18 +84,31 @@ uv run python scripts/init_database.py
 uv run python scripts/collect_sample_data.py C51 20    # 20 cycles of C51 data
 uv run python scripts/collect_sample_data.py C53 30    # 30 cycles of C53 data
 
+# Collect all vehicles system-wide (useful for system-wide analysis)
+uv run python scripts/collect_sample_data.py all 120   # 120 cycles (2 hours) of all vehicles
+
 # Continuous collection - runs every 60 seconds (for production)
 uv run python scripts/continuous_collector.py
 ```
 
 ### Running Analytics
 ```bash
+# Test multi-level OTP calculations
+uv run python tests/test_multi_level_otp.py
+
 # Test analytics with collected data
 uv run python tests/test_analytics.py
 uv run python tests/test_otp_with_matching.py
 
+# Validate WMATA's deviation data (shows unreliability)
+uv run python debug/validate_deviation.py
+
+# Compare OTP across multiple routes
+uv run python debug/compare_route_otp.py
+
 # Debug specific issues
 uv run python debug/debug_otp.py
+uv run python debug/check_early_arrivals.py
 ```
 
 ### Database Access
@@ -110,11 +135,13 @@ sqlite3 wmata_dashboard.db
 - **Stop**: Static GTFS stops (7,505 stops)
 - **Trip**: Static GTFS trips (~130k trips representing scheduled service)
 - **StopTime**: Static GTFS stop_times (scheduled arrival/departure at each stop, ~5.5M records)
-- **VehiclePosition**: Real-time vehicle snapshots collected every 60s with lat/lon, timestamp, route_id, trip_id
+- **VehiclePosition**: Real-time vehicle snapshots collected every 60s with lat/lon, timestamp, route_id, trip_id (PRIMARY DATA SOURCE)
+- **BusPosition**: WMATA BusPositions API data with deviation field (SUPPLEMENTARY - validation shows unreliable deviation data)
 
 Key relationships:
 - Routes → Trips → StopTimes → Stops (static schedule data)
-- VehiclePosition → Route/Trip (real-time observations)
+- VehiclePosition → Route/Trip (real-time observations - primary)
+- BusPosition → Route/Trip (WMATA proprietary API - supplementary only)
 
 ### Core Modules
 
@@ -125,14 +152,20 @@ Key relationships:
 
 **src/wmata_collector.py** - GTFS/GTFS-RT data collection
 - `download_gtfs_static()`: Downloads and parses GTFS static zip file
-- `get_realtime_vehicle_positions()`: Fetches GTFS-RT protobuf feed
+- `get_realtime_vehicle_positions()`: Fetches GTFS-RT protobuf feed (PRIMARY)
+- `get_bus_positions()`: Fetches WMATA BusPositions API (supplementary)
 - `get_route_vehicles()`: Filters vehicles by route_id
 - `_save_vehicle_positions()`: Bulk inserts vehicle positions
+- `_save_bus_positions()`: Bulk inserts bus positions from WMATA API
 
 **src/analytics.py** - Transit performance metrics
 - `calculate_headways()`: Measures time between consecutive buses at reference stops
-- `calculate_on_time_performance()`: Compares actual vs scheduled arrivals (LA Metro standard: -1min to +5min)
+- `calculate_stop_level_otp()`: OTP at specific stop on route
+- `calculate_time_period_otp()`: OTP by time of day (AM Peak, Midday, PM Peak, Evening, Night)
+- `calculate_line_level_otp()`: Overall route OTP (GTFS-based, PRIMARY METHOD)
+- `calculate_otp_from_bus_positions()`: OTP using WMATA deviation field (SUPPLEMENTARY ONLY - unreliable)
 - `get_route_summary()`: Returns data availability summary for a route
+- `find_nearest_stop()`: Find closest stop to position (with caching for performance)
 
 **src/trip_matching.py** - Trip matching with RT trip_id prioritization
 - `find_matching_trip()`: Matches real-time vehicles to scheduled trips
@@ -169,23 +202,36 @@ For continuous collection in production:
 
 **Completed:**
 - ✅ GTFS static data loading and database storage
-- ✅ Real-time vehicle position collection and storage
+- ✅ Real-time vehicle position collection (GTFS-RT VehiclePositions)
+- ✅ WMATA BusPositions API integration (supplementary)
 - ✅ SQLite local development setup
 - ✅ PostgreSQL production-ready architecture
+- ✅ Multi-level OTP calculations (stop/time-period/line level)
 - ✅ Analytics layer with headway calculation
-- ✅ On-time performance calculation with trip matching
+- ✅ Trip matching with high accuracy
+- ✅ Performance optimizations (caching)
+- ✅ Validation of WMATA deviation data (found unreliable)
 - ✅ Repository restructuring (src/, scripts/, tests/, debug/)
+- ✅ Comprehensive documentation (OTP_METHODOLOGY.md, SESSION_SUMMARY.md)
 - ✅ Basic CI/CD with GitHub Actions
 
 **Next Steps:**
-1. Build FastAPI backend with REST API endpoints
-2. Create React dashboard frontend with charts/maps
+1. Build visualizations and dashboard UI
+2. API/backend for serving metrics (FastAPI)
 3. Deploy to production environment
 4. Add more analytics metrics (bunching detection, service gaps, etc.)
 
 **Important Notes:**
+- **GTFS-based OTP is PRIMARY** - Don't use WMATA deviation as sole source (validation showed up to 7.7 min discrepancies)
 - WMATA's GTFS-RT trip_ids DO match GTFS static trip_ids (100% match rate verified)
 - All RT trip_ids have complete stop_times data in GTFS static (56-57 stops per trip typical for C51)
 - Trip matching prioritizes RT trip_id for accuracy and performance (~90% fast path usage)
 - Position/time-based matching serves as fallback for edge cases where RT trip_id is invalid
 - Never infer the planned schedule from actual vehicle position data - always use GTFS static data
+- BusPositions API useful for cross-validation and schedule discrepancy detection
+
+**Key Findings:**
+- ~40% of bus arrivals are early (real operational pattern, not data error)
+- LA Metro OTP standard (-1 to +5 min) is stricter than WMATA's published standard
+- Polling-based collection gives ±30-60 second accuracy (acceptable for trend analysis)
+- Route stops caching provides 100x+ performance improvement for multi-route analysis

@@ -13,10 +13,28 @@ Performance metrics dashboard for Washington DC Metro bus and rail lines.
 
 ## Current Status
 
-- [x] C51 bus route data collection
-- [ ] Database storage
-- [ ] Headway calculations  
-- [ ] Web dashboard
+### Data Collection
+- [x] GTFS Static data (routes, stops, schedules)
+- [x] GTFS-RT VehiclePositions (real-time locations) - PRIMARY
+- [x] WMATA BusPositions API (proprietary, includes deviation) - SUPPLEMENTARY
+- [x] SQLite database with 60-second polling
+
+### Analytics Implemented
+- [x] Multi-level OTP calculations (stop, time-period, line)
+- [x] Trip matching (GTFS-RT to GTFS static)
+- [x] Headway calculations using closest approach method
+- [x] Validation of WMATA deviation data (found unreliable)
+- [x] Performance optimizations (route stops caching)
+
+### Documentation
+- [x] OTP methodology documented (`docs/OTP_METHODOLOGY.md`)
+- [x] Project context (`CLAUDE.md`)
+- [x] Session summary (`docs/SESSION_SUMMARY.md`)
+
+### Next Steps
+- [ ] Visualizations and dashboard UI
+- [ ] API/backend for serving metrics
+- [ ] Real-time data collection service
 
 ## License
 

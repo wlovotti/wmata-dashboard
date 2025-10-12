@@ -7,7 +7,7 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 import math
 
-from src.models import VehiclePosition, Route, Trip, StopTime, Stop
+from src.models import VehiclePosition, BusPosition, Route, Trip, StopTime, Stop
 from src.database import get_session
 
 
@@ -403,6 +403,25 @@ def calculate_headways(
     }
 
 
+# Cache for route stops to avoid repeated database queries
+_route_stops_cache = {}
+
+def get_route_stops(db: Session, route_id: str) -> List[Stop]:
+    """
+    Get all stops for a route, with caching to avoid repeated queries.
+
+    Returns:
+        List of Stop objects for the route
+    """
+    if route_id not in _route_stops_cache:
+        stops = db.query(Stop).join(StopTime).join(Trip).filter(
+            Trip.route_id == route_id
+        ).distinct().all()
+        _route_stops_cache[route_id] = stops
+
+    return _route_stops_cache[route_id]
+
+
 def find_nearest_stop(
     db: Session,
     route_id: str,
@@ -411,15 +430,15 @@ def find_nearest_stop(
     max_distance_meters: float = 200.0
 ) -> Optional[Tuple[Stop, float]]:
     """
-    Find the nearest stop on a route to given coordinates
+    Find the nearest stop on a route to given coordinates.
+
+    Uses caching to avoid repeated database queries for the same route.
 
     Returns:
         Tuple of (Stop, distance_meters) or None if no stop within max_distance
     """
-    # Get all stops for this route
-    stops = db.query(Stop).join(StopTime).join(Trip).filter(
-        Trip.route_id == route_id
-    ).distinct().all()
+    # Get all stops for this route (cached)
+    stops = get_route_stops(db, route_id)
 
     nearest_stop = None
     min_distance = float('inf')
@@ -642,6 +661,469 @@ def get_route_summary(db: Session, route_id: str) -> Dict:
             'start': time_range[0].isoformat() if time_range[0] else None,
             'end': time_range[1].isoformat() if time_range[1] else None,
             'duration_minutes': ((time_range[1] - time_range[0]).total_seconds() / 60) if time_range[0] and time_range[1] else None
+        }
+    }
+
+
+def calculate_stop_level_otp(
+    db: Session,
+    route_id: str,
+    stop_id: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    proximity_meters: float = 50.0,
+    early_threshold_seconds: int = -60,
+    late_threshold_seconds: int = 300,
+    min_match_confidence: float = 0.3
+) -> Dict:
+    """
+    Calculate on-time performance for a specific stop on a specific route.
+
+    This analyzes how reliably buses arrive on-time at a particular stop,
+    which helps identify problem areas along a route.
+
+    Args:
+        db: Database session
+        route_id: Route to analyze (e.g., 'C51')
+        stop_id: Specific stop to analyze
+        start_time: Start of analysis period
+        end_time: End of analysis period
+        proximity_meters: Distance threshold to consider vehicle "at stop" (default: 50m)
+        early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
+        late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
+        min_match_confidence: Minimum confidence for trip matching
+
+    Returns:
+        Dictionary with stop-level OTP statistics
+    """
+    from src.trip_matching import find_matching_trip
+
+    # Get stop info
+    stop = db.query(Stop).filter(Stop.stop_id == stop_id).first()
+    if not stop:
+        return {'error': f'Stop {stop_id} not found'}
+
+    # Get vehicle positions for this route
+    positions = get_vehicle_positions(db, route_id, start_time, end_time)
+
+    if not positions:
+        return {
+            'route_id': route_id,
+            'stop_id': stop_id,
+            'stop_name': stop.stop_name,
+            'arrivals_analyzed': 0,
+            'on_time_percentage': None
+        }
+
+    # Find arrivals at this stop
+    arrivals = []
+
+    for pos in positions:
+        # Check if vehicle is near this stop
+        distance = haversine_distance(pos.latitude, pos.longitude, stop.stop_lat, stop.stop_lon)
+
+        if distance > proximity_meters:
+            continue
+
+        # Match to scheduled trip
+        match_result = find_matching_trip(db, pos)
+        if not match_result or match_result[1] < min_match_confidence:
+            continue
+
+        matched_trip, confidence = match_result
+
+        # Get scheduled time for this trip at this stop
+        stop_time = db.query(StopTime).filter(
+            and_(
+                StopTime.trip_id == matched_trip.trip_id,
+                StopTime.stop_id == stop_id
+            )
+        ).first()
+
+        if not stop_time:
+            continue
+
+        # Parse scheduled time
+        try:
+            hours, minutes, seconds = map(int, stop_time.arrival_time.split(':'))
+            scheduled_dt = pos.timestamp.replace(
+                hour=hours % 24,
+                minute=minutes,
+                second=seconds,
+                microsecond=0
+            )
+            if hours >= 24:
+                scheduled_dt += timedelta(days=hours // 24)
+
+            diff_seconds = (pos.timestamp - scheduled_dt).total_seconds()
+
+            arrivals.append({
+                'vehicle_id': pos.vehicle_id,
+                'actual_time': pos.timestamp,
+                'scheduled_time': scheduled_dt,
+                'difference_seconds': diff_seconds,
+                'distance_meters': distance,
+                'match_confidence': confidence
+            })
+        except (ValueError, AttributeError):
+            continue
+
+    if not arrivals:
+        return {
+            'route_id': route_id,
+            'stop_id': stop_id,
+            'stop_name': stop.stop_name,
+            'arrivals_analyzed': 0,
+            'on_time_percentage': None
+        }
+
+    # Classify arrivals
+    early_count = sum(1 for a in arrivals if a['difference_seconds'] < early_threshold_seconds)
+    late_count = sum(1 for a in arrivals if a['difference_seconds'] > late_threshold_seconds)
+    on_time_count = len(arrivals) - early_count - late_count
+
+    total = len(arrivals)
+
+    return {
+        'route_id': route_id,
+        'stop_id': stop_id,
+        'stop_name': stop.stop_name,
+        'stop_location': {'lat': stop.stop_lat, 'lon': stop.stop_lon},
+        'arrivals_analyzed': total,
+        'on_time_count': on_time_count,
+        'early_count': early_count,
+        'late_count': late_count,
+        'on_time_percentage': round((on_time_count / total) * 100, 2) if total > 0 else None,
+        'early_percentage': round((early_count / total) * 100, 2) if total > 0 else None,
+        'late_percentage': round((late_count / total) * 100, 2) if total > 0 else None,
+        'avg_lateness_seconds': round(sum(a['difference_seconds'] for a in arrivals) / total, 1) if total > 0 else None,
+        'thresholds': {
+            'proximity_meters': proximity_meters,
+            'early_threshold_seconds': early_threshold_seconds,
+            'late_threshold_seconds': late_threshold_seconds
+        }
+    }
+
+
+def calculate_time_period_otp(
+    db: Session,
+    route_id: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    early_threshold_seconds: int = -60,
+    late_threshold_seconds: int = 300,
+    min_match_confidence: float = 0.3
+) -> Dict:
+    """
+    Calculate on-time performance by time period (AM Peak, Midday, PM Peak, Evening, Night).
+
+    This shows how OTP varies throughout the day, revealing when congestion
+    or other factors impact service reliability.
+
+    Time periods:
+    - AM Peak: 6:00-9:00
+    - Midday: 9:00-15:00
+    - PM Peak: 15:00-19:00
+    - Evening: 19:00-24:00
+    - Night: 0:00-6:00
+
+    Args:
+        db: Database session
+        route_id: Route to analyze
+        start_time: Start of analysis period
+        end_time: End of analysis period
+        early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
+        late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
+        min_match_confidence: Minimum confidence for trip matching
+
+    Returns:
+        Dictionary with OTP by time period
+    """
+    from src.trip_matching import find_matching_trip
+
+    # Get vehicle positions
+    positions = get_vehicle_positions(db, route_id, start_time, end_time)
+
+    if not positions:
+        return {
+            'route_id': route_id,
+            'periods': {}
+        }
+
+    # Collect arrivals with time period info
+    arrivals_by_period = {
+        'AM Peak (6-9)': [],
+        'Midday (9-15)': [],
+        'PM Peak (15-19)': [],
+        'Evening (19-24)': [],
+        'Night (0-6)': []
+    }
+
+    def get_period(hour: int) -> str:
+        if 6 <= hour < 9:
+            return 'AM Peak (6-9)'
+        elif 9 <= hour < 15:
+            return 'Midday (9-15)'
+        elif 15 <= hour < 19:
+            return 'PM Peak (15-19)'
+        elif 19 <= hour < 24:
+            return 'Evening (19-24)'
+        else:  # 0-6
+            return 'Night (0-6)'
+
+    for pos in positions:
+        # Match to trip
+        match_result = find_matching_trip(db, pos)
+        if not match_result or match_result[1] < min_match_confidence:
+            continue
+
+        matched_trip, confidence = match_result
+
+        # Find nearest stop
+        nearest = find_nearest_stop(db, route_id, pos.latitude, pos.longitude, max_distance_meters=50.0)
+        if not nearest:
+            continue
+
+        stop, distance = nearest
+
+        # Get scheduled time
+        stop_time = db.query(StopTime).filter(
+            and_(
+                StopTime.trip_id == matched_trip.trip_id,
+                StopTime.stop_id == stop.stop_id
+            )
+        ).first()
+
+        if not stop_time:
+            continue
+
+        try:
+            hours, minutes, seconds = map(int, stop_time.arrival_time.split(':'))
+            scheduled_dt = pos.timestamp.replace(
+                hour=hours % 24,
+                minute=minutes,
+                second=seconds,
+                microsecond=0
+            )
+            if hours >= 24:
+                scheduled_dt += timedelta(days=hours // 24)
+
+            diff_seconds = (pos.timestamp - scheduled_dt).total_seconds()
+
+            # Determine time period based on actual time
+            period = get_period(pos.timestamp.hour)
+
+            arrivals_by_period[period].append({
+                'difference_seconds': diff_seconds,
+                'is_early': diff_seconds < early_threshold_seconds,
+                'is_on_time': early_threshold_seconds <= diff_seconds <= late_threshold_seconds,
+                'is_late': diff_seconds > late_threshold_seconds
+            })
+        except (ValueError, AttributeError):
+            continue
+
+    # Calculate statistics for each period
+    period_stats = {}
+    for period, arrivals in arrivals_by_period.items():
+        if not arrivals:
+            period_stats[period] = {
+                'arrivals_analyzed': 0,
+                'on_time_percentage': None
+            }
+            continue
+
+        total = len(arrivals)
+        on_time_count = sum(1 for a in arrivals if a['is_on_time'])
+        early_count = sum(1 for a in arrivals if a['is_early'])
+        late_count = sum(1 for a in arrivals if a['is_late'])
+
+        period_stats[period] = {
+            'arrivals_analyzed': total,
+            'on_time_count': on_time_count,
+            'early_count': early_count,
+            'late_count': late_count,
+            'on_time_percentage': round((on_time_count / total) * 100, 2) if total > 0 else None,
+            'early_percentage': round((early_count / total) * 100, 2) if total > 0 else None,
+            'late_percentage': round((late_count / total) * 100, 2) if total > 0 else None,
+            'avg_lateness_seconds': round(sum(a['difference_seconds'] for a in arrivals) / total, 1) if total > 0 else None
+        }
+
+    return {
+        'route_id': route_id,
+        'time_range': {
+            'start': start_time.isoformat() if start_time else None,
+            'end': end_time.isoformat() if end_time else None
+        },
+        'periods': period_stats,
+        'thresholds': {
+            'early_threshold_seconds': early_threshold_seconds,
+            'late_threshold_seconds': late_threshold_seconds
+        }
+    }
+
+
+def calculate_line_level_otp(
+    db: Session,
+    route_id: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    early_threshold_seconds: int = -60,
+    late_threshold_seconds: int = 300,
+    min_match_confidence: float = 0.3
+) -> Dict:
+    """
+    Calculate overall line-level on-time performance for a route.
+
+    This provides a single summary metric for the entire route, useful for
+    comparing performance across different routes.
+
+    Uses simple average: all arrivals weighted equally across all stops.
+
+    Args:
+        db: Database session
+        route_id: Route to analyze
+        start_time: Start of analysis period
+        end_time: End of analysis period
+        early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
+        late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
+        min_match_confidence: Minimum confidence for trip matching
+
+    Returns:
+        Dictionary with line-level OTP statistics
+    """
+    # Use existing calculate_on_time_performance function
+    # It already calculates line-level OTP (simple average across all arrivals)
+    result = calculate_on_time_performance(
+        db=db,
+        route_id=route_id,
+        start_time=start_time,
+        end_time=end_time,
+        early_threshold_seconds=early_threshold_seconds,
+        late_threshold_seconds=late_threshold_seconds,
+        min_match_confidence=min_match_confidence
+    )
+
+    # Add clarification that this is line-level
+    result['level'] = 'line'
+    result['description'] = 'Overall route performance (all stops weighted equally by arrivals)'
+
+    return result
+
+
+def calculate_otp_from_bus_positions(
+    db: Session,
+    route_id: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    early_threshold_minutes: float = -1.0,  # LA Metro: more than 1 min early
+    late_threshold_minutes: float = 5.0     # LA Metro: more than 5 min late
+) -> Dict:
+    """
+    Calculate on-time performance using WMATA's BusPositions API deviation data.
+
+    ⚠️  WARNING: Use this as SUPPLEMENTARY data only, not primary OTP metrics.
+    Validation shows WMATA's deviation can differ significantly from GTFS-based
+    calculations (some observations differ by 7+ minutes). Possible reasons:
+    - WMATA may use different/updated schedules than published GTFS
+    - Different calculation methodology
+    - Potential errors in WMATA's system
+
+    RECOMMENDED: Use calculate_line_level_otp() (GTFS-based) as primary metric,
+    and this function for comparison/validation.
+
+    Benefits of this approach:
+    - Much simpler (no trip matching or stop calculations)
+    - Faster to compute
+    - Useful for detecting schedule discrepancies
+
+    Uses LA Metro's on-time definition:
+    - Early: More than 1 minute early (deviation < -1.0)
+    - On-time: Between 1 min early and 5 min late (-1.0 <= deviation <= 5.0)
+    - Late: More than 5 minutes late (deviation > 5.0)
+
+    Args:
+        db: Database session
+        route_id: Route to analyze
+        start_time: Start of analysis period
+        end_time: End of analysis period
+        early_threshold_minutes: Minutes early to be considered "early" (default: -1.0, LA Metro)
+        late_threshold_minutes: Minutes late to be considered "late" (default: 5.0, LA Metro)
+
+    Returns:
+        Dictionary with on-time performance statistics
+    """
+    # Query bus positions
+    query = db.query(BusPosition).filter(BusPosition.route_id == route_id)
+
+    if start_time:
+        query = query.filter(BusPosition.timestamp >= start_time)
+    if end_time:
+        query = query.filter(BusPosition.timestamp <= end_time)
+
+    positions = query.order_by(BusPosition.timestamp).all()
+
+    if not positions:
+        return {
+            'route_id': route_id,
+            'data_source': 'bus_positions_api',
+            'on_time_percentage': None,
+            'early_percentage': None,
+            'late_percentage': None,
+            'observations': 0,
+            'early_count': 0,
+            'on_time_count': 0,
+            'late_count': 0,
+            'unique_vehicles': 0
+        }
+
+    # Filter out positions without deviation data
+    positions_with_deviation = [p for p in positions if p.deviation is not None]
+
+    if not positions_with_deviation:
+        return {
+            'route_id': route_id,
+            'data_source': 'bus_positions_api',
+            'on_time_percentage': None,
+            'early_percentage': None,
+            'late_percentage': None,
+            'observations': 0,
+            'early_count': 0,
+            'on_time_count': 0,
+            'late_count': 0,
+            'unique_vehicles': 0,
+            'note': 'No deviation data available in collected positions'
+        }
+
+    # Classify based on deviation (already in minutes!)
+    early_count = sum(1 for p in positions_with_deviation if p.deviation < early_threshold_minutes)
+    late_count = sum(1 for p in positions_with_deviation if p.deviation > late_threshold_minutes)
+    on_time_count = len(positions_with_deviation) - early_count - late_count
+
+    total = len(positions_with_deviation)
+    unique_vehicles = len(set(p.vehicle_id for p in positions_with_deviation))
+
+    # Calculate average deviation
+    avg_deviation = sum(p.deviation for p in positions_with_deviation) / total
+
+    return {
+        'route_id': route_id,
+        'data_source': 'bus_positions_api',
+        'time_range': {
+            'start': start_time.isoformat() if start_time else None,
+            'end': end_time.isoformat() if end_time else None
+        },
+        'on_time_percentage': round((on_time_count / total) * 100, 2) if total > 0 else None,
+        'early_percentage': round((early_count / total) * 100, 2) if total > 0 else None,
+        'late_percentage': round((late_count / total) * 100, 2) if total > 0 else None,
+        'observations': total,
+        'early_count': early_count,
+        'on_time_count': on_time_count,
+        'late_count': late_count,
+        'unique_vehicles': unique_vehicles,
+        'avg_deviation_minutes': round(avg_deviation, 2),
+        'thresholds': {
+            'early_threshold_minutes': early_threshold_minutes,
+            'late_threshold_minutes': late_threshold_minutes
         }
     }
 
