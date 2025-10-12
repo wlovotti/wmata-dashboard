@@ -1,8 +1,13 @@
 """
 One-time database initialization script
 Run this once to set up the database and load GTFS static data
+
+Usage:
+  python scripts/init_database.py              # Interactive mode (prompts for confirmation)
+  python scripts/init_database.py --no-confirm # Non-interactive mode (for automation)
 """
 import os
+import sys
 from dotenv import load_dotenv
 from src.wmata_collector import WMATADataCollector
 from src.database import get_session, init_db
@@ -27,10 +32,14 @@ def main():
     print("You only need to run this once (or when GTFS data updates).")
     print("=" * 60)
 
-    response = input("\nContinue? (y/n): ")
-    if response.lower() != 'y':
-        print("Aborted.")
-        return
+    # Check for --no-confirm flag
+    if "--no-confirm" not in sys.argv:
+        response = input("\nContinue? (y/n): ")
+        if response.lower() != 'y':
+            print("Aborted.")
+            return
+    else:
+        print("\n[Running in non-interactive mode]")
 
     # Initialize database
     print("\n[1/2] Initializing database...")
