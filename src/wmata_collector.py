@@ -9,7 +9,7 @@ from datetime import datetime
 from google.transit import gtfs_realtime_pb2
 from sqlalchemy.orm import Session
 from src.database import get_session, init_db
-from src.models import Route, Stop, Trip, StopTime, VehiclePosition, BusPosition
+from src.models import Route, Stop, Trip, StopTime, Shape, VehiclePosition, BusPosition
 
 # Load environment variables from .env file
 load_dotenv()
@@ -95,6 +95,11 @@ class WMATADataCollector:
             self.gtfs_data['stop_times'] = self._parse_csv(zip_file, 'stop_times.txt')
             print(f" {len(self.gtfs_data['stop_times'])} stop times")
 
+            print("    - Parsing shapes...", end='')
+            sys.stdout.flush()
+            self.gtfs_data['shapes'] = self._parse_csv(zip_file, 'shapes.txt')
+            print(f" {len(self.gtfs_data['shapes'])} shape points")
+
             print("  ✓ GTFS static data parsed successfully")
             sys.stdout.flush()
 
@@ -170,7 +175,9 @@ class WMATADataCollector:
                         route_id=trip_data['route_id'],
                         service_id=trip_data.get('service_id', ''),
                         trip_headsign=trip_data.get('trip_headsign', ''),
-                        direction_id=int(trip_data['direction_id']) if trip_data.get('direction_id') else None
+                        direction_id=int(trip_data['direction_id']) if trip_data.get('direction_id') else None,
+                        block_id=trip_data.get('block_id'),
+                        shape_id=trip_data.get('shape_id')
                     )
                     self.db.add(trip)
                     new_trips += 1
@@ -221,6 +228,50 @@ class WMATADataCollector:
                     self.db.commit()
 
                 print(f"\r    - Saving stop times... {stop_times_count:,} new stop times")
+
+            # Save shapes with progress (optimized for first run)
+            print("    - Checking if shapes already loaded...", end='')
+            sys.stdout.flush()
+            existing_shape_count = self.db.query(Shape).count()
+
+            if existing_shape_count > 0:
+                print(f" {existing_shape_count} shape points already in database (skipping)")
+                shapes_count = 0
+            else:
+                print(" database empty, loading all shape points...")
+                print("      This may take 1-2 minutes for shape data...")
+                sys.stdout.flush()
+
+                shapes_count = 0
+                total_shapes = len(self.gtfs_data['shapes'])
+                batch = []
+
+                for i, shape_data in enumerate(self.gtfs_data['shapes']):
+                    shape = Shape(
+                        shape_id=shape_data['shape_id'],
+                        shape_pt_lat=float(shape_data['shape_pt_lat']),
+                        shape_pt_lon=float(shape_data['shape_pt_lon']),
+                        shape_pt_sequence=int(shape_data['shape_pt_sequence']),
+                        shape_dist_traveled=float(shape_data['shape_dist_traveled']) if shape_data.get('shape_dist_traveled') else None
+                    )
+                    batch.append(shape)
+                    shapes_count += 1
+
+                    # Bulk insert in batches of 10000
+                    if len(batch) >= 10000:
+                        self.db.bulk_save_objects(batch)
+                        self.db.commit()
+                        batch = []
+                        percent = ((i + 1) / total_shapes) * 100
+                        print(f"\r      Progress: {percent:.1f}% ({i+1:,}/{total_shapes:,})", end='')
+                        sys.stdout.flush()
+
+                # Save remaining records
+                if batch:
+                    self.db.bulk_save_objects(batch)
+                    self.db.commit()
+
+                print(f"\r    - Saving shapes... {shapes_count:,} new shape points")
             print("  ✓ GTFS static data saved to database successfully")
             sys.stdout.flush()
 

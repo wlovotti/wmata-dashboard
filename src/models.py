@@ -47,6 +47,8 @@ class Trip(Base):
     service_id = Column(String)
     trip_headsign = Column(String)
     direction_id = Column(Integer)
+    block_id = Column(String, index=True)  # Links trips that use the same vehicle
+    shape_id = Column(String, index=True)  # Links to Shape table
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -74,6 +76,31 @@ class StopTime(Base):
     # Composite index for efficient queries
     __table_args__ = (
         Index('idx_trip_stop_sequence', 'trip_id', 'stop_sequence'),
+    )
+
+
+class Shape(Base):
+    """
+    GTFS static shapes data - defines the actual path that vehicles follow.
+
+    Shapes define the physical path that a vehicle travels along a route.
+    Each shape is composed of multiple points that, when connected, show the
+    actual street-level route. This is essential for accurate distance and
+    speed calculations.
+    """
+    __tablename__ = 'shapes'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    shape_id = Column(String, nullable=False, index=True)
+    shape_pt_lat = Column(Float, nullable=False)
+    shape_pt_lon = Column(Float, nullable=False)
+    shape_pt_sequence = Column(Integer, nullable=False)
+    shape_dist_traveled = Column(Float)  # Optional: cumulative distance in GTFS
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries by shape and sequence
+    __table_args__ = (
+        Index('idx_shape_sequence', 'shape_id', 'shape_pt_sequence'),
     )
 
 
