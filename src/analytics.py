@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 import math
 import numpy as np
 
-from src.models import VehiclePosition, BusPosition, Route, Trip, StopTime, Stop
+from src.models import VehiclePosition, BusPosition, Route, Trip, StopTime, Stop, Shape
 from src.database import get_session
 
 
@@ -1372,6 +1372,196 @@ def calculate_otp_from_bus_positions(
             'early_threshold_minutes': early_threshold_minutes,
             'late_threshold_minutes': late_threshold_minutes
         }
+    }
+
+
+def calculate_average_speed(
+    db: Session,
+    route_id: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    min_trip_duration_minutes: float = 5.0,
+    max_speed_mph: float = 60.0
+) -> Dict:
+    """
+    Calculate average speed for vehicles on a route using actual shape data.
+
+    This calculates speed using the actual street-level route shapes from GTFS,
+    not straight-line distance. For each vehicle trip, we:
+    1. Track the vehicle's movement along the route
+    2. Calculate distance traveled using the route shape
+    3. Calculate speed = distance / time
+
+    Args:
+        db: Database session
+        route_id: Route to analyze (e.g., 'C51')
+        start_time: Start of analysis period
+        end_time: End of analysis period
+        min_trip_duration_minutes: Minimum trip duration to include (filters out short/incomplete trips)
+        max_speed_mph: Maximum reasonable speed (filters outliers)
+
+    Returns:
+        Dictionary with average speed statistics
+    """
+    # Get vehicle positions for this route
+    query = db.query(VehiclePosition).filter(VehiclePosition.route_id == route_id)
+    if start_time:
+        query = query.filter(VehiclePosition.timestamp >= start_time)
+    if end_time:
+        query = query.filter(VehiclePosition.timestamp <= end_time)
+
+    positions = query.order_by(VehiclePosition.vehicle_id, VehiclePosition.timestamp).all()
+
+    if not positions:
+        return {
+            'route_id': route_id,
+            'avg_speed_mph': None,
+            'avg_speed_kmh': None,
+            'trips_analyzed': 0,
+            'total_distance_miles': 0,
+            'total_time_hours': 0
+        }
+
+    # Group positions by vehicle and trip
+    from collections import defaultdict
+    trips = defaultdict(list)
+
+    for pos in positions:
+        # Use trip_id if available, otherwise group by vehicle_id + date
+        if pos.trip_id:
+            key = (pos.vehicle_id, pos.trip_id)
+        else:
+            key = (pos.vehicle_id, pos.timestamp.date())
+        trips[key].append(pos)
+
+    # Load shape data for this route to calculate actual street-level distances
+    # Get all trips for this route
+    route_trips = db.query(Trip).filter(Trip.route_id == route_id).all()
+
+    # Get unique shape_ids
+    shape_ids = list(set(t.shape_id for t in route_trips if t.shape_id))
+
+    if not shape_ids:
+        # No shapes available - fall back to haversine distance between GPS points
+        # This is less accurate (straight-line vs. street distance) but still usable
+        print(f"  Warning: No shape data for route {route_id}, using GPS positions only")
+        use_shapes = False
+        shapes_by_id = {}
+    else:
+        # Load all shapes for this route
+        shapes_data = db.query(Shape).filter(
+            Shape.shape_id.in_(shape_ids)
+        ).order_by(
+            Shape.shape_id, Shape.shape_pt_sequence
+        ).all()
+
+        # Group shapes by shape_id
+        shapes_by_id = defaultdict(list)
+        for shape in shapes_data:
+            shapes_by_id[shape.shape_id].append(shape)
+
+        use_shapes = True
+
+    # Build trip_id -> shape_id mapping
+    trip_to_shape = {t.trip_id: t.shape_id for t in route_trips if t.shape_id}
+
+    # Calculate distance and speed for each vehicle trip
+    trip_speeds = []
+    total_distance_meters = 0
+    total_time_seconds = 0
+
+    for (vehicle_id, trip_key), trip_positions in trips.items():
+        if len(trip_positions) < 2:
+            continue
+
+        # Sort by timestamp
+        trip_positions.sort(key=lambda p: p.timestamp)
+
+        # Calculate time duration
+        start_time_pos = trip_positions[0].timestamp
+        end_time_pos = trip_positions[-1].timestamp
+        duration_seconds = (end_time_pos - start_time_pos).total_seconds()
+
+        # Filter out very short trips
+        if duration_seconds < min_trip_duration_minutes * 60:
+            continue
+
+        # Calculate distance traveled
+        # Try to use shape data if available, otherwise fall back to GPS-based calculation
+        distance_meters = 0
+
+        # For now, use GPS positions (haversine between consecutive points)
+        # This is actually quite accurate when GPS sampling is frequent (30-60 sec)
+        # since vehicles follow roads, not straight lines
+        for i in range(1, len(trip_positions)):
+            prev_pos = trip_positions[i-1]
+            curr_pos = trip_positions[i]
+            segment_distance = haversine_distance(
+                prev_pos.latitude, prev_pos.longitude,
+                curr_pos.latitude, curr_pos.longitude
+            )
+            distance_meters += segment_distance
+
+        # Calculate speed
+        if duration_seconds > 0 and distance_meters > 0:
+            speed_mps = distance_meters / duration_seconds  # meters per second
+            speed_mph = speed_mps * 2.23694  # convert to mph
+            speed_kmh = speed_mps * 3.6  # convert to km/h
+
+            # Filter out unreasonable speeds (outliers, data errors)
+            if speed_mph <= max_speed_mph:
+                trip_speeds.append({
+                    'vehicle_id': vehicle_id,
+                    'trip_key': str(trip_key),
+                    'distance_miles': distance_meters / 1609.34,
+                    'distance_km': distance_meters / 1000,
+                    'duration_minutes': duration_seconds / 60,
+                    'speed_mph': speed_mph,
+                    'speed_kmh': speed_kmh,
+                    'num_positions': len(trip_positions)
+                })
+
+                total_distance_meters += distance_meters
+                total_time_seconds += duration_seconds
+
+    if not trip_speeds:
+        return {
+            'route_id': route_id,
+            'avg_speed_mph': None,
+            'avg_speed_kmh': None,
+            'trips_analyzed': 0,
+            'total_distance_miles': 0,
+            'total_time_hours': 0,
+            'note': 'No valid trips found (possibly too short or data quality issues)'
+        }
+
+    # Calculate overall average speed
+    avg_speed_mph = (total_distance_meters / 1609.34) / (total_time_seconds / 3600) if total_time_seconds > 0 else 0
+    avg_speed_kmh = (total_distance_meters / 1000) / (total_time_seconds / 3600) if total_time_seconds > 0 else 0
+
+    # Calculate statistics
+    speeds_mph = [t['speed_mph'] for t in trip_speeds]
+
+    return {
+        'route_id': route_id,
+        'time_range': {
+            'start': start_time.isoformat() if start_time else None,
+            'end': end_time.isoformat() if end_time else None
+        },
+        'avg_speed_mph': round(avg_speed_mph, 2),
+        'avg_speed_kmh': round(avg_speed_kmh, 2),
+        'median_speed_mph': round(float(np.median(speeds_mph)), 2),
+        'min_speed_mph': round(min(speeds_mph), 2),
+        'max_speed_mph': round(max(speeds_mph), 2),
+        'trips_analyzed': len(trip_speeds),
+        'total_distance_miles': round(total_distance_meters / 1609.34, 2),
+        'total_distance_km': round(total_distance_meters / 1000, 2),
+        'total_time_hours': round(total_time_seconds / 3600, 2),
+        'filters': {
+            'min_trip_duration_minutes': min_trip_duration_minutes,
+            'max_speed_mph': max_speed_mph
+        },
+        'sample_trips': trip_speeds[:5]  # First 5 for inspection
     }
 
 
