@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Tuple
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 import math
+import numpy as np
 
 from src.models import VehiclePosition, BusPosition, Route, Trip, StopTime, Stop
 from src.database import get_session
@@ -28,6 +29,78 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     # Radius of Earth in meters
     r = 6371000
     return c * r
+
+
+def deduplicate_stop_passages(
+    observations: List[Dict],
+    group_by_keys: List[str] = None
+) -> List[Dict]:
+    """
+    Deduplicate vehicle observations at stops, keeping only the LAST observation.
+
+    This represents the departure time (when the bus leaves the stop), which is the
+    passenger-centric view: if a bus arrives early but waits until scheduled time
+    to depart, passengers can still board during the wait period.
+
+    This deduplication is used by both OTP and headway calculations to ensure
+    consistency across metrics.
+
+    IMPORTANT: Observations are grouped by date as well, so the same vehicle/trip/stop
+    combination on different dates will NOT be deduplicated against each other.
+
+    Args:
+        observations: List of observation dictionaries with at least:
+            - vehicle_id: Vehicle identifier
+            - trip_id: Trip identifier
+            - stop_id: Stop identifier
+            - timestamp: datetime of observation (used for both grouping by date and ordering)
+        group_by_keys: Keys to group by (default: ['vehicle_id', 'trip_id', 'stop_id'])
+                      Note: Date is always included in the grouping key automatically
+
+    Returns:
+        List of deduplicated observations (one per unique vehicle/trip/stop/date combination),
+        keeping the LAST (latest timestamp) observation for each group.
+
+    Example:
+        >>> observations = [
+        ...     # Same vehicle/trip/stop, same day - will deduplicate
+        ...     {'vehicle_id': '4586', 'trip_id': 'T1', 'stop_id': 'S1',
+        ...      'timestamp': datetime(2025, 1, 1, 12, 0, 0), 'diff_seconds': -120},
+        ...     {'vehicle_id': '4586', 'trip_id': 'T1', 'stop_id': 'S1',
+        ...      'timestamp': datetime(2025, 1, 1, 12, 1, 0), 'diff_seconds': -60},
+        ...     # Same vehicle/trip/stop, different day - will NOT deduplicate
+        ...     {'vehicle_id': '4586', 'trip_id': 'T1', 'stop_id': 'S1',
+        ...      'timestamp': datetime(2025, 1, 2, 12, 0, 0), 'diff_seconds': -120}
+        ... ]
+        >>> deduplicated = deduplicate_stop_passages(observations)
+        >>> len(deduplicated)
+        2  # One for Jan 1, one for Jan 2
+        >>> deduplicated[0]['timestamp']
+        datetime.datetime(2025, 1, 1, 12, 1, 0)  # Kept the LAST one from Jan 1
+    """
+    if group_by_keys is None:
+        group_by_keys = ['vehicle_id', 'trip_id', 'stop_id']
+
+    # Group observations by the specified keys PLUS date
+    # Keep only the LAST observation (latest timestamp) for each group
+    observation_map = {}  # {(key_tuple + date): latest_observation}
+
+    for obs in observations:
+        # Build key tuple from the observation
+        # Include date to ensure we don't deduplicate across different days
+        base_key = tuple(obs.get(k) for k in group_by_keys)
+        date = obs['timestamp'].date()
+        key = base_key + (date,)
+
+        if key not in observation_map:
+            observation_map[key] = obs
+        else:
+            # Keep the observation with the later timestamp (departure time)
+            if obs['timestamp'] > observation_map[key]['timestamp']:
+                observation_map[key] = obs
+
+    # Return deduplicated observations
+    return list(observation_map.values())
 
 
 def get_route_service_hours(db: Session, route_id: str) -> Tuple[int, int]:
@@ -165,7 +238,7 @@ def calculate_headways(
     end_time: Optional[datetime] = None,
     direction_id: Optional[int] = None,
     stop_id: Optional[str] = None,
-    proximity_meters: float = 150.0,
+    proximity_meters: float = 50.0,
     max_headway_minutes: float = 120.0,
     use_service_hours: bool = True
 ) -> Dict:
@@ -177,10 +250,11 @@ def calculate_headways(
 
     Method:
     1. Choose a reference stop (or use provided stop_id)
-    2. For each vehicle, find when it passes closest to that stop
-    3. Calculate time difference between consecutive vehicles passing that stop
-    4. Filter by direction and service hours
-    5. Flag outliers (data gaps vs actual headways)
+    2. For each vehicle trip, find all observations near that stop
+    3. Use LAST observation at stop (departure time) to match OTP methodology
+    4. Calculate time difference between consecutive vehicle departures
+    5. Filter by direction and service hours
+    6. Flag outliers (data gaps vs actual headways)
 
     Args:
         db: Database session
@@ -241,9 +315,9 @@ def calculate_headways(
             'service_hours': {'start': service_start_hour, 'end': service_end_hour}
         }
 
-    # For each vehicle, track all positions and find closest approach to reference stop
-    # IMPORTANT: Also track direction to ensure we don't mix opposite-direction buses
-    vehicle_closest_approach = {}  # {vehicle_id: {'time': datetime, 'distance': float, 'direction': int}}
+    # Collect all observations near the reference stop
+    # We'll deduplicate later to keep only LAST observation (departure time)
+    observations = []
 
     for pos in positions:
         # Filter by service hours if enabled
@@ -270,6 +344,10 @@ def calculate_headways(
         # Calculate distance to reference stop
         distance = haversine_distance(pos.latitude, pos.longitude, stop_lat, stop_lon)
 
+        # Only track positions within proximity threshold
+        if distance > proximity_meters:
+            continue
+
         # Get direction for this vehicle from its trip
         vehicle_direction = None
         if pos.trip_id:
@@ -281,33 +359,21 @@ def calculate_headways(
         if direction_id is not None and vehicle_direction != direction_id:
             continue
 
-        # Track closest approach for each vehicle
-        if pos.vehicle_id not in vehicle_closest_approach:
-            vehicle_closest_approach[pos.vehicle_id] = {
-                'time': pos.timestamp,
-                'distance': distance,
-                'direction': vehicle_direction
-            }
-        else:
-            # Update if this is closer
-            if distance < vehicle_closest_approach[pos.vehicle_id]['distance']:
-                vehicle_closest_approach[pos.vehicle_id] = {
-                    'time': pos.timestamp,
-                    'distance': distance,
-                    'direction': vehicle_direction
-                }
+        # Collect this observation for deduplication
+        # trip_id ensures we don't mix different trips by same vehicle
+        observations.append({
+            'vehicle_id': pos.vehicle_id,
+            'trip_id': pos.trip_id if pos.trip_id else f"unknown_{pos.vehicle_id}",
+            'stop_id': stop_id,  # Always the same for headway (reference stop)
+            'timestamp': pos.timestamp,
+            'distance': distance,
+            'direction': vehicle_direction
+        })
 
-    # Filter vehicles that passed within proximity threshold
-    # Group by direction if no specific direction was requested
-    passage_times = []
-    for vehicle_id, approach in vehicle_closest_approach.items():
-        if approach['distance'] <= proximity_meters:
-            passage_times.append({
-                'vehicle_id': vehicle_id,
-                'time': approach['time'],
-                'distance': approach['distance'],
-                'direction': approach['direction']
-            })
+    # DEDUPLICATE: Keep only LAST observation at each stop for each vehicle/trip
+    # This represents the departure time (when bus leaves the stop)
+    # Matches the OTP methodology for consistency
+    passage_times = deduplicate_stop_passages(observations)
 
     # If no direction filter specified, we should only compare vehicles in the same direction
     # Separate passages by direction
@@ -325,8 +391,8 @@ def calculate_headways(
             # Update direction_id for return value
             direction_id = primary_direction
 
-    # Sort by passage time
-    passage_times.sort(key=lambda x: x['time'])
+    # Sort by passage time (timestamp key from deduplicated observations)
+    passage_times.sort(key=lambda x: x['timestamp'])
 
     # Calculate headways (time between consecutive vehicles)
     valid_headways = []
@@ -337,17 +403,17 @@ def calculate_headways(
         curr_passage = passage_times[i]
 
         # Skip if crossing day boundary
-        if prev_passage['time'].date() != curr_passage['time'].date():
+        if prev_passage['timestamp'].date() != curr_passage['timestamp'].date():
             continue
 
-        time_diff = curr_passage['time'] - prev_passage['time']
+        time_diff = curr_passage['timestamp'] - prev_passage['timestamp']
         headway_minutes = time_diff.total_seconds() / 60
 
         headway_record = {
             'previous_vehicle': prev_passage['vehicle_id'],
             'current_vehicle': curr_passage['vehicle_id'],
-            'previous_time': prev_passage['time'].isoformat(),
-            'current_time': curr_passage['time'].isoformat(),
+            'previous_time': prev_passage['timestamp'].isoformat(),
+            'current_time': curr_passage['timestamp'].isoformat(),
             'headway_minutes': round(headway_minutes, 2)
         }
 
@@ -969,15 +1035,17 @@ def calculate_line_level_otp(
     end_time: Optional[datetime] = None,
     early_threshold_seconds: int = -60,
     late_threshold_seconds: int = 300,
-    min_match_confidence: float = 0.3
+    min_match_confidence: float = 0.3,
+    sample_rate: int = 1  # Process every Nth position (3 = every 3 minutes with 60s polling)
 ) -> Dict:
     """
-    Calculate overall line-level on-time performance for a route.
+    Calculate overall line-level on-time performance for a route (HIGHLY OPTIMIZED).
 
-    This provides a single summary metric for the entire route, useful for
-    comparing performance across different routes.
-
-    Uses simple average: all arrivals weighted equally across all stops.
+    OPTIMIZATION STRATEGY:
+    1. Batch-load all data upfront (stops, trips, stop_times) to minimize DB queries
+    2. Use numpy for vectorized distance calculations
+    3. Sample positions to reduce processing (sample_rate=3 → every 3 minutes)
+    4. Match trips using RT trip_id directly (fast path)
 
     Args:
         db: Database session
@@ -986,28 +1054,207 @@ def calculate_line_level_otp(
         end_time: End of analysis period
         early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
         late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
-        min_match_confidence: Minimum confidence for trip matching
+        min_match_confidence: Minimum confidence for trip matching (only used for fallback)
+        sample_rate: Process every Nth position (default: 3, for 3-minute intervals)
 
     Returns:
         Dictionary with line-level OTP statistics
     """
-    # Use existing calculate_on_time_performance function
-    # It already calculates line-level OTP (simple average across all arrivals)
-    result = calculate_on_time_performance(
-        db=db,
-        route_id=route_id,
-        start_time=start_time,
-        end_time=end_time,
-        early_threshold_seconds=early_threshold_seconds,
-        late_threshold_seconds=late_threshold_seconds,
-        min_match_confidence=min_match_confidence
-    )
 
-    # Add clarification that this is line-level
-    result['level'] = 'line'
-    result['description'] = 'Overall route performance (all stops weighted equally by arrivals)'
+    # Get vehicle positions (sampled)
+    query = db.query(VehiclePosition).filter(VehiclePosition.route_id == route_id)
+    if start_time:
+        query = query.filter(VehiclePosition.timestamp >= start_time)
+    if end_time:
+        query = query.filter(VehiclePosition.timestamp <= end_time)
 
-    return result
+    positions = query.order_by(VehiclePosition.timestamp).all()
+
+    if not positions:
+        return {
+            'route_id': route_id,
+            'level': 'line',
+            'total_observations': 0,
+            'matched_observations': 0,
+            'on_time_pct': None
+        }
+
+    # Track original count before deduplication
+    original_count = len(positions)
+
+    # DEDUPLICATE: Remove duplicate records (same vehicle, timestamp, location)
+    # This happens when multiple collectors ran simultaneously
+    seen = set()
+    unique_positions = []
+    for pos in positions:
+        key = (pos.vehicle_id, pos.timestamp, pos.latitude, pos.longitude)
+        if key not in seen:
+            seen.add(key)
+            unique_positions.append(pos)
+
+    positions = unique_positions
+    duplicates_removed = original_count - len(positions)
+
+    # Sample positions
+    sampled = positions[::sample_rate]
+    if duplicates_removed > 0:
+        print(f"Processing {len(sampled)} of {len(positions)} positions (sample_rate={sample_rate}, removed {duplicates_removed} duplicates)...")
+    else:
+        print(f"Processing {len(sampled)} of {len(positions)} positions (sample_rate={sample_rate})...")
+
+    # BATCH LOAD 1: Get all route stops and create numpy arrays for vectorized distance calc
+    stops = get_route_stops(db, route_id)
+    stop_ids = np.array([s.stop_id for s in stops])
+    stop_lats = np.array([s.stop_lat for s in stops])
+    stop_lons = np.array([s.stop_lon for s in stops])
+    stop_map = {s.stop_id: s for s in stops}
+
+    # BATCH LOAD 2: Get all trips for this route
+    trips = db.query(Trip).filter(Trip.route_id == route_id).all()
+    trip_map = {t.trip_id: t for t in trips}
+
+    # BATCH LOAD 3: Get ALL stop_times for this route's trips (this is the big one)
+    print(f"  Loading stop_times for {len(trips)} trips...")
+    trip_ids = [t.trip_id for t in trips]
+    stop_times = db.query(StopTime).filter(StopTime.trip_id.in_(trip_ids)).all()
+
+    # Index stop_times by (trip_id, stop_id) for O(1) lookup
+    stop_time_map = {}
+    for st in stop_times:
+        key = (st.trip_id, st.stop_id)
+        stop_time_map[key] = st.arrival_time
+
+    print(f"  Loaded {len(stop_times)} stop_times, processing positions...")
+
+    # Process positions and collect arrival data with metadata
+    # We'll deduplicate later to keep only FIRST arrival at each stop
+    arrival_records = []  # List of {vehicle_id, trip_id, stop_id, timestamp, diff_seconds}
+    matched_count = 0
+    unmatched_count = 0
+
+    for i, pos in enumerate(sampled):
+        if i % 1000 == 0 and i > 0:
+            print(f"    Processed {i}/{len(sampled)} positions...")
+
+        # FAST PATH: Use RT trip_id directly if it exists in our trip_map
+        if pos.trip_id and pos.trip_id in trip_map:
+            matched_trip_id = pos.trip_id
+            matched_count += 1
+        else:
+            # No trip_id or not in our GTFS - skip
+            # (Could add fallback to find_matching_trip here if needed)
+            unmatched_count += 1
+            continue
+
+        # VECTORIZED: Find nearest stop using numpy
+        # Haversine distance formula (vectorized)
+        lat1, lon1 = np.radians(pos.latitude), np.radians(pos.longitude)
+        lat2, lon2 = np.radians(stop_lats), np.radians(stop_lons)
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+        c = 2 * np.arcsin(np.sqrt(a))
+        distances = 6371000 * c  # meters
+
+        # Find nearest stop within 50m
+        min_idx = np.argmin(distances)
+        min_distance = distances[min_idx]
+
+        if min_distance > 50.0:
+            continue
+
+        nearest_stop_id = stop_ids[min_idx]
+
+        # O(1) lookup of scheduled time
+        key = (matched_trip_id, nearest_stop_id)
+        if key not in stop_time_map:
+            continue
+
+        scheduled_time_str = stop_time_map[key]
+
+        # Parse scheduled time
+        try:
+            hours, minutes, seconds = map(int, scheduled_time_str.split(':'))
+            scheduled_dt = pos.timestamp.replace(
+                hour=hours % 24,
+                minute=minutes,
+                second=seconds,
+                microsecond=0
+            )
+            if hours >= 24:
+                scheduled_dt += timedelta(days=hours // 24)
+
+            diff_seconds = (pos.timestamp - scheduled_dt).total_seconds()
+
+            # Store arrival record with metadata for deduplication
+            arrival_records.append({
+                'vehicle_id': pos.vehicle_id,
+                'trip_id': matched_trip_id,
+                'stop_id': nearest_stop_id,
+                'timestamp': pos.timestamp,
+                'diff_seconds': diff_seconds
+            })
+
+        except (ValueError, AttributeError):
+            continue
+
+    # DEDUPLICATE: Keep only LAST observation at each stop for each vehicle/trip
+    # This represents the departure time (when bus leaves the stop)
+    # Rationale: If a bus arrives early but waits until scheduled time to depart,
+    # passengers can still board during the wait period - this should count as on-time
+    arrivals_before_dedup = len(arrival_records)
+    deduplicated_arrivals = deduplicate_stop_passages(arrival_records)
+    arrivals_after_dedup = len(deduplicated_arrivals)
+
+    # Extract diff_seconds values from deduplicated records
+    arrivals = [record['diff_seconds'] for record in deduplicated_arrivals]
+
+    if not arrivals:
+        return {
+            'route_id': route_id,
+            'level': 'line',
+            'total_observations': len(positions),
+            'sampled_observations': len(sampled),
+            'matched_observations': 0,
+            'on_time_pct': None
+        }
+
+    # VECTORIZED: Classify arrivals using numpy
+    arrivals_array = np.array(arrivals)
+    early_count = np.sum(arrivals_array < early_threshold_seconds)
+    late_count = np.sum(arrivals_array > late_threshold_seconds)
+    on_time_count = len(arrivals) - early_count - late_count
+
+    total = len(arrivals)
+    avg_lateness = float(np.mean(arrivals_array))
+
+    if arrivals_before_dedup > arrivals_after_dedup:
+        dedup_removed = arrivals_before_dedup - arrivals_after_dedup
+        print(f"  Completed: {total} arrivals analyzed (removed {dedup_removed} duplicate stop arrivals)")
+    else:
+        print(f"  Completed: {total} arrivals analyzed")
+
+    return {
+        'route_id': route_id,
+        'level': 'line',
+        'description': 'Overall route performance (batch-loaded, vectorized)',
+        'total_observations': len(positions),
+        'sampled_observations': len(sampled),
+        'matched_observations': total,
+        'on_time_pct': round((on_time_count / total) * 100, 2) if total > 0 else None,
+        'early_pct': round((early_count / total) * 100, 2) if total > 0 else None,
+        'late_pct': round((late_count / total) * 100, 2) if total > 0 else None,
+        'early_count': int(early_count),
+        'on_time_count': int(on_time_count),
+        'late_count': int(late_count),
+        'avg_lateness_seconds': round(avg_lateness, 1),
+        'sample_rate': sample_rate,
+        'thresholds': {
+            'early_threshold_seconds': early_threshold_seconds,
+            'late_threshold_seconds': late_threshold_seconds
+        }
+    }
 
 
 def calculate_otp_from_bus_positions(
