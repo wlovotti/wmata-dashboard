@@ -8,9 +8,9 @@ Usage:
 """
 import os
 import sys
+import subprocess
 from dotenv import load_dotenv
-from src.wmata_collector import WMATADataCollector
-from src.database import get_session, init_db
+from src.database import init_db
 
 load_dotenv()
 
@@ -21,16 +21,19 @@ if not API_KEY:
 
 
 def main():
-    print("=" * 60)
+    print("=" * 70)
     print("WMATA Dashboard - Database Initialization")
-    print("=" * 60)
+    print("=" * 70)
     print("\nThis script will:")
-    print("1. Create database tables")
+    print("1. Create database tables with complete GTFS schema")
     print("2. Download GTFS static data (~40MB)")
-    print("3. Load routes, stops, trips, and schedules into database")
-    print("\nThis may take 5-10 minutes depending on your connection.")
+    print("3. Load ALL GTFS data into database:")
+    print("   - Agencies, Routes, Stops, Trips, Stop Times, Shapes")
+    print("   - Calendar, Calendar Dates, Feed Info")
+    print("   - Timepoints, Timepoint Times")
+    print("\nThis may take 10-15 minutes depending on your connection.")
     print("You only need to run this once (or when GTFS data updates).")
-    print("=" * 60)
+    print("=" * 70)
 
     # Check for --no-confirm flag
     if "--no-confirm" not in sys.argv:
@@ -41,32 +44,45 @@ def main():
     else:
         print("\n[Running in non-interactive mode]")
 
-    # Initialize database
-    print("\n[1/2] Initializing database...")
+    # Initialize database tables
+    print("\n[1/2] Creating database tables with complete GTFS schema...")
     init_db()
+    print("✓ Database tables created")
 
-    # Get database session
-    db = get_session()
+    # Load complete GTFS data using the reload script
+    print("\n[2/2] Loading complete GTFS data...")
+    print("-" * 70)
 
     try:
-        # Initialize collector with database session
-        collector = WMATADataCollector(API_KEY, db_session=db)
+        # Run the complete GTFS reload script
+        result = subprocess.run(
+            [sys.executable, "scripts/reload_gtfs_complete.py"],
+            check=True,
+            capture_output=False  # Show output in real-time
+        )
 
-        # Download and save GTFS static data
-        print("\n[2/2] Downloading and loading GTFS static data...")
-        if not collector.download_gtfs_static(save_to_db=True):
-            print("\n✗ Failed to download GTFS static data")
-            return
+        print("-" * 70)
+        print("✓ GTFS data loaded successfully")
 
-        print("\n" + "=" * 60)
-        print("✓ Database initialization complete!")
-        print("=" * 60)
-        print("\nYou can now run:")
-        print("  - wmata_collector.py (one-time data collection)")
-        print("  - continuous_collector.py (continuous collection every 60s)")
+    except subprocess.CalledProcessError as e:
+        print(f"\n✗ Failed to load GTFS data: {e}")
+        print("You can try running: python scripts/reload_gtfs_complete.py")
+        return
+    except Exception as e:
+        print(f"\n✗ Error: {e}")
+        return
 
-    finally:
-        db.close()
+    print("\n" + "=" * 70)
+    print("✓ Database initialization complete!")
+    print("=" * 70)
+    print("\nDatabase now contains:")
+    print("  - Complete GTFS schema (all 11 files)")
+    print("  - All GTFS fields (no dropped columns)")
+    print("  - ~7 million records total")
+    print("\nYou can now run:")
+    print("  - python src/wmata_collector.py (one-time data collection)")
+    print("  - python scripts/continuous_collector.py (continuous collection)")
+    print("  - python src/analytics.py (calculate metrics)")
 
 
 if __name__ == "__main__":

@@ -6,18 +6,132 @@ from datetime import datetime
 Base = declarative_base()
 
 
+class Agency(Base):
+    """GTFS agency data (transit agency information)"""
+    __tablename__ = 'agencies'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agency_id = Column(String, unique=True, nullable=False, index=True)
+    agency_name = Column(String, nullable=False)
+    agency_url = Column(String)
+    agency_timezone = Column(String)
+    agency_lang = Column(String)
+    agency_phone = Column(String)
+    agency_fare_url = Column(String)
+    agency_email = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    routes = relationship("Route", back_populates="agency")
+
+
+class Calendar(Base):
+    """GTFS calendar data (service schedules by day of week)"""
+    __tablename__ = 'calendar'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    service_id = Column(String, unique=True, nullable=False, index=True)
+    monday = Column(Integer, nullable=False)  # 0 or 1
+    tuesday = Column(Integer, nullable=False)
+    wednesday = Column(Integer, nullable=False)
+    thursday = Column(Integer, nullable=False)
+    friday = Column(Integer, nullable=False)
+    saturday = Column(Integer, nullable=False)
+    sunday = Column(Integer, nullable=False)
+    start_date = Column(String, nullable=False)  # YYYYMMDD format
+    end_date = Column(String, nullable=False)    # YYYYMMDD format
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CalendarDate(Base):
+    """GTFS calendar_dates data (service exceptions)"""
+    __tablename__ = 'calendar_dates'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    service_id = Column(String, nullable=False, index=True)
+    date = Column(String, nullable=False, index=True)  # YYYYMMDD format
+    exception_type = Column(Integer, nullable=False)  # 1=added, 2=removed
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries
+    __table_args__ = (
+        Index('idx_service_date', 'service_id', 'date'),
+    )
+
+
+class FeedInfo(Base):
+    """GTFS feed_info data (feed metadata)"""
+    __tablename__ = 'feed_info'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    feed_publisher_name = Column(String, nullable=False)
+    feed_publisher_url = Column(String)
+    feed_lang = Column(String)
+    feed_start_date = Column(String)  # YYYYMMDD format
+    feed_end_date = Column(String)    # YYYYMMDD format
+    feed_version = Column(String)
+    feed_contact_email = Column(String)
+    feed_contact_url = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Timepoint(Base):
+    """WMATA-specific timepoint data (subset of stops used for schedule adherence)"""
+    __tablename__ = 'timepoints'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stop_id = Column(String, unique=True, nullable=False, index=True)
+    stop_code = Column(String)
+    stop_name = Column(String, nullable=False)
+    stop_desc = Column(String)
+    stop_lat = Column(Float, nullable=False)
+    stop_lon = Column(Float, nullable=False)
+    zone_id = Column(String)
+    stop_url = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TimepointTime(Base):
+    """WMATA-specific timepoint schedule data"""
+    __tablename__ = 'timepoint_times'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trip_id = Column(String, nullable=False, index=True)
+    stop_id = Column(String, nullable=False, index=True)
+    arrival_time = Column(String, nullable=False)
+    departure_time = Column(String, nullable=False)
+    stop_sequence = Column(Integer, nullable=False)
+    stop_headsign = Column(String)
+    pickup_type = Column(Integer)
+    drop_off_type = Column(Integer)
+    shape_dist_traveled = Column(Float)
+    timepoint = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries
+    __table_args__ = (
+        Index('idx_timepoint_trip_sequence', 'trip_id', 'stop_sequence'),
+    )
+
+
 class Route(Base):
     """GTFS static route data"""
     __tablename__ = 'routes'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     route_id = Column(String, unique=True, nullable=False, index=True)
+    agency_id = Column(String, ForeignKey('agencies.agency_id'))
     route_short_name = Column(String, nullable=False)
     route_long_name = Column(String)
+    route_desc = Column(String)
     route_type = Column(String)
+    route_url = Column(String)
+    route_color = Column(String)
+    route_text_color = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
+    agency = relationship("Agency", back_populates="routes")
     trips = relationship("Trip", back_populates="route")
     vehicle_positions = relationship("VehiclePosition", back_populates="route")
 
@@ -28,9 +142,13 @@ class Stop(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     stop_id = Column(String, unique=True, nullable=False, index=True)
+    stop_code = Column(String)
     stop_name = Column(String, nullable=False)
+    stop_desc = Column(String)
     stop_lat = Column(Float, nullable=False)
     stop_lon = Column(Float, nullable=False)
+    zone_id = Column(String)
+    stop_url = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -67,6 +185,11 @@ class StopTime(Base):
     arrival_time = Column(String, nullable=False)
     departure_time = Column(String, nullable=False)
     stop_sequence = Column(Integer, nullable=False)
+    stop_headsign = Column(String)
+    pickup_type = Column(Integer)
+    drop_off_type = Column(Integer)
+    shape_dist_traveled = Column(Float)
+    timepoint = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
