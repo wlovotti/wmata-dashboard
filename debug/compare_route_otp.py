@@ -14,8 +14,6 @@ try:
     print("Analyzing OTP Rates Across All Routes")
     print("=" * 70)
 
-    # Find top 15 routes by position count
-    # Note: find_nearest_stop() now uses caching for better performance
     routes_with_data = db.query(
         VehiclePosition.route_id,
         func.count(VehiclePosition.id).label('position_count'),
@@ -24,9 +22,9 @@ try:
         VehiclePosition.route_id
     ).order_by(
         func.count(VehiclePosition.id).desc()
-    ).limit(15).all()
+    ).all()
 
-    print(f"\nAnalyzing top {len(routes_with_data)} routes by data volume (limited for performance)")
+    print(f"\nAnalyzing top {len(routes_with_data)} routes by data volume")
     print("-" * 70)
 
     # Calculate OTP for each route
@@ -37,19 +35,18 @@ try:
 
         otp = calculate_line_level_otp(db, route_id)
 
-        arrivals = otp.get('arrivals_analyzed', 0)
+        arrivals = otp.get('matched_observations', 0)
         if arrivals >= 10:  # Only include routes with at least 10 arrivals analyzed
-            print(f" {arrivals} arrivals, {otp.get('on_time_percentage', 0):.1f}% on-time")
+            print(f" {arrivals} arrivals, {otp.get('on_time_pct', 0):.1f}% on-time")
             route_otp_results.append({
                 'route_id': route_id,
                 'position_count': position_count,
                 'vehicle_count': vehicle_count,
                 'arrivals_analyzed': arrivals,
-                'on_time_pct': otp.get('on_time_percentage', 0),
-                'early_pct': otp.get('early_percentage', 0),
-                'late_pct': otp.get('late_percentage', 0),
-                'matched_vehicles': otp.get('matched_vehicles', 0),
-                'unmatched_vehicles': otp.get('unmatched_vehicles', 0)
+                'on_time_pct': otp.get('on_time_pct', 0),
+                'early_pct': otp.get('early_pct', 0),
+                'late_pct': otp.get('late_pct', 0),
+                'avg_lateness_min': otp.get('avg_lateness_seconds', 0) / 60.0
             })
         else:
             print(f" skipped ({arrivals} arrivals, need 10+)")
@@ -72,7 +69,7 @@ try:
         for route in route_otp_results[:min(5, len(route_otp_results))]:
             print(f"{route['route_id']:8s} {route['on_time_pct']:7.1f}% {route['early_pct']:7.1f}% "
                   f"{route['late_pct']:7.1f}% {route['arrivals_analyzed']:10d} "
-                  f"{route['matched_vehicles']:10d}")
+                  f"{route['vehicle_count']:10d}")
 
         # Show worst OTP
         if len(route_otp_results) > 5:
@@ -84,7 +81,7 @@ try:
             for route in route_otp_results[-min(5, len(route_otp_results)):]:
                 print(f"{route['route_id']:8s} {route['on_time_pct']:7.1f}% {route['early_pct']:7.1f}% "
                       f"{route['late_pct']:7.1f}% {route['arrivals_analyzed']:10d} "
-                      f"{route['matched_vehicles']:10d}")
+                      f"{route['vehicle_count']:10d}")
 
         # Summary statistics
         print("\n" + "=" * 70)

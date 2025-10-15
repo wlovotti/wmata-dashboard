@@ -1452,6 +1452,9 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "gtfs-realtime-bindings" },
+    { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
+    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "sqlalchemy" },
@@ -1471,6 +1474,7 @@ viz = [
 requires-dist = [
     { name = "gtfs-realtime-bindings", specifier = ">=1.0.0" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.7.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
     { name = "psycopg", marker = "extra == 'postgres'", specifier = ">=3.1.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "requests", specifier = ">=2.32.5" },
