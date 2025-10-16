@@ -4,25 +4,24 @@ FastAPI application for WMATA Performance Dashboard API
 This API serves pre-computed transit performance metrics for the web dashboard.
 Endpoints provide route-level OTP, headway, and speed data.
 """
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-from datetime import datetime, timedelta
 
-from src.database import get_session
 from api.aggregations import (
     get_all_routes_scorecard,
     get_route_detail_metrics,
-    get_route_trend_data,
     get_route_speed_segments,
-    get_route_time_period_summary
+    get_route_time_period_summary,
+    get_route_trend_data,
 )
+from src.database import get_session
 
 # Create FastAPI app
 app = FastAPI(
     title="WMATA Performance API",
     description="REST API for WMATA transit performance metrics",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Enable CORS for frontend development
@@ -38,12 +37,7 @@ app.add_middleware(
 @app.get("/")
 async def root():
     """API root - health check"""
-    return {
-        "status": "ok",
-        "name": "WMATA Performance API",
-        "version": "1.0.0",
-        "docs": "/docs"
-    }
+    return {"status": "ok", "name": "WMATA Performance API", "version": "1.0.0", "docs": "/docs"}
 
 
 @app.get("/api/routes")
@@ -85,8 +79,8 @@ async def get_route(route_id: str, days: int = 7):
     db = get_session()
     try:
         result = get_route_detail_metrics(db, route_id, days=days)
-        if result.get('error'):
-            raise HTTPException(status_code=404, detail=result['error'])
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
         return result
     finally:
         db.close()
@@ -107,17 +101,16 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
     Returns:
         Time-series data with daily values for the specified metric
     """
-    if metric not in ['otp', 'headway', 'speed']:
+    if metric not in ["otp", "headway", "speed"]:
         raise HTTPException(
-            status_code=400,
-            detail="Invalid metric. Must be 'otp', 'headway', or 'speed'"
+            status_code=400, detail="Invalid metric. Must be 'otp', 'headway', or 'speed'"
         )
 
     db = get_session()
     try:
         result = get_route_trend_data(db, route_id, metric=metric, days=days)
-        if result.get('error'):
-            raise HTTPException(status_code=404, detail=result['error'])
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
         return result
     finally:
         db.close()
@@ -141,8 +134,8 @@ async def get_route_segments_endpoint(route_id: str, days: int = 7):
     db = get_session()
     try:
         result = get_route_speed_segments(db, route_id, days=days)
-        if result.get('error'):
-            raise HTTPException(status_code=404, detail=result['error'])
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
         return result
     finally:
         db.close()
@@ -166,8 +159,8 @@ async def get_route_time_periods(route_id: str, days: int = 7):
     db = get_session()
     try:
         result = get_route_time_period_summary(db, route_id, days=days)
-        if result.get('error'):
-            raise HTTPException(status_code=404, detail=result['error'])
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
         return result
     finally:
         db.close()
@@ -175,4 +168,5 @@ async def get_route_time_periods(route_id: str, days: int = 7):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

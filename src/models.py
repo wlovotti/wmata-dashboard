@@ -1,14 +1,16 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Index
+from datetime import datetime
+
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from datetime import datetime
 
 Base = declarative_base()
 
 
 class Agency(Base):
     """GTFS agency data (transit agency information)"""
-    __tablename__ = 'agencies'
+
+    __tablename__ = "agencies"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     agency_id = Column(String, unique=True, nullable=False, index=True)
@@ -27,7 +29,8 @@ class Agency(Base):
 
 class Calendar(Base):
     """GTFS calendar data (service schedules by day of week)"""
-    __tablename__ = 'calendar'
+
+    __tablename__ = "calendar"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     service_id = Column(String, unique=True, nullable=False, index=True)
@@ -39,13 +42,14 @@ class Calendar(Base):
     saturday = Column(Integer, nullable=False)
     sunday = Column(Integer, nullable=False)
     start_date = Column(String, nullable=False)  # YYYYMMDD format
-    end_date = Column(String, nullable=False)    # YYYYMMDD format
+    end_date = Column(String, nullable=False)  # YYYYMMDD format
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class CalendarDate(Base):
     """GTFS calendar_dates data (service exceptions)"""
-    __tablename__ = 'calendar_dates'
+
+    __tablename__ = "calendar_dates"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     service_id = Column(String, nullable=False, index=True)
@@ -54,21 +58,20 @@ class CalendarDate(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Composite index for efficient queries
-    __table_args__ = (
-        Index('idx_service_date', 'service_id', 'date'),
-    )
+    __table_args__ = (Index("idx_service_date", "service_id", "date"),)
 
 
 class FeedInfo(Base):
     """GTFS feed_info data (feed metadata)"""
-    __tablename__ = 'feed_info'
+
+    __tablename__ = "feed_info"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     feed_publisher_name = Column(String, nullable=False)
     feed_publisher_url = Column(String)
     feed_lang = Column(String)
     feed_start_date = Column(String)  # YYYYMMDD format
-    feed_end_date = Column(String)    # YYYYMMDD format
+    feed_end_date = Column(String)  # YYYYMMDD format
     feed_version = Column(String)
     feed_contact_email = Column(String)
     feed_contact_url = Column(String)
@@ -77,7 +80,8 @@ class FeedInfo(Base):
 
 class Timepoint(Base):
     """WMATA-specific timepoint data (subset of stops used for schedule adherence)"""
-    __tablename__ = 'timepoints'
+
+    __tablename__ = "timepoints"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     stop_id = Column(String, unique=True, nullable=False, index=True)
@@ -93,7 +97,8 @@ class Timepoint(Base):
 
 class TimepointTime(Base):
     """WMATA-specific timepoint schedule data"""
-    __tablename__ = 'timepoint_times'
+
+    __tablename__ = "timepoint_times"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     trip_id = Column(String, nullable=False, index=True)
@@ -109,18 +114,17 @@ class TimepointTime(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Composite index for efficient queries
-    __table_args__ = (
-        Index('idx_timepoint_trip_sequence', 'trip_id', 'stop_sequence'),
-    )
+    __table_args__ = (Index("idx_timepoint_trip_sequence", "trip_id", "stop_sequence"),)
 
 
 class Route(Base):
     """GTFS static route data"""
-    __tablename__ = 'routes'
+
+    __tablename__ = "routes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     route_id = Column(String, unique=True, nullable=False, index=True)
-    agency_id = Column(String, ForeignKey('agencies.agency_id'))
+    agency_id = Column(String, ForeignKey("agencies.agency_id"))
     route_short_name = Column(String, nullable=False)
     route_long_name = Column(String)
     route_desc = Column(String)
@@ -138,7 +142,8 @@ class Route(Base):
 
 class Stop(Base):
     """GTFS static stop data"""
-    __tablename__ = 'stops'
+
+    __tablename__ = "stops"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     stop_id = Column(String, unique=True, nullable=False, index=True)
@@ -157,11 +162,12 @@ class Stop(Base):
 
 class Trip(Base):
     """GTFS static trip data"""
-    __tablename__ = 'trips'
+
+    __tablename__ = "trips"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     trip_id = Column(String, unique=True, nullable=False, index=True)
-    route_id = Column(String, ForeignKey('routes.route_id'), nullable=False, index=True)
+    route_id = Column(String, ForeignKey("routes.route_id"), nullable=False, index=True)
     service_id = Column(String)
     trip_headsign = Column(String)
     direction_id = Column(Integer)
@@ -177,11 +183,12 @@ class Trip(Base):
 
 class StopTime(Base):
     """GTFS static stop_times data (scheduled stops)"""
-    __tablename__ = 'stop_times'
+
+    __tablename__ = "stop_times"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    trip_id = Column(String, ForeignKey('trips.trip_id'), nullable=False, index=True)
-    stop_id = Column(String, ForeignKey('stops.stop_id'), nullable=False, index=True)
+    trip_id = Column(String, ForeignKey("trips.trip_id"), nullable=False, index=True)
+    stop_id = Column(String, ForeignKey("stops.stop_id"), nullable=False, index=True)
     arrival_time = Column(String, nullable=False)
     departure_time = Column(String, nullable=False)
     stop_sequence = Column(Integer, nullable=False)
@@ -197,9 +204,7 @@ class StopTime(Base):
     stop = relationship("Stop", back_populates="stop_times")
 
     # Composite index for efficient queries
-    __table_args__ = (
-        Index('idx_trip_stop_sequence', 'trip_id', 'stop_sequence'),
-    )
+    __table_args__ = (Index("idx_trip_stop_sequence", "trip_id", "stop_sequence"),)
 
 
 class Shape(Base):
@@ -211,7 +216,8 @@ class Shape(Base):
     actual street-level route. This is essential for accurate distance and
     speed calculations.
     """
-    __tablename__ = 'shapes'
+
+    __tablename__ = "shapes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     shape_id = Column(String, nullable=False, index=True)
@@ -222,20 +228,19 @@ class Shape(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Composite index for efficient queries by shape and sequence
-    __table_args__ = (
-        Index('idx_shape_sequence', 'shape_id', 'shape_pt_sequence'),
-    )
+    __table_args__ = (Index("idx_shape_sequence", "shape_id", "shape_pt_sequence"),)
 
 
 class VehiclePosition(Base):
     """Real-time vehicle position data from GTFS-RT (collected every 30-60 seconds)"""
-    __tablename__ = 'vehicle_positions'
+
+    __tablename__ = "vehicle_positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     vehicle_id = Column(String, nullable=False, index=True)
     vehicle_label = Column(String)  # Vehicle display label
-    route_id = Column(String, ForeignKey('routes.route_id'), index=True)
-    trip_id = Column(String, ForeignKey('trips.trip_id'), index=True)
+    route_id = Column(String, ForeignKey("routes.route_id"), index=True)
+    trip_id = Column(String, ForeignKey("trips.trip_id"), index=True)
 
     # Position data
     latitude = Column(Float, nullable=False)
@@ -267,9 +272,9 @@ class VehiclePosition(Base):
 
     # Composite indexes for efficient queries
     __table_args__ = (
-        Index('idx_vehicle_timestamp', 'vehicle_id', 'timestamp'),
-        Index('idx_route_timestamp', 'route_id', 'timestamp'),
-        Index('idx_trip_timestamp', 'trip_id', 'timestamp'),
+        Index("idx_vehicle_timestamp", "vehicle_id", "timestamp"),
+        Index("idx_route_timestamp", "route_id", "timestamp"),
+        Index("idx_trip_timestamp", "trip_id", "timestamp"),
     )
 
 
@@ -280,7 +285,8 @@ class BusPosition(Base):
     This is WMATA's proprietary API that provides richer data than GTFS-RT,
     including schedule deviation which is crucial for accurate OTP metrics.
     """
-    __tablename__ = 'bus_positions'
+
+    __tablename__ = "bus_positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     vehicle_id = Column(String, nullable=False, index=True)
@@ -310,10 +316,10 @@ class BusPosition(Base):
 
     # Composite indexes for efficient queries
     __table_args__ = (
-        Index('idx_bus_vehicle_timestamp', 'vehicle_id', 'timestamp'),
-        Index('idx_bus_route_timestamp', 'route_id', 'timestamp'),
-        Index('idx_bus_trip_timestamp', 'trip_id', 'timestamp'),
-        Index('idx_bus_block_timestamp', 'block_number', 'timestamp'),
+        Index("idx_bus_vehicle_timestamp", "vehicle_id", "timestamp"),
+        Index("idx_bus_route_timestamp", "route_id", "timestamp"),
+        Index("idx_bus_trip_timestamp", "trip_id", "timestamp"),
+        Index("idx_bus_block_timestamp", "block_number", "timestamp"),
     )
 
 
@@ -325,7 +331,8 @@ class RouteMetricsDaily(Base):
     enabling fast API responses without recalculating from raw vehicle positions.
     Populated by nightly batch job (pipelines/compute_daily_metrics.py).
     """
-    __tablename__ = 'route_metrics_daily'
+
+    __tablename__ = "route_metrics_daily"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     route_id = Column(String, nullable=False, index=True)
@@ -354,9 +361,7 @@ class RouteMetricsDaily(Base):
     computed_at = Column(DateTime, default=datetime.utcnow)
 
     # Composite index for efficient queries
-    __table_args__ = (
-        Index('idx_route_date', 'route_id', 'date', unique=True),
-    )
+    __table_args__ = (Index("idx_route_date", "route_id", "date", unique=True),)
 
 
 class RouteMetricsSummary(Base):
@@ -366,14 +371,15 @@ class RouteMetricsSummary(Base):
     This table stores aggregated metrics over a recent time period
     for quick scorecard/summary displays. Updated by nightly batch job.
     """
-    __tablename__ = 'route_metrics_summary'
+
+    __tablename__ = "route_metrics_summary"
 
     route_id = Column(String, primary_key=True)
 
     # Time period analyzed
     days_analyzed = Column(Integer, default=7)
     date_start = Column(String)  # YYYY-MM-DD
-    date_end = Column(String)    # YYYY-MM-DD
+    date_end = Column(String)  # YYYY-MM-DD
 
     # Performance metrics
     otp_percentage = Column(Float)

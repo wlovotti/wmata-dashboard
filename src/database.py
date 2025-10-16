@@ -1,14 +1,13 @@
 import os
+
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
+
 from src.models import Base
 
 # Database configuration from environment variables
 # Default to SQLite if no PostgreSQL connection string provided
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "sqlite:///./wmata_dashboard.db"
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./wmata_dashboard.db")
 
 
 def get_engine():
@@ -18,14 +17,14 @@ def get_engine():
         engine = create_engine(
             DATABASE_URL,
             connect_args={"check_same_thread": False},
-            echo=False  # Set to True for SQL debugging
+            echo=False,  # Set to True for SQL debugging
         )
     else:
         # PostgreSQL settings
         engine = create_engine(
             DATABASE_URL,
             pool_pre_ping=True,  # Verify connections before using
-            echo=False  # Set to True for SQL debugging
+            echo=False,  # Set to True for SQL debugging
         )
     return engine
 
