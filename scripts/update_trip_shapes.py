@@ -4,13 +4,15 @@ Update existing trips with shape_id and block_id from GTFS data.
 This script downloads fresh GTFS data and updates the shape_id and block_id fields
 for all existing trips in the database.
 """
-import os
-import sys
-import requests
-import zipfile
-import io
+
 import csv
+import io
+import os
+import zipfile
+
+import requests
 from dotenv import load_dotenv
+
 from src.database import get_session
 from src.models import Trip
 
@@ -45,7 +47,7 @@ def main():
         # Extract and parse trips.txt
         print("Parsing trips.txt...")
         zip_file = zipfile.ZipFile(io.BytesIO(response.content))
-        content = zip_file.read('trips.txt').decode('utf-8-sig')
+        content = zip_file.read("trips.txt").decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(content))
         trips_data = list(reader)
 
@@ -62,10 +64,10 @@ def main():
                 if i % 10000 == 0 and i > 0:
                     print(f"  Progress: {i}/{len(trips_data)} trips processed...")
 
-                trip = db.query(Trip).filter_by(trip_id=trip_data['trip_id']).first()
+                trip = db.query(Trip).filter_by(trip_id=trip_data["trip_id"]).first()
                 if trip:
-                    shape_id = trip_data.get('shape_id')
-                    block_id = trip_data.get('block_id')
+                    shape_id = trip_data.get("shape_id")
+                    block_id = trip_data.get("block_id")
                     if shape_id:
                         trip.shape_id = shape_id
                     if block_id:
@@ -91,10 +93,14 @@ def main():
             trips_with_blocks = db.query(Trip).filter(Trip.block_id.isnot(None)).count()
             total_trips = db.query(Trip).count()
 
-            print(f"\nDatabase status:")
+            print("\nDatabase status:")
             print(f"  Total trips: {total_trips}")
-            print(f"  Trips with shape_id: {trips_with_shapes} ({(trips_with_shapes/total_trips*100):.1f}%)")
-            print(f"  Trips with block_id: {trips_with_blocks} ({(trips_with_blocks/total_trips*100):.1f}%)")
+            print(
+                f"  Trips with shape_id: {trips_with_shapes} ({(trips_with_shapes / total_trips * 100):.1f}%)"
+            )
+            print(
+                f"  Trips with block_id: {trips_with_blocks} ({(trips_with_blocks / total_trips * 100):.1f}%)"
+            )
 
         finally:
             db.close()

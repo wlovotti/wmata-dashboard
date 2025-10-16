@@ -22,17 +22,30 @@ jobs:
       run: pip install uv
 
     - name: Install dependencies
-      run: uv sync
+      run: uv sync --extra dev
+
+    - name: Lint with ruff
+      run: |
+        uv run ruff check src/ scripts/ api/ pipelines/
+        echo "✓ Ruff linting passed"
+
+    - name: Check code formatting
+      run: |
+        uv run ruff format --check src/ scripts/ api/ pipelines/
+        echo "✓ Code formatting check passed"
 
     - name: Test imports
       run: |
         uv run python -c "from src.database import get_session; print('✓ Imports work')"
         uv run python -c "from src.analytics import calculate_headways; print('✓ Analytics module loads')"
         uv run python -c "from src.trip_matching import find_matching_trip; print('✓ Trip matching module loads')"
+        uv run python -c "from api.aggregations import get_all_routes_scorecard; print('✓ API module loads')"
 
     - name: Check code structure
       run: |
         test -d src && echo "✓ src/ directory exists"
         test -d scripts && echo "✓ scripts/ directory exists"
+        test -d api && echo "✓ api/ directory exists"
+        test -d pipelines && echo "✓ pipelines/ directory exists"
         test -d tests && echo "✓ tests/ directory exists"
         test -f src/__init__.py && echo "✓ src/__init__.py exists"

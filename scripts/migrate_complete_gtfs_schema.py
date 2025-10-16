@@ -10,9 +10,12 @@ Changes:
 WARNING: This migration requires reloading data for routes, stops, and stop_times
 to populate the new fields. Run scripts/reload_gtfs_complete.py after this migration.
 """
-from src.database import get_engine
-from sqlalchemy import text, inspect
+
 import sys
+
+from sqlalchemy import inspect, text
+
+from src.database import get_engine
 
 
 def check_table_exists(engine, table_name):
@@ -26,7 +29,7 @@ def check_column_exists(engine, table_name, column_name):
     if not check_table_exists(engine, table_name):
         return False
     inspector = inspect(engine)
-    columns = [col['name'] for col in inspector.get_columns(table_name)]
+    columns = [col["name"] for col in inspector.get_columns(table_name)]
     return column_name in columns
 
 
@@ -38,24 +41,24 @@ def migrate_complete_gtfs(engine):
 
     # Check database type
     db_url = str(engine.url)
-    is_sqlite = db_url.startswith('sqlite')
+    is_sqlite = db_url.startswith("sqlite")
 
     print(f"\nDatabase: {db_url}")
     print(f"Type: {'SQLite' if is_sqlite else 'PostgreSQL'}")
     print()
 
     with engine.connect() as conn:
-
         # ===== CREATE NEW TABLES =====
 
         print("STEP 1: Creating new GTFS tables")
         print("-" * 70)
 
         # Create agencies table
-        if not check_table_exists(engine, 'agencies'):
+        if not check_table_exists(engine, "agencies"):
             print("→ Creating agencies table...")
             if is_sqlite:
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE agencies (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         agency_id VARCHAR UNIQUE NOT NULL,
@@ -68,10 +71,12 @@ def migrate_complete_gtfs(engine):
                         agency_email VARCHAR,
                         created_at DATETIME
                     )
-                """))
+                """)
+                )
                 conn.execute(text("CREATE INDEX ix_agencies_agency_id ON agencies (agency_id)"))
             else:  # PostgreSQL
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE agencies (
                         id SERIAL PRIMARY KEY,
                         agency_id VARCHAR UNIQUE NOT NULL,
@@ -84,7 +89,8 @@ def migrate_complete_gtfs(engine):
                         agency_email VARCHAR,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """))
+                """)
+                )
                 conn.execute(text("CREATE INDEX ix_agencies_agency_id ON agencies (agency_id)"))
             conn.commit()
             print("  ✓ Created agencies table")
@@ -92,10 +98,11 @@ def migrate_complete_gtfs(engine):
             print("✓ agencies table already exists")
 
         # Create calendar table
-        if not check_table_exists(engine, 'calendar'):
+        if not check_table_exists(engine, "calendar"):
             print("→ Creating calendar table...")
             if is_sqlite:
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE calendar (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         service_id VARCHAR UNIQUE NOT NULL,
@@ -110,10 +117,12 @@ def migrate_complete_gtfs(engine):
                         end_date VARCHAR NOT NULL,
                         created_at DATETIME
                     )
-                """))
+                """)
+                )
                 conn.execute(text("CREATE INDEX ix_calendar_service_id ON calendar (service_id)"))
             else:  # PostgreSQL
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE calendar (
                         id SERIAL PRIMARY KEY,
                         service_id VARCHAR UNIQUE NOT NULL,
@@ -128,7 +137,8 @@ def migrate_complete_gtfs(engine):
                         end_date VARCHAR NOT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """))
+                """)
+                )
                 conn.execute(text("CREATE INDEX ix_calendar_service_id ON calendar (service_id)"))
             conn.commit()
             print("  ✓ Created calendar table")
@@ -136,10 +146,11 @@ def migrate_complete_gtfs(engine):
             print("✓ calendar table already exists")
 
         # Create calendar_dates table
-        if not check_table_exists(engine, 'calendar_dates'):
+        if not check_table_exists(engine, "calendar_dates"):
             print("→ Creating calendar_dates table...")
             if is_sqlite:
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE calendar_dates (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         service_id VARCHAR NOT NULL,
@@ -147,12 +158,18 @@ def migrate_complete_gtfs(engine):
                         exception_type INTEGER NOT NULL,
                         created_at DATETIME
                     )
-                """))
-                conn.execute(text("CREATE INDEX ix_calendar_dates_service_id ON calendar_dates (service_id)"))
+                """)
+                )
+                conn.execute(
+                    text("CREATE INDEX ix_calendar_dates_service_id ON calendar_dates (service_id)")
+                )
                 conn.execute(text("CREATE INDEX ix_calendar_dates_date ON calendar_dates (date)"))
-                conn.execute(text("CREATE INDEX idx_service_date ON calendar_dates (service_id, date)"))
+                conn.execute(
+                    text("CREATE INDEX idx_service_date ON calendar_dates (service_id, date)")
+                )
             else:  # PostgreSQL
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE calendar_dates (
                         id SERIAL PRIMARY KEY,
                         service_id VARCHAR NOT NULL,
@@ -160,20 +177,26 @@ def migrate_complete_gtfs(engine):
                         exception_type INTEGER NOT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """))
-                conn.execute(text("CREATE INDEX ix_calendar_dates_service_id ON calendar_dates (service_id)"))
+                """)
+                )
+                conn.execute(
+                    text("CREATE INDEX ix_calendar_dates_service_id ON calendar_dates (service_id)")
+                )
                 conn.execute(text("CREATE INDEX ix_calendar_dates_date ON calendar_dates (date)"))
-                conn.execute(text("CREATE INDEX idx_service_date ON calendar_dates (service_id, date)"))
+                conn.execute(
+                    text("CREATE INDEX idx_service_date ON calendar_dates (service_id, date)")
+                )
             conn.commit()
             print("  ✓ Created calendar_dates table")
         else:
             print("✓ calendar_dates table already exists")
 
         # Create feed_info table
-        if not check_table_exists(engine, 'feed_info'):
+        if not check_table_exists(engine, "feed_info"):
             print("→ Creating feed_info table...")
             if is_sqlite:
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE feed_info (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         feed_publisher_name VARCHAR NOT NULL,
@@ -186,9 +209,11 @@ def migrate_complete_gtfs(engine):
                         feed_contact_url VARCHAR,
                         created_at DATETIME
                     )
-                """))
+                """)
+                )
             else:  # PostgreSQL
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE feed_info (
                         id SERIAL PRIMARY KEY,
                         feed_publisher_name VARCHAR NOT NULL,
@@ -201,17 +226,19 @@ def migrate_complete_gtfs(engine):
                         feed_contact_url VARCHAR,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """))
+                """)
+                )
             conn.commit()
             print("  ✓ Created feed_info table")
         else:
             print("✓ feed_info table already exists")
 
         # Create timepoints table
-        if not check_table_exists(engine, 'timepoints'):
+        if not check_table_exists(engine, "timepoints"):
             print("→ Creating timepoints table...")
             if is_sqlite:
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE timepoints (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         stop_id VARCHAR UNIQUE NOT NULL,
@@ -224,10 +251,12 @@ def migrate_complete_gtfs(engine):
                         stop_url VARCHAR,
                         created_at DATETIME
                     )
-                """))
+                """)
+                )
                 conn.execute(text("CREATE INDEX ix_timepoints_stop_id ON timepoints (stop_id)"))
             else:  # PostgreSQL
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE timepoints (
                         id SERIAL PRIMARY KEY,
                         stop_id VARCHAR UNIQUE NOT NULL,
@@ -240,7 +269,8 @@ def migrate_complete_gtfs(engine):
                         stop_url VARCHAR,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """))
+                """)
+                )
                 conn.execute(text("CREATE INDEX ix_timepoints_stop_id ON timepoints (stop_id)"))
             conn.commit()
             print("  ✓ Created timepoints table")
@@ -248,10 +278,11 @@ def migrate_complete_gtfs(engine):
             print("✓ timepoints table already exists")
 
         # Create timepoint_times table
-        if not check_table_exists(engine, 'timepoint_times'):
+        if not check_table_exists(engine, "timepoint_times"):
             print("→ Creating timepoint_times table...")
             if is_sqlite:
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE timepoint_times (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         trip_id VARCHAR NOT NULL,
@@ -266,12 +297,22 @@ def migrate_complete_gtfs(engine):
                         timepoint INTEGER,
                         created_at DATETIME
                     )
-                """))
-                conn.execute(text("CREATE INDEX ix_timepoint_times_trip_id ON timepoint_times (trip_id)"))
-                conn.execute(text("CREATE INDEX ix_timepoint_times_stop_id ON timepoint_times (stop_id)"))
-                conn.execute(text("CREATE INDEX idx_timepoint_trip_sequence ON timepoint_times (trip_id, stop_sequence)"))
+                """)
+                )
+                conn.execute(
+                    text("CREATE INDEX ix_timepoint_times_trip_id ON timepoint_times (trip_id)")
+                )
+                conn.execute(
+                    text("CREATE INDEX ix_timepoint_times_stop_id ON timepoint_times (stop_id)")
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX idx_timepoint_trip_sequence ON timepoint_times (trip_id, stop_sequence)"
+                    )
+                )
             else:  # PostgreSQL
-                conn.execute(text("""
+                conn.execute(
+                    text("""
                     CREATE TABLE timepoint_times (
                         id SERIAL PRIMARY KEY,
                         trip_id VARCHAR NOT NULL,
@@ -286,10 +327,19 @@ def migrate_complete_gtfs(engine):
                         timepoint INTEGER,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """))
-                conn.execute(text("CREATE INDEX ix_timepoint_times_trip_id ON timepoint_times (trip_id)"))
-                conn.execute(text("CREATE INDEX ix_timepoint_times_stop_id ON timepoint_times (stop_id)"))
-                conn.execute(text("CREATE INDEX idx_timepoint_trip_sequence ON timepoint_times (trip_id, stop_sequence)"))
+                """)
+                )
+                conn.execute(
+                    text("CREATE INDEX ix_timepoint_times_trip_id ON timepoint_times (trip_id)")
+                )
+                conn.execute(
+                    text("CREATE INDEX ix_timepoint_times_stop_id ON timepoint_times (stop_id)")
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX idx_timepoint_trip_sequence ON timepoint_times (trip_id, stop_sequence)"
+                    )
+                )
             conn.commit()
             print("  ✓ Created timepoint_times table")
         else:
@@ -302,16 +352,16 @@ def migrate_complete_gtfs(engine):
 
         # Update routes table
         routes_columns = [
-            ('agency_id', 'VARCHAR'),
-            ('route_desc', 'VARCHAR'),
-            ('route_url', 'VARCHAR'),
-            ('route_color', 'VARCHAR'),
-            ('route_text_color', 'VARCHAR')
+            ("agency_id", "VARCHAR"),
+            ("route_desc", "VARCHAR"),
+            ("route_url", "VARCHAR"),
+            ("route_color", "VARCHAR"),
+            ("route_text_color", "VARCHAR"),
         ]
 
-        if check_table_exists(engine, 'routes'):
+        if check_table_exists(engine, "routes"):
             for col_name, col_type in routes_columns:
-                if not check_column_exists(engine, 'routes', col_name):
+                if not check_column_exists(engine, "routes", col_name):
                     print(f"→ Adding routes.{col_name}...")
                     conn.execute(text(f"ALTER TABLE routes ADD COLUMN {col_name} {col_type}"))
                     conn.commit()
@@ -321,15 +371,15 @@ def migrate_complete_gtfs(engine):
 
         # Update stops table
         stops_columns = [
-            ('stop_code', 'VARCHAR'),
-            ('stop_desc', 'VARCHAR'),
-            ('zone_id', 'VARCHAR'),
-            ('stop_url', 'VARCHAR')
+            ("stop_code", "VARCHAR"),
+            ("stop_desc", "VARCHAR"),
+            ("zone_id", "VARCHAR"),
+            ("stop_url", "VARCHAR"),
         ]
 
-        if check_table_exists(engine, 'stops'):
+        if check_table_exists(engine, "stops"):
             for col_name, col_type in stops_columns:
-                if not check_column_exists(engine, 'stops', col_name):
+                if not check_column_exists(engine, "stops", col_name):
                     print(f"→ Adding stops.{col_name}...")
                     conn.execute(text(f"ALTER TABLE stops ADD COLUMN {col_name} {col_type}"))
                     conn.commit()
@@ -339,16 +389,16 @@ def migrate_complete_gtfs(engine):
 
         # Update stop_times table
         stop_times_columns = [
-            ('stop_headsign', 'VARCHAR'),
-            ('pickup_type', 'INTEGER'),
-            ('drop_off_type', 'INTEGER'),
-            ('shape_dist_traveled', 'FLOAT' if is_sqlite else 'DOUBLE PRECISION'),
-            ('timepoint', 'INTEGER')
+            ("stop_headsign", "VARCHAR"),
+            ("pickup_type", "INTEGER"),
+            ("drop_off_type", "INTEGER"),
+            ("shape_dist_traveled", "FLOAT" if is_sqlite else "DOUBLE PRECISION"),
+            ("timepoint", "INTEGER"),
         ]
 
-        if check_table_exists(engine, 'stop_times'):
+        if check_table_exists(engine, "stop_times"):
             for col_name, col_type in stop_times_columns:
-                if not check_column_exists(engine, 'stop_times', col_name):
+                if not check_column_exists(engine, "stop_times", col_name):
                     print(f"→ Adding stop_times.{col_name}...")
                     conn.execute(text(f"ALTER TABLE stop_times ADD COLUMN {col_name} {col_type}"))
                     conn.commit()
@@ -377,6 +427,7 @@ def main():
     except Exception as e:
         print(f"\n✗ Migration failed: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
     finally:

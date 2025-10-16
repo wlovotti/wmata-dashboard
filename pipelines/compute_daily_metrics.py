@@ -12,18 +12,15 @@ Options:
     --days N         Compute metrics for last N days (default: 7)
     --route ROUTE_ID Compute for specific route only (default: all routes)
 """
-import sys
+
 import argparse
 from datetime import datetime, timedelta
+
 from sqlalchemy import func
 
+from src.analytics import calculate_average_speed, calculate_headways, calculate_line_level_otp
 from src.database import get_session
-from src.models import Route, VehiclePosition, RouteMetricsDaily, RouteMetricsSummary
-from src.analytics import (
-    calculate_line_level_otp,
-    calculate_headways,
-    calculate_average_speed
-)
+from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, VehiclePosition
 
 
 def compute_metrics_for_route_day(db, route_id: str, date: datetime.date) -> dict:
@@ -45,11 +42,15 @@ def compute_metrics_for_route_day(db, route_id: str, date: datetime.date) -> dic
     print(f"  Computing metrics for {route_id} on {date.isoformat()}...")
 
     # Check if we have enough data
-    position_count = db.query(VehiclePosition).filter(
-        VehiclePosition.route_id == route_id,
-        VehiclePosition.timestamp >= start_time,
-        VehiclePosition.timestamp < end_time
-    ).count()
+    position_count = (
+        db.query(VehiclePosition)
+        .filter(
+            VehiclePosition.route_id == route_id,
+            VehiclePosition.timestamp >= start_time,
+            VehiclePosition.timestamp < end_time,
+        )
+        .count()
+    )
 
     MIN_POSITIONS = 50
     if position_count < MIN_POSITIONS:
@@ -57,78 +58,77 @@ def compute_metrics_for_route_day(db, route_id: str, date: datetime.date) -> dic
         return None
 
     # Compute OTP
-    print(f"    Computing OTP...")
+    print("    Computing OTP...")
     try:
         otp_result = calculate_line_level_otp(
-            db, route_id,
+            db,
+            route_id,
             start_time=start_time,
             end_time=end_time,
-            sample_rate=1  # No sampling for daily computation
+            sample_rate=1,  # No sampling for daily computation
         )
-        otp_pct = otp_result.get('on_time_pct')
-        early_pct = otp_result.get('early_pct')
-        late_pct = otp_result.get('late_pct')
-        total_arrivals = otp_result.get('matched_observations', 0)
+        otp_pct = otp_result.get("on_time_pct")
+        early_pct = otp_result.get("early_pct")
+        late_pct = otp_result.get("late_pct")
+        total_arrivals = otp_result.get("matched_observations", 0)
     except Exception as e:
         print(f"    Error computing OTP: {e}")
         otp_pct = early_pct = late_pct = None
         total_arrivals = 0
 
     # Compute headway
-    print(f"    Computing headway...")
+    print("    Computing headway...")
     try:
-        headway_result = calculate_headways(
-            db, route_id,
-            start_time=start_time,
-            end_time=end_time
-        )
-        avg_headway = headway_result.get('avg_headway_minutes')
-        min_headway = headway_result.get('min_headway_minutes')
-        max_headway = headway_result.get('max_headway_minutes')
+        headway_result = calculate_headways(db, route_id, start_time=start_time, end_time=end_time)
+        avg_headway = headway_result.get("avg_headway_minutes")
+        min_headway = headway_result.get("min_headway_minutes")
+        max_headway = headway_result.get("max_headway_minutes")
     except Exception as e:
         print(f"    Error computing headway: {e}")
         avg_headway = min_headway = max_headway = None
 
     # Compute speed
-    print(f"    Computing speed...")
+    print("    Computing speed...")
     try:
         speed_result = calculate_average_speed(
-            db, route_id,
-            start_time=start_time,
-            end_time=end_time
+            db, route_id, start_time=start_time, end_time=end_time
         )
-        avg_speed = speed_result.get('avg_speed_mph')
-        median_speed = speed_result.get('median_speed_mph')
+        avg_speed = speed_result.get("avg_speed_mph")
+        median_speed = speed_result.get("median_speed_mph")
     except Exception as e:
         print(f"    Error computing speed: {e}")
         avg_speed = median_speed = None
 
     # Count unique vehicles and trips
-    stats = db.query(
-        func.count(func.distinct(VehiclePosition.vehicle_id)).label('vehicles'),
-        func.count(func.distinct(VehiclePosition.trip_id)).label('trips')
-    ).filter(
-        VehiclePosition.route_id == route_id,
-        VehiclePosition.timestamp >= start_time,
-        VehiclePosition.timestamp < end_time
-    ).first()
+    stats = (
+        db.query(
+            func.count(func.distinct(VehiclePosition.vehicle_id)).label("vehicles"),
+            func.count(func.distinct(VehiclePosition.trip_id)).label("trips"),
+        )
+        .filter(
+            VehiclePosition.route_id == route_id,
+            VehiclePosition.timestamp >= start_time,
+            VehiclePosition.timestamp < end_time,
+        )
+        .first()
+    )
 
     print(f"    ✓ Complete: OTP={otp_pct}%, Headway={avg_headway}min, Speed={avg_speed}mph")
 
     return {
-        'route_id': route_id,
-        'date': date.isoformat(),
-        'otp_percentage': otp_pct,
-        'early_percentage': early_pct,
-        'late_percentage': late_pct,
-        'avg_headway_minutes': avg_headway,
-        'min_headway_minutes': min_headway,
-        'max_headway_minutes': max_headway,
-        'avg_speed_mph': avg_speed,
-        'median_speed_mph': median_speed,
-        'total_arrivals': total_arrivals,
-        'unique_vehicles': stats.vehicles if stats else 0,
-        'unique_trips': stats.trips if stats else 0
+        "route_id": route_id,
+        "date": date.isoformat(),
+        "otp_percentage": otp_pct,
+        "early_percentage": early_pct,
+        "late_percentage": late_pct,
+        "avg_headway_minutes": avg_headway,
+        "min_headway_minutes": min_headway,
+        "max_headway_minutes": max_headway,
+        "avg_speed_mph": avg_speed,
+        "median_speed_mph": median_speed,
+        "total_arrivals": total_arrivals,
+        "unique_vehicles": stats.vehicles if stats else 0,
+        "unique_trips": stats.trips if stats else 0,
     }
 
 
@@ -172,10 +172,14 @@ def compute_daily_metrics(days: int = 7, route_filter: str = None):
 
             for date in dates:
                 # Check if we already have metrics for this day
-                existing = db.query(RouteMetricsDaily).filter(
-                    RouteMetricsDaily.route_id == route.route_id,
-                    RouteMetricsDaily.date == date.isoformat()
-                ).first()
+                existing = (
+                    db.query(RouteMetricsDaily)
+                    .filter(
+                        RouteMetricsDaily.route_id == route.route_id,
+                        RouteMetricsDaily.date == date.isoformat(),
+                    )
+                    .first()
+                )
 
                 if existing:
                     print(f"  {date.isoformat()}: Already computed, skipping")
@@ -194,7 +198,7 @@ def compute_daily_metrics(days: int = 7, route_filter: str = None):
                     total_skipped += 1
 
         print("\n" + "=" * 70)
-        print(f"Daily metrics computation complete!")
+        print("Daily metrics computation complete!")
         print(f"  Computed: {total_computed} route-days")
         print(f"  Skipped: {total_skipped} route-days (insufficient data)")
         print("=" * 70)
@@ -225,18 +229,24 @@ def compute_summary_metrics(db, days: int = 7):
 
     for route_id in routes_with_data:
         # Get daily metrics for this route in the date range
-        daily_metrics = db.query(RouteMetricsDaily).filter(
-            RouteMetricsDaily.route_id == route_id,
-            RouteMetricsDaily.date >= start_date.isoformat(),
-            RouteMetricsDaily.date <= end_date.isoformat()
-        ).all()
+        daily_metrics = (
+            db.query(RouteMetricsDaily)
+            .filter(
+                RouteMetricsDaily.route_id == route_id,
+                RouteMetricsDaily.date >= start_date.isoformat(),
+                RouteMetricsDaily.date <= end_date.isoformat(),
+            )
+            .all()
+        )
 
         if not daily_metrics:
             continue
 
         # Calculate averages
         otp_values = [m.otp_percentage for m in daily_metrics if m.otp_percentage is not None]
-        headway_values = [m.avg_headway_minutes for m in daily_metrics if m.avg_headway_minutes is not None]
+        headway_values = [
+            m.avg_headway_minutes for m in daily_metrics if m.avg_headway_minutes is not None
+        ]
         speed_values = [m.avg_speed_mph for m in daily_metrics if m.avg_speed_mph is not None]
         early_values = [m.early_percentage for m in daily_metrics if m.early_percentage is not None]
         late_values = [m.late_percentage for m in daily_metrics if m.late_percentage is not None]
@@ -251,16 +261,19 @@ def compute_summary_metrics(db, days: int = 7):
         total_vehicles = sum(m.unique_vehicles for m in daily_metrics if m.unique_vehicles)
 
         # Get last data timestamp from vehicle_positions
-        last_position = db.query(VehiclePosition).filter(
-            VehiclePosition.route_id == route_id
-        ).order_by(VehiclePosition.timestamp.desc()).first()
+        last_position = (
+            db.query(VehiclePosition)
+            .filter(VehiclePosition.route_id == route_id)
+            .order_by(VehiclePosition.timestamp.desc())
+            .first()
+        )
 
         last_timestamp = last_position.timestamp if last_position else None
 
         # Upsert summary record
-        summary = db.query(RouteMetricsSummary).filter(
-            RouteMetricsSummary.route_id == route_id
-        ).first()
+        summary = (
+            db.query(RouteMetricsSummary).filter(RouteMetricsSummary.route_id == route_id).first()
+        )
 
         if summary:
             # Update existing
@@ -290,7 +303,7 @@ def compute_summary_metrics(db, days: int = 7):
                 avg_speed_mph=avg_speed,
                 total_observations=total_obs,
                 unique_vehicles=total_vehicles,
-                last_data_timestamp=last_timestamp
+                last_data_timestamp=last_timestamp,
             )
             db.add(summary)
 
@@ -301,9 +314,11 @@ def compute_summary_metrics(db, days: int = 7):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Compute daily performance metrics')
-    parser.add_argument('--days', type=int, default=7, help='Number of days to compute (default: 7)')
-    parser.add_argument('--route', type=str, help='Specific route to compute (default: all)')
+    parser = argparse.ArgumentParser(description="Compute daily performance metrics")
+    parser.add_argument(
+        "--days", type=int, default=7, help="Number of days to compute (default: 7)"
+    )
+    parser.add_argument("--route", type=str, help="Specific route to compute (default: all)")
 
     args = parser.parse_args()
 

@@ -19,15 +19,18 @@ New fields:
 Usage:
   python scripts/migrate_vehicle_positions.py
 """
-from src.database import get_engine
-from sqlalchemy import text, inspect
+
 import sys
+
+from sqlalchemy import inspect, text
+
+from src.database import get_engine
 
 
 def check_column_exists(engine, table_name, column_name):
     """Check if a column exists in a table"""
     inspector = inspect(engine)
-    columns = [col['name'] for col in inspector.get_columns(table_name)]
+    columns = [col["name"] for col in inspector.get_columns(table_name)]
     return column_name in columns
 
 
@@ -39,7 +42,7 @@ def migrate_vehicle_positions(engine):
 
     # Check database type
     db_url = str(engine.url)
-    is_sqlite = db_url.startswith('sqlite')
+    is_sqlite = db_url.startswith("sqlite")
 
     print(f"\nDatabase: {db_url}")
     print(f"Type: {'SQLite' if is_sqlite else 'PostgreSQL'}")
@@ -47,16 +50,16 @@ def migrate_vehicle_positions(engine):
 
     # Define columns to add
     columns_to_add = [
-        ('vehicle_label', 'VARCHAR'),
-        ('bearing', 'FLOAT' if is_sqlite else 'DOUBLE PRECISION'),
-        ('speed', 'FLOAT' if is_sqlite else 'DOUBLE PRECISION'),
-        ('stop_id', 'VARCHAR'),
-        ('current_status', 'INTEGER'),
-        ('direction_id', 'INTEGER'),
-        ('trip_start_time', 'VARCHAR'),
-        ('trip_start_date', 'VARCHAR'),
-        ('schedule_relationship', 'INTEGER'),
-        ('occupancy_status', 'INTEGER')
+        ("vehicle_label", "VARCHAR"),
+        ("bearing", "FLOAT" if is_sqlite else "DOUBLE PRECISION"),
+        ("speed", "FLOAT" if is_sqlite else "DOUBLE PRECISION"),
+        ("stop_id", "VARCHAR"),
+        ("current_status", "INTEGER"),
+        ("direction_id", "INTEGER"),
+        ("trip_start_time", "VARCHAR"),
+        ("trip_start_date", "VARCHAR"),
+        ("schedule_relationship", "INTEGER"),
+        ("occupancy_status", "INTEGER"),
     ]
 
     with engine.connect() as conn:
@@ -65,9 +68,11 @@ def migrate_vehicle_positions(engine):
 
         added_count = 0
         for col_name, col_type in columns_to_add:
-            if not check_column_exists(engine, 'vehicle_positions', col_name):
+            if not check_column_exists(engine, "vehicle_positions", col_name):
                 print(f"→ Adding vehicle_positions.{col_name}...")
-                conn.execute(text(f"ALTER TABLE vehicle_positions ADD COLUMN {col_name} {col_type}"))
+                conn.execute(
+                    text(f"ALTER TABLE vehicle_positions ADD COLUMN {col_name} {col_type}")
+                )
                 conn.commit()
                 print(f"  ✓ Added {col_name}")
                 added_count += 1
@@ -102,6 +107,7 @@ def main():
     except Exception as e:
         print(f"\n✗ Migration failed: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
     finally:

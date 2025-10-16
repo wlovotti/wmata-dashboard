@@ -5,13 +5,14 @@ For WMATA, GTFS-RT trip_ids generally DO match GTFS static trip_ids and have sto
 This module prioritizes using the RT trip_id when available, with position/time-based
 matching as a fallback for edge cases where the RT trip_id is missing or invalid.
 """
+
 from datetime import datetime, timedelta
-from typing import Optional, List, Tuple
-from sqlalchemy import and_
+from typing import Optional
+
 from sqlalchemy.orm import Session
 
-from src.models import Trip, StopTime, Stop, VehiclePosition
 from src.analytics import haversine_distance
+from src.models import Stop, StopTime, Trip, VehiclePosition
 
 
 def parse_gtfs_time(time_str: str, reference_datetime: datetime) -> datetime:
@@ -28,10 +29,12 @@ def parse_gtfs_time(time_str: str, reference_datetime: datetime) -> datetime:
         datetime object
     """
     try:
-        hours, minutes, seconds = map(int, time_str.split(':'))
+        hours, minutes, seconds = map(int, time_str.split(":"))
 
         # Create datetime from reference date
-        result = reference_datetime.replace(hour=hours % 24, minute=minutes, second=seconds, microsecond=0)
+        result = reference_datetime.replace(
+            hour=hours % 24, minute=minutes, second=seconds, microsecond=0
+        )
 
         # If hours >= 24, add extra days
         if hours >= 24:
@@ -47,8 +50,8 @@ def find_matching_trip(
     vehicle_pos: VehiclePosition,
     max_time_diff_minutes: float = 15.0,
     max_distance_meters: float = 500.0,
-    prefer_rt_trip_id: bool = True
-) -> Optional[Tuple[Trip, float]]:
+    prefer_rt_trip_id: bool = True,
+) -> Optional[tuple[Trip, float]]:
     """
     Find the scheduled trip that best matches a vehicle's real-time position.
 
@@ -86,15 +89,18 @@ def find_matching_trip(
             vehicle_direction = rt_trip.direction_id
 
             # Check if this trip has stop_times
-            stop_times_count = db.query(StopTime).filter(
-                StopTime.trip_id == rt_trip.trip_id
-            ).count()
+            stop_times_count = (
+                db.query(StopTime).filter(StopTime.trip_id == rt_trip.trip_id).count()
+            )
 
             if stop_times_count > 0:
                 # Validate the RT trip_id by checking if vehicle is reasonably close to any scheduled stop
-                stop_times = db.query(StopTime).filter(
-                    StopTime.trip_id == rt_trip.trip_id
-                ).order_by(StopTime.stop_sequence).all()
+                stop_times = (
+                    db.query(StopTime)
+                    .filter(StopTime.trip_id == rt_trip.trip_id)
+                    .order_by(StopTime.stop_sequence)
+                    .all()
+                )
 
                 for st in stop_times:
                     stop = db.query(Stop).filter(Stop.stop_id == st.stop_id).first()
@@ -103,18 +109,24 @@ def find_matching_trip(
 
                     # Check distance
                     distance = haversine_distance(
-                        vehicle_pos.latitude, vehicle_pos.longitude,
-                        stop.stop_lat, stop.stop_lon
+                        vehicle_pos.latitude, vehicle_pos.longitude, stop.stop_lat, stop.stop_lon
                     )
 
                     # Check time
                     scheduled_time = parse_gtfs_time(st.arrival_time, vehicle_pos.timestamp)
-                    time_diff_minutes = (vehicle_pos.timestamp - scheduled_time).total_seconds() / 60
+                    time_diff_minutes = (
+                        vehicle_pos.timestamp - scheduled_time
+                    ).total_seconds() / 60
 
                     # If vehicle is within reasonable distance and time of ANY stop on this trip, trust the RT trip_id
-                    if distance <= max_distance_meters and -10.0 <= time_diff_minutes <= max_time_diff_minutes:
+                    if (
+                        distance <= max_distance_meters
+                        and -10.0 <= time_diff_minutes <= max_time_diff_minutes
+                    ):
                         # Calculate confidence based on best match found
-                        time_confidence = max(0, 1.0 - (abs(time_diff_minutes) / max_time_diff_minutes))
+                        time_confidence = max(
+                            0, 1.0 - (abs(time_diff_minutes) / max_time_diff_minutes)
+                        )
                         distance_confidence = 1.0 - (distance / max_distance_meters)
                         confidence = (time_confidence + distance_confidence) / 2
                         confidence = max(0.0, min(1.0, confidence))
@@ -139,21 +151,24 @@ def find_matching_trip(
     best_score = 0.0
 
     vehicle_time = vehicle_pos.timestamp
-    vehicle_time_of_day = vehicle_time.time()
+    vehicle_time.time()
 
     for trip in candidate_trips:
         # Get all stop_times for this trip
-        stop_times = db.query(StopTime).filter(
-            StopTime.trip_id == trip.trip_id
-        ).order_by(StopTime.stop_sequence).all()
+        stop_times = (
+            db.query(StopTime)
+            .filter(StopTime.trip_id == trip.trip_id)
+            .order_by(StopTime.stop_sequence)
+            .all()
+        )
 
         if not stop_times:
             continue
 
         # Find the stop_time closest to the vehicle's current time
         best_stop_match = None
-        best_time_diff = float('inf')
-        best_distance = float('inf')
+        best_time_diff = float("inf")
+        best_distance = float("inf")
 
         for st in stop_times:
             # Parse scheduled time
@@ -177,8 +192,7 @@ def find_matching_trip(
 
             # Calculate distance from vehicle to this stop
             distance = haversine_distance(
-                vehicle_pos.latitude, vehicle_pos.longitude,
-                stop.stop_lat, stop.stop_lon
+                vehicle_pos.latitude, vehicle_pos.longitude, stop.stop_lat, stop.stop_lon
             )
 
             # Skip if distance is too large
@@ -210,7 +224,9 @@ def find_matching_trip(
             combined_score = (time_score + distance_score) / 2
 
             # Track best match for this trip (lower score is better)
-            current_best = (best_time_diff / max_time_diff_minutes + best_distance / max_distance_meters) / 2
+            current_best = (
+                best_time_diff / max_time_diff_minutes + best_distance / max_distance_meters
+            ) / 2
             if best_stop_match is None or combined_score < current_best:
                 best_stop_match = st
                 best_time_diff = abs_time_diff
@@ -245,9 +261,7 @@ def find_matching_trip(
 
 
 def match_vehicles_to_trips(
-    db: Session,
-    vehicle_positions: List[VehiclePosition],
-    min_confidence: float = 0.3
+    db: Session, vehicle_positions: list[VehiclePosition], min_confidence: float = 0.3
 ) -> dict:
     """
     Match multiple vehicle positions to scheduled trips.
@@ -282,9 +296,13 @@ if __name__ == "__main__":
         print("=" * 70)
 
         # Get some recent C51 vehicle positions
-        recent_positions = db.query(VehiclePosition).filter(
-            VehiclePosition.route_id == 'C51'
-        ).order_by(VehiclePosition.timestamp.desc()).limit(10).all()
+        recent_positions = (
+            db.query(VehiclePosition)
+            .filter(VehiclePosition.route_id == "C51")
+            .order_by(VehiclePosition.timestamp.desc())
+            .limit(10)
+            .all()
+        )
 
         print(f"\nTesting with {len(recent_positions)} recent vehicle positions...")
 
@@ -301,7 +319,7 @@ if __name__ == "__main__":
                 print(f"   Confidence: {confidence:.2%}")
                 print(f"   Direction: {trip.direction_id}")
             else:
-                print(f"   ✗ No matching trip found")
+                print("   ✗ No matching trip found")
 
         print("\n" + "=" * 70)
 

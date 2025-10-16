@@ -6,10 +6,13 @@ Usage:
   python scripts/init_database.py              # Interactive mode (prompts for confirmation)
   python scripts/init_database.py --no-confirm # Non-interactive mode (for automation)
 """
+
 import os
-import sys
 import subprocess
+import sys
+
 from dotenv import load_dotenv
+
 from src.database import init_db
 
 load_dotenv()
@@ -38,7 +41,7 @@ def main():
     # Check for --no-confirm flag
     if "--no-confirm" not in sys.argv:
         response = input("\nContinue? (y/n): ")
-        if response.lower() != 'y':
+        if response.lower() != "y":
             print("Aborted.")
             return
     else:
@@ -55,10 +58,10 @@ def main():
 
     try:
         # Run the complete GTFS reload script
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, "scripts/reload_gtfs_complete.py"],
             check=True,
-            capture_output=False  # Show output in real-time
+            capture_output=False,  # Show output in real-time
         )
 
         print("-" * 70)

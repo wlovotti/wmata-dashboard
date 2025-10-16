@@ -1,12 +1,15 @@
 """
 Continuous data collector that runs every 60 seconds to collect vehicle positions
 """
+
 import os
 import time
 from datetime import datetime
+
 from dotenv import load_dotenv
-from src.wmata_collector import WMATADataCollector
+
 from src.database import get_session, init_db
+from src.wmata_collector import WMATADataCollector
 
 # Load environment variables
 load_dotenv()
@@ -30,7 +33,9 @@ def collect_vehicle_positions_only():
         # Save all vehicle positions to database
         if vehicles:
             collector._save_vehicle_positions(vehicles)
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Saved {len(vehicles)} vehicle positions")
+            print(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Saved {len(vehicles)} vehicle positions"
+            )
         else:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] No vehicles found")
 
