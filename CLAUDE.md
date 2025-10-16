@@ -135,8 +135,10 @@ sqlite3 wmata_dashboard.db
 - **Stop**: Static GTFS stops (7,505 stops)
 - **Trip**: Static GTFS trips (~130k trips representing scheduled service)
 - **StopTime**: Static GTFS stop_times (scheduled arrival/departure at each stop, ~5.5M records)
-- **VehiclePosition**: Real-time vehicle snapshots collected every 60s with lat/lon, timestamp, route_id, trip_id (PRIMARY DATA SOURCE)
+- **Shape**: GTFS shapes data defining vehicle paths (503k points for accurate distance/speed calculations)
+- **VehiclePosition**: Real-time vehicle snapshots from GTFS-RT with ALL 17 fields including lat/lon, speed, bearing, occupancy, trip details (PRIMARY DATA SOURCE)
 - **BusPosition**: WMATA BusPositions API data with deviation field (SUPPLEMENTARY - validation shows unreliable deviation data)
+- **Agency, Calendar, CalendarDate, FeedInfo, Timepoint, TimepointTime**: Additional GTFS static data tables
 
 Key relationships:
 - Routes → Trips → StopTimes → Stops (static schedule data)
@@ -191,18 +193,43 @@ When running `scripts/init_database.py`:
 
 ## Production Deployment Notes
 
+### Data Collection Strategy
+
+**Collection Volume (60-second intervals, system-wide):**
+- ~500 active vehicles per collection
+- ~720,000 records/day = 9.4 GB/day
+- ~281 GB/month
+- ~3.4 TB/year
+
+**Recommended Approach:**
+- Collect at 60-second intervals for maximum granularity
+- Implement automatic data aggregation/retention strategy:
+  - Keep raw 60-second data for 2-4 weeks (recent analysis)
+  - Aggregate to 5-10 minute averages for older data
+  - Results in ~60-120 GB steady-state storage
+- Strategy TBD based on analytics requirements (develop analytics first)
+
+**Cost Estimates (for production deployment):**
+- DIY PostgreSQL on VPS: $18-24/month (80-160 GB storage)
+- Managed PostgreSQL: $60-120/month (with auto-scaling)
+- Note: DigitalOcean offers $200 credit for new users (~9-10 months free)
+
+### Deployment Steps (when ready)
+
 For continuous collection in production:
 1. Deploy to cloud server (DigitalOcean, AWS EC2, etc.)
 2. Set up PostgreSQL and configure `DATABASE_URL` in `.env`
 3. Run `uv run python scripts/init_database.py` to load initial GTFS data
 4. Run `uv run python scripts/continuous_collector.py` as a systemd service or similar
-5. Consider setting up cron job to refresh GTFS static data weekly (WMATA updates schedules periodically)
+5. Set up cron job to refresh GTFS static data weekly (WMATA updates schedules periodically)
+6. Implement data retention/aggregation automation (scripts TBD)
 
 ## Current Status & Roadmap
 
 **Completed:**
 - ✅ GTFS static data loading and database storage
-- ✅ Real-time vehicle position collection (GTFS-RT VehiclePositions)
+- ✅ Complete GTFS schema with all fields and tables (agencies, calendar, feed_info, timepoints, etc.)
+- ✅ Real-time vehicle position collection (GTFS-RT VehiclePositions) - ALL 17 fields captured
 - ✅ WMATA BusPositions API integration (supplementary)
 - ✅ SQLite local development setup
 - ✅ PostgreSQL production-ready architecture
@@ -214,12 +241,39 @@ For continuous collection in production:
 - ✅ Repository restructuring (src/, scripts/, tests/, debug/)
 - ✅ Comprehensive documentation (OTP_METHODOLOGY.md, SESSION_SUMMARY.md)
 - ✅ Basic CI/CD with GitHub Actions
+- ✅ GTFS shapes support for accurate distance/speed calculations
+- ✅ Database migration scripts for schema updates
 
-**Next Steps:**
-1. Build visualizations and dashboard UI
-2. API/backend for serving metrics (FastAPI)
-3. Deploy to production environment
-4. Add more analytics metrics (bunching detection, service gaps, etc.)
+**In Progress:**
+- 🔄 Analytics function development and refinement
+- 🔄 Web dashboard UI/visualization layer
+
+**Next Steps (Priority Order):**
+1. **Analytics & Visualization** (Current Focus)
+   - Refine OTP calculation methods
+   - Develop headway analysis algorithms
+   - Determine aggregation strategies for long-term data retention
+   - Build initial web dashboard UI
+   - Create data visualization components
+
+2. **Production Data Collection** (After Analytics)
+   - Design data retention/aggregation strategy based on analytics needs
+   - Create automated aggregation scripts (compress old detailed data)
+   - Deploy continuous collector to cloud (DigitalOcean VPS)
+   - Set up PostgreSQL database (managed or DIY based on budget)
+   - Implement 60-second collection with automatic data lifecycle management
+
+3. **Production Infrastructure**
+   - API/backend for serving metrics (FastAPI)
+   - Monitoring and alerting
+   - Backup strategy
+   - Weekly GTFS static data refresh automation
+
+4. **Advanced Analytics**
+   - Bunching detection algorithms
+   - Service gap identification
+   - Route reliability scoring
+   - Comparative route analysis
 
 **Important Notes:**
 - **GTFS-based OTP is PRIMARY** - Don't use WMATA deviation as sole source (validation showed up to 7.7 min discrepancies)
