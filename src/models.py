@@ -315,3 +315,77 @@ class BusPosition(Base):
         Index('idx_bus_trip_timestamp', 'trip_id', 'timestamp'),
         Index('idx_bus_block_timestamp', 'block_number', 'timestamp'),
     )
+
+
+class RouteMetricsDaily(Base):
+    """
+    Pre-computed daily performance metrics for routes.
+
+    This table stores calculated metrics for each route for each day,
+    enabling fast API responses without recalculating from raw vehicle positions.
+    Populated by nightly batch job (pipelines/compute_daily_metrics.py).
+    """
+    __tablename__ = 'route_metrics_daily'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(String, nullable=False, index=True)
+    date = Column(String, nullable=False, index=True)  # YYYY-MM-DD format
+
+    # On-time performance metrics
+    otp_percentage = Column(Float)
+    early_percentage = Column(Float)
+    late_percentage = Column(Float)
+
+    # Headway metrics
+    avg_headway_minutes = Column(Float)
+    min_headway_minutes = Column(Float)
+    max_headway_minutes = Column(Float)
+
+    # Speed metrics
+    avg_speed_mph = Column(Float)
+    median_speed_mph = Column(Float)
+
+    # Data quality metrics
+    total_arrivals = Column(Integer)
+    unique_vehicles = Column(Integer)
+    unique_trips = Column(Integer)
+
+    # Metadata
+    computed_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries
+    __table_args__ = (
+        Index('idx_route_date', 'route_id', 'date', unique=True),
+    )
+
+
+class RouteMetricsSummary(Base):
+    """
+    Pre-computed rolling summary metrics for routes (typically 7 days).
+
+    This table stores aggregated metrics over a recent time period
+    for quick scorecard/summary displays. Updated by nightly batch job.
+    """
+    __tablename__ = 'route_metrics_summary'
+
+    route_id = Column(String, primary_key=True)
+
+    # Time period analyzed
+    days_analyzed = Column(Integer, default=7)
+    date_start = Column(String)  # YYYY-MM-DD
+    date_end = Column(String)    # YYYY-MM-DD
+
+    # Performance metrics
+    otp_percentage = Column(Float)
+    early_percentage = Column(Float)
+    late_percentage = Column(Float)
+    avg_headway_minutes = Column(Float)
+    avg_speed_mph = Column(Float)
+
+    # Data quality
+    total_observations = Column(Integer)
+    unique_vehicles = Column(Integer)
+    last_data_timestamp = Column(DateTime)
+
+    # Metadata
+    computed_at = Column(DateTime, default=datetime.utcnow)
