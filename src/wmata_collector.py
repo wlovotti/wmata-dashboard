@@ -354,13 +354,32 @@ class WMATADataCollector:
                 if entity.HasField('vehicle'):
                     vehicle = entity.vehicle
                     vehicles.append({
+                        # Vehicle identification
                         'vehicle_id': vehicle.vehicle.id if vehicle.vehicle.HasField('id') else None,
+                        'vehicle_label': vehicle.vehicle.label if vehicle.vehicle.HasField('label') else None,
+
+                        # Trip information
                         'route_id': vehicle.trip.route_id if vehicle.trip.HasField('route_id') else None,
                         'trip_id': vehicle.trip.trip_id if vehicle.trip.HasField('trip_id') else None,
+                        'direction_id': vehicle.trip.direction_id if vehicle.trip.HasField('direction_id') else None,
+                        'trip_start_time': vehicle.trip.start_time if vehicle.trip.HasField('start_time') else None,
+                        'trip_start_date': vehicle.trip.start_date if vehicle.trip.HasField('start_date') else None,
+                        'schedule_relationship': vehicle.trip.schedule_relationship if vehicle.trip.HasField('schedule_relationship') else None,
+
+                        # Position data
                         'latitude': vehicle.position.latitude if vehicle.position.HasField('latitude') else None,
                         'longitude': vehicle.position.longitude if vehicle.position.HasField('longitude') else None,
+                        'bearing': vehicle.position.bearing if vehicle.position.HasField('bearing') else None,
+                        'speed': vehicle.position.speed if vehicle.position.HasField('speed') else None,
+
+                        # Stop information
+                        'current_stop_sequence': vehicle.current_stop_sequence if vehicle.HasField('current_stop_sequence') else None,
+                        'stop_id': vehicle.stop_id if vehicle.HasField('stop_id') else None,
+                        'current_status': vehicle.current_status if vehicle.HasField('current_status') else None,
+
+                        # Additional data
                         'timestamp': vehicle.timestamp if vehicle.HasField('timestamp') else None,
-                        'current_stop_sequence': vehicle.current_stop_sequence if vehicle.HasField('current_stop_sequence') else None
+                        'occupancy_status': vehicle.occupancy_status if vehicle.HasField('occupancy_status') else None
                     })
 
             print(f"  ✓ Found {len(vehicles)} active vehicles")
@@ -395,16 +414,37 @@ class WMATADataCollector:
         return route_vehicles
 
     def _save_vehicle_positions(self, vehicles):
-        """Save vehicle positions to database"""
+        """Save vehicle positions to database with all GTFS-RT fields"""
         saved_count = 0
         for vehicle_data in vehicles:
             vehicle_pos = VehiclePosition(
+                # Vehicle identification
                 vehicle_id=vehicle_data['vehicle_id'],
+                vehicle_label=vehicle_data.get('vehicle_label'),
+
+                # Trip information
                 route_id=vehicle_data['route_id'],
                 trip_id=vehicle_data['trip_id'],
+                direction_id=vehicle_data.get('direction_id'),
+                trip_start_time=vehicle_data.get('trip_start_time'),
+                trip_start_date=vehicle_data.get('trip_start_date'),
+                schedule_relationship=vehicle_data.get('schedule_relationship'),
+
+                # Position data
                 latitude=vehicle_data['latitude'],
                 longitude=vehicle_data['longitude'],
+                bearing=vehicle_data.get('bearing'),
+                speed=vehicle_data.get('speed'),
+
+                # Stop information
                 current_stop_sequence=vehicle_data.get('current_stop_sequence'),
+                stop_id=vehicle_data.get('stop_id'),
+                current_status=vehicle_data.get('current_status'),
+
+                # Additional data
+                occupancy_status=vehicle_data.get('occupancy_status'),
+
+                # Timestamps
                 timestamp=datetime.fromtimestamp(vehicle_data['timestamp']) if vehicle_data['timestamp'] else datetime.utcnow()
             )
             self.db.add(vehicle_pos)

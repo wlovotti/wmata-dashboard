@@ -233,11 +233,31 @@ class VehiclePosition(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     vehicle_id = Column(String, nullable=False, index=True)
+    vehicle_label = Column(String)  # Vehicle display label
     route_id = Column(String, ForeignKey('routes.route_id'), index=True)
     trip_id = Column(String, ForeignKey('trips.trip_id'), index=True)
+
+    # Position data
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
+    bearing = Column(Float)  # Direction vehicle is facing (0-360 degrees)
+    speed = Column(Float)  # Speed in meters/second
+
+    # Stop information
     current_stop_sequence = Column(Integer)
+    stop_id = Column(String)  # Current or next stop
+    current_status = Column(Integer)  # 0=incoming, 1=stopped, 2=in_transit
+
+    # Trip details
+    direction_id = Column(Integer)  # 0 or 1 for trip direction
+    trip_start_time = Column(String)  # HH:MM:SS format
+    trip_start_date = Column(String)  # YYYYMMDD format
+    schedule_relationship = Column(Integer)  # 0=scheduled, 1=added, 2=unscheduled, 3=canceled
+
+    # Additional data
+    occupancy_status = Column(Integer)  # Passenger load (0-7 scale)
+
+    # Timestamps
     timestamp = Column(DateTime, nullable=False, index=True)
     collected_at = Column(DateTime, default=datetime.utcnow, index=True)
 
