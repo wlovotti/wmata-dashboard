@@ -71,9 +71,7 @@ def get_exception_service_dates(db: Session) -> set[tuple[str, str]]:
     # Load all exception (date, service_id) combinations from calendar_dates table
     # Filter to only current records (versioning support)
     exception_records = (
-        db.query(CalendarDate.date, CalendarDate.service_id)
-        .filter(CalendarDate.is_current)
-        .all()
+        db.query(CalendarDate.date, CalendarDate.service_id).filter(CalendarDate.is_current).all()
     )
 
     # Convert to set of (date, service_id) tuples for fast O(1) lookup
@@ -597,7 +595,9 @@ def get_route_stops(db: Session, route_id: str) -> list[Stop]:
             db.query(Stop)
             .join(StopTime)
             .join(Trip)
-            .filter(Trip.route_id == route_id, Trip.is_current, StopTime.is_current, Stop.is_current)
+            .filter(
+                Trip.route_id == route_id, Trip.is_current, StopTime.is_current, Stop.is_current
+            )
             .distinct()
             .all()
         )
@@ -1619,9 +1619,7 @@ def calculate_average_speed(
     trip_ids = {pos.trip_id for pos in positions if pos.trip_id}
     trip_service_map = {}
     if trip_ids:
-        trips_for_service = (
-            db.query(Trip).filter(Trip.trip_id.in_(trip_ids), Trip.is_current).all()
-        )
+        trips_for_service = db.query(Trip).filter(Trip.trip_id.in_(trip_ids), Trip.is_current).all()
         trip_service_map = {t.trip_id: t.service_id for t in trips_for_service}
 
     # Filter positions by checking (date, service_id) against exceptions

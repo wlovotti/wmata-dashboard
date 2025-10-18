@@ -54,7 +54,9 @@ class Calendar(Base):
     end_date = Column(String, nullable=False)  # YYYYMMDD format
 
     # GTFS Snapshot versioning
-    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    snapshot_id = Column(
+        Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
+    )
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
@@ -76,7 +78,9 @@ class CalendarDate(Base):
     exception_type = Column(Integer, nullable=False)  # 1=added, 2=removed
 
     # GTFS Snapshot versioning
-    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    snapshot_id = Column(
+        Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
+    )
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
@@ -189,10 +193,14 @@ class Route(Base):
     route_text_color = Column(String)
 
     # GTFS Snapshot versioning
-    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    snapshot_id = Column(
+        Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
+    )
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
-    is_current = Column(Boolean, nullable=False, default=True, index=True)  # Fast lookup for current
+    is_current = Column(
+        Boolean, nullable=False, default=True, index=True
+    )  # Fast lookup for current
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -221,7 +229,9 @@ class Stop(Base):
     stop_url = Column(String)
 
     # GTFS Snapshot versioning
-    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    snapshot_id = Column(
+        Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
+    )
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
@@ -250,7 +260,9 @@ class Trip(Base):
     shape_id = Column(String, index=True)  # Links to Shape table
 
     # GTFS Snapshot versioning
-    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    snapshot_id = Column(
+        Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
+    )
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
@@ -284,7 +296,9 @@ class StopTime(Base):
     timepoint = Column(Integer)
 
     # GTFS Snapshot versioning
-    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    snapshot_id = Column(
+        Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
+    )
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)

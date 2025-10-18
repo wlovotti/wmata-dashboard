@@ -115,7 +115,11 @@ def reload_complete_gtfs():
 
             # Create new GTFSSnapshot record
             now = datetime.utcnow()
-            feed_version = gtfs_data["feed_info"][0].get("feed_version") if gtfs_data.get("feed_info") else None
+            feed_version = (
+                gtfs_data["feed_info"][0].get("feed_version")
+                if gtfs_data.get("feed_info")
+                else None
+            )
 
             snapshot = GTFSSnapshot(
                 snapshot_date=now,
@@ -216,7 +220,9 @@ def reload_complete_gtfs():
                     route_id=trip_data["route_id"],
                     service_id=trip_data.get("service_id"),
                     trip_headsign=trip_data.get("trip_headsign"),
-                    direction_id=int(trip_data["direction_id"]) if trip_data.get("direction_id") else None,
+                    direction_id=int(trip_data["direction_id"])
+                    if trip_data.get("direction_id")
+                    else None,
                     block_id=trip_data.get("block_id"),
                     shape_id=trip_data.get("shape_id"),
                     # Versioning fields

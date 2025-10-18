@@ -154,11 +154,7 @@ def compute_daily_metrics(days: int = 7, route_filter: str = None):
 
         # Get routes to process (current version only)
         if route_filter:
-            routes = (
-                db.query(Route)
-                .filter(Route.route_id == route_filter, Route.is_current)
-                .all()
-            )
+            routes = db.query(Route).filter(Route.route_id == route_filter, Route.is_current).all()
             if not routes:
                 print(f"Error: Route {route_filter} not found")
                 return
