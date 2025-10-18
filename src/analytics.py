@@ -11,7 +11,75 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from src.database import get_session
-from src.models import BusPosition, Route, Shape, Stop, StopTime, Trip, VehiclePosition
+from src.models import (
+    BusPosition,
+    CalendarDate,
+    Route,
+    Shape,
+    Stop,
+    StopTime,
+    Trip,
+    VehiclePosition,
+)
+
+# Cache for exception service-dates (loaded once per session)
+_EXCEPTION_SERVICE_DATES_CACHE = None
+
+
+def get_exception_service_dates(db: Session) -> set[tuple[str, str]]:
+    """
+    Get all (date, service_id) combinations that have calendar exceptions.
+
+    This enables TRIP-LEVEL filtering rather than throwing out entire days.
+    On holidays, WMATA typically removes one service (e.g., "Saturday service")
+    and adds another (e.g., "Holiday service"). We want to exclude trips using
+    the exceptional service_ids while keeping trips using normal service_ids.
+
+    GTFS uses calendar_dates table to handle exceptions:
+    - exception_type = 1: Service added for this date (special schedule)
+    - exception_type = 2: Service removed for this date (holiday, no service)
+
+    We exclude BOTH types because:
+    - Type 1 (added): Special schedules with modified routes/frequencies
+    - Type 2 (removed): Normal service cancelled, special service runs instead
+
+    Examples:
+    - Christmas Day 2025: service_id=12 removed, service_id=7 added
+    - Oct 18, 2025 (Sat): service_id=11 removed, service_id=3 added
+
+    Args:
+        db: Database session
+
+    Returns:
+        Set of (date, service_id) tuples in (YYYYMMDD, service_id) format
+        Example: {('20251225', '12'), ('20251225', '7'), ...}
+
+    Example:
+        >>> exception_pairs = get_exception_service_dates(db)
+        >>> ('20251225', '7') in exception_pairs  # Christmas special service
+        True
+        >>> # Filter a vehicle position by its trip's service_id
+        >>> if (position_date, trip.service_id) not in exception_pairs:
+        ...     # Include in metrics calculation
+    """
+    global _EXCEPTION_SERVICE_DATES_CACHE
+
+    # Return cached value if available
+    if _EXCEPTION_SERVICE_DATES_CACHE is not None:
+        return _EXCEPTION_SERVICE_DATES_CACHE
+
+    # Load all exception (date, service_id) combinations from calendar_dates table
+    # Filter to only current records (versioning support)
+    exception_records = (
+        db.query(CalendarDate.date, CalendarDate.service_id).filter(CalendarDate.is_current).all()
+    )
+
+    # Convert to set of (date, service_id) tuples for fast O(1) lookup
+    _EXCEPTION_SERVICE_DATES_CACHE = {
+        (record.date, record.service_id) for record in exception_records
+    }
+
+    return _EXCEPTION_SERVICE_DATES_CACHE
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -146,9 +214,25 @@ def get_vehicle_positions(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
     direction_id: Optional[int] = None,
+    exclude_exception_dates: bool = True,
 ) -> list[VehiclePosition]:
     """
-    Get vehicle positions for a route within a time range, optionally filtered by direction
+    Get vehicle positions for a route within a time range, optionally filtered by direction.
+
+    Uses TRIP-LEVEL filtering for exception dates: only excludes positions whose trips
+    use exceptional service_ids (special holiday schedules), not entire days.
+
+    Args:
+        db: Database session
+        route_id: Route to query
+        start_time: Optional start of time range
+        end_time: Optional end of time range
+        direction_id: Optional direction filter (0 or 1)
+        exclude_exception_dates: If True, exclude positions from trips with exceptional
+                                service_ids (default: True)
+
+    Returns:
+        List of VehiclePosition objects, ordered by timestamp
     """
     query = db.query(VehiclePosition).filter(VehiclePosition.route_id == route_id)
 
@@ -164,7 +248,40 @@ def get_vehicle_positions(
             Trip.direction_id == direction_id
         )
 
-    return query.order_by(VehiclePosition.timestamp).all()
+    positions = query.order_by(VehiclePosition.timestamp).all()
+
+    # Filter out exception service-dates (trip-level filtering)
+    # Only exclude positions whose trips use exceptional service_ids on exception dates
+    if exclude_exception_dates:
+        exception_service_dates = get_exception_service_dates(db)
+
+        # Build trip_id -> service_id map for positions' trips
+        trip_ids = {pos.trip_id for pos in positions if pos.trip_id}
+        trip_service_map = {}
+        if trip_ids:
+            trips = db.query(Trip).filter(Trip.trip_id.in_(trip_ids), Trip.is_current).all()
+            trip_service_map = {t.trip_id: t.service_id for t in trips}
+
+        # Filter positions by checking (date, service_id) against exceptions
+        filtered_positions = []
+        for pos in positions:
+            # If position has no trip_id, we can't determine service_id, so keep it
+            if not pos.trip_id or pos.trip_id not in trip_service_map:
+                filtered_positions.append(pos)
+                continue
+
+            # Check if this trip's (date, service_id) is an exception
+            position_date = pos.timestamp.strftime("%Y%m%d")
+            service_id = trip_service_map[pos.trip_id]
+
+            if (position_date, service_id) not in exception_service_dates:
+                # Not an exception - keep it
+                filtered_positions.append(pos)
+            # else: This is an exceptional service - exclude it
+
+        positions = filtered_positions
+
+    return positions
 
 
 def find_reference_stop(
@@ -185,8 +302,8 @@ def find_reference_stop(
     Returns:
         stop_id of the reference stop, or None if not found
     """
-    # Get all trips for this route/direction
-    trip_query = db.query(Trip).filter(Trip.route_id == route_id)
+    # Get all trips for this route/direction (current version only)
+    trip_query = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current)
     if direction_id is not None:
         trip_query = trip_query.filter(Trip.direction_id == direction_id)
 
@@ -199,7 +316,9 @@ def find_reference_stop(
     stop_avg_sequence = {}
 
     for trip in trips:
-        stop_times = db.query(StopTime).filter(StopTime.trip_id == trip.trip_id).all()
+        stop_times = (
+            db.query(StopTime).filter(StopTime.trip_id == trip.trip_id, StopTime.is_current).all()
+        )
 
         for st in stop_times:
             if st.stop_id not in stop_counts:
@@ -279,8 +398,8 @@ def calculate_headways(
                 "direction_id": direction_id,
             }
 
-    # Get stop location
-    stop = db.query(Stop).filter(Stop.stop_id == stop_id).first()
+    # Get stop location (current version only)
+    stop = db.query(Stop).filter(Stop.stop_id == stop_id, Stop.is_current).first()
     if not stop:
         return {"error": f"Stop {stop_id} not found", "route_id": route_id, "stop_id": stop_id}
 
@@ -341,7 +460,7 @@ def calculate_headways(
         # Get direction for this vehicle from its trip
         vehicle_direction = None
         if pos.trip_id:
-            trip = db.query(Trip).filter(Trip.trip_id == pos.trip_id).first()
+            trip = db.query(Trip).filter(Trip.trip_id == pos.trip_id, Trip.is_current).first()
             if trip:
                 vehicle_direction = trip.direction_id
 
@@ -476,7 +595,9 @@ def get_route_stops(db: Session, route_id: str) -> list[Stop]:
             db.query(Stop)
             .join(StopTime)
             .join(Trip)
-            .filter(Trip.route_id == route_id)
+            .filter(
+                Trip.route_id == route_id, Trip.is_current, StopTime.is_current, Stop.is_current
+            )
             .distinct()
             .all()
         )
@@ -593,11 +714,15 @@ def calculate_on_time_performance(
 
         stop, distance = nearest
 
-        # Get scheduled time for the MATCHED trip at this stop
+        # Get scheduled time for the MATCHED trip at this stop (current version only)
         stop_time = (
             db.query(StopTime)
             .filter(
-                and_(StopTime.trip_id == matched_trip.trip_id, StopTime.stop_id == stop.stop_id)
+                and_(
+                    StopTime.trip_id == matched_trip.trip_id,
+                    StopTime.stop_id == stop.stop_id,
+                    StopTime.is_current,
+                )
             )
             .first()
         )
@@ -691,13 +816,13 @@ def get_route_summary(db: Session, route_id: str) -> dict:
     """
     Get a summary of data available for a route
     """
-    route = db.query(Route).filter(Route.route_id == route_id).first()
+    route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
 
     if not route:
         return {"error": f"Route {route_id} not found"}
 
-    # Count trips
-    trip_count = db.query(Trip).filter(Trip.route_id == route_id).count()
+    # Count trips (current version only)
+    trip_count = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).count()
 
     # Count vehicle positions
     position_count = db.query(VehiclePosition).filter(VehiclePosition.route_id == route_id).count()
@@ -766,8 +891,8 @@ def calculate_stop_level_otp(
     """
     from src.trip_matching import find_matching_trip
 
-    # Get stop info
-    stop = db.query(Stop).filter(Stop.stop_id == stop_id).first()
+    # Get stop info (current version only)
+    stop = db.query(Stop).filter(Stop.stop_id == stop_id, Stop.is_current).first()
     if not stop:
         return {"error": f"Stop {stop_id} not found"}
 
@@ -800,10 +925,16 @@ def calculate_stop_level_otp(
 
         matched_trip, confidence = match_result
 
-        # Get scheduled time for this trip at this stop
+        # Get scheduled time for this trip at this stop (current version only)
         stop_time = (
             db.query(StopTime)
-            .filter(and_(StopTime.trip_id == matched_trip.trip_id, StopTime.stop_id == stop_id))
+            .filter(
+                and_(
+                    StopTime.trip_id == matched_trip.trip_id,
+                    StopTime.stop_id == stop_id,
+                    StopTime.is_current,
+                )
+            )
             .first()
         )
 
@@ -953,11 +1084,15 @@ def calculate_time_period_otp(
 
         stop, distance = nearest
 
-        # Get scheduled time
+        # Get scheduled time (current version only)
         stop_time = (
             db.query(StopTime)
             .filter(
-                and_(StopTime.trip_id == matched_trip.trip_id, StopTime.stop_id == stop.stop_id)
+                and_(
+                    StopTime.trip_id == matched_trip.trip_id,
+                    StopTime.stop_id == stop.stop_id,
+                    StopTime.is_current,
+                )
             )
             .first()
         )
@@ -1095,11 +1230,58 @@ def calculate_line_level_otp(
     positions = unique_positions
     duplicates_removed = original_count - len(positions)
 
+    # FILTER EXCEPTION SERVICE-DATES: Remove positions from trips with exceptional service_ids
+    # Uses TRIP-LEVEL filtering: only excludes positions whose trips use special holiday
+    # service_ids, not entire days. This preserves data from routes running normal service
+    # on holidays while excluding special holiday schedules.
+    exception_service_dates = get_exception_service_dates(db)
+    positions_before_filter = len(positions)
+
+    # Build trip_id -> service_id map for efficient lookup (current version only)
+    trip_ids = {pos.trip_id for pos in positions if pos.trip_id}
+    trip_service_map = {}
+    if trip_ids:
+        trips_query = db.query(Trip).filter(Trip.trip_id.in_(trip_ids), Trip.is_current)
+        trips_for_map = trips_query.all()
+        trip_service_map = {t.trip_id: t.service_id for t in trips_for_map}
+
+    # Filter positions by checking (date, service_id) against exceptions
+    filtered_positions = []
+    for pos in positions:
+        # If position has no trip_id, we can't determine service_id, so keep it
+        if not pos.trip_id or pos.trip_id not in trip_service_map:
+            filtered_positions.append(pos)
+            continue
+
+        # Check if this trip's (date, service_id) is an exception
+        position_date = pos.timestamp.strftime("%Y%m%d")
+        service_id = trip_service_map[pos.trip_id]
+
+        if (position_date, service_id) not in exception_service_dates:
+            # Not an exception - keep it
+            filtered_positions.append(pos)
+        # else: This is an exceptional service - exclude it
+
+    positions = filtered_positions
+    exception_trips_removed = positions_before_filter - len(positions)
+
+    if not positions:
+        return {
+            "route_id": route_id,
+            "level": "line",
+            "total_observations": 0,
+            "matched_observations": 0,
+            "on_time_pct": None,
+            "note": "All positions were from trips with exceptional service_ids (holiday schedules)",
+        }
+
     # Sample positions
     sampled = positions[::sample_rate]
-    if duplicates_removed > 0:
+    if duplicates_removed > 0 or exception_trips_removed > 0:
         print(
-            f"Processing {len(sampled)} of {len(positions)} positions (sample_rate={sample_rate}, removed {duplicates_removed} duplicates)..."
+            f"Processing {len(sampled)} of {len(positions)} positions "
+            f"(sample_rate={sample_rate}, removed {duplicates_removed} duplicates, "
+            f"{exception_trips_removed} from exceptional service trips)..."
         )
     else:
         print(
@@ -1113,14 +1295,16 @@ def calculate_line_level_otp(
     stop_lons = np.array([s.stop_lon for s in stops])
     {s.stop_id: s for s in stops}
 
-    # BATCH LOAD 2: Get all trips for this route
-    trips = db.query(Trip).filter(Trip.route_id == route_id).all()
+    # BATCH LOAD 2: Get all trips for this route (current version only)
+    trips = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
     trip_map = {t.trip_id: t for t in trips}
 
-    # BATCH LOAD 3: Get ALL stop_times for this route's trips (this is the big one)
+    # BATCH LOAD 3: Get ALL stop_times for this route's trips (current version only)
     print(f"  Loading stop_times for {len(trips)} trips...")
     trip_ids = [t.trip_id for t in trips]
-    stop_times = db.query(StopTime).filter(StopTime.trip_id.in_(trip_ids)).all()
+    stop_times = (
+        db.query(StopTime).filter(StopTime.trip_id.in_(trip_ids), StopTime.is_current).all()
+    )
 
     # Index stop_times by (trip_id, stop_id) for O(1) lookup
     stop_time_map = {}
@@ -1427,6 +1611,47 @@ def calculate_average_speed(
             "total_time_hours": 0,
         }
 
+    # Filter out exception service-dates (trip-level filtering)
+    # Only exclude positions whose trips use exceptional service_ids on exception dates
+    exception_service_dates = get_exception_service_dates(db)
+
+    # Build trip_id -> service_id map for positions' trips (current version only)
+    trip_ids = {pos.trip_id for pos in positions if pos.trip_id}
+    trip_service_map = {}
+    if trip_ids:
+        trips_for_service = db.query(Trip).filter(Trip.trip_id.in_(trip_ids), Trip.is_current).all()
+        trip_service_map = {t.trip_id: t.service_id for t in trips_for_service}
+
+    # Filter positions by checking (date, service_id) against exceptions
+    filtered_positions = []
+    for pos in positions:
+        # If position has no trip_id, we can't determine service_id, so keep it
+        if not pos.trip_id or pos.trip_id not in trip_service_map:
+            filtered_positions.append(pos)
+            continue
+
+        # Check if this trip's (date, service_id) is an exception
+        position_date = pos.timestamp.strftime("%Y%m%d")
+        service_id = trip_service_map[pos.trip_id]
+
+        if (position_date, service_id) not in exception_service_dates:
+            # Not an exception - keep it
+            filtered_positions.append(pos)
+        # else: This is an exceptional service - exclude it
+
+    positions = filtered_positions
+
+    if not positions:
+        return {
+            "route_id": route_id,
+            "avg_speed_mph": None,
+            "avg_speed_kmh": None,
+            "trips_analyzed": 0,
+            "total_distance_miles": 0,
+            "total_time_hours": 0,
+            "note": "All positions were from trips with exceptional service_ids (holiday schedules)",
+        }
+
     # Group positions by vehicle and trip
     from collections import defaultdict
 
@@ -1441,8 +1666,8 @@ def calculate_average_speed(
         trips[key].append(pos)
 
     # Load shape data for this route to calculate actual street-level distances
-    # Get all trips for this route
-    route_trips = db.query(Trip).filter(Trip.route_id == route_id).all()
+    # Get all trips for this route (current version only)
+    route_trips = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
 
     # Get unique shape_ids
     shape_ids = list({t.shape_id for t in route_trips if t.shape_id})

@@ -1,22 +1,20 @@
 """
-Complete GTFS Data Reload Script
+Complete GTFS Data Reload Script with Versioning
 
-This script completely reloads GTFS data with ALL fields from ALL files.
+This script reloads GTFS data with versioning support, preserving historical data.
 
-WARNING: This will DROP and recreate tables that have new fields:
-- routes (adds agency_id, route_desc, route_url, route_color, route_text_color)
-- stops (adds stop_code, stop_desc, zone_id, stop_url)
-- stop_times (adds stop_headsign, pickup_type, drop_off_type, shape_dist_traveled, timepoint)
+VERSIONING BEHAVIOR:
+- Creates a new GTFSSnapshot record for each reload
+- Marks old records as inactive (sets valid_to, is_current=false)
+- Inserts new records with current snapshot_id
+- Never deletes data - all historical records preserved
 
-And will populate new tables:
-- agencies
-- calendar
-- calendar_dates
-- feed_info
-- timepoints
-- timepoint_times
+This means:
+- Routes that are discontinued remain in the database
+- All vehicle position data stays valid
+- You can query historical GTFS data by snapshot_id
 
-Prerequisite: Run scripts/migrate_complete_gtfs_schema.py first!
+Prerequisite: Run scripts/migrate_add_gtfs_versioning.py first!
 """
 
 import csv
@@ -24,6 +22,7 @@ import io
 import os
 import sys
 import zipfile
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -35,6 +34,7 @@ from src.models import (
     Calendar,
     CalendarDate,
     FeedInfo,
+    GTFSSnapshot,
     Route,
     Shape,
     Stop,
@@ -110,17 +110,63 @@ def reload_complete_gtfs():
         db = get_session()
 
         try:
-            print("\nDropping and recreating tables with new data...")
+            print("\nCreating new GTFS snapshot...")
             print("-" * 70)
 
-            # ==== DROP AND RECREATE TABLES WITH NEW FIELDS ====
+            # Create new GTFSSnapshot record
+            now = datetime.utcnow()
+            feed_version = (
+                gtfs_data["feed_info"][0].get("feed_version")
+                if gtfs_data.get("feed_info")
+                else None
+            )
 
-            # Routes - drop and recreate
-            print("→ Dropping routes table...")
-            db.execute(text("DELETE FROM routes"))
+            snapshot = GTFSSnapshot(
+                snapshot_date=now,
+                feed_version=feed_version,
+                routes_count=len(gtfs_data["routes"]),
+                stops_count=len(gtfs_data["stops"]),
+                trips_count=len(gtfs_data.get("trips", [])),
+                stop_times_count=len(gtfs_data["stop_times"]),
+                shapes_count=len(gtfs_data.get("shapes", [])),
+                calendar_entries=len(gtfs_data["calendar"]),
+                calendar_exceptions=len(gtfs_data["calendar_dates"]),
+                notes=f"Auto-reload at {now.isoformat()}",
+            )
+            db.add(snapshot)
             db.commit()
+            snapshot_id = snapshot.snapshot_id
 
-            print("  Reloading routes...")
+            print(f"✓ Created snapshot {snapshot_id} (version: {feed_version or 'unknown'})")
+
+            # Mark all current records as inactive
+            print("\n→ Marking old records as inactive...")
+            db.query(Route).filter(Route.is_current).update(
+                {"valid_to": now, "is_current": False}, synchronize_session=False
+            )
+            db.query(Stop).filter(Stop.is_current).update(
+                {"valid_to": now, "is_current": False}, synchronize_session=False
+            )
+            db.query(Trip).filter(Trip.is_current).update(
+                {"valid_to": now, "is_current": False}, synchronize_session=False
+            )
+            db.query(StopTime).filter(StopTime.is_current).update(
+                {"valid_to": now, "is_current": False}, synchronize_session=False
+            )
+            db.query(Calendar).filter(Calendar.is_current).update(
+                {"valid_to": now, "is_current": False}, synchronize_session=False
+            )
+            db.query(CalendarDate).filter(CalendarDate.is_current).update(
+                {"valid_to": now, "is_current": False}, synchronize_session=False
+            )
+            db.commit()
+            print("  ✓ Old records marked inactive")
+
+            print("\nLoading new GTFS data with versioning...")
+            print("-" * 70)
+
+            # Routes
+            print("→ Loading routes...")
             for route_data in gtfs_data["routes"]:
                 route = Route(
                     route_id=route_data["route_id"],
@@ -132,18 +178,19 @@ def reload_complete_gtfs():
                     route_url=route_data.get("route_url"),
                     route_color=route_data.get("route_color"),
                     route_text_color=route_data.get("route_text_color"),
+                    # Versioning fields
+                    snapshot_id=snapshot_id,
+                    valid_from=now,
+                    valid_to=None,
+                    is_current=True,
                 )
                 db.add(route)
 
             db.commit()
             print(f"  ✓ Loaded {len(gtfs_data['routes'])} routes")
 
-            # Stops - drop and recreate
-            print("→ Dropping stops table...")
-            db.execute(text("DELETE FROM stops"))
-            db.commit()
-
-            print("  Reloading stops...")
+            # Stops
+            print("→ Loading stops...")
             for stop_data in gtfs_data["stops"]:
                 stop = Stop(
                     stop_id=stop_data["stop_id"],
@@ -154,18 +201,43 @@ def reload_complete_gtfs():
                     stop_lon=float(stop_data["stop_lon"]),
                     zone_id=stop_data.get("zone_id"),
                     stop_url=stop_data.get("stop_url"),
+                    # Versioning fields
+                    snapshot_id=snapshot_id,
+                    valid_from=now,
+                    valid_to=None,
+                    is_current=True,
                 )
                 db.add(stop)
 
             db.commit()
             print(f"  ✓ Loaded {len(gtfs_data['stops'])} stops")
 
-            # Stop Times - drop and recreate
-            print("→ Dropping stop_times table...")
-            db.execute(text("DELETE FROM stop_times"))
-            db.commit()
+            # Trips
+            print("→ Loading trips...")
+            for trip_data in gtfs_data["trips"]:
+                trip = Trip(
+                    trip_id=trip_data["trip_id"],
+                    route_id=trip_data["route_id"],
+                    service_id=trip_data.get("service_id"),
+                    trip_headsign=trip_data.get("trip_headsign"),
+                    direction_id=int(trip_data["direction_id"])
+                    if trip_data.get("direction_id")
+                    else None,
+                    block_id=trip_data.get("block_id"),
+                    shape_id=trip_data.get("shape_id"),
+                    # Versioning fields
+                    snapshot_id=snapshot_id,
+                    valid_from=now,
+                    valid_to=None,
+                    is_current=True,
+                )
+                db.add(trip)
 
-            print("  Reloading stop_times (this will take 3-5 minutes)...")
+            db.commit()
+            print(f"  ✓ Loaded {len(gtfs_data['trips'])} trips")
+
+            # Stop Times
+            print("→ Loading stop_times (this will take 3-5 minutes)...")
             batch = []
             total = len(gtfs_data["stop_times"])
 
@@ -185,6 +257,11 @@ def reload_complete_gtfs():
                     if st_data.get("shape_dist_traveled")
                     else None,
                     timepoint=int(st_data["timepoint"]) if st_data.get("timepoint") else None,
+                    # Versioning fields
+                    snapshot_id=snapshot_id,
+                    valid_from=now,
+                    valid_to=None,
+                    is_current=True,
                 )
                 batch.append(stop_time)
 
@@ -227,9 +304,6 @@ def reload_complete_gtfs():
 
             # Calendar
             print("→ Loading calendar...")
-            db.execute(text("DELETE FROM calendar"))
-            db.commit()
-
             for cal_data in gtfs_data["calendar"]:
                 calendar = Calendar(
                     service_id=cal_data["service_id"],
@@ -242,6 +316,11 @@ def reload_complete_gtfs():
                     sunday=int(cal_data["sunday"]),
                     start_date=cal_data["start_date"],
                     end_date=cal_data["end_date"],
+                    # Versioning fields
+                    snapshot_id=snapshot_id,
+                    valid_from=now,
+                    valid_to=None,
+                    is_current=True,
                 )
                 db.add(calendar)
 
@@ -250,14 +329,16 @@ def reload_complete_gtfs():
 
             # Calendar Dates
             print("→ Loading calendar_dates...")
-            db.execute(text("DELETE FROM calendar_dates"))
-            db.commit()
-
             for cal_date_data in gtfs_data["calendar_dates"]:
                 calendar_date = CalendarDate(
                     service_id=cal_date_data["service_id"],
                     date=cal_date_data["date"],
                     exception_type=int(cal_date_data["exception_type"]),
+                    # Versioning fields
+                    snapshot_id=snapshot_id,
+                    valid_from=now,
+                    valid_to=None,
+                    is_current=True,
                 )
                 db.add(calendar_date)
 
