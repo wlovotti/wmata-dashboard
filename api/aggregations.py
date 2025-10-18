@@ -58,8 +58,8 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
     Returns:
         List of route summaries with performance metrics
     """
-    # Get all routes
-    routes = db.query(Route).all()
+    # Get all routes (current version only)
+    routes = db.query(Route).filter(Route.is_current).all()
     route_map = {r.route_id: r for r in routes}
 
     # Get pre-computed summaries
@@ -128,8 +128,8 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
     Returns:
         Dictionary with detailed route metrics
     """
-    # Get route info
-    route = db.query(Route).filter(Route.route_id == route_id).first()
+    # Get route info (current version only)
+    route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
     if not route:
         return {"error": f"Route {route_id} not found"}
 

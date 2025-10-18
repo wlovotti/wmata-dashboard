@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
@@ -28,12 +37,12 @@ class Agency(Base):
 
 
 class Calendar(Base):
-    """GTFS calendar data (service schedules by day of week)"""
+    """GTFS calendar data (service schedules by day of week) with versioning support"""
 
     __tablename__ = "calendar"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    service_id = Column(String, unique=True, nullable=False, index=True)
+    service_id = Column(String, nullable=False, index=True)
     monday = Column(Integer, nullable=False)  # 0 or 1
     tuesday = Column(Integer, nullable=False)
     wednesday = Column(Integer, nullable=False)
@@ -43,11 +52,21 @@ class Calendar(Base):
     sunday = Column(Integer, nullable=False)
     start_date = Column(String, nullable=False)  # YYYYMMDD format
     end_date = Column(String, nullable=False)  # YYYYMMDD format
+
+    # GTFS Snapshot versioning
+    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries on current calendars
+    __table_args__ = (Index("idx_calendar_current", "service_id", "is_current"),)
 
 
 class CalendarDate(Base):
-    """GTFS calendar_dates data (service exceptions)"""
+    """GTFS calendar_dates data (service exceptions) with versioning support"""
 
     __tablename__ = "calendar_dates"
 
@@ -55,10 +74,20 @@ class CalendarDate(Base):
     service_id = Column(String, nullable=False, index=True)
     date = Column(String, nullable=False, index=True)  # YYYYMMDD format
     exception_type = Column(Integer, nullable=False)  # 1=added, 2=removed
+
+    # GTFS Snapshot versioning
+    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Composite index for efficient queries
-    __table_args__ = (Index("idx_service_date", "service_id", "date"),)
+    # Composite indexes for efficient queries
+    __table_args__ = (
+        Index("idx_service_date", "service_id", "date"),
+        Index("idx_calendardate_current", "date", "is_current"),
+    )
 
 
 class FeedInfo(Base):
@@ -76,6 +105,32 @@ class FeedInfo(Base):
     feed_contact_email = Column(String)
     feed_contact_url = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GTFSSnapshot(Base):
+    """
+    Metadata for GTFS static data snapshots.
+
+    Tracks each time GTFS data is reloaded, allowing version control over
+    routes, stops, and other GTFS data. When a new snapshot is loaded,
+    previous records are marked as inactive instead of deleted, preserving
+    historical data and all associated vehicle position data.
+    """
+
+    __tablename__ = "gtfs_snapshots"
+
+    snapshot_id = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_date = Column(DateTime, nullable=False, index=True)  # When this snapshot was created
+    feed_version = Column(String)  # From GTFS feed_info.feed_version
+    routes_count = Column(Integer)  # Number of routes in this snapshot
+    stops_count = Column(Integer)  # Number of stops in this snapshot
+    trips_count = Column(Integer)  # Number of trips in this snapshot
+    stop_times_count = Column(Integer)  # Number of stop_times in this snapshot
+    shapes_count = Column(Integer)  # Number of shapes in this snapshot
+    calendar_entries = Column(Integer)  # Number of calendar entries
+    calendar_exceptions = Column(Integer)  # Number of calendar_dates entries
+    notes = Column(String)  # Optional notes about this snapshot
+    created_at = Column(DateTime, default=datetime.utcnow)  # When we created this record
 
 
 class Timepoint(Base):
@@ -118,12 +173,12 @@ class TimepointTime(Base):
 
 
 class Route(Base):
-    """GTFS static route data"""
+    """GTFS static route data with versioning support"""
 
     __tablename__ = "routes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    route_id = Column(String, unique=True, nullable=False, index=True)
+    route_id = Column(String, nullable=False, index=True)
     agency_id = Column(String, ForeignKey("agencies.agency_id"))
     route_short_name = Column(String, nullable=False)
     route_long_name = Column(String)
@@ -132,7 +187,17 @@ class Route(Base):
     route_url = Column(String)
     route_color = Column(String)
     route_text_color = Column(String)
+
+    # GTFS Snapshot versioning
+    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
+    is_current = Column(Boolean, nullable=False, default=True, index=True)  # Fast lookup for current
+
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries on current routes
+    __table_args__ = (Index("idx_route_current", "route_id", "is_current"),)
 
     # Relationships
     agency = relationship("Agency", back_populates="routes")
@@ -141,12 +206,12 @@ class Route(Base):
 
 
 class Stop(Base):
-    """GTFS static stop data"""
+    """GTFS static stop data with versioning support"""
 
     __tablename__ = "stops"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    stop_id = Column(String, unique=True, nullable=False, index=True)
+    stop_id = Column(String, nullable=False, index=True)
     stop_code = Column(String)
     stop_name = Column(String, nullable=False)
     stop_desc = Column(String)
@@ -154,26 +219,46 @@ class Stop(Base):
     stop_lon = Column(Float, nullable=False)
     zone_id = Column(String)
     stop_url = Column(String)
+
+    # GTFS Snapshot versioning
+    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries on current stops
+    __table_args__ = (Index("idx_stop_current", "stop_id", "is_current"),)
 
     # Relationships
     stop_times = relationship("StopTime", back_populates="stop")
 
 
 class Trip(Base):
-    """GTFS static trip data"""
+    """GTFS static trip data with versioning support"""
 
     __tablename__ = "trips"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    trip_id = Column(String, unique=True, nullable=False, index=True)
+    trip_id = Column(String, nullable=False, index=True)
     route_id = Column(String, ForeignKey("routes.route_id"), nullable=False, index=True)
-    service_id = Column(String)
+    service_id = Column(String, index=True)
     trip_headsign = Column(String)
     direction_id = Column(Integer)
     block_id = Column(String, index=True)  # Links trips that use the same vehicle
     shape_id = Column(String, index=True)  # Links to Shape table
+
+    # GTFS Snapshot versioning
+    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Composite index for efficient queries on current trips
+    __table_args__ = (Index("idx_trip_current", "trip_id", "is_current"),)
 
     # Relationships
     route = relationship("Route", back_populates="trips")
@@ -182,7 +267,7 @@ class Trip(Base):
 
 
 class StopTime(Base):
-    """GTFS static stop_times data (scheduled stops)"""
+    """GTFS static stop_times data (scheduled stops) with versioning support"""
 
     __tablename__ = "stop_times"
 
@@ -197,14 +282,24 @@ class StopTime(Base):
     drop_off_type = Column(Integer)
     shape_dist_traveled = Column(Float)
     timepoint = Column(Integer)
+
+    # GTFS Snapshot versioning
+    snapshot_id = Column(Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True)
+    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     trip = relationship("Trip", back_populates="stop_times")
     stop = relationship("Stop", back_populates="stop_times")
 
-    # Composite index for efficient queries
-    __table_args__ = (Index("idx_trip_stop_sequence", "trip_id", "stop_sequence"),)
+    # Composite indexes for efficient queries
+    __table_args__ = (
+        Index("idx_trip_stop_sequence", "trip_id", "stop_sequence"),
+        Index("idx_stoptime_current", "trip_id", "is_current"),
+    )
 
 
 class Shape(Base):

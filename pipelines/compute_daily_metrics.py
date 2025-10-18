@@ -18,7 +18,12 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func
 
-from src.analytics import calculate_average_speed, calculate_headways, calculate_line_level_otp
+from src.analytics import (
+    calculate_average_speed,
+    calculate_headways,
+    calculate_line_level_otp,
+    get_exception_service_dates,
+)
 from src.database import get_session
 from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, VehiclePosition
 
@@ -147,17 +152,42 @@ def compute_daily_metrics(days: int = 7, route_filter: str = None):
         print("Daily Metrics Computation Pipeline")
         print("=" * 70)
 
-        # Get routes to process
+        # Get routes to process (current version only)
         if route_filter:
-            routes = db.query(Route).filter(Route.route_id == route_filter).all()
+            routes = (
+                db.query(Route)
+                .filter(Route.route_id == route_filter, Route.is_current)
+                .all()
+            )
             if not routes:
                 print(f"Error: Route {route_filter} not found")
                 return
         else:
-            routes = db.query(Route).order_by(Route.route_short_name).all()
+            routes = db.query(Route).filter(Route.is_current).order_by(Route.route_short_name).all()
 
         print(f"\nProcessing {len(routes)} routes for last {days} days")
         print()
+
+        # Load exception service-dates (trip-level filtering)
+        # Analytics functions will automatically filter out trips with exceptional service_ids
+        exception_service_dates = get_exception_service_dates(db)
+        if exception_service_dates:
+            # Group by date to show which dates have exceptions
+            dates_with_exceptions = {date for date, service_id in exception_service_dates}
+            exception_dates_formatted = [
+                f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in sorted(dates_with_exceptions)
+            ]
+            print(
+                f"\nUsing trip-level filtering for {len(exception_service_dates)} exception service-dates:"
+            )
+            print(
+                f"  ({len(dates_with_exceptions)} dates with exceptions, "
+                f"excluding trips with special service_ids)"
+            )
+            print(f"  Example dates: {', '.join(exception_dates_formatted[:10])}")
+            if len(exception_dates_formatted) > 10:
+                print(f"  ... and {len(exception_dates_formatted) - 10} more")
+            print()
 
         # Generate date range (last N days)
         end_date = datetime.now().date()
@@ -171,6 +201,10 @@ def compute_daily_metrics(days: int = 7, route_filter: str = None):
             print(f"\nRoute: {route.route_short_name} ({route.route_id})")
 
             for date in dates:
+                # Note: We NO LONGER skip entire exception dates at the pipeline level
+                # Instead, analytics functions filter at the TRIP level (by service_id)
+                # This preserves data from routes running normal service on holidays
+
                 # Check if we already have metrics for this day
                 existing = (
                     db.query(RouteMetricsDaily)
@@ -200,7 +234,11 @@ def compute_daily_metrics(days: int = 7, route_filter: str = None):
         print("\n" + "=" * 70)
         print("Daily metrics computation complete!")
         print(f"  Computed: {total_computed} route-days")
-        print(f"  Skipped: {total_skipped} route-days (insufficient data)")
+        print(f"  Skipped (insufficient data): {total_skipped} route-days")
+        print(
+            f"  Note: Trip-level filtering excluded positions from {len(exception_service_dates)} "
+            f"exceptional service-dates"
+        )
         print("=" * 70)
 
         # Now compute summary metrics (rolling 7-day average)
