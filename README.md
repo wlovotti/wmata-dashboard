@@ -6,11 +6,16 @@ A real-time transit performance dashboard for Washington DC Metro bus and rail l
 
 - **Web Dashboard**: React-based frontend with route scorecards, detail pages, performance charts, and interactive maps
 - **Real-time Data Collection**: Polls WMATA's GTFS-RT feed every 60 seconds to track vehicle positions
-- **Performance Metrics**: Calculates on-time performance, headways, and average speeds for all routes
+- **Performance Metrics**:
+  - On-time performance (OTP) with early/on-time/late breakdown
+  - Headway analysis with bunching detection (standard deviation, coefficient of variation)
+  - Average speed calculations
+  - Service regularity metrics
 - **Multi-level Analysis**:
   - Stop-level OTP (performance at specific stops)
   - Time-period OTP (AM Peak, Midday, PM Peak, Evening, Night)
   - Line-level OTP (overall route performance)
+  - 30-day trend analysis for all metrics
 - **Fast API**: Pre-computed aggregation tables for sub-100ms API responses
 - **REST API**: FastAPI backend serving route scorecards and detailed metrics
 - **Interactive Maps**: Leaflet-based route visualization with WMATA branding
@@ -94,12 +99,13 @@ The dashboard will be available at `http://localhost:5173`
 
 ### API Endpoints
 
-- `GET /api/routes` - Get scorecard for all routes
+- `GET /api/routes` - Get scorecard for all routes (includes OTP, headway, speed, headway regularity)
 - `GET /api/routes/{route_id}` - Get detailed metrics for a specific route
-- `GET /api/routes/{route_id}/trend?days=30&metric=otp` - Get time-series trend data (otp, headway, speed)
+- `GET /api/routes/{route_id}/trend?days=30&metric=<metric>` - Get time-series trend data
+  - Supported metrics: `otp`, `early`, `late`, `headway`, `headway_std_dev`, `speed`
 - `GET /api/routes/{route_id}/time-periods` - Get performance by time of day
 - `GET /api/routes/{route_id}/shapes` - Get GTFS shapes for map visualization
-- `GET /api/routes/{route_id}/segments` - Get speed segments (currently disabled for performance)
+- `GET /api/routes/{route_id}/segments` - Get speed segments for map visualization
 
 Example:
 ```bash
@@ -131,8 +137,8 @@ curl 'http://localhost:8000/api/routes/C51/trend?days=30&metric=otp'
 - BusPosition - WMATA BusPositions API (supplementary)
 
 **Aggregations:**
-- RouteMetricsDaily - Daily performance metrics per route
-- RouteMetricsSummary - Rolling 7-day summaries for API
+- RouteMetricsDaily - Daily performance metrics per route (OTP, headway, speed, bunching metrics)
+- RouteMetricsSummary - Rolling 7-day summaries for API (all metrics aggregated)
 
 ### Key Modules
 
@@ -288,6 +294,9 @@ sqlite> SELECT * FROM route_metrics_summary;
 - **Trip Matching**: ~90% use fast path (RT trip_id), fallback to position/time matching
 - **Database**: SQLite for dev (may require pausing collection), PostgreSQL for production
 - **Pre-computation**: All heavy calculations done in nightly pipeline, not on-demand
+- **Match Rate**: 22.75% overall (vehicle positions to stop arrivals) - expected and healthy
+  - Top routes achieve 45-50% match rates
+  - Low overall rate is normal (buses spend 75-80% of time between stops)
 
 ## Key Findings
 
@@ -295,6 +304,10 @@ sqlite> SELECT * FROM route_metrics_summary;
 - LA Metro OTP standard (-1 to +5 min) is stricter than WMATA's published standard
 - Polling-based collection gives ±30-60 second accuracy (acceptable for trend analysis)
 - WMATA's GTFS-RT trip_ids match GTFS static trip_ids with 100% accuracy
+- 60-second collection frequency is optimal for headway/bunching analysis
+  - Provides 256 positions per vehicle per day
+  - Well within WMATA API limits (1,440 calls/day vs 50,000 limit)
+  - Less frequent collection (2-3 min) would lose 30-50% of data
 
 ## Environment Variables
 

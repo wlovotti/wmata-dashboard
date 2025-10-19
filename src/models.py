@@ -456,6 +456,8 @@ class RouteMetricsDaily(Base):
     avg_headway_minutes = Column(Float)
     min_headway_minutes = Column(Float)
     max_headway_minutes = Column(Float)
+    headway_std_dev_minutes = Column(Float)  # Standard deviation for bunching detection
+    headway_cv = Column(Float)  # Coefficient of variation (std_dev / mean)
 
     # Speed metrics
     avg_speed_mph = Column(Float)
@@ -495,6 +497,8 @@ class RouteMetricsSummary(Base):
     early_percentage = Column(Float)
     late_percentage = Column(Float)
     avg_headway_minutes = Column(Float)
+    headway_std_dev_minutes = Column(Float)  # Standard deviation for bunching detection
+    headway_cv = Column(Float)  # Coefficient of variation (std_dev / mean)
     avg_speed_mph = Column(Float)
 
     # Data quality

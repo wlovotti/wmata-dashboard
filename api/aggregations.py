@@ -76,6 +76,7 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
                 "route_long_name": route.route_long_name,
                 "otp_percentage": summary.otp_percentage,
                 "avg_headway_minutes": summary.avg_headway_minutes,
+                "headway_std_dev_minutes": getattr(summary, "headway_std_dev_minutes", None),
                 "avg_speed_mph": summary.avg_speed_mph,
                 "grade": calculate_performance_grade(summary.otp_percentage),
                 "total_observations": summary.total_observations,
@@ -97,6 +98,7 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
                     "route_long_name": route.route_long_name,
                     "otp_percentage": None,
                     "avg_headway_minutes": None,
+                    "headway_std_dev_minutes": None,
                     "avg_speed_mph": None,
                     "grade": "N/A",
                     "total_observations": 0,
@@ -164,6 +166,8 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "early_percentage": getattr(summary, "early_percentage", None),
             "late_percentage": getattr(summary, "late_percentage", None),
             "avg_headway_minutes": summary.avg_headway_minutes,
+            "headway_std_dev_minutes": getattr(summary, "headway_std_dev_minutes", None),
+            "headway_cv": getattr(summary, "headway_cv", None),
             "min_headway_minutes": None,  # Not in summary table
             "max_headway_minutes": None,  # Not in summary table
             "avg_speed_mph": summary.avg_speed_mph,
@@ -184,6 +188,8 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "early_percentage": None,
             "late_percentage": None,
             "avg_headway_minutes": None,
+            "headway_std_dev_minutes": None,
+            "headway_cv": None,
             "min_headway_minutes": None,
             "max_headway_minutes": None,
             "avg_speed_mph": None,
@@ -199,13 +205,13 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     """
     Get time-series trend data for a specific route metric
 
-    Computes daily values for OTP, headway, or speed over the specified time period.
+    Computes daily values for OTP, headway, speed, or other metrics over the specified time period.
     Used for trend charts on the route detail page.
 
     Args:
         db: Database session
         route_id: Route identifier (e.g., 'C51')
-        metric: Metric to analyze ('otp', 'headway', 'speed')
+        metric: Metric to analyze ('otp', 'early', 'late', 'headway', 'headway_std_dev', 'speed')
         days: Number of days to analyze (default: 30)
 
     Returns:
@@ -240,7 +246,10 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     # Map metric name to field and response key
     metric_config = {
         "otp": {"field": "otp_percentage", "key": "otp_percentage"},
+        "early": {"field": "early_percentage", "key": "early_percentage"},
+        "late": {"field": "late_percentage", "key": "late_percentage"},
         "headway": {"field": "avg_headway_minutes", "key": "avg_headway_minutes"},
+        "headway_std_dev": {"field": "headway_std_dev_minutes", "key": "headway_std_dev_minutes"},
         "speed": {"field": "avg_speed_mph", "key": "avg_speed_mph"},
     }
 
