@@ -166,6 +166,61 @@ async def get_route_time_periods(route_id: str, days: int = 7):
         db.close()
 
 
+@app.get("/api/routes/{route_id}/shapes")
+async def get_route_shapes(route_id: str):
+    """
+    Get GTFS shapes data for a route
+
+    Returns geographic coordinates for drawing the route on a map.
+
+    Args:
+        route_id: Route identifier (e.g., 'C51')
+
+    Returns:
+        List of shape variants with coordinate arrays
+    """
+    from src.models import Shape, Trip
+
+    db = get_session()
+    try:
+        # Get distinct shape_ids for this route
+        shape_ids = (
+            db.query(Trip.shape_id)
+            .filter(Trip.route_id == route_id)
+            .distinct()
+            .all()
+        )
+
+        if not shape_ids:
+            raise HTTPException(status_code=404, detail=f"No shapes found for route {route_id}")
+
+        shapes_data = []
+        for (shape_id,) in shape_ids:
+            if not shape_id:
+                continue
+
+            # Get all points for this shape, ordered by sequence
+            points = (
+                db.query(Shape)
+                .filter(Shape.shape_id == shape_id)
+                .order_by(Shape.shape_pt_sequence)
+                .all()
+            )
+
+            if points:
+                shapes_data.append({
+                    "shape_id": shape_id,
+                    "points": [
+                        {"lat": p.shape_pt_lat, "lon": p.shape_pt_lon}
+                        for p in points
+                    ]
+                })
+
+        return {"route_id": route_id, "shapes": shapes_data}
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     import uvicorn
 
