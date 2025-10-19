@@ -4,9 +4,10 @@ Test WMATA BusPositions JSON API endpoint
 This endpoint provides real-time bus positions and may include additional
 fields beyond what's available in GTFS-RT VehiclePositions feed.
 """
-import os
-import requests
 import json
+import os
+
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()

@@ -1,8 +1,8 @@
 """
 Investigate the D80 headway anomaly (0.05 minute headway)
 """
-from src.database import get_session
 from src.analytics import calculate_headways
+from src.database import get_session
 
 db = get_session()
 
@@ -51,8 +51,9 @@ try:
             print(f"Current vehicle: {curr_vehicle} at {hw['current_time']}")
 
             # Query the actual position records to see trip_id and direction
-            from src.models import VehiclePosition, Trip
             from datetime import datetime, timedelta
+
+            from src.models import Trip, VehiclePosition
 
             prev_time = datetime.fromisoformat(hw['previous_time'])
             curr_time = datetime.fromisoformat(hw['current_time'])

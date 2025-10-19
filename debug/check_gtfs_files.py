@@ -1,17 +1,18 @@
 """
 Check what files are in WMATA's GTFS static feed
 """
-import os
-import requests
-import zipfile
 import io
+import os
+import zipfile
+
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 API_KEY = os.getenv("WMATA_API_KEY")
 
 print("Downloading WMATA GTFS static feed...")
-url = f"https://api.wmata.com/gtfs/bus-gtfs-static.zip"
+url = "https://api.wmata.com/gtfs/bus-gtfs-static.zip"
 headers = {"api_key": API_KEY}
 
 response = requests.get(url, headers=headers, timeout=30)
@@ -50,7 +51,7 @@ c51_trips = [t for t in trips if t.get('route_id') == 'C51']
 print(f"C51 trips in GTFS: {len(c51_trips)}")
 
 if c51_trips:
-    print(f"\nSample C51 trip IDs from GTFS static:")
+    print("\nSample C51 trip IDs from GTFS static:")
     for trip in c51_trips[:10]:
         print(f"  {trip['trip_id']} - {trip.get('trip_headsign', 'N/A')}")
 

@@ -224,6 +224,9 @@ function RouteList() {
               <th onClick={() => handleSort('avg_headway_minutes')} className="sortable">
                 Avg Headway {getSortIcon('avg_headway_minutes')}
               </th>
+              <th onClick={() => handleSort('headway_std_dev_minutes')} className="sortable">
+                Headway Regularity {getSortIcon('headway_std_dev_minutes')}
+              </th>
               <th onClick={() => handleSort('avg_speed_mph')} className="sortable">
                 Avg Speed {getSortIcon('avg_speed_mph')}
               </th>
@@ -238,7 +241,7 @@ function RouteList() {
           <tbody>
             {filteredAndSortedRoutes.length === 0 ? (
               <tr>
-                <td colSpan="8" className="empty-state">
+                <td colSpan="9" className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">🔍</div>
                     <p>No routes match your filters</p>
@@ -286,6 +289,11 @@ function RouteList() {
                 <td className="metric">
                   {route.avg_headway_minutes !== null
                     ? `${Math.round(route.avg_headway_minutes)} min`
+                    : '—'}
+                </td>
+                <td className="metric">
+                  {route.headway_std_dev_minutes !== null
+                    ? `${Math.round(route.headway_std_dev_minutes * 10) / 10} min`
                     : '—'}
                 </td>
                 <td className="metric">

@@ -1,10 +1,11 @@
 """
 Check if WMATA GTFS includes shapes.txt
 """
-import requests
-import zipfile
 import io
 import os
+import zipfile
+
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -38,7 +39,7 @@ if response.status_code == 200:
         # Sample first few lines
         content = zip_data.read('shapes.txt').decode('utf-8-sig')
         lines = content.split('\n')[:10]
-        print(f"\nFirst few lines:")
+        print("\nFirst few lines:")
         for line in lines:
             print(f"  {line}")
     else:

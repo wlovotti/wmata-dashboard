@@ -1,8 +1,8 @@
 """
 Quick OTP test for a few routes with the collected data
 """
-from src.database import get_session
 from src.analytics import calculate_line_level_otp
+from src.database import get_session
 
 db = get_session()
 

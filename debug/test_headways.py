@@ -1,8 +1,8 @@
 """
 Test headway calculation with updated methodology
 """
-from src.database import get_session
 from src.analytics import calculate_headways
+from src.database import get_session
 
 db = get_session()
 
@@ -37,7 +37,7 @@ try:
 
         # Show a few sample headways
         if result['valid_headways']:
-            print(f"\n  Sample headways:")
+            print("\n  Sample headways:")
             for hw in result['valid_headways'][:3]:
                 print(f"    Vehicle {hw['previous_vehicle']} -> {hw['current_vehicle']}: {hw['headway_minutes']} min")
 

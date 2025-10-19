@@ -2,10 +2,12 @@
 Test collecting BusPositions data and saving to database
 """
 import os
+
 from dotenv import load_dotenv
-from src.wmata_collector import WMATADataCollector
+
 from src.database import get_session
 from src.models import BusPosition
+from src.wmata_collector import WMATADataCollector
 
 load_dotenv()
 API_KEY = os.getenv("WMATA_API_KEY")
@@ -33,13 +35,13 @@ try:
 
         # Verify
         count = db.query(BusPosition).filter_by(route_id='C51').count()
-        print(f"\n3. Verification:")
+        print("\n3. Verification:")
         print(f"   Total C51 BusPositions in database: {count}")
 
         # Show a sample record
         sample = db.query(BusPosition).filter_by(route_id='C51').first()
         if sample:
-            print(f"\n   Sample record:")
+            print("\n   Sample record:")
             print(f"     Vehicle: {sample.vehicle_id}")
             print(f"     Deviation: {sample.deviation} minutes")
             print(f"     Timestamp: {sample.timestamp}")

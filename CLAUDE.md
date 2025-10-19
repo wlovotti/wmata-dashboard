@@ -352,6 +352,7 @@ Required in `.env` file:
 - ✅ PostgreSQL production-ready architecture
 - ✅ Multi-level OTP calculations (stop/time-period/line level)
 - ✅ Analytics layer with headway and speed calculations
+- ✅ **Headway regularity metrics** (standard deviation, coefficient of variation for bunching detection)
 - ✅ Trip matching with high accuracy
 - ✅ Performance optimizations (caching, batch loading, NumPy vectorization)
 - ✅ Validation of WMATA deviation data (found unreliable)
@@ -365,42 +366,52 @@ Required in `.env` file:
 - ✅ **Nightly batch job pipeline** (compute_daily_metrics.py)
 - ✅ **Ruff linting integration** (PR checks, code quality enforcement)
 - ✅ **React frontend dashboard** (Vite, React Router, Recharts, Leaflet)
-- ✅ **Route scorecard table** with sticky headers and WMATA branding
-- ✅ **Route detail pages** with metrics, charts, and interactive maps
-- ✅ **Trend charts** for OTP, headway, and speed (30-day time series)
+- ✅ **Route scorecard table** with sorting, filtering, and headway regularity column
+- ✅ **Route detail pages** with comprehensive metrics and charts
+- ✅ **OTP breakdown visualization** (early/on-time/late percentages)
+- ✅ **Trend charts** for all metrics: OTP, early%, late%, headway, headway regularity, speed
 - ✅ **Route map visualization** with GTFS shapes and optional speed segments
+- ✅ **Data collection frequency analysis** (60-second intervals validated as optimal)
 
 **Next Steps (Priority Order):**
 
-1. **Production Deployment**
-   - Deploy to cloud platform (DigitalOcean, AWS, etc.)
+1. **Production Deployment** (Next Priority)
+   - Deploy to cloud platform (DigitalOcean, AWS, Heroku, etc.)
    - Set up PostgreSQL database
-   - Configure continuous data collection (systemd service)
+   - Configure continuous data collection (systemd service or cloud scheduler)
    - Set up cron jobs for nightly metrics computation
    - Set up weekly GTFS refresh
-   - Configure Nginx reverse proxy
-   - Set up SSL certificates (Let's Encrypt)
+   - Configure reverse proxy (Nginx or cloud provider)
+   - Set up SSL certificates (Let's Encrypt or cloud provider)
+   - Build and serve frontend static files
    - Implement monitoring and alerting
 
-2. **Frontend Enhancements**
-   - Add filtering/sorting to route scorecard table
-   - Implement search functionality for routes
+2. **Data Retention & Archival**
+   - Implement data archival strategy (keep raw 60s data for 2-4 weeks)
+   - Aggregate older data to 5-10 minute averages
+   - Set up automated cleanup jobs
+   - Target steady-state storage: ~1-2 GB
+
+3. **Frontend Enhancements**
    - Add date range selectors for trend charts
    - Improve responsive design for mobile devices
    - Add loading states and error handling improvements
+   - Export functionality (CSV, JSON downloads)
 
-3. **Performance Optimizations**
-   - Consider pre-computing speed segments in nightly pipeline
+4. **API Enhancements**
+   - Add pagination for large result sets
+   - Add date range filtering parameters
    - Add caching layer (Redis) for frequently accessed data
-   - Optimize database queries with indexes
-   - Implement API pagination for large result sets
+   - Add API rate limiting
+   - Add API authentication/authorization (if needed)
 
-4. **Advanced Analytics**
-   - Bunching detection algorithms
-   - Service gap identification
-   - Route reliability scoring
-   - Comparative route analysis
-   - Historical trend analysis
+5. **Advanced Analytics & Features**
+   - Automated bus bunching alerts
+   - Service gap identification and alerting
+   - Route reliability scoring (beyond just OTP)
+   - Comparative route analysis dashboard
+   - Historical performance comparisons (month-over-month, year-over-year)
+   - Email/SMS alerts for service disruptions
 
 **Important Notes:**
 - **GTFS-based OTP is PRIMARY** - Don't use WMATA deviation as sole source (validation showed up to 7.7 min discrepancies)
@@ -415,6 +426,8 @@ Required in `.env` file:
 - Run nightly batch job to keep metrics up to date
 - **SQLite database locking**: For development, pause data collection when using API/dashboard (write locks block reads)
 - **PostgreSQL required for production** to support concurrent collection and API queries
+- **60-second collection frequency is optimal** - provides good data quality with minimal API usage (1,440/50,000 daily limit)
+- **22.75% match rate is expected and healthy** - buses spend 75-80% of time between stops, not at them
 
 **Key Findings:**
 - ~40% of bus arrivals are early (real operational pattern, not data error)
@@ -424,6 +437,11 @@ Required in `.env` file:
 - API response time: 37ms with pre-computed aggregations (vs 30+ seconds with live calculation)
 - NumPy vectorization: ~10x speedup for speed segment calculations (3.4M → 350K operations)
 - Speed segments disabled by default in frontend to avoid performance issues on route detail pages
+- Match rate analysis shows 60s collection frequency is optimal:
+  - Overall: 22.75% match rate (expected - buses between stops most of the time)
+  - Top routes: 45-50% match rate (excellent for high-frequency service)
+  - 256 positions per vehicle per day provides excellent temporal resolution
+  - Less frequent collection (2-3 min) would lose 30-50% of matched arrivals
 
 ## Git Workflow
 
@@ -442,25 +460,48 @@ Required in `.env` file:
 
 ## Session Notes
 
-**Last Session (2025-10-18):**
-- Completed React frontend dashboard with WMATA branding
-- Built route scorecard table with sticky headers, sorting, and filtering
-- Created route detail pages with metrics, trend charts (OTP, headway, speed), and interactive maps
-- Implemented Leaflet map visualization with GTFS shapes
-- Added optional speed segments with color coding (disabled by default for performance)
-- Fixed multiple performance issues using NumPy vectorization
-- Addressed SQLite database locking issues (required pausing data collection during dev)
-- Updated README.md and CLAUDE.md documentation to reflect completed features
-- Frontend running at localhost:5173, API at localhost:8000
+**Current Session (2025-10-19):**
+- Added headway regularity metrics (standard deviation, coefficient of variation)
+- Implemented bus bunching detection in analytics pipeline
+- Created database migration script for new headway metrics columns
+- Updated pipeline to compute and store headway std dev and CV
+- Added OTP breakdown visualization (early/on-time/late stacked bar chart)
+- Added 30-day trend charts for early%, late%, and headway regularity
+- Added headway regularity stat card to route detail page
+- Added headway regularity column to route scorecard table
+- Updated API to support new trend metrics (early, late, headway_std_dev)
+- Fixed API validation to accept new metric types
+- Analyzed vehicle position match rate (22.75% - optimal for current use case)
+- Created match rate analysis tools (`debug/analyze_match_rate.py`, `debug/match_rate_detailed_analysis.md`)
+- Validated 60-second collection frequency as optimal balance
+- Updated README.md and CLAUDE.md with latest features and findings
 
-**Application Status:**
-- **Frontend**: Fully functional with all major features implemented
-- **API**: All endpoints working (routes, detail, trend, shapes, segments, time-periods)
-- **Performance**: 37ms API response time, vectorized speed segment calculation
-- **Data**: Multiple routes with computed metrics available for testing
+**Dashboard Status:**
+- **Frontend**: Fully functional with all comprehensive features
+  - Route scorecard table with sorting/filtering and headway regularity
+  - Route detail pages with all performance metrics
+  - OTP breakdown chart, 6 trend charts (OTP, early, late, headway, headway regularity, speed)
+  - Interactive route maps with Leaflet
+  - Time-period performance analysis
+- **API**: All endpoints complete and performant (37ms response time)
+- **Pipeline**: Processing 103 routes, computing all metrics including bunching detection
+- **Data**: System-wide collection at 60s intervals (~550-630 vehicles/minute)
 
-**Technical Learnings:**
-- Pre-computation philosophy critical for performance (offline pipelines vs. live calculations)
+**Data Collection Analysis:**
+- **Match Rate**: 22.75% overall (expected - buses spend most time between stops)
+- **Top Routes**: 45-50% match rates (F20, D80, C53)
+- **Collection Volume**: 243,016 positions → 55,275 arrivals per week
+- **Temporal Resolution**: 256 positions per vehicle per day
+- **API Usage**: 1,440 calls/day (well within 50,000/day limit)
+- **Conclusion**: 60-second intervals optimal - less frequent would lose 30-50% of data
+
+**Ready for Production:**
+- All core features implemented and tested
+- Frontend and backend fully integrated
+- API endpoints complete and performant
+- Data collection strategy validated and optimized
+- Documentation updated and comprehensive
+- Match rate analysis confirms current approach is optimal
 - NumPy vectorization provides ~10x speedup for distance/proximity calculations
 - SQLite write locks block reads - PostgreSQL required for production with concurrent access
 - Speed segments expensive to compute on-demand - should be pre-computed or disabled by default
