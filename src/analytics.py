@@ -488,20 +488,22 @@ def _process_positions_batch(
             continue
 
         # Add record
-        records.append({
-            'route_id': route_id,
-            'vehicle_id': pos.vehicle_id,
-            'trip_id': pos.trip_id,
-            'stop_id': nearest_stop_id,
-            'timestamp': pos.timestamp,
-            'scheduled_time': scheduled_dt,
-            'diff_seconds': diff_seconds,
-            'latitude': pos.latitude,
-            'longitude': pos.longitude,
-            'speed': pos.speed if hasattr(pos, 'speed') else None,
-            'stop_lat': nearest_stop.stop_lat,
-            'stop_lon': nearest_stop.stop_lon,
-        })
+        records.append(
+            {
+                "route_id": route_id,
+                "vehicle_id": pos.vehicle_id,
+                "trip_id": pos.trip_id,
+                "stop_id": nearest_stop_id,
+                "timestamp": pos.timestamp,
+                "scheduled_time": scheduled_dt,
+                "diff_seconds": diff_seconds,
+                "latitude": pos.latitude,
+                "longitude": pos.longitude,
+                "speed": pos.speed if hasattr(pos, "speed") else None,
+                "stop_lat": nearest_stop.stop_lat,
+                "stop_lon": nearest_stop.stop_lon,
+            }
+        )
 
     return pd.DataFrame(records)
 
@@ -554,7 +556,7 @@ def calculate_line_level_otp_batch(
 
     # Filter to specific routes if requested
     if route_ids is not None:
-        positions_df = positions_df[positions_df['route_id'].isin(route_ids)]
+        positions_df = positions_df[positions_df["route_id"].isin(route_ids)]
 
     if positions_df.empty:
         return {}
@@ -562,46 +564,50 @@ def calculate_line_level_otp_batch(
     # DEDUPLICATE: Keep only LAST observation at each stop for each vehicle/trip
     # This represents departure time (when bus leaves the stop)
     # Sort by timestamp within each group, then keep last
-    positions_df = positions_df.sort_values('timestamp')
+    positions_df = positions_df.sort_values("timestamp")
     positions_df = positions_df.groupby(
-        ['route_id', 'vehicle_id', 'trip_id', 'stop_id'], as_index=False
+        ["route_id", "vehicle_id", "trip_id", "stop_id"], as_index=False
     ).last()
 
     # VECTORIZED CLASSIFICATION: Classify all arrivals at once using numpy/pandas
-    positions_df['is_early'] = positions_df['diff_seconds'] < early_threshold_seconds
-    positions_df['is_late'] = positions_df['diff_seconds'] > late_threshold_seconds
-    positions_df['is_on_time'] = ~(positions_df['is_early'] | positions_df['is_late'])
+    positions_df["is_early"] = positions_df["diff_seconds"] < early_threshold_seconds
+    positions_df["is_late"] = positions_df["diff_seconds"] > late_threshold_seconds
+    positions_df["is_on_time"] = ~(positions_df["is_early"] | positions_df["is_late"])
 
     # AGGREGATE BY ROUTE: Use pandas groupby to compute metrics for each route
-    route_metrics = positions_df.groupby('route_id').agg(
-        early_count=('is_early', 'sum'),
-        late_count=('is_late', 'sum'),
-        on_time_count=('is_on_time', 'sum'),
-        total_arrivals=('diff_seconds', 'count'),
-        avg_lateness_seconds=('diff_seconds', 'mean'),
-    ).reset_index()
+    route_metrics = (
+        positions_df.groupby("route_id")
+        .agg(
+            early_count=("is_early", "sum"),
+            late_count=("is_late", "sum"),
+            on_time_count=("is_on_time", "sum"),
+            total_arrivals=("diff_seconds", "count"),
+            avg_lateness_seconds=("diff_seconds", "mean"),
+        )
+        .reset_index()
+    )
 
     # BUILD RESULTS DICTIONARY
     results = {}
     for _, row in route_metrics.iterrows():
-        route_id = row['route_id']
-        total = row['total_arrivals']
+        route_id = row["route_id"]
+        total = row["total_arrivals"]
 
         results[route_id] = {
-            'route_id': route_id,
-            'level': 'line',
-            'description': 'Overall route performance (vectorized batch processing)',
-            'on_time_pct': round((row['on_time_count'] / total) * 100, 2) if total > 0 else None,
-            'early_pct': round((row['early_count'] / total) * 100, 2) if total > 0 else None,
-            'late_pct': round((row['late_count'] / total) * 100, 2) if total > 0 else None,
-            'on_time_count': int(row['on_time_count']),
-            'early_count': int(row['early_count']),
-            'late_count': int(row['late_count']),
-            'total_arrivals': int(total),
-            'avg_lateness_seconds': round(row['avg_lateness_seconds'], 1),
-            'thresholds': {
-                'early_threshold_seconds': early_threshold_seconds,
-                'late_threshold_seconds': late_threshold_seconds,
+            "route_id": route_id,
+            "level": "line",
+            "description": "Overall route performance (vectorized batch processing)",
+            "on_time_pct": round((row["on_time_count"] / total) * 100, 2) if total > 0 else None,
+            "early_pct": round((row["early_count"] / total) * 100, 2) if total > 0 else None,
+            "late_pct": round((row["late_count"] / total) * 100, 2) if total > 0 else None,
+            "on_time_count": int(row["on_time_count"]),
+            "early_count": int(row["early_count"]),
+            "late_count": int(row["late_count"]),
+            "total_arrivals": int(total),
+            "avg_lateness_seconds": round(row["avg_lateness_seconds"], 1),
+            "thresholds": {
+                "early_threshold_seconds": early_threshold_seconds,
+                "late_threshold_seconds": late_threshold_seconds,
             },
         }
 
@@ -654,30 +660,28 @@ def calculate_headways_batch(
 
     # Filter to specific routes if requested
     if route_ids is not None:
-        positions_df = positions_df[positions_df['route_id'].isin(route_ids)]
+        positions_df = positions_df[positions_df["route_id"].isin(route_ids)]
 
     if positions_df.empty:
         return {}
 
     # DEDUPLICATE: Keep only LAST observation at each stop for each vehicle/trip
     # This represents departure time (when bus leaves the stop)
-    positions_df = positions_df.sort_values('timestamp')
+    positions_df = positions_df.sort_values("timestamp")
     positions_df = positions_df.groupby(
-        ['route_id', 'vehicle_id', 'trip_id', 'stop_id'], as_index=False
+        ["route_id", "vehicle_id", "trip_id", "stop_id"], as_index=False
     ).last()
 
     # For each route, find the most active stop (most vehicle passages)
     # This will be our reference stop for headway calculation
     stop_counts = (
-        positions_df.groupby(['route_id', 'stop_id'])
-        .size()
-        .reset_index(name='passage_count')
+        positions_df.groupby(["route_id", "stop_id"]).size().reset_index(name="passage_count")
     )
 
     # Get the most active stop per route
     reference_stops = (
-        stop_counts.sort_values('passage_count', ascending=False)
-        .groupby('route_id')
+        stop_counts.sort_values("passage_count", ascending=False)
+        .groupby("route_id")
         .first()
         .reset_index()
     )
@@ -686,56 +690,54 @@ def calculate_headways_batch(
 
     # Process each route individually (but using vectorized pandas operations)
     for _, ref_stop in reference_stops.iterrows():
-        route_id = ref_stop['route_id']
-        stop_id = ref_stop['stop_id']
+        route_id = ref_stop["route_id"]
+        stop_id = ref_stop["stop_id"]
 
         # Filter to passages at this stop for this route
         route_stop_passages = positions_df[
-            (positions_df['route_id'] == route_id) & (positions_df['stop_id'] == stop_id)
+            (positions_df["route_id"] == route_id) & (positions_df["stop_id"] == stop_id)
         ].copy()
 
         if len(route_stop_passages) < 2:
             # Need at least 2 passages to calculate headway
             results[route_id] = {
-                'route_id': route_id,
-                'avg_headway_minutes': None,
-                'min_headway_minutes': None,
-                'max_headway_minutes': None,
-                'std_dev_minutes': None,
-                'cv': None,
-                'count': 0,
-                'vehicles_passed_stop': len(route_stop_passages),
+                "route_id": route_id,
+                "avg_headway_minutes": None,
+                "min_headway_minutes": None,
+                "max_headway_minutes": None,
+                "std_dev_minutes": None,
+                "cv": None,
+                "count": 0,
+                "vehicles_passed_stop": len(route_stop_passages),
             }
             continue
 
         # Sort by timestamp
-        route_stop_passages = route_stop_passages.sort_values('timestamp')
+        route_stop_passages = route_stop_passages.sort_values("timestamp")
 
         # Calculate time differences between consecutive passages (vectorized)
-        route_stop_passages['prev_timestamp'] = route_stop_passages['timestamp'].shift(1)
-        route_stop_passages['headway_seconds'] = (
-            route_stop_passages['timestamp'] - route_stop_passages['prev_timestamp']
+        route_stop_passages["prev_timestamp"] = route_stop_passages["timestamp"].shift(1)
+        route_stop_passages["headway_seconds"] = (
+            route_stop_passages["timestamp"] - route_stop_passages["prev_timestamp"]
         ).dt.total_seconds()
-        route_stop_passages['headway_minutes'] = (
-            route_stop_passages['headway_seconds'] / 60.0
-        )
+        route_stop_passages["headway_minutes"] = route_stop_passages["headway_seconds"] / 60.0
 
         # Remove first row (no previous timestamp)
-        headways = route_stop_passages['headway_minutes'].dropna()
+        headways = route_stop_passages["headway_minutes"].dropna()
 
         # Filter out data gaps (headways > max_headway_minutes)
         valid_headways = headways[headways <= max_headway_minutes]
 
         if len(valid_headways) == 0:
             results[route_id] = {
-                'route_id': route_id,
-                'avg_headway_minutes': None,
-                'min_headway_minutes': None,
-                'max_headway_minutes': None,
-                'std_dev_minutes': None,
-                'cv': None,
-                'count': 0,
-                'vehicles_passed_stop': len(route_stop_passages),
+                "route_id": route_id,
+                "avg_headway_minutes": None,
+                "min_headway_minutes": None,
+                "max_headway_minutes": None,
+                "std_dev_minutes": None,
+                "cv": None,
+                "count": 0,
+                "vehicles_passed_stop": len(route_stop_passages),
             }
         else:
             avg_headway = valid_headways.mean()
@@ -746,14 +748,14 @@ def calculate_headways_batch(
             cv = std_dev / avg_headway if avg_headway > 0 else None
 
             results[route_id] = {
-                'route_id': route_id,
-                'avg_headway_minutes': round(avg_headway, 2),
-                'min_headway_minutes': round(valid_headways.min(), 2),
-                'max_headway_minutes': round(valid_headways.max(), 2),
-                'std_dev_minutes': round(std_dev, 2),
-                'cv': round(cv, 3) if cv is not None else None,
-                'count': len(valid_headways),
-                'vehicles_passed_stop': len(route_stop_passages),
+                "route_id": route_id,
+                "avg_headway_minutes": round(avg_headway, 2),
+                "min_headway_minutes": round(valid_headways.min(), 2),
+                "max_headway_minutes": round(valid_headways.max(), 2),
+                "std_dev_minutes": round(std_dev, 2),
+                "cv": round(cv, 3) if cv is not None else None,
+                "count": len(valid_headways),
+                "vehicles_passed_stop": len(route_stop_passages),
             }
 
     return results
@@ -796,33 +798,37 @@ def calculate_average_speed_batch(
 
     # Filter to specific routes if requested
     if route_ids is not None:
-        positions_df = positions_df[positions_df['route_id'].isin(route_ids)]
+        positions_df = positions_df[positions_df["route_id"].isin(route_ids)]
 
     if positions_df.empty:
         return {}
 
     # Filter to positions with valid speed data
     # Speed is already in mph from GTFS-RT feed
-    speed_data = positions_df[positions_df['speed'].notna()].copy()
+    speed_data = positions_df[positions_df["speed"].notna()].copy()
 
     if speed_data.empty:
         return {}
 
     # AGGREGATE BY ROUTE: Use pandas groupby to compute average speed per route
-    route_speeds = speed_data.groupby('route_id').agg(
-        avg_speed_mph=('speed', 'mean'),
-        observations_with_speed=('speed', 'count'),
-    ).reset_index()
+    route_speeds = (
+        speed_data.groupby("route_id")
+        .agg(
+            avg_speed_mph=("speed", "mean"),
+            observations_with_speed=("speed", "count"),
+        )
+        .reset_index()
+    )
 
     # BUILD RESULTS DICTIONARY
     results = {}
     for _, row in route_speeds.iterrows():
-        route_id = row['route_id']
+        route_id = row["route_id"]
 
         results[route_id] = {
-            'route_id': route_id,
-            'avg_speed_mph': round(row['avg_speed_mph'], 2),
-            'observations_with_speed': int(row['observations_with_speed']),
+            "route_id": route_id,
+            "avg_speed_mph": round(row["avg_speed_mph"], 2),
+            "observations_with_speed": int(row["observations_with_speed"]),
         }
 
     return results
@@ -904,16 +910,18 @@ def calculate_headways(
                     for t in db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
                 }
                 positions = [
-                    p for p in positions
-                    if (start_time is None or p.timestamp >= start_time) and
-                       (end_time is None or p.timestamp <= end_time) and
-                       (direction_id is None or trip_directions.get(p.trip_id) == direction_id)
+                    p
+                    for p in positions
+                    if (start_time is None or p.timestamp >= start_time)
+                    and (end_time is None or p.timestamp <= end_time)
+                    and (direction_id is None or trip_directions.get(p.trip_id) == direction_id)
                 ]
             else:
                 positions = [
-                    p for p in positions
-                    if (start_time is None or p.timestamp >= start_time) and
-                       (end_time is None or p.timestamp <= end_time)
+                    p
+                    for p in positions
+                    if (start_time is None or p.timestamp >= start_time)
+                    and (end_time is None or p.timestamp <= end_time)
                 ]
 
     if not positions:
@@ -1687,7 +1695,9 @@ def calculate_line_level_otp(
     sample_rate: int = 1,  # Process every Nth position (3 = every 3 minutes with 60s polling)
     positions: Optional[list] = None,  # Pre-loaded positions (for batch processing)
     trips: Optional[dict] = None,  # Pre-loaded trips map {trip_id: Trip} (for batch processing)
-    stop_times: Optional[dict] = None,  # Pre-loaded stop_times map {trip_id: [StopTime]} (for batch processing)
+    stop_times: Optional[
+        dict
+    ] = None,  # Pre-loaded stop_times map {trip_id: [StopTime]} (for batch processing)
     stops: Optional[dict] = None,  # Pre-loaded stops map {stop_id: Stop} (for batch processing)
 ) -> dict:
     """
@@ -1728,9 +1738,10 @@ def calculate_line_level_otp(
         # Filter pre-loaded positions by time range if specified
         if start_time or end_time:
             positions = [
-                p for p in positions
-                if (start_time is None or p.timestamp >= start_time) and
-                   (end_time is None or p.timestamp <= end_time)
+                p
+                for p in positions
+                if (start_time is None or p.timestamp >= start_time)
+                and (end_time is None or p.timestamp <= end_time)
             ]
 
     if not positions:
@@ -1771,11 +1782,7 @@ def calculate_line_level_otp(
     if trip_ids:
         if trips is not None:
             # Use pre-loaded trips (batch processing optimization)
-            trip_service_map = {
-                tid: trips[tid].service_id
-                for tid in trip_ids
-                if tid in trips
-            }
+            trip_service_map = {tid: trips[tid].service_id for tid in trip_ids if tid in trips}
         else:
             # Query trips from database
             trips_query = db.query(Trip).filter(Trip.trip_id.in_(trip_ids), Trip.is_current)
@@ -1860,7 +1867,9 @@ def calculate_line_level_otp(
         print(f"  Loading stop_times for {len(route_trips)} trips...")
         trip_ids_list = [t.trip_id for t in route_trips]
         stop_times_list = (
-            db.query(StopTime).filter(StopTime.trip_id.in_(trip_ids_list), StopTime.is_current).all()
+            db.query(StopTime)
+            .filter(StopTime.trip_id.in_(trip_ids_list), StopTime.is_current)
+            .all()
         )
     else:
         # Use pre-loaded stop_times - filter to this route's trips
@@ -2171,9 +2180,10 @@ def calculate_average_speed(
         # Filter pre-loaded positions by time range if specified
         if start_time or end_time:
             positions = [
-                p for p in positions
-                if (start_time is None or p.timestamp >= start_time) and
-                   (end_time is None or p.timestamp <= end_time)
+                p
+                for p in positions
+                if (start_time is None or p.timestamp >= start_time)
+                and (end_time is None or p.timestamp <= end_time)
             ]
         # Sort by vehicle_id and timestamp for trip tracking
         positions = sorted(positions, key=lambda p: (p.vehicle_id, p.timestamp))

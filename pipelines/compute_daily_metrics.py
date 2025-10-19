@@ -191,9 +191,9 @@ def compute_metrics_batch(
     start_time = datetime.combine(date, datetime.min.time())
     end_time = start_time + timedelta(days=1)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Batch processing {len(routes)} routes for {date.isoformat()}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     batch_start = time.time()
 
@@ -241,7 +241,9 @@ def compute_metrics_batch(
     for pos in all_positions:
         positions_by_route[pos.route_id].append(pos)
 
-    print(f"      ✓ Grouped into {len(positions_by_route)} routes in {time.time() - group_start:.2f}s")
+    print(
+        f"      ✓ Grouped into {len(positions_by_route)} routes in {time.time() - group_start:.2f}s"
+    )
 
     # Step 3: Filter routes with insufficient data
     MIN_POSITIONS = 50
@@ -255,7 +257,9 @@ def compute_metrics_batch(
         else:
             routes_to_process[route.route_id] = route
 
-    print(f"  [3/5] Processing {len(routes_to_process)} routes, skipping {len(routes_skipped)} (insufficient data)")
+    print(
+        f"  [3/5] Processing {len(routes_to_process)} routes, skipping {len(routes_skipped)} (insufficient data)"
+    )
 
     # Step 4: Check for existing metrics if not recalculating
     if not recalculate:
@@ -272,13 +276,17 @@ def compute_metrics_batch(
         )
 
         existing_route_ids = {r[0] for r in existing}
-        routes_with_existing = [rid for rid in routes_to_process.keys() if rid in existing_route_ids]
+        routes_with_existing = [
+            rid for rid in routes_to_process.keys() if rid in existing_route_ids
+        ]
 
         # Remove from processing list
         for rid in routes_with_existing:
             del routes_to_process[rid]
 
-        print(f"      ✓ Found {len(routes_with_existing)} existing, will process {len(routes_to_process)} in {time.time() - check_start:.2f}s")
+        print(
+            f"      ✓ Found {len(routes_with_existing)} existing, will process {len(routes_to_process)} in {time.time() - check_start:.2f}s"
+        )
     else:
         print("  [4/5] Recalculate mode - will replace existing metrics")
 
@@ -294,7 +302,9 @@ def compute_metrics_batch(
                 .delete(synchronize_session=False)
             )
             db.commit()
-            print(f"      ✓ Deleted {deleted} existing metrics in {time.time() - delete_start:.2f}s")
+            print(
+                f"      ✓ Deleted {deleted} existing metrics in {time.time() - delete_start:.2f}s"
+            )
 
     # Step 5: Batch-load ALL GTFS data for all routes (avoid per-route queries)
     print("  [5/5] Loading GTFS data for all routes...")
@@ -325,7 +335,9 @@ def compute_metrics_batch(
             stop_times_by_trip[st.trip_id].append(st)
 
     filtered_count = len([st for st_list in stop_times_by_trip.values() for st in st_list])
-    print(f"      ✓ Loaded {len(all_stop_times)} stop_times, using {filtered_count} for today's trips")
+    print(
+        f"      ✓ Loaded {len(all_stop_times)} stop_times, using {filtered_count} for today's trips"
+    )
 
     # Load all stops (just get all current stops, it's not that many)
     print("      Loading stops...")
@@ -336,7 +348,9 @@ def compute_metrics_batch(
     print(f"      ✓ GTFS data loaded in {time.time() - gtfs_start:.2f}s")
 
     # Step 6: VECTORIZED BATCH PROCESSING - Process ALL routes at once
-    print(f"  [6/6] Computing metrics for {len(routes_to_process)} routes using vectorized batch processing...")
+    print(
+        f"  [6/6] Computing metrics for {len(routes_to_process)} routes using vectorized batch processing..."
+    )
     compute_start = time.time()
 
     # Import batch functions from analytics
@@ -363,7 +377,9 @@ def compute_metrics_batch(
         stops_map=stop_map,
     )
 
-    print(f"      ✓ Processed positions in {time.time() - process_start:.2f}s ({len(positions_df)} matched arrivals)")
+    print(
+        f"      ✓ Processed positions in {time.time() - process_start:.2f}s ({len(positions_df)} matched arrivals)"
+    )
 
     # VECTORIZED METRICS CALCULATION - ALL routes computed simultaneously
     print("      [6.2] Computing OTP for ALL routes...")
@@ -380,7 +396,9 @@ def compute_metrics_batch(
         positions_df=positions_df,
         route_ids=list(routes_to_process.keys()),
     )
-    print(f"      ✓ Headways computed for {len(headway_results)} routes in {time.time() - headway_start:.2f}s")
+    print(
+        f"      ✓ Headways computed for {len(headway_results)} routes in {time.time() - headway_start:.2f}s"
+    )
 
     print("      [6.4] Computing speeds for ALL routes...")
     speed_start = time.time()
@@ -388,7 +406,9 @@ def compute_metrics_batch(
         positions_df=positions_df,
         route_ids=list(routes_to_process.keys()),
     )
-    print(f"      ✓ Speeds computed for {len(speed_results)} routes in {time.time() - speed_start:.2f}s")
+    print(
+        f"      ✓ Speeds computed for {len(speed_results)} routes in {time.time() - speed_start:.2f}s"
+    )
 
     # Combine results and save to database
     print("      [6.5] Saving metrics to database...")
@@ -405,19 +425,19 @@ def compute_metrics_batch(
         speed = speed_results.get(route_id)
 
         # Only save if we have at least OTP metrics
-        if otp and otp.get('total_arrivals', 0) > 0:
+        if otp and otp.get("total_arrivals", 0) > 0:
             metrics = {
-                'route_id': route_id,
-                'date': date.isoformat(),
-                'otp_percentage': otp.get('on_time_pct'),
-                'early_percentage': otp.get('early_pct'),
-                'late_percentage': otp.get('late_pct'),
-                'total_arrivals': otp.get('total_arrivals', 0),
-                'avg_headway_minutes': headway.get('avg_headway_minutes') if headway else None,
-                'headway_std_dev_minutes': headway.get('std_dev_minutes') if headway else None,
-                'headway_cv': headway.get('cv') if headway else None,
-                'avg_speed_mph': speed.get('avg_speed_mph') if speed else None,
-                'computed_at': datetime.utcnow(),
+                "route_id": route_id,
+                "date": date.isoformat(),
+                "otp_percentage": otp.get("on_time_pct"),
+                "early_percentage": otp.get("early_pct"),
+                "late_percentage": otp.get("late_pct"),
+                "total_arrivals": otp.get("total_arrivals", 0),
+                "avg_headway_minutes": headway.get("avg_headway_minutes") if headway else None,
+                "headway_std_dev_minutes": headway.get("std_dev_minutes") if headway else None,
+                "headway_cv": headway.get("cv") if headway else None,
+                "avg_speed_mph": speed.get("avg_speed_mph") if speed else None,
+                "computed_at": datetime.utcnow(),
             }
 
             # Save to database
@@ -429,7 +449,9 @@ def compute_metrics_batch(
 
     # Commit all records at once
     db.commit()
-    print(f"      ✓ Saved {len([r for r in results.values() if r])} route metrics in {time.time() - save_start:.2f}s")
+    print(
+        f"      ✓ Saved {len([r for r in results.values() if r])} route metrics in {time.time() - save_start:.2f}s"
+    )
 
     print(f"      ✓ All routes computed in {time.time() - compute_start:.2f}s")
 
@@ -437,10 +459,10 @@ def compute_metrics_batch(
     for route_id in routes_skipped:
         results[route_id] = None
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Batch complete: {len(routes_to_process)} computed, {len(routes_skipped)} skipped")
     print(f"Total time: {time.time() - batch_start:.2f}s")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     return results
 
@@ -492,7 +514,9 @@ def compute_daily_metrics(
         print("Loading exception service dates...")
         exception_start = time.time()
         exception_service_dates = get_exception_service_dates(db)
-        print(f"  ✓ Loaded {len(exception_service_dates)} exceptions in {time.time() - exception_start:.2f}s")
+        print(
+            f"  ✓ Loaded {len(exception_service_dates)} exceptions in {time.time() - exception_start:.2f}s"
+        )
         if exception_service_dates:
             # Group by date to show which dates have exceptions
             dates_with_exceptions = {date for date, service_id in exception_service_dates}
@@ -540,7 +564,9 @@ def compute_daily_metrics(
                     dates.append(current)
                     current += timedelta(days=1)
 
-                print(f"Found {len(routes)} routes for date range {start_date} to {end_date} ({len(dates)} days)")
+                print(
+                    f"Found {len(routes)} routes for date range {start_date} to {end_date} ({len(dates)} days)"
+                )
             except ValueError as e:
                 print(
                     f"Error: Invalid date format. Use YYYY-MM-DD format (e.g., '2025-10-18'). Error: {e}"
@@ -558,9 +584,9 @@ def compute_daily_metrics(
         # NEW APPROACH: Process all routes for each date using batch processing
         # This is much faster because we load all positions at once per date
         for date in dates:
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"Processing date: {date.isoformat()}")
-            print(f"{'='*70}")
+            print(f"{'=' * 70}")
 
             # Use batch processing for this date
             date_results = compute_metrics_batch(db, routes, date, recalculate=recalculate)
@@ -572,7 +598,9 @@ def compute_daily_metrics(
             total_computed += computed_count
             total_skipped += skipped_count
 
-            print(f"Date {date.isoformat()} complete: {computed_count} computed, {skipped_count} skipped")
+            print(
+                f"Date {date.isoformat()} complete: {computed_count} computed, {skipped_count} skipped"
+            )
 
         print("\n" + "=" * 70)
         print("Daily metrics computation complete!")
@@ -629,19 +657,25 @@ def compute_summary_metrics(db, days: int = 7):
             m.avg_headway_minutes for m in daily_metrics if m.avg_headway_minutes is not None
         ]
         headway_std_dev_values = [
-            m.headway_std_dev_minutes for m in daily_metrics if m.headway_std_dev_minutes is not None
+            m.headway_std_dev_minutes
+            for m in daily_metrics
+            if m.headway_std_dev_minutes is not None
         ]
-        headway_cv_values = [
-            m.headway_cv for m in daily_metrics if m.headway_cv is not None
-        ]
+        headway_cv_values = [m.headway_cv for m in daily_metrics if m.headway_cv is not None]
         speed_values = [m.avg_speed_mph for m in daily_metrics if m.avg_speed_mph is not None]
         early_values = [m.early_percentage for m in daily_metrics if m.early_percentage is not None]
         late_values = [m.late_percentage for m in daily_metrics if m.late_percentage is not None]
 
         avg_otp = sum(otp_values) / len(otp_values) if otp_values else None
         avg_headway = sum(headway_values) / len(headway_values) if headway_values else None
-        avg_headway_std_dev = sum(headway_std_dev_values) / len(headway_std_dev_values) if headway_std_dev_values else None
-        avg_headway_cv = sum(headway_cv_values) / len(headway_cv_values) if headway_cv_values else None
+        avg_headway_std_dev = (
+            sum(headway_std_dev_values) / len(headway_std_dev_values)
+            if headway_std_dev_values
+            else None
+        )
+        avg_headway_cv = (
+            sum(headway_cv_values) / len(headway_cv_values) if headway_cv_values else None
+        )
         avg_speed = sum(speed_values) / len(speed_values) if speed_values else None
         avg_early = sum(early_values) / len(early_values) if early_values else None
         avg_late = sum(late_values) / len(late_values) if late_values else None

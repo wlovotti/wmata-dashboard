@@ -104,8 +104,7 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
     valid_metrics = ["otp", "early", "late", "headway", "headway_std_dev", "speed"]
     if metric not in valid_metrics:
         raise HTTPException(
-            status_code=400,
-            detail=f"Invalid metric. Must be one of: {', '.join(valid_metrics)}"
+            status_code=400, detail=f"Invalid metric. Must be one of: {', '.join(valid_metrics)}"
         )
 
     db = get_session()
