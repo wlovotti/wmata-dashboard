@@ -342,7 +342,10 @@ def compute_summary_metrics(db, days: int = 7):
             db.add(summary)
 
         db.commit()
-        print(f"    ✓ {route_id}: OTP={avg_otp:.1f}% over {len(daily_metrics)} days")
+        if avg_otp is not None:
+            print(f"    ✓ {route_id}: OTP={avg_otp:.1f}% over {len(daily_metrics)} days")
+        else:
+            print(f"    ✓ {route_id}: OTP=N/A over {len(daily_metrics)} days")
 
     print(f"  ✓ Summary metrics computed for {len(routes_with_data)} routes")
 

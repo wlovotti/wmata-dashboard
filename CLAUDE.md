@@ -8,13 +8,22 @@ WMATA Performance Dashboard - A transit metrics dashboard for Washington DC Metr
 
 ## Technology Stack
 
+**Backend:**
 - **Python 3.9+** with `uv` for package management
 - **SQLAlchemy** for ORM and database operations
 - **SQLite** for local development (PostgreSQL-ready for production)
 - **FastAPI** for REST API backend
 - **GTFS & GTFS-RT** for transit data (static schedules + real-time positions)
 - **protobuf** for parsing GTFS-RT vehicle position feeds
+- **NumPy** for vectorized array operations (performance-critical calculations)
 - **ruff** for code linting and formatting
+
+**Frontend:**
+- **React 18** with Vite build tool
+- **React Router** for client-side navigation
+- **Recharts** for data visualization (trend charts)
+- **React Leaflet** for interactive maps
+- **WMATA Brand Guidelines** for colors and typography
 
 ## Repository Structure
 
@@ -53,6 +62,19 @@ wmata-dashboard/
 │   ├── compare_route_otp.py
 │   ├── validate_deviation.py      # Validates WMATA deviation (found unreliable)
 │   └── ...
+│
+├── frontend/              # React frontend
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── RouteList.jsx    # Route scorecard table
+│   │   │   ├── RouteDetail.jsx  # Individual route detail page
+│   │   │   └── RouteMap.jsx     # Leaflet map with route visualization
+│   │   ├── App.jsx              # Main application with routing
+│   │   ├── App.css              # WMATA brand styling
+│   │   └── main.jsx             # React entry point
+│   ├── index.html               # HTML template with Leaflet CSS
+│   ├── package.json             # Node.js dependencies
+│   └── vite.config.js           # Vite build configuration
 │
 ├── docs/                 # Documentation
 │   ├── OTP_METHODOLOGY.md        # Detailed OTP calculation methodology
@@ -116,12 +138,30 @@ uv run uvicorn api.main:app --reload
 # Endpoints:
 #   GET /api/routes - All routes scorecard
 #   GET /api/routes/{route_id} - Detailed route metrics
-#   GET /api/routes/{route_id}/trends - Time-series trend data
+#   GET /api/routes/{route_id}/trend?days=30&metric=otp - Time-series trend data
 #   GET /api/routes/{route_id}/time-periods - Performance by time of day
+#   GET /api/routes/{route_id}/shapes - GTFS shapes for map visualization
+#   GET /api/routes/{route_id}/segments - Speed segments (disabled by default)
 
 # Test API
 curl http://localhost:8000/api/routes
 curl http://localhost:8000/api/routes/C51
+curl 'http://localhost:8000/api/routes/C51/trend?days=30&metric=otp'
+```
+
+### Running the Frontend
+```bash
+# Navigate to frontend directory
+cd frontend
+
+# Install dependencies (first time only)
+npm install
+
+# Start development server
+npm run dev
+
+# Frontend available at http://localhost:5173
+# The dashboard connects to the backend API at http://localhost:8000
 ```
 
 ### Running Analytics
@@ -172,6 +212,7 @@ sqlite3 wmata_dashboard.db
 4. **Nightly Batch Job** → `pipelines/compute_daily_metrics.py` computes daily metrics
 5. **Aggregation Tables** → Pre-computed metrics stored in `route_metrics_daily` and `route_metrics_summary`
 6. **API** → FastAPI serves pre-computed metrics with <100ms response times
+7. **Frontend** → React dashboard with route scorecard, detail pages, charts, and maps
 
 ### Database Models (`src/models.py`)
 
@@ -233,16 +274,41 @@ Key relationships:
 - Routes:
   - `GET /api/routes` - Scorecard for all routes
   - `GET /api/routes/{route_id}` - Detailed metrics for specific route
-  - `GET /api/routes/{route_id}/trends` - Time-series data (TODO: implement)
+  - `GET /api/routes/{route_id}/trend?days=30&metric=otp` - Time-series trend data
   - `GET /api/routes/{route_id}/time-periods` - Performance by time of day
+  - `GET /api/routes/{route_id}/shapes` - GTFS shapes for map visualization
+  - `GET /api/routes/{route_id}/segments` - Speed segments for map (vectorized with NumPy)
 
 **api/aggregations.py** - API aggregation functions
 - `get_all_routes_scorecard()`: Returns scorecard from pre-computed summary table (37ms response time)
-- `get_route_detail_metrics()`: Returns detailed metrics for a route
-- `get_route_trend_data()`: Time-series trend data (TODO: implement)
-- `get_route_speed_segments()`: Speed by route segment for map viz (TODO: implement)
+- `get_route_detail_metrics()`: Returns detailed metrics for a route (uses RouteMetricsSummary)
+- `get_route_trend_data()`: Time-series trend data (supports otp, headway, speed metrics)
+- `get_route_speed_segments()`: Vectorized NumPy calculation for speed by route segment
 - `get_route_time_period_summary()`: Performance metrics by time of day
 - `calculate_performance_grade()`: Converts OTP percentage to letter grade (A-F)
+
+**frontend/src/App.jsx** - Main React application
+- React Router setup with routes for RouteList and RouteDetail
+- WMATA branding (colors, typography)
+- Responsive layout
+
+**frontend/src/components/RouteList.jsx** - Route scorecard table
+- Sortable, filterable table showing all routes
+- Performance grades (A-F) with color coding
+- Click navigation to route detail pages
+- Sticky table headers
+
+**frontend/src/components/RouteDetail.jsx** - Individual route page
+- Route header with key metrics (OTP, headway, speed)
+- Performance by time of day (bar chart)
+- 30-day trend charts (OTP, headway, speed)
+- Interactive route map with WMATA branding
+
+**frontend/src/components/RouteMap.jsx** - Leaflet map component
+- Displays route geometry from GTFS shapes
+- Optional speed segments with color coding (disabled by default for performance)
+- Auto-fits bounds to route extent
+- WMATA red (#C8102E) for route lines
 
 **pipelines/compute_daily_metrics.py** - Nightly batch job
 - `compute_metrics_for_route_day()`: Computes all metrics for single route/day
@@ -268,7 +334,12 @@ Required in `.env` file:
 - **Route Stops Caching**: 100x+ performance improvement for multi-route analysis
 - **Trip Matching Fast Path**: ~90% of matches use RT trip_id directly (no position/time matching needed)
 - **Batch Loading**: Load all stops/trips upfront rather than individual queries
-- **NumPy Vectorization**: Use numpy arrays for distance/speed calculations
+- **NumPy Vectorization**: Use numpy arrays for distance/speed calculations (speed segments: ~10x faster)
+
+### Frontend Performance
+- **Speed Segments Disabled by Default**: Heavy calculation disabled by default, only computed on-demand
+- **Pre-computation Philosophy**: Heavy calculations done in offline pipelines, not live in API endpoints
+- **Database Considerations**: SQLite has write lock limitations (pause collection during dev), PostgreSQL required for production
 
 ## Current Status & Next Steps
 
@@ -282,39 +353,26 @@ Required in `.env` file:
 - ✅ Multi-level OTP calculations (stop/time-period/line level)
 - ✅ Analytics layer with headway and speed calculations
 - ✅ Trip matching with high accuracy
-- ✅ Performance optimizations (caching, batch loading)
+- ✅ Performance optimizations (caching, batch loading, NumPy vectorization)
 - ✅ Validation of WMATA deviation data (found unreliable)
 - ✅ Repository restructuring (src/, scripts/, tests/, debug/, api/, pipelines/)
-- ✅ Comprehensive documentation (OTP_METHODOLOGY.md, SESSION_SUMMARY.md)
+- ✅ Comprehensive documentation (OTP_METHODOLOGY.md, SESSION_SUMMARY.md, README.md)
 - ✅ CI/CD with GitHub Actions (ruff linting on PRs)
 - ✅ GTFS shapes support for accurate distance/speed calculations
 - ✅ Database migration scripts for schema updates
-- ✅ **FastAPI REST API backend**
+- ✅ **FastAPI REST API backend** with all major endpoints
 - ✅ **Pre-computed aggregation system** (route_metrics_daily, route_metrics_summary)
 - ✅ **Nightly batch job pipeline** (compute_daily_metrics.py)
 - ✅ **Ruff linting integration** (PR checks, code quality enforcement)
-
-**In Progress:**
-- 🔄 Web dashboard UI/visualization layer (React frontend)
-- 🔄 Additional API endpoints (trends, speed segments)
+- ✅ **React frontend dashboard** (Vite, React Router, Recharts, Leaflet)
+- ✅ **Route scorecard table** with sticky headers and WMATA branding
+- ✅ **Route detail pages** with metrics, charts, and interactive maps
+- ✅ **Trend charts** for OTP, headway, and speed (30-day time series)
+- ✅ **Route map visualization** with GTFS shapes and optional speed segments
 
 **Next Steps (Priority Order):**
 
-1. **Frontend Dashboard** (Next Priority)
-   - Set up React/Vite project in `frontend/` directory
-   - Create route scorecard view (table of all routes with OTP/headway/speed)
-   - Create route detail page (charts, time-series, map visualization)
-   - Integrate with FastAPI backend
-   - Add filtering/sorting capabilities
-
-2. **API Enhancements**
-   - Implement `get_route_trend_data()` - time-series data for charts
-   - Implement `get_route_speed_segments()` - segment-level speeds for map viz
-   - Add pagination for large result sets
-   - Add filtering parameters (date ranges, time periods)
-   - Add caching layer (Redis) for frequently accessed data
-
-3. **Production Deployment** (After Frontend MVP)
+1. **Production Deployment**
    - Deploy to cloud platform (DigitalOcean, AWS, etc.)
    - Set up PostgreSQL database
    - Configure continuous data collection (systemd service)
@@ -323,6 +381,19 @@ Required in `.env` file:
    - Configure Nginx reverse proxy
    - Set up SSL certificates (Let's Encrypt)
    - Implement monitoring and alerting
+
+2. **Frontend Enhancements**
+   - Add filtering/sorting to route scorecard table
+   - Implement search functionality for routes
+   - Add date range selectors for trend charts
+   - Improve responsive design for mobile devices
+   - Add loading states and error handling improvements
+
+3. **Performance Optimizations**
+   - Consider pre-computing speed segments in nightly pipeline
+   - Add caching layer (Redis) for frequently accessed data
+   - Optimize database queries with indexes
+   - Implement API pagination for large result sets
 
 4. **Advanced Analytics**
    - Bunching detection algorithms
@@ -339,8 +410,11 @@ Required in `.env` file:
 - Position/time-based matching serves as fallback for edge cases where RT trip_id is invalid
 - Never infer the planned schedule from actual vehicle position data - always use GTFS static data
 - BusPositions API useful for cross-validation and schedule discrepancy detection
-- Pre-computed aggregations are critical for API performance - never calculate metrics live in API endpoints
+- **Pre-computed aggregations are critical for API performance** - never calculate metrics live in API endpoints
+- **When adding new functionality**, consider whether calculation is expensive; if so, use offline pre-computation
 - Run nightly batch job to keep metrics up to date
+- **SQLite database locking**: For development, pause data collection when using API/dashboard (write locks block reads)
+- **PostgreSQL required for production** to support concurrent collection and API queries
 
 **Key Findings:**
 - ~40% of bus arrivals are early (real operational pattern, not data error)
@@ -348,6 +422,8 @@ Required in `.env` file:
 - Polling-based collection gives ±30-60 second accuracy (acceptable for trend analysis)
 - Route stops caching provides 100x+ performance improvement for multi-route analysis
 - API response time: 37ms with pre-computed aggregations (vs 30+ seconds with live calculation)
+- NumPy vectorization: ~10x speedup for speed segment calculations (3.4M → 350K operations)
+- Speed segments disabled by default in frontend to avoid performance issues on route detail pages
 
 ## Git Workflow
 
@@ -366,22 +442,25 @@ Required in `.env` file:
 
 ## Session Notes
 
-**Last Session (2025-10-15):**
-- Added ruff linting to PR checks in GitHub Actions workflow
-- Fixed all 91 code quality issues (type hints, imports, formatting)
-- Updated both README.md and CLAUDE.md to reflect current state
-- FastAPI backend fully functional with 37ms response times
-- Pre-computed aggregation system working well
-- Ready to start frontend development
+**Last Session (2025-10-18):**
+- Completed React frontend dashboard with WMATA branding
+- Built route scorecard table with sticky headers, sorting, and filtering
+- Created route detail pages with metrics, trend charts (OTP, headway, speed), and interactive maps
+- Implemented Leaflet map visualization with GTFS shapes
+- Added optional speed segments with color coding (disabled by default for performance)
+- Fixed multiple performance issues using NumPy vectorization
+- Addressed SQLite database locking issues (required pausing data collection during dev)
+- Updated README.md and CLAUDE.md documentation to reflect completed features
+- Frontend running at localhost:5173, API at localhost:8000
 
-**FastAPI Server Status:**
-- Server running on localhost:8000
-- `/api/routes` endpoint returning data for 3 routes (C53, D80, F20) with computed metrics
-- 122 routes showing null values (need data collection + metrics computation)
-- Response time: 37ms (1000x faster than live calculation)
+**Application Status:**
+- **Frontend**: Fully functional with all major features implemented
+- **API**: All endpoints working (routes, detail, trend, shapes, segments, time-periods)
+- **Performance**: 37ms API response time, vectorized speed segment calculation
+- **Data**: Multiple routes with computed metrics available for testing
 
-**Data Status:**
-- Test data collected from October 12, 2025
-- 3 routes have computed metrics (C53, D80, F20)
-- Need to collect more recent data for full route coverage
-- Pipeline ready to compute metrics when more data available
+**Technical Learnings:**
+- Pre-computation philosophy critical for performance (offline pipelines vs. live calculations)
+- NumPy vectorization provides ~10x speedup for distance/proximity calculations
+- SQLite write locks block reads - PostgreSQL required for production with concurrent access
+- Speed segments expensive to compute on-demand - should be pre-computed or disabled by default
