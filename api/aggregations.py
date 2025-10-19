@@ -12,9 +12,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.analytics import (
-    calculate_average_speed,
-    calculate_headways,
-    calculate_line_level_otp,
     calculate_time_period_otp,
 )
 from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, VehiclePosition
@@ -276,9 +273,11 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
     Returns:
         Route segments with coordinates and speed data
     """
-    from src.models import Shape, Trip, VehiclePosition
     from datetime import datetime, timedelta
+
     import numpy as np
+
+    from src.models import Shape, Trip, VehiclePosition
 
     # Get shape data for this route
     shape_ids = db.query(Trip.shape_id).filter(Trip.route_id == route_id).distinct().limit(1).all()
