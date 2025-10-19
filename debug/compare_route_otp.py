@@ -1,10 +1,11 @@
 """
 Compare OTP rates across all routes in the database
 """
-from src.database import get_session
-from src.analytics import calculate_line_level_otp
-from src.models import VehiclePosition
 from sqlalchemy import func
+
+from src.analytics import calculate_line_level_otp
+from src.database import get_session
+from src.models import VehiclePosition
 
 db = get_session()
 

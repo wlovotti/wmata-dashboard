@@ -4,12 +4,14 @@ Validate WMATA's deviation field by comparing it to our own calculations
 This checks if WMATA's reported deviation matches what we calculate from
 the GTFS schedule.
 """
-from src.database import get_session
-from src.models import BusPosition, Trip, StopTime, Stop
-from src.trip_matching import find_matching_trip
-from src.analytics import find_nearest_stop, haversine_distance
 from datetime import timedelta
+
 from sqlalchemy import and_
+
+from src.analytics import find_nearest_stop
+from src.database import get_session
+from src.models import BusPosition, StopTime
+from src.trip_matching import find_matching_trip
 
 db = get_session()
 
@@ -125,7 +127,7 @@ try:
     avg_diff = sum(c['difference'] for c in comparisons) / len(comparisons)
     max_diff = max(c['difference'] for c in comparisons)
 
-    print(f"\nStatistics:")
+    print("\nStatistics:")
     print(f"  Average difference: {avg_diff:.2f} minutes")
     print(f"  Max difference: {max_diff:.2f} minutes")
 

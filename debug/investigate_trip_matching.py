@@ -7,11 +7,11 @@ This script analyzes:
 3. What directions vehicles are traveling
 4. Time/position matching quality
 """
-from datetime import datetime
+from sqlalchemy import distinct, func
+
 from src.database import get_session
-from src.models import VehiclePosition, Trip, Route
+from src.models import Route, Trip, VehiclePosition
 from src.trip_matching import find_matching_trip
-from sqlalchemy import func, distinct
 
 db = get_session()
 
@@ -46,7 +46,7 @@ try:
         VehiclePosition.trip_id.isnot(None)
     ).limit(10).all()
 
-    print(f"Sample GTFS-RT trip_ids from C51 vehicles:")
+    print("Sample GTFS-RT trip_ids from C51 vehicles:")
     for (trip_id,) in rt_trip_ids:
         # Check if this trip exists in GTFS static
         static_trip = db.query(Trip).filter(Trip.trip_id == trip_id).first()
@@ -126,12 +126,12 @@ try:
             print(f"    Trip direction: {trip.direction_id}")
             print(f"    Trip headsign: {trip.trip_headsign}")
         else:
-            print(f"  ✗ NO MATCH FOUND")
+            print("  ✗ NO MATCH FOUND")
 
             # Try to diagnose why
             route = db.query(Route).filter(Route.route_id == 'C51').first()
             if not route:
-                print(f"    Problem: Route C51 not found in database!")
+                print("    Problem: Route C51 not found in database!")
 
             # Check if there are ANY trips for this route
             trip_count = db.query(Trip).filter(Trip.route_id == 'C51').count()
@@ -141,7 +141,7 @@ try:
             if pos.trip_id:
                 trip_from_rt = db.query(Trip).filter(Trip.trip_id == pos.trip_id).first()
                 if trip_from_rt:
-                    print(f"    Position has valid trip_id but matching failed!")
+                    print("    Position has valid trip_id but matching failed!")
                     print(f"    Trip direction: {trip_from_rt.direction_id}")
 
     # 5. Time coverage analysis
@@ -157,7 +157,7 @@ try:
     ).order_by(VehiclePosition.timestamp.desc()).first()
 
     if first_pos and last_pos:
-        print(f"Data collection period:")
+        print("Data collection period:")
         print(f"  First: {first_pos.timestamp}")
         print(f"  Last: {last_pos.timestamp}")
         print(f"  Duration: {(last_pos.timestamp - first_pos.timestamp).total_seconds() / 3600:.1f} hours")
@@ -171,7 +171,7 @@ try:
                                  last_pos.timestamp.minute * 60 +
                                  last_pos.timestamp.second)
 
-        print(f"\nScheduled C51 trips during collection window:")
+        print("\nScheduled C51 trips during collection window:")
         from src.models import StopTime
         trips_in_window = db.query(func.count(distinct(StopTime.trip_id))).join(
             Trip, StopTime.trip_id == Trip.trip_id

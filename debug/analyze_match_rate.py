@@ -5,7 +5,6 @@ This script analyzes how many collected vehicle positions successfully match
 to scheduled stops, to help inform optimal data collection frequency.
 """
 
-from datetime import datetime, timedelta
 
 from sqlalchemy import func
 
@@ -109,7 +108,7 @@ def analyze_match_rate():
             avg_positions_per_hour = total_positions / hours if hours > 0 else 0
             avg_interval_seconds = 3600 / avg_positions_per_hour if avg_positions_per_hour > 0 else 0
 
-            print(f"\n1. Collection Frequency:")
+            print("\n1. Collection Frequency:")
             print(f"   - Total collection time: {hours:.1f} hours")
             print(f"   - Total positions collected: {total_positions:,}")
             print(f"   - Average positions per hour: {avg_positions_per_hour:.0f}")
@@ -117,7 +116,7 @@ def analyze_match_rate():
                 f"   - Average interval between positions: {avg_interval_seconds:.0f} seconds"
             )
 
-        print(f"\n2. Match Rate:")
+        print("\n2. Match Rate:")
         print(f"   - Overall match rate: {overall_match_rate:.2f}%")
         print(f"   - Total matched arrivals: {total_arrivals:,}")
         print(
@@ -138,7 +137,7 @@ def analyze_match_rate():
             .all()
         )
 
-        print(f"\n3. Top 10 Routes by Matched Arrivals:")
+        print("\n3. Top 10 Routes by Matched Arrivals:")
         print(f"   {'Route':<8} {'Arrivals':>10} {'Avg OTP':>8}")
         print("   " + "-" * 28)
         for route in route_analysis:

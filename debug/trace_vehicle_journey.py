@@ -1,12 +1,14 @@
 """
 Trace a single vehicle's journey showing actual vs scheduled times at each stop
 """
+from datetime import timedelta
+
 import numpy as np
-from datetime import datetime, timedelta
-from src.database import get_session
-from src.models import VehiclePosition, Trip, StopTime, Stop
-from src.analytics import get_route_stops
 from sqlalchemy import and_
+
+from src.analytics import get_route_stops
+from src.database import get_session
+from src.models import StopTime, Trip, VehiclePosition
 
 db = get_session()
 

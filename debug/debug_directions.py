@@ -2,8 +2,9 @@
 Debug direction filtering for headway calculation
 """
 from datetime import datetime
+
 from src.database import get_session
-from src.models import VehiclePosition, Trip
+from src.models import Trip, VehiclePosition
 
 db = get_session()
 
@@ -53,7 +54,7 @@ try:
         ).all()
 
         if veh_positions:
-            trip_ids = set([v.trip_id for v in veh_positions if v.trip_id])
+            trip_ids = {v.trip_id for v in veh_positions if v.trip_id}
             print(f"  Vehicle {vid}: {len(veh_positions)} positions, trip_ids: {trip_ids}")
 
             for trip_id in trip_ids:

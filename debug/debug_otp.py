@@ -1,10 +1,10 @@
 """
 Debug OTP calculation to understand why so many buses appear early
 """
-from src.database import get_session
+
 from src.analytics import calculate_on_time_performance
+from src.database import get_session
 from src.models import VehiclePosition
-from datetime import datetime
 
 db = get_session()
 
@@ -32,7 +32,7 @@ try:
 
     otp = calculate_on_time_performance(db, 'C51')
 
-    print(f"\nOverall Stats:")
+    print("\nOverall Stats:")
     print(f"  Total positions: {db.query(VehiclePosition).filter(VehiclePosition.route_id == 'C51').count()}")
     print(f"  Matched: {otp.get('matched_vehicles')}")
     print(f"  Unmatched: {otp.get('unmatched_vehicles')}")

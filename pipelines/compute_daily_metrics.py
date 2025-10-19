@@ -19,7 +19,6 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-import numpy as np
 from sqlalchemy import and_, func
 
 from src.analytics import (
@@ -102,11 +101,11 @@ def compute_metrics_for_route_day(
         early_pct = otp_result.get("early_pct")
         late_pct = otp_result.get("late_pct")
         total_arrivals = otp_result.get("matched_observations", 0)
-        otp_time = time.time() - otp_start
-    except Exception as e:
+        time.time() - otp_start
+    except Exception:
         otp_pct = early_pct = late_pct = None
         total_arrivals = 0
-        otp_time = time.time() - otp_start
+        time.time() - otp_start
 
     # Compute headway
     headway_start = time.time()
@@ -117,10 +116,10 @@ def compute_metrics_for_route_day(
         avg_headway = headway_result.get("avg_headway_minutes")
         min_headway = headway_result.get("min_headway_minutes")
         max_headway = headway_result.get("max_headway_minutes")
-        headway_time = time.time() - headway_start
-    except Exception as e:
+        time.time() - headway_start
+    except Exception:
         avg_headway = min_headway = max_headway = None
-        headway_time = time.time() - headway_start
+        time.time() - headway_start
 
     # Compute speed
     speed_start = time.time()
@@ -130,10 +129,10 @@ def compute_metrics_for_route_day(
         )
         avg_speed = speed_result.get("avg_speed_mph")
         median_speed = speed_result.get("median_speed_mph")
-        speed_time = time.time() - speed_start
-    except Exception as e:
+        time.time() - speed_start
+    except Exception:
         avg_speed = median_speed = None
-        speed_time = time.time() - speed_start
+        time.time() - speed_start
 
     # Count unique vehicles and trips
     stats = (
@@ -212,7 +211,7 @@ def compute_metrics_batch(
             VehiclePosition.route_id.in_(route_ids),
             VehiclePosition.timestamp >= start_time,
             VehiclePosition.timestamp < end_time,
-            Trip.is_current == True,
+            Trip.is_current,
         )
     )
 
@@ -225,7 +224,7 @@ def compute_metrics_batch(
                 CalendarDate.date == func.strftime("%Y%m%d", VehiclePosition.timestamp),
                 CalendarDate.service_id == Trip.service_id,
                 CalendarDate.exception_type == 2,
-                CalendarDate.is_current == True,
+                CalendarDate.is_current,
             )
         )
         .exists()
@@ -298,13 +297,13 @@ def compute_metrics_batch(
             print(f"      ✓ Deleted {deleted} existing metrics in {time.time() - delete_start:.2f}s")
 
     # Step 5: Batch-load ALL GTFS data for all routes (avoid per-route queries)
-    print(f"  [5/5] Loading GTFS data for all routes...")
+    print("  [5/5] Loading GTFS data for all routes...")
     gtfs_start = time.time()
 
     route_ids_list = list(routes_to_process.keys())
 
     # Load all trips for these routes
-    print(f"      Loading trips...")
+    print("      Loading trips...")
     trips = db.query(Trip).filter(Trip.route_id.in_(route_ids_list), Trip.is_current).all()
     trip_map = {t.trip_id: t for t in trips}
     trips_by_route = defaultdict(list)
@@ -313,13 +312,13 @@ def compute_metrics_batch(
     print(f"      ✓ Loaded {len(trips)} trips")
 
     # Load all stop_times - filter by date in Python, not SQL
-    print(f"      Loading stop_times...")
+    print("      Loading stop_times...")
     # OPTIMIZATION: Load ALL stop_times for current GTFS version, filter in Python
     # This is faster than complex SQL joins and avoids chunking large IN() clauses
     all_stop_times = db.query(StopTime).filter(StopTime.is_current).all()
 
     # Filter to only the trips we loaded (which are already filtered by route and date)
-    trip_ids_set = set(t.trip_id for t in trips)
+    trip_ids_set = {t.trip_id for t in trips}
     stop_times_by_trip = defaultdict(list)
     for st in all_stop_times:
         if st.trip_id in trip_ids_set:
@@ -329,7 +328,7 @@ def compute_metrics_batch(
     print(f"      ✓ Loaded {len(all_stop_times)} stop_times, using {filtered_count} for today's trips")
 
     # Load all stops (just get all current stops, it's not that many)
-    print(f"      Loading stops...")
+    print("      Loading stops...")
     stops = db.query(Stop).filter(Stop.is_current).all()
     stop_map = {s.stop_id: s for s in stops}
     print(f"      ✓ Loaded {len(stops)} stops")
@@ -343,9 +342,9 @@ def compute_metrics_batch(
     # Import batch functions from analytics
     from src.analytics import (
         _process_positions_batch,
-        calculate_line_level_otp_batch,
-        calculate_headways_batch,
         calculate_average_speed_batch,
+        calculate_headways_batch,
+        calculate_line_level_otp_batch,
     )
 
     # Get all positions for routes we're processing
@@ -367,7 +366,7 @@ def compute_metrics_batch(
     print(f"      ✓ Processed positions in {time.time() - process_start:.2f}s ({len(positions_df)} matched arrivals)")
 
     # VECTORIZED METRICS CALCULATION - ALL routes computed simultaneously
-    print(f"      [6.2] Computing OTP for ALL routes...")
+    print("      [6.2] Computing OTP for ALL routes...")
     otp_start = time.time()
     otp_results = calculate_line_level_otp_batch(
         positions_df=positions_df,
@@ -375,7 +374,7 @@ def compute_metrics_batch(
     )
     print(f"      ✓ OTP computed for {len(otp_results)} routes in {time.time() - otp_start:.2f}s")
 
-    print(f"      [6.3] Computing headways for ALL routes...")
+    print("      [6.3] Computing headways for ALL routes...")
     headway_start = time.time()
     headway_results = calculate_headways_batch(
         positions_df=positions_df,
@@ -383,7 +382,7 @@ def compute_metrics_batch(
     )
     print(f"      ✓ Headways computed for {len(headway_results)} routes in {time.time() - headway_start:.2f}s")
 
-    print(f"      [6.4] Computing speeds for ALL routes...")
+    print("      [6.4] Computing speeds for ALL routes...")
     speed_start = time.time()
     speed_results = calculate_average_speed_batch(
         positions_df=positions_df,
@@ -392,11 +391,11 @@ def compute_metrics_batch(
     print(f"      ✓ Speeds computed for {len(speed_results)} routes in {time.time() - speed_start:.2f}s")
 
     # Combine results and save to database
-    print(f"      [6.5] Saving metrics to database...")
+    print("      [6.5] Saving metrics to database...")
     save_start = time.time()
 
     results = {}
-    for route_id, route in routes_to_process.items():
+    for route_id, _route in routes_to_process.items():
         # Get position count for this route
         pos_count = len(positions_by_route[route_id])
 

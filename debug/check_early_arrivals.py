@@ -1,12 +1,14 @@
 """
 Investigate why so many arrivals are classified as "early"
 """
-from src.database import get_session
-from src.models import VehiclePosition, Trip, StopTime, Stop
-from src.trip_matching import find_matching_trip
-from src.analytics import find_nearest_stop, haversine_distance
 from datetime import timedelta
+
 from sqlalchemy import and_
+
+from src.analytics import find_nearest_stop
+from src.database import get_session
+from src.models import StopTime, VehiclePosition
+from src.trip_matching import find_matching_trip
 
 db = get_session()
 

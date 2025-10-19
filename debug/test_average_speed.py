@@ -1,10 +1,11 @@
 """
 Test average speed calculation using shapes data
 """
-from src.database import get_session
-from src.analytics import calculate_average_speed
-from src.models import VehiclePosition
 from sqlalchemy import func
+
+from src.analytics import calculate_average_speed
+from src.database import get_session
+from src.models import VehiclePosition
 
 db = get_session()
 
@@ -37,7 +38,7 @@ try:
         if 'error' in speed_data:
             print(f"    Error: {speed_data['error']}")
         elif speed_data.get('avg_speed_mph') is None:
-            print(f"    No valid trips found")
+            print("    No valid trips found")
             if 'note' in speed_data:
                 print(f"    Note: {speed_data['note']}")
         else:
@@ -50,7 +51,7 @@ try:
 
             # Show sample trips
             if speed_data.get('sample_trips'):
-                print(f"\n    Sample trips:")
+                print("\n    Sample trips:")
                 for trip in speed_data['sample_trips'][:3]:
                     print(f"      - Vehicle {trip['vehicle_id']}: {trip['speed_mph']:.1f} mph, "
                           f"{trip['distance_miles']:.1f} mi, {trip['duration_minutes']:.1f} min")

@@ -1,8 +1,8 @@
 """
 Test OTP calculation using BusPositions deviation data
 """
-from src.database import get_session
 from src.analytics import calculate_otp_from_bus_positions
+from src.database import get_session
 
 db = get_session()
 
@@ -18,7 +18,7 @@ try:
     print(f"Data Source: {result['data_source']}")
     print(f"Observations: {result['observations']}")
     print(f"Unique Vehicles: {result['unique_vehicles']}")
-    print(f"\nOTP Metrics:")
+    print("\nOTP Metrics:")
     print(f"  On-time: {result['on_time_percentage']}%")
     print(f"  Early:   {result['early_percentage']}%")
     print(f"  Late:    {result['late_percentage']}%")

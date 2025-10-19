@@ -241,8 +241,7 @@ def get_vehicle_positions(
     """
     # OPTIMIZATION: Build query with SQL-based exception filtering
     # This avoids Python loops entirely by using database joins
-    from sqlalchemy import and_, func, or_
-    from sqlalchemy.sql import text
+    from sqlalchemy import and_, func
 
     if exclude_exception_dates:
         # Join with Trip to get service_id, then use a NOT EXISTS subquery
@@ -1845,7 +1844,7 @@ def calculate_line_level_otp(
     stop_ids = np.array([s.stop_id for s in route_stops])
     stop_lats = np.array([s.stop_lat for s in route_stops])
     stop_lons = np.array([s.stop_lon for s in route_stops])
-    stop_map_local = {s.stop_id: s for s in route_stops}
+    {s.stop_id: s for s in route_stops}
 
     # BATCH LOAD 2: Get all trips for this route (current version only)
     if trips is None:

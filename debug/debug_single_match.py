@@ -1,10 +1,10 @@
 """
 Debug a single vehicle position match attempt in detail
 """
-from src.database import get_session
-from src.models import VehiclePosition, Trip, StopTime, Stop
-from src.trip_matching import parse_gtfs_time, find_matching_trip
 from src.analytics import haversine_distance
+from src.database import get_session
+from src.models import Stop, StopTime, Trip, VehiclePosition
+from src.trip_matching import find_matching_trip, parse_gtfs_time
 
 db = get_session()
 
@@ -25,7 +25,7 @@ try:
     # Get the trip this vehicle claims to be on
     rt_trip = db.query(Trip).filter(Trip.trip_id == pos.trip_id).first()
     if rt_trip:
-        print(f"\nRT Trip Info:")
+        print("\nRT Trip Info:")
         print(f"  Direction: {rt_trip.direction_id}")
         print(f"  Headsign: {rt_trip.trip_headsign}")
 
@@ -34,7 +34,7 @@ try:
             StopTime.trip_id == rt_trip.trip_id
         ).order_by(StopTime.stop_sequence).limit(5).all()
 
-        print(f"\nFirst 5 scheduled stops for this trip:")
+        print("\nFirst 5 scheduled stops for this trip:")
         for st in stop_times:
             stop = db.query(Stop).filter(Stop.stop_id == st.stop_id).first()
             if stop:
@@ -61,13 +61,13 @@ try:
 
     if result:
         matched_trip, confidence = result
-        print(f"✓ MATCH FOUND!")
+        print("✓ MATCH FOUND!")
         print(f"  Trip: {matched_trip.trip_id}")
         print(f"  Confidence: {confidence:.0%}")
         print(f"  Same as RT trip_id: {matched_trip.trip_id == pos.trip_id}")
     else:
-        print(f"✗ NO MATCH FOUND")
-        print(f"\nDebugging why it failed...")
+        print("✗ NO MATCH FOUND")
+        print("\nDebugging why it failed...")
 
         # Try to figure out what went wrong
         # Check candidate trips
@@ -84,7 +84,7 @@ try:
 
         # Check a few stop_times with verbose output
         if rt_trip:
-            print(f"\n  Checking why stops don't match...")
+            print("\n  Checking why stops don't match...")
             stop_times = db.query(StopTime).filter(
                 StopTime.trip_id == rt_trip.trip_id
             ).order_by(StopTime.stop_sequence).limit(10).all()

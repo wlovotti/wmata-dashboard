@@ -2,8 +2,9 @@
 Check how many vehicle positions have trip_ids with actual stop_times
 """
 from datetime import datetime
+
 from src.database import get_session
-from src.models import VehiclePosition, StopTime
+from src.models import StopTime, VehiclePosition
 
 db = get_session()
 
@@ -48,7 +49,7 @@ try:
         print(f"\nValid trip_ids: {sorted(unique_trips_with_stops)}")
 
     if unique_trips_without_stops:
-        print(f"\nInvalid trip_ids (sample): {list(sorted(unique_trips_without_stops))[:10]}")
+        print(f"\nInvalid trip_ids (sample): {sorted(unique_trips_without_stops)[:10]}")
 
     print("\n" + "=" * 70)
 
