@@ -161,13 +161,13 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "route_long_name": route.route_long_name,
             "time_period_days": days,
             "otp_percentage": summary.otp_percentage,
-            "early_percentage": getattr(summary, 'early_percentage', None),
-            "late_percentage": getattr(summary, 'late_percentage', None),
+            "early_percentage": getattr(summary, "early_percentage", None),
+            "late_percentage": getattr(summary, "late_percentage", None),
             "avg_headway_minutes": summary.avg_headway_minutes,
             "min_headway_minutes": None,  # Not in summary table
             "max_headway_minutes": None,  # Not in summary table
             "avg_speed_mph": summary.avg_speed_mph,
-            "total_arrivals_analyzed": getattr(summary, 'total_arrivals_analyzed', 0) or 0,
+            "total_arrivals_analyzed": getattr(summary, "total_arrivals_analyzed", 0) or 0,
             "total_positions": position_stats.total_positions if position_stats else 0,
             "unique_vehicles": position_stats.unique_vehicles if position_stats else 0,
             "unique_trips": position_stats.unique_trips if position_stats else 0,
@@ -289,10 +289,7 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
 
     # Get all shape points ordered by sequence
     shape_points = (
-        db.query(Shape)
-        .filter(Shape.shape_id == shape_id)
-        .order_by(Shape.shape_pt_sequence)
-        .all()
+        db.query(Shape).filter(Shape.shape_id == shape_id).order_by(Shape.shape_pt_sequence).all()
     )
 
     if len(shape_points) < 2:
@@ -322,7 +319,9 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
             segment_points = shape_points[i : i + segment_size + 1]
             segments.append(
                 {
-                    "points": [{"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in segment_points],
+                    "points": [
+                        {"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in segment_points
+                    ],
                     "avg_speed_mph": None,
                 }
             )
@@ -336,18 +335,24 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
     shape_coords = np.array([[p.shape_pt_lat, p.shape_pt_lon] for p in shape_points])
 
     # Filter positions with valid coordinates and speed
-    valid_positions = [(p.latitude, p.longitude, p.speed)
-                       for p in positions
-                       if p.latitude is not None and p.longitude is not None and p.speed is not None]
+    valid_positions = [
+        (p.latitude, p.longitude, p.speed)
+        for p in positions
+        if p.latitude is not None and p.longitude is not None and p.speed is not None
+    ]
 
     if not valid_positions:
         # Return segments with no speed data
         for i in range(0, len(shape_points) - segment_size, segment_size):
             segment_points = shape_points[i : i + segment_size + 1]
-            segments.append({
-                "points": [{"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in segment_points],
-                "avg_speed_mph": None,
-            })
+            segments.append(
+                {
+                    "points": [
+                        {"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in segment_points
+                    ],
+                    "avg_speed_mph": None,
+                }
+            )
         return {"route_id": route_id, "days": days, "segments": segments}
 
     pos_coords = np.array([[lat, lon] for lat, lon, _ in valid_positions])
@@ -359,7 +364,9 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
 
     # Vectorized distance calculation: find nearest sampled shape point for each position
     # Shape: (n_positions, n_sampled_points)
-    distances = np.sum((pos_coords[:, np.newaxis, :] - sampled_coords[np.newaxis, :, :]) ** 2, axis=2)
+    distances = np.sum(
+        (pos_coords[:, np.newaxis, :] - sampled_coords[np.newaxis, :, :]) ** 2, axis=2
+    )
     closest_sampled_indices = np.argmin(distances, axis=1)
     min_distances = np.min(distances, axis=1)
 
@@ -389,10 +396,12 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
         segment_speeds = position_segments.get(segment_idx, [])
         avg_speed = np.mean(segment_speeds) if segment_speeds else None
 
-        segments.append({
-            "points": [{"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in segment_points],
-            "avg_speed_mph": float(avg_speed) if avg_speed is not None else None,
-        })
+        segments.append(
+            {
+                "points": [{"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in segment_points],
+                "avg_speed_mph": float(avg_speed) if avg_speed is not None else None,
+            }
+        )
 
     return {"route_id": route_id, "days": days, "segments": segments}
 

@@ -184,12 +184,7 @@ async def get_route_shapes(route_id: str):
     db = get_session()
     try:
         # Get distinct shape_ids for this route
-        shape_ids = (
-            db.query(Trip.shape_id)
-            .filter(Trip.route_id == route_id)
-            .distinct()
-            .all()
-        )
+        shape_ids = db.query(Trip.shape_id).filter(Trip.route_id == route_id).distinct().all()
 
         if not shape_ids:
             raise HTTPException(status_code=404, detail=f"No shapes found for route {route_id}")
@@ -208,13 +203,12 @@ async def get_route_shapes(route_id: str):
             )
 
             if points:
-                shapes_data.append({
-                    "shape_id": shape_id,
-                    "points": [
-                        {"lat": p.shape_pt_lat, "lon": p.shape_pt_lon}
-                        for p in points
-                    ]
-                })
+                shapes_data.append(
+                    {
+                        "shape_id": shape_id,
+                        "points": [{"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in points],
+                    }
+                )
 
         return {"route_id": route_id, "shapes": shapes_data}
     finally:
