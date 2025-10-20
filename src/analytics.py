@@ -386,7 +386,7 @@ def _process_positions_batch(
 
     Returns:
         DataFrame with columns:
-        - route_id, vehicle_id, trip_id, stop_id, timestamp
+        - route_id, vehicle_id, trip_id, stop_id, direction_id, timestamp
         - scheduled_time, diff_seconds
         - latitude, longitude, speed
         - stop_lat, stop_lon (for the matched stop)
@@ -494,6 +494,7 @@ def _process_positions_batch(
                 "vehicle_id": pos.vehicle_id,
                 "trip_id": pos.trip_id,
                 "stop_id": nearest_stop_id,
+                "direction_id": trip.direction_id,  # Add direction from trip
                 "timestamp": pos.timestamp,
                 "scheduled_time": scheduled_dt,
                 "diff_seconds": diff_seconds,
@@ -626,13 +627,17 @@ def calculate_headways_batch(
     one-by-one, this function processes ALL routes in a single vectorized operation.
 
     Headway is measured as the time between consecutive vehicles passing each stop.
-    For each route, we identify the most active stop and calculate headways there.
+    For each route + direction, we identify the most active stop and calculate headways there.
+    Results are then averaged across directions to produce route-level metrics.
+
+    CRITICAL: Headways are calculated PER DIRECTION to avoid mixing northbound/southbound
+    buses at the same stop, which would artificially halve the headway values.
 
     PERFORMANCE: Processes 103 routes in ~2-3 minutes (vs 30-60 minutes sequentially)
 
     Args:
         positions_df: DataFrame from _process_positions_batch() with columns:
-                      route_id, vehicle_id, trip_id, stop_id, timestamp,
+                      route_id, vehicle_id, trip_id, stop_id, direction_id, timestamp,
                       scheduled_time, diff_seconds, latitude, longitude, speed,
                       stop_lat, stop_lon
         route_ids: Optional list of route_ids to filter to (None = all routes in df)
@@ -672,44 +677,44 @@ def calculate_headways_batch(
         ["route_id", "vehicle_id", "trip_id", "stop_id"], as_index=False
     ).last()
 
-    # For each route, find the most active stop (most vehicle passages)
+    # For each route + direction, find the most active stop (most vehicle passages)
     # This will be our reference stop for headway calculation
+    # CRITICAL: Group by direction_id to avoid mixing northbound/southbound headways
     stop_counts = (
-        positions_df.groupby(["route_id", "stop_id"]).size().reset_index(name="passage_count")
+        positions_df.groupby(["route_id", "direction_id", "stop_id"])
+        .size()
+        .reset_index(name="passage_count")
     )
 
-    # Get the most active stop per route
+    # Get the most active stop per route + direction combination
     reference_stops = (
         stop_counts.sort_values("passage_count", ascending=False)
-        .groupby("route_id")
+        .groupby(["route_id", "direction_id"])
         .first()
         .reset_index()
     )
 
-    results = {}
+    # Calculate headways per direction, then average across directions
+    direction_results = {}
 
-    # Process each route individually (but using vectorized pandas operations)
+    # Process each route + direction individually (but using vectorized pandas operations)
     for _, ref_stop in reference_stops.iterrows():
         route_id = ref_stop["route_id"]
+        direction_id = ref_stop["direction_id"]
         stop_id = ref_stop["stop_id"]
 
-        # Filter to passages at this stop for this route
+        # Filter to passages at this stop for this route + direction
         route_stop_passages = positions_df[
-            (positions_df["route_id"] == route_id) & (positions_df["stop_id"] == stop_id)
+            (positions_df["route_id"] == route_id)
+            & (positions_df["direction_id"] == direction_id)
+            & (positions_df["stop_id"] == stop_id)
         ].copy()
 
         if len(route_stop_passages) < 2:
-            # Need at least 2 passages to calculate headway
-            results[route_id] = {
-                "route_id": route_id,
-                "avg_headway_minutes": None,
-                "min_headway_minutes": None,
-                "max_headway_minutes": None,
-                "std_dev_minutes": None,
-                "cv": None,
-                "count": 0,
-                "vehicles_passed_stop": len(route_stop_passages),
-            }
+            # Need at least 2 passages to calculate headway for this direction
+            # Store None for this direction, will handle in aggregation below
+            direction_key = (route_id, direction_id)
+            direction_results[direction_key] = None
             continue
 
         # Sort by timestamp
@@ -729,16 +734,8 @@ def calculate_headways_batch(
         valid_headways = headways[headways <= max_headway_minutes]
 
         if len(valid_headways) == 0:
-            results[route_id] = {
-                "route_id": route_id,
-                "avg_headway_minutes": None,
-                "min_headway_minutes": None,
-                "max_headway_minutes": None,
-                "std_dev_minutes": None,
-                "cv": None,
-                "count": 0,
-                "vehicles_passed_stop": len(route_stop_passages),
-            }
+            direction_key = (route_id, direction_id)
+            direction_results[direction_key] = None
         else:
             avg_headway = valid_headways.mean()
             std_dev = valid_headways.std()
@@ -747,15 +744,62 @@ def calculate_headways_batch(
             # Lower CV = more regular service, Higher CV = more bunching/gaps
             cv = std_dev / avg_headway if avg_headway > 0 else None
 
+            direction_key = (route_id, direction_id)
+            direction_results[direction_key] = {
+                "avg_headway_minutes": avg_headway,
+                "min_headway_minutes": valid_headways.min(),
+                "max_headway_minutes": valid_headways.max(),
+                "std_dev_minutes": std_dev,
+                "cv": cv,
+                "count": len(valid_headways),
+                "vehicles_passed_stop": len(route_stop_passages),
+            }
+
+    # Aggregate direction-level results to route-level by averaging
+    results = {}
+    routes_seen = {route_id for route_id, _ in direction_results.keys()}
+
+    for route_id in routes_seen:
+        # Get results for all directions of this route
+        dir_data = [
+            direction_results[(route_id, dir_id)]
+            for route_id_key, dir_id in direction_results.keys()
+            if route_id_key == route_id and direction_results[(route_id, dir_id)] is not None
+        ]
+
+        if not dir_data:
+            # No valid data for any direction
+            results[route_id] = {
+                "route_id": route_id,
+                "avg_headway_minutes": None,
+                "min_headway_minutes": None,
+                "max_headway_minutes": None,
+                "std_dev_minutes": None,
+                "cv": None,
+                "count": 0,
+                "vehicles_passed_stop": 0,
+            }
+        else:
+            # Average metrics across directions
+            avg_headway = sum(d["avg_headway_minutes"] for d in dir_data) / len(dir_data)
+            min_headway = min(d["min_headway_minutes"] for d in dir_data)
+            max_headway = max(d["max_headway_minutes"] for d in dir_data)
+            avg_std_dev = sum(d["std_dev_minutes"] for d in dir_data) / len(dir_data)
+            avg_cv = sum(d["cv"] for d in dir_data if d["cv"] is not None) / len(
+                [d for d in dir_data if d["cv"] is not None]
+            ) if any(d["cv"] is not None for d in dir_data) else None
+            total_count = sum(d["count"] for d in dir_data)
+            total_passages = sum(d["vehicles_passed_stop"] for d in dir_data)
+
             results[route_id] = {
                 "route_id": route_id,
                 "avg_headway_minutes": round(avg_headway, 2),
-                "min_headway_minutes": round(valid_headways.min(), 2),
-                "max_headway_minutes": round(valid_headways.max(), 2),
-                "std_dev_minutes": round(std_dev, 2),
-                "cv": round(cv, 3) if cv is not None else None,
-                "count": len(valid_headways),
-                "vehicles_passed_stop": len(route_stop_passages),
+                "min_headway_minutes": round(min_headway, 2),
+                "max_headway_minutes": round(max_headway, 2),
+                "std_dev_minutes": round(avg_std_dev, 2),
+                "cv": round(avg_cv, 3) if avg_cv is not None else None,
+                "count": total_count,
+                "vehicles_passed_stop": total_passages,
             }
 
     return results
