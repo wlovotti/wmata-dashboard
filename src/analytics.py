@@ -785,9 +785,12 @@ def calculate_headways_batch(
             min_headway = min(d["min_headway_minutes"] for d in dir_data)
             max_headway = max(d["max_headway_minutes"] for d in dir_data)
             avg_std_dev = sum(d["std_dev_minutes"] for d in dir_data) / len(dir_data)
-            avg_cv = sum(d["cv"] for d in dir_data if d["cv"] is not None) / len(
-                [d for d in dir_data if d["cv"] is not None]
-            ) if any(d["cv"] is not None for d in dir_data) else None
+            avg_cv = (
+                sum(d["cv"] for d in dir_data if d["cv"] is not None)
+                / len([d for d in dir_data if d["cv"] is not None])
+                if any(d["cv"] is not None for d in dir_data)
+                else None
+            )
             total_count = sum(d["count"] for d in dir_data)
             total_passages = sum(d["vehicles_passed_stop"] for d in dir_data)
 
