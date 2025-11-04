@@ -209,8 +209,8 @@ class Route(Base):
 
     # Relationships
     agency = relationship("Agency", back_populates="routes")
-    trips = relationship("Trip", back_populates="route")
-    vehicle_positions = relationship("VehiclePosition", back_populates="route")
+    # Note: trips and vehicle_positions relationships removed due to versioning complexity
+    # Query using: session.query(Trip).filter(Trip.route_id == route.route_id, Trip.is_current == True)
 
 
 class Stop(Base):
@@ -241,8 +241,8 @@ class Stop(Base):
     # Composite index for efficient queries on current stops
     __table_args__ = (Index("idx_stop_current", "stop_id", "is_current"),)
 
-    # Relationships
-    stop_times = relationship("StopTime", back_populates="stop")
+    # Note: stop_times relationship removed due to versioning complexity
+    # Query using: session.query(StopTime).filter(StopTime.stop_id == stop.stop_id, StopTime.is_current == True)
 
 
 class Trip(Base):
@@ -252,7 +252,9 @@ class Trip(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     trip_id = Column(String, nullable=False, index=True)
-    route_id = Column(String, ForeignKey("routes.route_id"), nullable=False, index=True)
+    route_id = Column(
+        String, nullable=False, index=True
+    )  # References routes.route_id (not FK due to versioning)
     service_id = Column(String, index=True)
     trip_headsign = Column(String)
     direction_id = Column(Integer)
@@ -272,10 +274,8 @@ class Trip(Base):
     # Composite index for efficient queries on current trips
     __table_args__ = (Index("idx_trip_current", "trip_id", "is_current"),)
 
-    # Relationships
-    route = relationship("Route", back_populates="trips")
-    stop_times = relationship("StopTime", back_populates="trip")
-    vehicle_positions = relationship("VehiclePosition", back_populates="trip")
+    # Note: Relationships removed due to versioning complexity
+    # Query using explicit filters on route_id/trip_id with is_current=True
 
 
 class StopTime(Base):
@@ -284,8 +284,12 @@ class StopTime(Base):
     __tablename__ = "stop_times"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    trip_id = Column(String, ForeignKey("trips.trip_id"), nullable=False, index=True)
-    stop_id = Column(String, ForeignKey("stops.stop_id"), nullable=False, index=True)
+    trip_id = Column(
+        String, nullable=False, index=True
+    )  # References trips.trip_id (not FK due to versioning)
+    stop_id = Column(
+        String, nullable=False, index=True
+    )  # References stops.stop_id (not FK due to versioning)
     arrival_time = Column(String, nullable=False)
     departure_time = Column(String, nullable=False)
     stop_sequence = Column(Integer, nullable=False)
@@ -305,9 +309,8 @@ class StopTime(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Relationships
-    trip = relationship("Trip", back_populates="stop_times")
-    stop = relationship("Stop", back_populates="stop_times")
+    # Note: Relationships removed due to versioning complexity
+    # Query using explicit filters with is_current=True
 
     # Composite indexes for efficient queries
     __table_args__ = (
@@ -348,8 +351,8 @@ class VehiclePosition(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     vehicle_id = Column(String, nullable=False, index=True)
     vehicle_label = Column(String)  # Vehicle display label
-    route_id = Column(String, ForeignKey("routes.route_id"), index=True)
-    trip_id = Column(String, ForeignKey("trips.trip_id"), index=True)
+    route_id = Column(String, index=True)  # References routes.route_id (not FK due to versioning)
+    trip_id = Column(String, index=True)  # References trips.trip_id (not FK due to versioning)
 
     # Position data
     latitude = Column(Float, nullable=False)
@@ -375,9 +378,8 @@ class VehiclePosition(Base):
     timestamp = Column(DateTime, nullable=False, index=True)
     collected_at = Column(DateTime, default=datetime.utcnow, index=True)
 
-    # Relationships
-    route = relationship("Route", back_populates="vehicle_positions")
-    trip = relationship("Trip", back_populates="vehicle_positions")
+    # Note: Relationships removed due to versioning complexity
+    # Query using explicit filters on route_id/trip_id with is_current=True
 
     # Composite indexes for efficient queries
     __table_args__ = (
@@ -505,6 +507,12 @@ class RouteMetricsSummary(Base):
     total_observations = Column(Integer)
     unique_vehicles = Column(Integer)
     last_data_timestamp = Column(DateTime)
+
+    # Pre-computed position statistics (7-day window)
+    total_positions_7d = Column(Integer)  # Total position records
+    unique_vehicles_7d = Column(Integer)  # Unique vehicles seen
+    unique_trips_7d = Column(Integer)  # Unique trips tracked
+    last_position_timestamp = Column(DateTime)  # Most recent position timestamp
 
     # Metadata
     computed_at = Column(DateTime, default=datetime.utcnow)

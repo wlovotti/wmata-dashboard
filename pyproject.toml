@@ -23,6 +23,9 @@ viz = [
 ]
 dev = [
     "ruff>=0.1.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "httpx>=0.24.0",  # For testing FastAPI endpoints
 ]
 
 [build-system]
@@ -52,3 +55,24 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py files
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=src",
+    "--cov=api",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+markers = [
+    "smoke: Quick smoke tests for critical functionality",
+    "integration: Integration tests requiring database",
+    "api: API endpoint tests",
+    "slow: Tests that take longer than 1 second",
+]

@@ -1,31 +1,37 @@
 import os
 
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.models import Base
 
+# Load environment variables before reading DATABASE_URL
+load_dotenv()
+
 # Database configuration from environment variables
-# Default to SQLite if no PostgreSQL connection string provided
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./wmata_dashboard.db")
+# PostgreSQL is required - no fallback to SQLite
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def get_engine():
-    """Create and return a SQLAlchemy engine"""
-    if DATABASE_URL.startswith("sqlite"):
-        # SQLite-specific settings
-        engine = create_engine(
-            DATABASE_URL,
-            connect_args={"check_same_thread": False},
-            echo=False,  # Set to True for SQL debugging
-        )
-    else:
-        # PostgreSQL settings
-        engine = create_engine(
-            DATABASE_URL,
-            pool_pre_ping=True,  # Verify connections before using
-            echo=False,  # Set to True for SQL debugging
-        )
+    """
+    Create and return a SQLAlchemy engine for PostgreSQL
+
+    Connection pooling is enabled for production performance:
+    - pool_pre_ping: Verify connections before using (handle stale connections)
+    - pool_size: Number of connections to maintain in pool
+    - max_overflow: Additional connections allowed when pool is full
+    - pool_recycle: Recycle connections after 1 hour
+    """
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        pool_recycle=3600,
+        echo=False,  # Set to True for SQL debugging
+    )
     return engine
 
 
