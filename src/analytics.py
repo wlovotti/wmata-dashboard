@@ -42,6 +42,7 @@ def get_date_format_expr(timestamp_column):
         # SQLite: use strftime
         return func.strftime("%Y%m%d", timestamp_column)
 
+
 # Cache for exception service-dates (loaded once per session)
 _EXCEPTION_SERVICE_DATES_CACHE = None
 
@@ -260,7 +261,7 @@ def get_vehicle_positions(
     """
     # OPTIMIZATION: Build query with SQL-based exception filtering
     # This avoids Python loops entirely by using database joins
-    from sqlalchemy import and_, func
+    from sqlalchemy import and_
 
     if exclude_exception_dates:
         # Join with Trip to get service_id, then use a NOT EXISTS subquery

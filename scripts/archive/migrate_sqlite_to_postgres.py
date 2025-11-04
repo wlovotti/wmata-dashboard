@@ -13,7 +13,7 @@ via init_database.py to ensure consistency.
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.models import RouteMetricsDaily, RouteMetricsSummary, VehiclePosition
@@ -103,7 +103,7 @@ def migrate_data():
                 migrated += len(positions)
                 print(
                     f"  Progress: {migrated:,}/{total_positions:,} "
-                    f"({migrated/total_positions*100:.1f}%)"
+                    f"({migrated / total_positions * 100:.1f}%)"
                 )
 
             print(f"✓ Migrated {migrated:,} vehicle positions")

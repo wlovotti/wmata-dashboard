@@ -65,9 +65,7 @@ def add_columns():
         # Add columns (safe to run multiple times - will fail gracefully if columns exist)
         try:
             conn.execute(
-                text(
-                    "ALTER TABLE route_metrics_summary ADD COLUMN total_positions_7d INTEGER"
-                )
+                text("ALTER TABLE route_metrics_summary ADD COLUMN total_positions_7d INTEGER")
             )
             print("  ✓ Added total_positions_7d")
         except Exception as e:
@@ -75,9 +73,7 @@ def add_columns():
 
         try:
             conn.execute(
-                text(
-                    "ALTER TABLE route_metrics_summary ADD COLUMN unique_vehicles_7d INTEGER"
-                )
+                text("ALTER TABLE route_metrics_summary ADD COLUMN unique_vehicles_7d INTEGER")
             )
             print("  ✓ Added unique_vehicles_7d")
         except Exception as e:
@@ -85,9 +81,7 @@ def add_columns():
 
         try:
             conn.execute(
-                text(
-                    "ALTER TABLE route_metrics_summary ADD COLUMN unique_trips_7d INTEGER"
-                )
+                text("ALTER TABLE route_metrics_summary ADD COLUMN unique_trips_7d INTEGER")
             )
             print("  ✓ Added unique_trips_7d")
         except Exception as e:

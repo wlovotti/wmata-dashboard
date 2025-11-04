@@ -15,18 +15,15 @@ Options:
 """
 
 import argparse
+import math
+import os
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-import os
-
+import numpy as np
 from dotenv import load_dotenv
-from sqlalchemy import and_, cast, func
-from sqlalchemy.types import String
-
-# Load environment variables
-load_dotenv()
+from sqlalchemy import and_, func
 
 from src.analytics import (
     calculate_average_speed,
@@ -34,6 +31,20 @@ from src.analytics import (
     calculate_line_level_otp,
     get_exception_service_dates,
 )
+from src.database import get_session
+from src.models import (
+    CalendarDate,
+    Route,
+    RouteMetricsDaily,
+    RouteMetricsSummary,
+    Stop,
+    StopTime,
+    Trip,
+    VehiclePosition,
+)
+
+# Load environment variables
+load_dotenv()
 
 
 def convert_numpy_types(value):
@@ -41,10 +52,6 @@ def convert_numpy_types(value):
 
     Converts NaN and Infinity to None (NULL) for proper JSON serialization.
     """
-    import math
-
-    import numpy as np
-
     if value is None:
         return None
     # Check for numpy scalar types or Python numeric types
@@ -59,17 +66,6 @@ def convert_numpy_types(value):
         return value.tolist()
     else:
         return value
-from src.database import get_session
-from src.models import (
-    CalendarDate,
-    Route,
-    RouteMetricsDaily,
-    RouteMetricsSummary,
-    Stop,
-    StopTime,
-    Trip,
-    VehiclePosition,
-)
 
 
 def compute_metrics_for_route_day(
@@ -462,7 +458,7 @@ def compute_metrics_batch(
 
         # Calculate unique vehicles for this route
         route_positions = positions_by_route[route_id]
-        unique_vehicles = len(set(pos.vehicle_id for pos in route_positions if pos.vehicle_id))
+        unique_vehicles = len({pos.vehicle_id for pos in route_positions if pos.vehicle_id})
 
         # Combine metrics from all batch results
         otp = otp_results.get(route_id)
@@ -479,8 +475,12 @@ def compute_metrics_batch(
                 "late_percentage": convert_numpy_types(otp.get("late_pct")),
                 "total_arrivals": int(otp.get("total_arrivals", 0)),
                 "unique_vehicles": unique_vehicles,
-                "avg_headway_minutes": convert_numpy_types(headway.get("avg_headway_minutes")) if headway else None,
-                "headway_std_dev_minutes": convert_numpy_types(headway.get("std_dev_minutes")) if headway else None,
+                "avg_headway_minutes": convert_numpy_types(headway.get("avg_headway_minutes"))
+                if headway
+                else None,
+                "headway_std_dev_minutes": convert_numpy_types(headway.get("std_dev_minutes"))
+                if headway
+                else None,
                 "headway_cv": convert_numpy_types(headway.get("cv")) if headway else None,
                 "avg_speed_mph": convert_numpy_types(speed.get("avg_speed_mph")) if speed else None,
                 "computed_at": datetime.utcnow(),
@@ -680,10 +680,7 @@ def get_last_data_collection_date(db) -> datetime:
         datetime object representing the most recent data collection timestamp,
         or current time if no data exists
     """
-    last_position = (
-        db.query(func.max(VehiclePosition.timestamp))
-        .scalar()
-    )
+    last_position = db.query(func.max(VehiclePosition.timestamp)).scalar()
 
     if last_position:
         return last_position
@@ -817,9 +814,13 @@ def compute_summary_metrics(db, days: int = 7):
             summary.unique_vehicles = total_vehicles
             summary.last_data_timestamp = last_timestamp
             summary.total_positions_7d = position_stats.total_positions if position_stats else None
-            summary.unique_vehicles_7d = position_stats.unique_vehicles_7d if position_stats else None
+            summary.unique_vehicles_7d = (
+                position_stats.unique_vehicles_7d if position_stats else None
+            )
             summary.unique_trips_7d = position_stats.unique_trips_7d if position_stats else None
-            summary.last_position_timestamp = position_stats.last_position_timestamp if position_stats else None
+            summary.last_position_timestamp = (
+                position_stats.last_position_timestamp if position_stats else None
+            )
             summary.computed_at = datetime.utcnow()
         else:
             # Create new
@@ -841,7 +842,9 @@ def compute_summary_metrics(db, days: int = 7):
                 total_positions_7d=position_stats.total_positions if position_stats else None,
                 unique_vehicles_7d=position_stats.unique_vehicles_7d if position_stats else None,
                 unique_trips_7d=position_stats.unique_trips_7d if position_stats else None,
-                last_position_timestamp=position_stats.last_position_timestamp if position_stats else None,
+                last_position_timestamp=position_stats.last_position_timestamp
+                if position_stats
+                else None,
             )
             db.add(summary)
 

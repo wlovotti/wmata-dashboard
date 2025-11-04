@@ -252,7 +252,9 @@ class Trip(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     trip_id = Column(String, nullable=False, index=True)
-    route_id = Column(String, nullable=False, index=True)  # References routes.route_id (not FK due to versioning)
+    route_id = Column(
+        String, nullable=False, index=True
+    )  # References routes.route_id (not FK due to versioning)
     service_id = Column(String, index=True)
     trip_headsign = Column(String)
     direction_id = Column(Integer)
@@ -282,8 +284,12 @@ class StopTime(Base):
     __tablename__ = "stop_times"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    trip_id = Column(String, nullable=False, index=True)  # References trips.trip_id (not FK due to versioning)
-    stop_id = Column(String, nullable=False, index=True)  # References stops.stop_id (not FK due to versioning)
+    trip_id = Column(
+        String, nullable=False, index=True
+    )  # References trips.trip_id (not FK due to versioning)
+    stop_id = Column(
+        String, nullable=False, index=True
+    )  # References stops.stop_id (not FK due to versioning)
     arrival_time = Column(String, nullable=False)
     departure_time = Column(String, nullable=False)
     stop_sequence = Column(Integer, nullable=False)

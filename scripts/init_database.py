@@ -16,7 +16,6 @@ from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy import text
 
 from src.database import get_session, init_db
 from src.models import (
@@ -101,9 +100,7 @@ def load_gtfs_data(db):
         # Create new GTFSSnapshot record
         now = datetime.utcnow()
         feed_version = (
-            gtfs_data["feed_info"][0].get("feed_version")
-            if gtfs_data.get("feed_info")
-            else None
+            gtfs_data["feed_info"][0].get("feed_version") if gtfs_data.get("feed_info") else None
         )
 
         snapshot = GTFSSnapshot(
@@ -400,9 +397,7 @@ def load_gtfs_data(db):
                 departure_time=tpt_data["departure_time"],
                 stop_sequence=int(tpt_data["stop_sequence"]),
                 stop_headsign=tpt_data.get("stop_headsign"),
-                pickup_type=int(tpt_data["pickup_type"])
-                if tpt_data.get("pickup_type")
-                else None,
+                pickup_type=int(tpt_data["pickup_type"]) if tpt_data.get("pickup_type") else None,
                 drop_off_type=int(tpt_data["drop_off_type"])
                 if tpt_data.get("drop_off_type")
                 else None,
@@ -435,6 +430,7 @@ def load_gtfs_data(db):
     except Exception as e:
         print(f"\n✗ Error loading GTFS data: {e}")
         import traceback
+
         traceback.print_exc()
         return False
 

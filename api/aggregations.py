@@ -9,7 +9,6 @@ import math
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.analytics import (
@@ -173,7 +172,9 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "early_percentage": sanitize_float(getattr(summary, "early_percentage", None)),
             "late_percentage": sanitize_float(getattr(summary, "late_percentage", None)),
             "avg_headway_minutes": sanitize_float(summary.avg_headway_minutes),
-            "headway_std_dev_minutes": sanitize_float(getattr(summary, "headway_std_dev_minutes", None)),
+            "headway_std_dev_minutes": sanitize_float(
+                getattr(summary, "headway_std_dev_minutes", None)
+            ),
             "headway_cv": sanitize_float(getattr(summary, "headway_cv", None)),
             "min_headway_minutes": None,  # Not in summary table
             "max_headway_minutes": None,  # Not in summary table
@@ -293,7 +294,7 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
 
     import numpy as np
 
-    from src.models import Shape, Trip, VehiclePosition
+    from src.models import Shape, Trip
 
     # Get shape data for this route
     shape_ids = db.query(Trip.shape_id).filter(Trip.route_id == route_id).distinct().limit(1).all()
