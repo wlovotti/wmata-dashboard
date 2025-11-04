@@ -12,12 +12,6 @@ load_dotenv()
 # Database configuration from environment variables
 # PostgreSQL is required - no fallback to SQLite
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError(
-        "DATABASE_URL environment variable is required. "
-        "Please set it in your .env file. "
-        "Example: DATABASE_URL=postgresql://user:pass@localhost/wmata_dashboard"
-    )
 
 
 def get_engine():
