@@ -3,11 +3,13 @@ Analytics module for calculating transit performance metrics
 """
 
 import math
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
@@ -22,6 +24,23 @@ from src.models import (
     Trip,
     VehiclePosition,
 )
+
+# Load environment variables
+load_dotenv()
+
+
+def get_date_format_expr(timestamp_column):
+    """
+    Get database-agnostic date formatting expression.
+    Returns SQLAlchemy func for formatting timestamp as YYYYMMDD string.
+    """
+    database_url = os.getenv("DATABASE_URL", "sqlite:///./wmata_dashboard.db")
+    if database_url.startswith("postgresql"):
+        # PostgreSQL: use to_char
+        return func.to_char(timestamp_column, "YYYYMMDD")
+    else:
+        # SQLite: use strftime
+        return func.strftime("%Y%m%d", timestamp_column)
 
 # Cache for exception service-dates (loaded once per session)
 _EXCEPTION_SERVICE_DATES_CACHE = None
@@ -275,7 +294,7 @@ def get_vehicle_positions(
             ~db.query(CalendarDate)
             .filter(
                 and_(
-                    CalendarDate.date == func.strftime("%Y%m%d", VehiclePosition.timestamp),
+                    CalendarDate.date == get_date_format_expr(VehiclePosition.timestamp),
                     CalendarDate.service_id == Trip.service_id,
                     CalendarDate.is_current == True,  # noqa: E712
                 )

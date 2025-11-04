@@ -11,11 +11,12 @@ WMATA Performance Dashboard - A transit metrics dashboard for Washington DC Metr
 **Backend:**
 - **Python 3.9+** with `uv` for package management
 - **SQLAlchemy** for ORM and database operations
-- **SQLite** for local development (PostgreSQL-ready for production)
+- **PostgreSQL** (required - no SQLite support)
 - **FastAPI** for REST API backend
 - **GTFS & GTFS-RT** for transit data (static schedules + real-time positions)
 - **protobuf** for parsing GTFS-RT vehicle position feeds
 - **NumPy** for vectorized array operations (performance-critical calculations)
+- **pytest** for testing (smoke tests + integration tests)
 - **ruff** for code linting and formatting
 
 **Frontend:**
@@ -50,7 +51,7 @@ wmata-dashboard/
 │   ├── collect_sample_data.py     # Collect sample data (supports "all" for system-wide)
 │   ├── continuous_collector.py    # Production data collector (60s polling)
 │   ├── reload_gtfs_complete.py    # Refresh GTFS static data
-│   └── migrate_*.py              # Database migration scripts
+│   └── archive/                   # Archived migration scripts (no longer needed)
 │
 ├── tests/                # Test files
 │   ├── test_analytics.py
@@ -86,8 +87,7 @@ wmata-dashboard/
 ├── .env                  # Environment variables (not in git)
 ├── CLAUDE.md            # This file - project context for Claude Code
 ├── README.md            # User-facing documentation
-├── pyproject.toml       # Python dependencies and ruff config
-└── wmata_dashboard.db   # SQLite database (not in git)
+└── pyproject.toml       # Python dependencies, ruff config, pytest config
 ```
 
 ## Development Commands
@@ -100,11 +100,13 @@ brew install uv
 # Install dependencies (including dev dependencies)
 uv sync --extra dev
 
+# Set up PostgreSQL (REQUIRED)
+createdb wmata_dashboard
+echo "DATABASE_URL=postgresql://localhost/wmata_dashboard" >> .env
+echo "WMATA_API_KEY=your_key_here" >> .env
+
 # Initialize database and load GTFS static data (run once, takes 5-10 minutes)
 uv run python scripts/init_database.py
-
-# For PostgreSQL in production, add to .env:
-# DATABASE_URL=postgresql://user:pass@host/dbname
 ```
 
 ### Running Data Collection
@@ -194,8 +196,8 @@ uv run ruff check --fix src/ scripts/ api/ pipelines/
 
 ### Database Access
 ```bash
-# Query SQLite database directly
-sqlite3 wmata_dashboard.db
+# Query PostgreSQL database directly
+psql wmata_dashboard
 
 # Example queries:
 # SELECT COUNT(*) FROM vehicle_positions;
@@ -242,7 +244,9 @@ Key relationships:
 **src/database.py** - Database connection factory
 - `get_session()`: Returns new database session
 - `init_db()`: Creates all tables
-- Supports both SQLite (dev) and PostgreSQL (prod) via `DATABASE_URL` env var
+- `get_engine()`: Creates database engine with appropriate settings
+- Supports both PostgreSQL (production) and SQLite (development) via `DATABASE_URL` env var
+- Automatically configures connection pooling for PostgreSQL
 
 **src/wmata_collector.py** - GTFS/GTFS-RT data collection
 - `download_gtfs_static()`: Downloads and parses GTFS static zip file
@@ -253,6 +257,7 @@ Key relationships:
 - `_save_bus_positions()`: Bulk inserts bus positions from WMATA API
 
 **src/analytics.py** - Transit performance metrics
+- `get_date_format_expr()`: Database-agnostic date formatting (PostgreSQL/SQLite compatibility)
 - `calculate_headways()`: Measures time between consecutive buses at reference stops
 - `calculate_stop_level_otp()`: OTP at specific stop on route
 - `calculate_time_period_otp()`: OTP by time of day (AM Peak, Midday, PM Peak, Evening, Night)
@@ -311,17 +316,25 @@ Key relationships:
 - WMATA red (#C8102E) for route lines
 
 **pipelines/compute_daily_metrics.py** - Nightly batch job
+- `convert_numpy_types()`: Converts NumPy types to Python native types (PostgreSQL compatibility)
 - `compute_metrics_for_route_day()`: Computes all metrics for single route/day
 - `compute_daily_metrics()`: Main function - computes for all routes over N days
 - `compute_summary_metrics()`: Aggregates daily metrics into rolling summaries
 - Stores results in `route_metrics_daily` and `route_metrics_summary` tables
+- Database-agnostic date formatting for PostgreSQL/SQLite compatibility
 - Run via cron: `0 2 * * * cd /path/to/wmata-dashboard && uv run python pipelines/compute_daily_metrics.py --days 7`
+
+**scripts/migrate_sqlite_to_postgres.py** - Database migration script
+- `migrate_data()`: Migrates vehicle positions, daily metrics, and summary metrics from SQLite to PostgreSQL
+- Uses bulk insert operations for performance
+- Batch processing for large datasets (1000 records per batch)
+- Gracefully handles schema differences using `getattr()` with defaults
 
 ## Environment Variables
 
 Required in `.env` file:
 - `WMATA_API_KEY`: API key from https://developer.wmata.com (rate limit: 10 calls/sec, 50k/day)
-- `DATABASE_URL`: Optional, defaults to SQLite `./wmata_dashboard.db`, use PostgreSQL URI for production
+- `DATABASE_URL`: PostgreSQL URI (recommended: `postgresql://localhost/wmata_dashboard`) or SQLite path for development (`sqlite:///./wmata_dashboard.db`)
 
 ## Performance Optimizations
 
@@ -339,7 +352,45 @@ Required in `.env` file:
 ### Frontend Performance
 - **Speed Segments Disabled by Default**: Heavy calculation disabled by default, only computed on-demand
 - **Pre-computation Philosophy**: Heavy calculations done in offline pipelines, not live in API endpoints
-- **Database Considerations**: SQLite has write lock limitations (pause collection during dev), PostgreSQL required for production
+
+### Database Performance
+- **PostgreSQL Benefits**: No write locks, concurrent read/write operations, better query optimization
+- **SQLite Limitations**: Write locks block reads (pause collection during development), not suitable for production
+- **Database-Agnostic Code**: All queries work on both PostgreSQL and SQLite with automatic detection
+- **Type Conversion**: NumPy types automatically converted to Python native types for PostgreSQL compatibility
+
+## Database Migration Notes
+
+### PostgreSQL Migration (Completed October 2025)
+
+The project successfully migrated from SQLite to PostgreSQL for production use. Key changes:
+
+**Compatibility Fixes:**
+1. **Date Formatting**: Added `get_date_format_expr()` helper function in both `analytics.py` and `compute_daily_metrics.py` to handle database-specific date formatting:
+   - PostgreSQL: `to_char(timestamp, 'YYYYMMDD')`
+   - SQLite: `strftime('%Y%m%d', timestamp)`
+
+2. **NumPy Type Conversion**: Created `convert_numpy_types()` helper in `compute_daily_metrics.py` to convert NumPy types (np.float64, np.integer) to Python native types before database insertion. PostgreSQL interprets NumPy types as schema qualifiers, causing errors.
+
+3. **Schema Fields**: Added `unique_vehicles` field to daily metrics calculation to track distinct vehicles per route/day.
+
+**Migration Process:**
+1. Created PostgreSQL database: `createdb wmata_dashboard`
+2. Updated `.env` with `DATABASE_URL=postgresql://localhost/wmata_dashboard`
+3. Initialized PostgreSQL schema: `scripts/init_database.py --no-confirm`
+4. Migrated data: `scripts/migrate_sqlite_to_postgres.py` (vehicle positions, daily metrics, summary metrics)
+5. Recomputed metrics: `pipelines/compute_daily_metrics.py --days 7 --recalculate`
+
+**Benefits:**
+- Concurrent read/write operations (no more write locks)
+- Better query optimization and performance
+- Production-ready reliability
+- Proper type checking and data validation
+
+**Backward Compatibility:**
+- All code remains SQLite-compatible via environment detection
+- Developers can use either database by setting `DATABASE_URL`
+- Migration script available for easy transition
 
 ## Current Status & Next Steps
 
@@ -348,8 +399,7 @@ Required in `.env` file:
 - ✅ Complete GTFS schema with all fields and tables
 - ✅ Real-time vehicle position collection (GTFS-RT VehiclePositions) - ALL 17 fields captured
 - ✅ WMATA BusPositions API integration (supplementary)
-- ✅ SQLite local development setup
-- ✅ PostgreSQL production-ready architecture
+- ✅ PostgreSQL production database (required for concurrent access and performance)
 - ✅ Multi-level OTP calculations (stop/time-period/line level)
 - ✅ Analytics layer with headway and speed calculations
 - ✅ **Headway regularity metrics** (standard deviation, coefficient of variation for bunching detection)
@@ -372,10 +422,23 @@ Required in `.env` file:
 - ✅ **Trend charts** for all metrics: OTP, early%, late%, headway, headway regularity, speed
 - ✅ **Route map visualization** with GTFS shapes and optional speed segments
 - ✅ **Data collection frequency analysis** (60-second intervals validated as optimal)
+- ✅ **PostgreSQL migration** with database-agnostic code and migration script
+- ✅ **Database compatibility layer** (automatic detection and adaptation for PostgreSQL/SQLite)
+- ✅ **"Last 7 days" date calculation fix** - Metrics use last data collection date as reference (robust to gaps)
+- ✅ **API performance optimization** - Position statistics pre-computation (700ms → 18ms)
+- ✅ **PostgreSQL connection pooling** - Production-ready database configuration
+- ✅ **Date range fields in API** - Frontend displays actual metric time periods
 
 **Next Steps (Priority Order):**
 
-1. **Production Deployment** (Next Priority)
+1. **Pre-Deployment Maintenance** (Current Priority)
+   - Fix frontend map functionality (investigate API response/frontend integration)
+   - Create comprehensive test suite (API smoke tests, integration tests)
+   - Update CI/CD to run automated tests on PRs
+   - Validate PostgreSQL migration complete and remove SQLite artifacts
+   - Update documentation to reflect current state
+
+2. **Production Deployment** (After Maintenance)
    - Deploy to cloud platform (DigitalOcean, AWS, Heroku, etc.)
    - Set up PostgreSQL database
    - Configure continuous data collection (systemd service or cloud scheduler)
@@ -386,26 +449,26 @@ Required in `.env` file:
    - Build and serve frontend static files
    - Implement monitoring and alerting
 
-2. **Data Retention & Archival**
+3. **Data Retention & Archival**
    - Implement data archival strategy (keep raw 60s data for 2-4 weeks)
    - Aggregate older data to 5-10 minute averages
    - Set up automated cleanup jobs
    - Target steady-state storage: ~1-2 GB
 
-3. **Frontend Enhancements**
+4. **Frontend Enhancements**
    - Add date range selectors for trend charts
    - Improve responsive design for mobile devices
    - Add loading states and error handling improvements
    - Export functionality (CSV, JSON downloads)
 
-4. **API Enhancements**
+5. **API Enhancements**
    - Add pagination for large result sets
    - Add date range filtering parameters
    - Add caching layer (Redis) for frequently accessed data
    - Add API rate limiting
    - Add API authentication/authorization (if needed)
 
-5. **Advanced Analytics & Features**
+6. **Advanced Analytics & Features**
    - Automated bus bunching alerts
    - Service gap identification and alerting
    - Route reliability scoring (beyond just OTP)
@@ -424,8 +487,10 @@ Required in `.env` file:
 - **Pre-computed aggregations are critical for API performance** - never calculate metrics live in API endpoints
 - **When adding new functionality**, consider whether calculation is expensive; if so, use offline pre-computation
 - Run nightly batch job to keep metrics up to date
-- **SQLite database locking**: For development, pause data collection when using API/dashboard (write locks block reads)
-- **PostgreSQL required for production** to support concurrent collection and API queries
+- **PostgreSQL is now the primary database** - SQLite only for local development
+- **Database compatibility**: Code automatically detects and adapts to PostgreSQL vs SQLite
+- **SQLite write locks**: For SQLite development, pause data collection when using API/dashboard (write locks block reads)
+- **NumPy type conversion**: All metrics automatically converted from NumPy to Python native types for PostgreSQL
 - **60-second collection frequency is optimal** - provides good data quality with minimal API usage (1,440/50,000 daily limit)
 - **22.75% match rate is expected and healthy** - buses spend 75-80% of time between stops, not at them
 
@@ -460,7 +525,26 @@ Required in `.env` file:
 
 ## Session Notes
 
-**Current Session (2025-10-19):**
+**Current Session (2025-10-27):**
+- Preparing for production deployment with pre-deployment maintenance
+- Fixed "last 7 days" date calculation to use last data collection date (robust to gaps)
+- Optimized API performance with position statistics pre-computation (700ms → 18ms)
+- Added date range fields to API responses (date_range_start, date_range_end)
+- Fixed off-by-one error in date range calculation (was 8 days, now correctly 7 days)
+- Created comprehensive test suite plan (API smoke tests, integration tests)
+- Updated documentation to reflect current state and priorities
+
+**Previous Session (2025-10-25):**
+- Completed PostgreSQL migration from SQLite
+- Fixed database compatibility issues (strftime vs to_char, NumPy types)
+- Added database-agnostic helper functions for date formatting
+- Created migration script for data transfer (vehicle positions, metrics)
+- Recomputed metrics pipeline to populate new PostgreSQL tables
+- Updated documentation (README.md, CLAUDE.md) with PostgreSQL setup and migration guide
+- System now running on PostgreSQL in production with no write lock issues
+- All API endpoints tested and working with PostgreSQL backend
+
+**Previous Session (2025-10-19):**
 - Added headway regularity metrics (standard deviation, coefficient of variation)
 - Implemented bus bunching detection in analytics pipeline
 - Created database migration script for new headway metrics columns
@@ -505,3 +589,4 @@ Required in `.env` file:
 - NumPy vectorization provides ~10x speedup for distance/proximity calculations
 - SQLite write locks block reads - PostgreSQL required for production with concurrent access
 - Speed segments expensive to compute on-demand - should be pre-computed or disabled by default
+- Before committing new code to git, check if there are any linting or formatting errors with ruff.

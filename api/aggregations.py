@@ -5,6 +5,7 @@ These functions compute high-level metrics from raw vehicle position data,
 optimized for fast API responses and dashboard visualization.
 """
 
+import math
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -15,6 +16,27 @@ from src.analytics import (
     calculate_time_period_otp,
 )
 from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, VehiclePosition
+
+
+def sanitize_float(value):
+    """
+    Convert float value to None if it's NaN or Infinity
+
+    Args:
+        value: Float value to sanitize
+
+    Returns:
+        None if value is NaN/Infinity, otherwise the float value
+    """
+    if value is None:
+        return None
+    try:
+        float_value = float(value)
+        if math.isnan(float_value) or math.isinf(float_value):
+            return None
+        return float_value
+    except (ValueError, TypeError):
+        return None
 
 
 def calculate_performance_grade(otp_percentage: Optional[float]) -> str:
@@ -74,10 +96,12 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
                 "route_id": summary.route_id,
                 "route_name": route.route_short_name,
                 "route_long_name": route.route_long_name,
-                "otp_percentage": summary.otp_percentage,
-                "avg_headway_minutes": summary.avg_headway_minutes,
-                "headway_std_dev_minutes": getattr(summary, "headway_std_dev_minutes", None),
-                "avg_speed_mph": summary.avg_speed_mph,
+                "otp_percentage": sanitize_float(summary.otp_percentage),
+                "avg_headway_minutes": sanitize_float(summary.avg_headway_minutes),
+                "headway_std_dev_minutes": sanitize_float(
+                    getattr(summary, "headway_std_dev_minutes", None)
+                ),
+                "avg_speed_mph": sanitize_float(summary.avg_speed_mph),
                 "grade": calculate_performance_grade(summary.otp_percentage),
                 "total_observations": summary.total_observations,
                 "data_updated_at": summary.last_data_timestamp.isoformat()
@@ -133,27 +157,8 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
     if not route:
         return {"error": f"Route {route_id} not found"}
 
-    # Get pre-computed summary metrics
+    # Get pre-computed summary metrics (includes position stats)
     summary = db.query(RouteMetricsSummary).filter(RouteMetricsSummary.route_id == route_id).first()
-
-    # Calculate date range for position stats
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=days)
-
-    # Count unique vehicles and trips
-    position_stats = (
-        db.query(
-            func.count(VehiclePosition.id).label("total_positions"),
-            func.count(func.distinct(VehiclePosition.vehicle_id)).label("unique_vehicles"),
-            func.count(func.distinct(VehiclePosition.trip_id)).label("unique_trips"),
-        )
-        .filter(
-            VehiclePosition.route_id == route_id,
-            VehiclePosition.timestamp >= start_time,
-            VehiclePosition.timestamp <= end_time,
-        )
-        .first()
-    )
 
     # Return summary metrics if available
     if summary:
@@ -162,19 +167,21 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "route_name": route.route_short_name,
             "route_long_name": route.route_long_name,
             "time_period_days": days,
-            "otp_percentage": summary.otp_percentage,
-            "early_percentage": getattr(summary, "early_percentage", None),
-            "late_percentage": getattr(summary, "late_percentage", None),
-            "avg_headway_minutes": summary.avg_headway_minutes,
-            "headway_std_dev_minutes": getattr(summary, "headway_std_dev_minutes", None),
-            "headway_cv": getattr(summary, "headway_cv", None),
+            "date_range_start": summary.date_start if hasattr(summary, "date_start") else None,
+            "date_range_end": summary.date_end if hasattr(summary, "date_end") else None,
+            "otp_percentage": sanitize_float(summary.otp_percentage),
+            "early_percentage": sanitize_float(getattr(summary, "early_percentage", None)),
+            "late_percentage": sanitize_float(getattr(summary, "late_percentage", None)),
+            "avg_headway_minutes": sanitize_float(summary.avg_headway_minutes),
+            "headway_std_dev_minutes": sanitize_float(getattr(summary, "headway_std_dev_minutes", None)),
+            "headway_cv": sanitize_float(getattr(summary, "headway_cv", None)),
             "min_headway_minutes": None,  # Not in summary table
             "max_headway_minutes": None,  # Not in summary table
-            "avg_speed_mph": summary.avg_speed_mph,
+            "avg_speed_mph": sanitize_float(summary.avg_speed_mph),
             "total_arrivals_analyzed": getattr(summary, "total_arrivals_analyzed", 0) or 0,
-            "total_positions": position_stats.total_positions if position_stats else 0,
-            "unique_vehicles": position_stats.unique_vehicles if position_stats else 0,
-            "unique_trips": position_stats.unique_trips if position_stats else 0,
+            "total_positions": getattr(summary, "total_positions_7d", 0) or 0,
+            "unique_vehicles": getattr(summary, "unique_vehicles_7d", 0) or 0,
+            "unique_trips": getattr(summary, "unique_trips_7d", 0) or 0,
             "grade": calculate_performance_grade(summary.otp_percentage),
         }
     else:
@@ -194,9 +201,9 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "max_headway_minutes": None,
             "avg_speed_mph": None,
             "total_arrivals_analyzed": 0,
-            "total_positions": position_stats.total_positions if position_stats else 0,
-            "unique_vehicles": position_stats.unique_vehicles if position_stats else 0,
-            "unique_trips": position_stats.unique_trips if position_stats else 0,
+            "total_positions": 0,
+            "unique_vehicles": 0,
+            "unique_trips": 0,
             "grade": "N/A",
         }
 
@@ -408,7 +415,7 @@ def get_route_speed_segments(db: Session, route_id: str, days: int = 7) -> dict:
         segments.append(
             {
                 "points": [{"lat": p.shape_pt_lat, "lon": p.shape_pt_lon} for p in segment_points],
-                "avg_speed_mph": float(avg_speed) if avg_speed is not None else None,
+                "avg_speed_mph": sanitize_float(avg_speed),
             }
         )
 

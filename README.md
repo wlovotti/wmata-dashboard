@@ -19,7 +19,7 @@ A real-time transit performance dashboard for Washington DC Metro bus and rail l
 - **Fast API**: Pre-computed aggregation tables for sub-100ms API responses
 - **REST API**: FastAPI backend serving route scorecards and detailed metrics
 - **Interactive Maps**: Leaflet-based route visualization with WMATA branding
-- **Database**: SQLite for development, PostgreSQL-ready for production
+- **Database**: PostgreSQL for production, SQLite also supported for development
 
 ## Quick Start
 
@@ -28,6 +28,7 @@ A real-time transit performance dashboard for Washington DC Metro bus and rail l
 - Python 3.9+
 - Node.js 18+ (for frontend)
 - [uv](https://github.com/astral-sh/uv) package manager
+- PostgreSQL 12+ (recommended) or SQLite for development
 - WMATA API key from https://developer.wmata.com
 
 ### Installation
@@ -48,11 +49,17 @@ cd frontend
 npm install
 cd ..
 
-# Create .env file with your WMATA API key
-echo "WMATA_API_KEY=your_key_here" > .env
+# Create .env file with your WMATA API key and database URL
+cat > .env << EOF
+WMATA_API_KEY=your_key_here
+DATABASE_URL=postgresql://localhost/wmata_dashboard
+EOF
+
+# Create PostgreSQL database (skip if using SQLite)
+createdb wmata_dashboard
 
 # Initialize database and load GTFS static data (takes 5-10 minutes)
-uv run python scripts/init_database.py
+uv run python scripts/init_database.py --no-confirm
 ```
 
 ### Running the Application
@@ -215,14 +222,61 @@ uv run ruff check --fix src/ scripts/ api/ pipelines/
 ### Database Access
 
 ```bash
-# Query SQLite database directly
-sqlite3 wmata_dashboard.db
+# Query PostgreSQL database directly
+psql wmata_dashboard
 
 # Example queries:
-sqlite> SELECT COUNT(*) FROM vehicle_positions;
-sqlite> SELECT * FROM routes WHERE route_short_name = 'C51';
-sqlite> SELECT * FROM route_metrics_summary;
+wmata_dashboard=# SELECT COUNT(*) FROM vehicle_positions;
+wmata_dashboard=# SELECT * FROM routes WHERE route_short_name = 'C51';
+wmata_dashboard=# SELECT * FROM route_metrics_summary;
+
+# For SQLite (if using SQLite instead of PostgreSQL)
+sqlite3 wmata_dashboard.db
 ```
+
+## Database Migration
+
+### Migrating from SQLite to PostgreSQL
+
+If you previously used SQLite and want to migrate to PostgreSQL:
+
+```bash
+# 1. Set up PostgreSQL database
+createdb wmata_dashboard
+
+# 2. Update .env to point to PostgreSQL
+echo "DATABASE_URL=postgresql://localhost/wmata_dashboard" >> .env
+
+# 3. Initialize PostgreSQL database schema
+uv run python scripts/init_database.py --no-confirm
+
+# 4. Migrate collected data from SQLite (optional - or start fresh)
+uv run python scripts/migrate_sqlite_to_postgres.py
+
+# 5. Recompute metrics to populate aggregation tables
+uv run python pipelines/compute_daily_metrics.py --days 7 --recalculate
+```
+
+**Note:** The migration script copies:
+- All vehicle position data (real-time snapshots)
+- Daily metrics (if previously computed)
+- Summary metrics (if previously computed)
+
+GTFS static data (routes, stops, trips, etc.) is reloaded from WMATA API via `init_database.py` to ensure consistency.
+
+### PostgreSQL Benefits
+
+- **Concurrent Access**: No write locks - data collection and API can run simultaneously
+- **Performance**: Better query optimization for large datasets
+- **Production Ready**: Designed for 24/7 operation with high availability
+- **Type Safety**: Stricter type checking prevents data quality issues
+
+### Database Compatibility
+
+The codebase is database-agnostic and works with both SQLite and PostgreSQL:
+- Date formatting functions detect database type automatically
+- NumPy type conversion ensures PostgreSQL compatibility
+- All queries tested on both databases
 
 ## Production Deployment
 
@@ -234,8 +288,8 @@ sqlite> SELECT * FROM route_metrics_summary;
 - ~400 MB/month
 
 **Recommended Approach:**
+- **Use PostgreSQL** (not SQLite) to avoid database locking issues
 - Collect at 60-second intervals continuously for real-time monitoring
-- Use PostgreSQL (not SQLite) to avoid database locking issues
 - Keep raw 60-second data for 2-4 weeks
 - Aggregate older data to 5-10 minute averages
 - Results in ~1-2 GB steady-state storage
@@ -244,13 +298,16 @@ sqlite> SELECT * FROM route_metrics_summary;
 
 1. **Set up PostgreSQL database**
    ```bash
+   # Create database
+   createdb wmata_dashboard
+
    # Add to .env:
-   DATABASE_URL=postgresql://user:pass@host/dbname
+   DATABASE_URL=postgresql://localhost/wmata_dashboard
    ```
 
 2. **Initialize database**
    ```bash
-   uv run python scripts/init_database.py
+   uv run python scripts/init_database.py --no-confirm
    ```
 
 3. **Set up continuous data collection** (systemd, supervisor, etc.)
@@ -315,7 +372,8 @@ Create a `.env` file with:
 
 ```bash
 WMATA_API_KEY=your_api_key_here
-DATABASE_URL=sqlite:///./wmata_dashboard.db  # or PostgreSQL URI for production
+DATABASE_URL=postgresql://localhost/wmata_dashboard  # PostgreSQL (recommended)
+# DATABASE_URL=sqlite:///./wmata_dashboard.db  # SQLite (development only)
 ```
 
 ## License
