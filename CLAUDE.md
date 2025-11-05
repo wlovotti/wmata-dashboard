@@ -53,10 +53,12 @@ wmata-dashboard/
 │   ├── reload_gtfs_complete.py    # Refresh GTFS static data
 │   └── archive/                   # Archived migration scripts (no longer needed)
 │
-├── tests/                # Test files
-│   ├── test_analytics.py
-│   ├── test_otp_with_matching.py
-│   └── test_multi_level_otp.py
+├── tests/                # Test suite (pytest)
+│   ├── conftest.py               # Shared fixtures (db_session, client, sample data)
+│   ├── test_smoke.py             # Smoke tests (critical paths, <10s)
+│   ├── test_api_endpoints.py     # API endpoint tests (all 7 endpoints)
+│   ├── test_aggregations.py      # Unit tests for business logic
+│   └── test_models.py            # Database model tests
 │
 ├── debug/                # Debug and exploration scripts
 │   ├── check_early_arrivals.py
@@ -82,7 +84,7 @@ wmata-dashboard/
 │   └── SESSION_SUMMARY.md        # Session notes and findings
 │
 ├── .github/workflows/    # CI/CD workflows
-│   └── test.yml         # PR checks: ruff linting + import tests
+│   └── test.yml         # PR checks: ruff linting + pytest (smoke + full suite)
 │
 ├── .env                  # Environment variables (not in git)
 ├── CLAUDE.md            # This file - project context for Claude Code
@@ -166,19 +168,25 @@ npm run dev
 # The dashboard connects to the backend API at http://localhost:8000
 ```
 
-### Running Analytics
+### Running Tests
 ```bash
-# Test multi-level OTP calculations
-uv run python tests/test_multi_level_otp.py
+# Run all tests
+uv run pytest
 
-# Test analytics with collected data
-uv run python tests/test_analytics.py
-uv run python tests/test_otp_with_matching.py
+# Run smoke tests only (fast, critical paths)
+uv run pytest -m smoke
 
-# Validate WMATA's deviation data (shows unreliability)
+# Run API tests only
+uv run pytest -m api
+
+# Run tests with coverage report
+uv run pytest --cov=src --cov=api --cov-report=term-missing --cov-report=html
+
+# Run specific test file
+uv run pytest tests/test_aggregations.py -v
+
+# Debug/validation scripts (for exploratory analysis)
 uv run python debug/validate_deviation.py
-
-# Compare OTP across multiple routes
 uv run python debug/compare_route_otp.py
 ```
 
@@ -431,14 +439,33 @@ The project successfully migrated from SQLite to PostgreSQL for production use. 
 
 **Next Steps (Priority Order):**
 
-1. **Pre-Deployment Maintenance** (Current Priority)
-   - Fix frontend map functionality (investigate API response/frontend integration)
-   - Create comprehensive test suite (API smoke tests, integration tests)
-   - Update CI/CD to run automated tests on PRs
-   - Validate PostgreSQL migration complete and remove SQLite artifacts
-   - Update documentation to reflect current state
+1. **PostgreSQL-only Production** ✅ COMPLETED (Nov 2025)
+   - ✅ Removed SQLite support, PostgreSQL now required
+   - ✅ Archived obsolete migration scripts
+   - ✅ Added pytest configuration and markers
+   - ✅ Fixed ruff linting and CI integration
+   - ✅ Updated documentation to reflect current state
 
-2. **Production Deployment** (After Maintenance)
+2. **Test Suite Development** ✅ COMPLETED (Nov 2025)
+   - ✅ Comprehensive test fixtures in conftest.py
+   - ✅ Smoke tests (5 tests, critical paths, <10s execution)
+   - ✅ API endpoint tests (25 tests, all 7 endpoints with edge cases)
+   - ✅ Unit tests for aggregations (30+ tests, business logic)
+   - ✅ Model tests (14 tests, database operations)
+   - ✅ pytest markers for selective test running (smoke, api)
+   - ✅ CI/CD integration (GitHub Actions runs pytest on every PR)
+   - ✅ Uses in-memory SQLite for fast isolated tests
+   - ✅ Coverage reporting configured
+
+3. **Production Deployment** (Next Priority)
+   - Continue enhancing React/Vite frontend
+   - Fix any remaining map functionality issues
+   - Add date range selectors for trend charts
+   - Improve responsive design for mobile devices
+   - Add loading states and better error handling
+   - Export functionality (CSV, JSON downloads)
+
+4. **Production Deployment** (After #2 and #3)
    - Deploy to cloud platform (DigitalOcean, AWS, Heroku, etc.)
    - Set up PostgreSQL database
    - Configure continuous data collection (systemd service or cloud scheduler)
@@ -449,26 +476,20 @@ The project successfully migrated from SQLite to PostgreSQL for production use. 
    - Build and serve frontend static files
    - Implement monitoring and alerting
 
-3. **Data Retention & Archival**
+5. **Data Retention & Archival**
    - Implement data archival strategy (keep raw 60s data for 2-4 weeks)
    - Aggregate older data to 5-10 minute averages
    - Set up automated cleanup jobs
    - Target steady-state storage: ~1-2 GB
 
-4. **Frontend Enhancements**
-   - Add date range selectors for trend charts
-   - Improve responsive design for mobile devices
-   - Add loading states and error handling improvements
-   - Export functionality (CSV, JSON downloads)
-
-5. **API Enhancements**
+6. **API Enhancements**
    - Add pagination for large result sets
    - Add date range filtering parameters
    - Add caching layer (Redis) for frequently accessed data
    - Add API rate limiting
    - Add API authentication/authorization (if needed)
 
-6. **Advanced Analytics & Features**
+7. **Advanced Analytics & Features**
    - Automated bus bunching alerts
    - Service gap identification and alerting
    - Route reliability scoring (beyond just OTP)
