@@ -40,6 +40,70 @@ async def root():
     return {"status": "ok", "name": "WMATA Performance API", "version": "1.0.0", "docs": "/docs"}
 
 
+@app.get("/health")
+async def health_check():
+    """
+    Comprehensive health check endpoint for monitoring
+
+    Checks:
+    - API service status
+    - Database connectivity
+    - Recent data collection activity
+
+    Returns:
+        Health status with component details and timestamps
+    """
+    from datetime import datetime, timedelta
+    from src.models import VehiclePosition
+
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "service": "wmata-dashboard-api",
+        "version": "1.0.0",
+        "checks": {}
+    }
+
+    # Check database connectivity
+    try:
+        db = get_session()
+        try:
+            # Test database connection with a simple query
+            db.execute("SELECT 1").scalar()
+            health_status["checks"]["database"] = {
+                "status": "healthy",
+                "message": "Database connection successful"
+            }
+
+            # Check for recent data collection (last 5 minutes)
+            five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
+            recent_data_count = db.query(VehiclePosition).filter(
+                VehiclePosition.timestamp >= five_minutes_ago
+            ).count()
+
+            if recent_data_count > 0:
+                health_status["checks"]["data_collection"] = {
+                    "status": "healthy",
+                    "message": f"Recent data: {recent_data_count} vehicle positions in last 5 min"
+                }
+            else:
+                health_status["checks"]["data_collection"] = {
+                    "status": "warning",
+                    "message": "No recent data collected in last 5 minutes"
+                }
+                health_status["status"] = "degraded"
+        finally:
+            db.close()
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["checks"]["database"] = {
+            "status": "unhealthy",
+            "message": f"Database connection failed: {str(e)}"
+        }
+
+    return health_status
+
+
 @app.get("/api/routes")
 async def get_routes(days: int = 7):
     """

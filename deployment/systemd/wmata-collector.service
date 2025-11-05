@@ -1,0 +1,38 @@
+[Unit]
+Description=WMATA Dashboard Data Collector
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=wmata
+Group=wmata
+WorkingDirectory=/home/wmata/wmata-dashboard
+Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/wmata/wmata-dashboard/.env
+
+# Run the continuous collector script
+ExecStart=/home/wmata/.local/bin/uv run python scripts/continuous_collector.py
+
+# Restart policy
+Restart=always
+RestartSec=5s
+
+# Logging
+StandardOutput=append:/var/log/wmata/collector.log
+StandardError=append:/var/log/wmata/collector-error.log
+SyslogIdentifier=wmata-collector
+
+# Resource limits (512MB RAM droplet friendly)
+MemoryMax=200M
+CPUQuota=50%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/wmata
+
+[Install]
+WantedBy=multi-user.target

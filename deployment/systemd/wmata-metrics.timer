@@ -1,0 +1,18 @@
+[Unit]
+Description=WMATA Dashboard Daily Metrics Timer
+Requires=wmata-metrics.service
+
+[Timer]
+# Run daily at 2:00 AM Eastern Time
+# Note: Server timezone should be set to America/New_York
+OnCalendar=daily
+OnCalendar=*-*-* 02:00:00
+
+# Add random delay to avoid load spikes
+RandomizedDelaySec=15min
+
+# If system was off, run when it comes back up
+Persistent=true
+
+[Install]
+WantedBy=timers.target
