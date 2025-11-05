@@ -49,3 +49,19 @@ jobs:
         test -d pipelines && echo "✓ pipelines/ directory exists"
         test -d tests && echo "✓ tests/ directory exists"
         test -f src/__init__.py && echo "✓ src/__init__.py exists"
+
+    - name: Run smoke tests
+      env:
+        DATABASE_URL: sqlite:///:memory:
+        WMATA_API_KEY: test_api_key
+      run: |
+        uv run pytest -m smoke -v --tb=short
+        echo "✓ Smoke tests passed"
+
+    - name: Run full test suite with coverage
+      env:
+        DATABASE_URL: sqlite:///:memory:
+        WMATA_API_KEY: test_api_key
+      run: |
+        uv run pytest -v --tb=short --cov=src --cov=api --cov-report=term-missing
+        echo "✓ All tests passed"
