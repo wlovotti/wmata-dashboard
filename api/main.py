@@ -5,6 +5,8 @@ This API serves pre-computed transit performance metrics for the web dashboard.
 Endpoints provide route-level OTP, headway, and speed data.
 """
 
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -16,6 +18,7 @@ from api.aggregations import (
     get_route_trend_data,
 )
 from src.database import get_session
+from src.models import VehiclePosition
 
 # Create FastAPI app
 app = FastAPI(
@@ -53,9 +56,6 @@ async def health_check():
     Returns:
         Health status with component details and timestamps
     """
-    from datetime import datetime, timedelta
-    from src.models import VehiclePosition
-
     health_status = {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
