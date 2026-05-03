@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-03 (PR #47).
+Last edited 2026-05-03 (PR #48).
 
 ---
 
@@ -66,12 +66,18 @@ sequencing still matters.
 
 ### Independent of the redesign
 
-- **NOTES-22 Fix `reload_gtfs_complete.py` and put GTFS reload on a
-  schedule.** Found while wiring up Phase A2: the script crashes mid-flow
-  on FK violations, and even when it works it isn't scheduled, so our
-  GTFS snapshot was 6 months stale. CLAUDE.md's claim that the script
-  "correctly invalidates the prior snapshot" is wrong — fix the script,
-  add a smoke test, then schedule it.
+- **NOTES-23 Schedule the GTFS reload.** Now that
+  `reload_gtfs_complete.py` is transactional and FK-safe (PR #48),
+  put it on a daily/weekly cron / GitHub Action with alerting on
+  failure. Daily is overkill (WMATA revises GTFS roughly quarterly;
+  added trips and suspended routes ride TripUpdates /
+  VehiclePositions, not static GTFS), weekly probably right.
+  Operational risk is silent staleness — that's how this got 6
+  months stale before.
+- **NOTES-24 Surface GTFS snapshot freshness in the dashboard.**
+  Show the newest `gtfs_snapshots.snapshot_date` somewhere visible
+  (footer on RouteList?) so a stale schedule is observable instead
+  of silent.
 
 ---
 
@@ -313,67 +319,43 @@ So: keep collecting raw, then add retention.
 
 ---
 
-## NOTES-22. Fix `reload_gtfs_complete.py` and put GTFS reload on a schedule
+## NOTES-23. Schedule the GTFS reload
 
-**Severity: high — silently corrupts metrics. Discovered while wiring up
-the Phase A2 proximity derivation: our GTFS snapshot was 6 months stale
-(2025-10-28), and almost every RT trip_id resolved to a different route
-in current GTFS (or to no trip at all).**
+**Severity: medium — operational hygiene. The reload now succeeds
+reliably (PR #48); the next failure mode is forgetting to run it.**
 
-### Two problems, one root cause
+A daily or weekly GitHub Action / cron invoking
+`reload_gtfs_complete.py`, with alerting on failure. Weekly is
+probably right: WMATA revises GTFS roughly quarterly, and real-time
+operational changes (added trips, suspended routes) land in
+TripUpdates / VehiclePositions, not static GTFS — so daily buys
+nothing.
 
-1. **The reload script crashes mid-flow.** `scripts/reload_gtfs_complete.py`
-   does `db.execute(text("DELETE FROM agencies"))` (line 288) without
-   first invalidating the FK from `routes.agency_id`, so it raises
-   `psycopg2.errors.ForeignKeyViolation` on any populated DB. CLAUDE.md's
-   claim that the script "correctly invalidates the prior snapshot" is
-   wrong — it invalidates routes/stops/trips/stop_times/calendar via
-   UPDATE (lines 146–162), but for agencies/feed_info/timepoints/
-   timepoint_times/route_service_profile it does a plain DELETE. The
-   per-table commits before the failure mean partial migrations stick:
-   running the script today left the DB with snapshot-5 routes/trips/
-   stops/stop_times marked current, but agencies still on snapshot 4.
-
-2. **There is no automated reload.** The script is invoked manually,
-   and nobody invoked it for 6 months. By the time we noticed, every
-   downstream metric was being computed against a schedule WMATA had
-   long since revised. The OTP numbers in `route_metrics_daily` for
-   any recent date are likely junk for routes whose trip_id space
-   churned.
-
-### Fix
-
-1. **Make the script transactional or idempotent end-to-end.** Either
-   wrap the whole reload in a single `BEGIN`/`COMMIT` so a partial
-   failure rolls back, or rewrite each table's reload as
-   "invalidate-then-insert-new-snapshot" (matching the pattern that
-   already works for routes/stops/trips). The DELETE-then-INSERT
-   pattern for agencies/feed_info/timepoints can't survive FKs; the
-   versioned pattern can.
-2. **Add a smoke test** that reloads against an empty DB and against a
-   populated DB and asserts both succeed.
-3. **Schedule it.** A daily or weekly cron / GitHub Action invoking
-   `reload_gtfs_complete.py`, with alerting on failure. Frequency is
-   a judgment call — WMATA revises GTFS roughly quarterly, but
-   real-time operational schedule changes (added trips, suspended
-   routes) only land in TripUpdates / VehiclePositions, not in static
-   GTFS, so daily is overkill.
-4. **Surface staleness in the dashboard.** The newest GTFS snapshot
-   date should appear somewhere visible (a footer line on RouteList?)
-   so a stale schedule is observable instead of silent.
-
-### Scope decision
-
-Fold the script fix into NOTES-22's PR. Cron / scheduling and dashboard
-freshness indicator are separate items — file as follow-on once the
-script is reliable.
+The failure mode to alert on is the script raising and rolling
+back. The DB stays consistent (the transactional contract from
+PR #48 guarantees that), but the schedule slowly goes stale, and
+without alerting that's invisible — exactly how this got 6 months
+stale before the script fix.
 
 ### Dependencies
 
-- Independent of NOTES-12 through NOTES-21. Can land any time.
-- Side note: the 6-month-stale GTFS also means
-  `route_metrics_daily` numbers for the last several months may be
-  unreliable. We're slated to drop that table anyway (NOTES-19), so
-  not worth backfilling. Worth flagging to anyone reviewing historical
-  trend numbers in the meantime.
+- Builds on the script reliability landed in PR #48.
+- Independent of NOTES-12 through NOTES-21.
+
+---
+
+## NOTES-24. Surface GTFS snapshot freshness in the dashboard
+
+**Severity: low — observability.**
+
+Display the most recent `gtfs_snapshots.snapshot_date` somewhere
+visible in the UI (footer on RouteList?) so a stale schedule is
+observable instead of silent. Useful even after NOTES-23 schedules
+the reload — gives a "last refreshed" sanity check to anyone
+viewing the dashboard, and is the first place to look when metrics
+start looking off. Pure read; thin API addition.
+
+### Dependencies
+
+- Independent of NOTES-12 through NOTES-21 and NOTES-23.
 

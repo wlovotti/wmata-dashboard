@@ -1359,3 +1359,265 @@ def test_compute_service_delivered_for_routes_unions_profile_and_runs(db_session
     assert by_route["R_PROF_ONLY"]["ratio"] == 0.0
     assert by_route["R_RUNS_ONLY"]["scheduled_trips"] == 0
     assert by_route["R_RUNS_ONLY"]["ratio"] is None
+
+
+# --- GTFS reload regression (PR #48) ---
+
+
+def _minimal_gtfs_fixture() -> dict[str, list[dict]]:
+    """
+    A minimum-viable GTFS dataset that exercises every code path in
+    `apply_gtfs_to_db`: one row per table, FKs consistent.
+    """
+    return {
+        "agency": [
+            {
+                "agency_id": "1",
+                "agency_name": "WMATA",
+                "agency_url": "https://wmata.com",
+                "agency_timezone": "America/New_York",
+                "agency_lang": "en",
+                "agency_phone": "202-637-7000",
+                "agency_fare_url": "",
+                "agency_email": "",
+            }
+        ],
+        "feed_info": [
+            {
+                "feed_publisher_name": "WMATA",
+                "feed_publisher_url": "https://wmata.com",
+                "feed_lang": "en",
+                "feed_start_date": "20260101",
+                "feed_end_date": "20261231",
+                "feed_version": "v1",
+                "feed_contact_email": "",
+                "feed_contact_url": "",
+            }
+        ],
+        "routes": [
+            {
+                "route_id": "R1",
+                "agency_id": "1",
+                "route_short_name": "R1",
+                "route_long_name": "Route 1",
+                "route_desc": "",
+                "route_type": "3",
+                "route_url": "",
+                "route_color": "",
+                "route_text_color": "",
+            }
+        ],
+        "stops": [
+            {
+                "stop_id": "S1",
+                "stop_code": "",
+                "stop_name": "Stop 1",
+                "stop_desc": "",
+                "stop_lat": "38.9072",
+                "stop_lon": "-77.0369",
+                "zone_id": "",
+                "stop_url": "",
+            },
+            {
+                "stop_id": "S2",
+                "stop_code": "",
+                "stop_name": "Stop 2",
+                "stop_desc": "",
+                "stop_lat": "38.9100",
+                "stop_lon": "-77.0400",
+                "zone_id": "",
+                "stop_url": "",
+            },
+        ],
+        "trips": [
+            {
+                "trip_id": "T1",
+                "route_id": "R1",
+                "service_id": "WK",
+                "trip_headsign": "Downtown",
+                "direction_id": "0",
+                "block_id": "",
+                "shape_id": "",
+            }
+        ],
+        "stop_times": [
+            {
+                "trip_id": "T1",
+                "stop_id": "S1",
+                "arrival_time": "08:00:00",
+                "departure_time": "08:00:00",
+                "stop_sequence": "1",
+                "stop_headsign": "",
+                "pickup_type": "",
+                "drop_off_type": "",
+                "shape_dist_traveled": "",
+                "timepoint": "1",
+            },
+            {
+                "trip_id": "T1",
+                "stop_id": "S2",
+                "arrival_time": "08:10:00",
+                "departure_time": "08:10:00",
+                "stop_sequence": "2",
+                "stop_headsign": "",
+                "pickup_type": "",
+                "drop_off_type": "",
+                "shape_dist_traveled": "",
+                "timepoint": "1",
+            },
+        ],
+        "shapes": [],
+        "calendar": [
+            {
+                "service_id": "WK",
+                "monday": "1",
+                "tuesday": "1",
+                "wednesday": "1",
+                "thursday": "1",
+                "friday": "1",
+                "saturday": "0",
+                "sunday": "0",
+                "start_date": "20260101",
+                "end_date": "20261231",
+            }
+        ],
+        "calendar_dates": [
+            {
+                "service_id": "WK",
+                "date": "20260704",
+                "exception_type": "2",
+            }
+        ],
+        "timepoints": [
+            {
+                "stop_id": "S1",
+                "stop_code": "",
+                "stop_name": "Stop 1",
+                "stop_desc": "",
+                "stop_lat": "38.9072",
+                "stop_lon": "-77.0369",
+                "zone_id": "",
+                "stop_url": "",
+            }
+        ],
+        "timepoint_times": [
+            {
+                "trip_id": "T1",
+                "stop_id": "S1",
+                "arrival_time": "08:00:00",
+                "departure_time": "08:00:00",
+                "stop_sequence": "1",
+                "stop_headsign": "",
+                "pickup_type": "",
+                "drop_off_type": "",
+                "shape_dist_traveled": "",
+                "timepoint": "1",
+            }
+        ],
+    }
+
+
+@pytest.mark.smoke
+def test_apply_gtfs_to_db_succeeds_on_empty_db(db_session):
+    """First reload against a fresh DB inserts one snapshot and current rows."""
+    from scripts.reload_gtfs_complete import apply_gtfs_to_db
+    from src.models import Agency, GTFSSnapshot
+
+    db_session.execute(text("PRAGMA foreign_keys = ON"))
+    snapshot_id = apply_gtfs_to_db(db_session, _minimal_gtfs_fixture())
+
+    assert snapshot_id is not None
+    assert db_session.query(GTFSSnapshot).count() == 1
+
+    current_routes = db_session.query(Route).filter(Route.is_current).all()
+    assert len(current_routes) == 1
+    assert current_routes[0].route_id == "R1"
+    assert current_routes[0].snapshot_id == snapshot_id
+
+    agency = db_session.query(Agency).filter_by(agency_id="1").one()
+    assert agency.agency_name == "WMATA"
+
+
+@pytest.mark.smoke
+def test_apply_gtfs_to_db_succeeds_on_populated_db_under_fk_enforcement(db_session):
+    """
+    Second reload against a populated DB succeeds with FKs enforced.
+
+    This is the regression test for the FK violation in the previous
+    reload script (fixed in PR #48): it did `DELETE FROM agencies`
+    while routes still referenced agency_id, which FK-violates.
+    Verifies the fix (upsert agencies, never delete) holds.
+    """
+    from scripts.reload_gtfs_complete import apply_gtfs_to_db
+    from src.models import Agency, GTFSSnapshot
+
+    db_session.execute(text("PRAGMA foreign_keys = ON"))
+
+    # First pass populates the DB.
+    first_id = apply_gtfs_to_db(db_session, _minimal_gtfs_fixture())
+    db_session.flush()
+
+    # Second pass — same agency_id, slightly different agency name to
+    # confirm upsert refreshes fields.
+    fixture = _minimal_gtfs_fixture()
+    fixture["agency"][0]["agency_name"] = "WMATA (refreshed)"
+    second_id = apply_gtfs_to_db(db_session, fixture)
+
+    assert second_id != first_id
+    assert db_session.query(GTFSSnapshot).count() == 2
+
+    # Old versioned rows are no longer current; new ones are.
+    old_routes = (
+        db_session.query(Route).filter(Route.snapshot_id == first_id, ~Route.is_current).all()
+    )
+    new_routes = db_session.query(Route).filter(Route.is_current).all()
+    assert len(old_routes) == 1
+    assert len(new_routes) == 1
+    assert new_routes[0].snapshot_id == second_id
+
+    # Agency row was UPDATEd, not deleted/reinserted — same row, refreshed name.
+    agencies = db_session.query(Agency).filter_by(agency_id="1").all()
+    assert len(agencies) == 1
+    assert agencies[0].agency_name == "WMATA (refreshed)"
+
+
+@pytest.mark.smoke
+def test_apply_gtfs_to_db_rolls_back_on_failure(db_session):
+    """
+    A failure mid-load leaves the DB unchanged when the caller rolls back.
+
+    Drives the new transactional contract: `apply_gtfs_to_db` does not
+    commit; one bad row → caller's `rollback()` discards the partial work.
+    Uses a savepoint so this assertion is independent of the conftest's
+    outer test-fixture transaction.
+    """
+    from scripts.reload_gtfs_complete import apply_gtfs_to_db
+    from src.models import GTFSSnapshot
+
+    db_session.execute(text("PRAGMA foreign_keys = ON"))
+
+    # Populate first so we have a non-empty baseline to compare against.
+    apply_gtfs_to_db(db_session, _minimal_gtfs_fixture())
+    db_session.flush()
+
+    baseline_snapshots = db_session.query(GTFSSnapshot).count()
+    baseline_current_routes = db_session.query(Route).filter(Route.is_current).count()
+    assert baseline_snapshots == 1
+    assert baseline_current_routes == 1
+
+    # A malformed fixture: stop_times with a non-integer stop_sequence.
+    # The stop_times loop raises ValueError on int() conversion after
+    # already inserting the new snapshot, agency upsert, and is_current
+    # flips for the prior snapshot — exactly the partial-migration
+    # scenario the previous reload script's partial-migration bug was filed against.
+    bad_fixture = _minimal_gtfs_fixture()
+    bad_fixture["stop_times"][0]["stop_sequence"] = "not-a-number"
+
+    sp = db_session.begin_nested()
+    with pytest.raises(ValueError):
+        apply_gtfs_to_db(db_session, bad_fixture)
+    sp.rollback()
+
+    # Baseline is intact: no extra snapshot, prior current-route still current.
+    assert db_session.query(GTFSSnapshot).count() == baseline_snapshots
+    assert db_session.query(Route).filter(Route.is_current).count() == baseline_current_routes
