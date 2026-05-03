@@ -184,3 +184,34 @@ Two reasonable paths:
 If you don't have a strong product reason to keep it, deleting is cheaper.
 The current state — keeping the code without exposing the feature — is the
 worst of both options.
+
+---
+
+## 4. Bump Python from 3.9 to 3.11 or 3.12 — OPEN
+
+**Severity: low (maintenance, not blocking).**
+
+### Evidence
+
+- `pyproject.toml:6` pins `requires-python = ">=3.9"`.
+- `pyproject.toml:43` pins `target-version = "py39"` for ruff.
+- `.venv` runs Python 3.9.6.
+- Python 3.9 reached end of life on 2025-10-31; VS Code's Jupyter
+  extension surfaces a "no longer supported" warning when loading the
+  kernel. Nothing breaks today, but no further security patches upstream.
+
+### Fix
+
+1. Pick a target — 3.11 or 3.12 are both safe; 3.13 is fine if you want
+   the latest. None of the current deps (sqlalchemy 2, pandas 2,
+   fastapi, gtfs-realtime-bindings, psycopg/psycopg2, jupyter) require
+   anything older.
+2. Update `requires-python` in `pyproject.toml`.
+3. Update `target-version` in the ruff config (`py311` / `py312`).
+4. `uv sync --extra postgres --extra viz --extra dev` to rebuild the
+   venv against the new interpreter (uv will fetch it if not installed).
+5. `uv run pytest -m smoke` and a one-off `uv run python -c "import api.main"` to confirm imports cleanly.
+6. CI: check `.github/workflows/` for any `python-version: '3.9'` pins
+   and bump them to match.
+
+Not coupled to any other work — can be done in a 5-minute PR whenever.

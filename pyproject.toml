@@ -23,6 +23,7 @@ postgres = [
 viz = [
     "matplotlib>=3.7.0",
     "seaborn>=0.12.0",
+    "jupyter>=1.0.0",
 ]
 dev = [
     "ruff>=0.1.0",
@@ -41,6 +42,7 @@ packages = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = [
