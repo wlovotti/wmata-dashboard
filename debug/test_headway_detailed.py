@@ -3,7 +3,7 @@ Detailed test of headway calculation showing reference stop and vehicle passages
 """
 from datetime import datetime
 
-from src.analytics import calculate_headways, find_reference_stop
+from src.analytics import calculate_headways, calculate_route_headways, find_reference_stop
 from src.database import get_session
 from src.models import Stop
 
@@ -14,9 +14,10 @@ try:
     print("Detailed Headway Analysis for C51")
     print("=" * 70)
 
-    # Find the reference stop
-    print("\n1. Finding Reference Stop:")
-    ref_stop_id = find_reference_stop(db, 'C51')
+    # Find the reference stop (direction 0 — diagnostic only; the per-direction
+    # loop below covers both)
+    print("\n1. Finding Reference Stop (direction 0):")
+    ref_stop_id = find_reference_stop(db, 'C51', direction_id=0)
     if ref_stop_id:
         stop = db.query(Stop).filter(Stop.stop_id == ref_stop_id).first()
         print(f"   Selected: {stop.stop_name}")
@@ -25,12 +26,12 @@ try:
     else:
         print("   ERROR: Could not find reference stop")
 
-    # Calculate headways for today
+    # Calculate headways for today (route-level: averaged across directions)
     print("\n2. Calculating Headways:")
     today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    result = calculate_headways(
+    result = calculate_route_headways(
         db,
         'C51',
         start_time=today_start,
