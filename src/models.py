@@ -528,7 +528,7 @@ class Run(Base):
     A "run" is one bus's pass through one trip on one service date — the natural
     unit for trip-level metrics like end-to-end excess time (NOTES.md NOTES-12),
     per-run deviation charts (NOTES-5), and the delivered-runs numerator for
-    service-delivered ratio (NOTES-11). One row per (service_date, trip_id,
+    service-delivered ratio (PR #47). One row per (service_date, trip_id,
     source); the source dimension propagates from stop_events so the
     proximity/trip_update agreement story extends to the run level.
 
@@ -570,9 +570,8 @@ class Run(Base):
         coverage), null for trip_update runs.
       - destination_dev_sec is populated for trip_update runs (87-97%
         literal coverage), rarely populated for proximity runs.
-    The OTP origin/destination split (NOTES.md NOTES-10) reads
-    origin_dev_sec from proximity rows and destination_dev_sec from
-    trip_update rows.
+    The OTP origin/destination split (PR #46) reads origin_dev_sec from
+    proximity rows and destination_dev_sec from trip_update rows.
 
     Schedule snapshot fields (`sched_first_arrival_ts`, `sched_last_arrival_ts`,
     `sched_first_seq`, `sched_last_seq`, `stops_scheduled`) are denormalized at
@@ -648,8 +647,8 @@ class RouteServiceProfile(Base):
     Per-(route, day_type, hour) scheduled service profile derived from GTFS.
 
     Reference data for downstream metrics: scheduled_trips is the denominator
-    for service-delivered ratio (NOTES.md NOTES-11), and is_frequent is the
-    gate for EWT (NOTES.md NOTES-15). Derived fresh on every GTFS reload — no
+    for service-delivered ratio (PR #47), and is_frequent is the gate for
+    EWT (NOTES.md NOTES-15). Derived fresh on every GTFS reload — no
     versioning, the table is rewritten in place to match the current GTFS
     snapshot.
 

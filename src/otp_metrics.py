@@ -6,8 +6,8 @@ path (which reads vehicle_positions and writes route_metrics_daily). It computes
 OTP at three levels — origin, destination, and all-timepoints — for one
 (route, service_date), returning per-source aggregates.
 
-Origin / destination split (NOTES.md NOTES-10) requires picking a source per
-endpoint because the two derivation sources have nearly inverse blind spots:
+Origin / destination split (PR #46) requires picking a source per endpoint
+because the two derivation sources have nearly inverse blind spots:
   - TripUpdate: ~0% literal-origin coverage (WMATA's TU feed only contains
     trips after the AVL system marks them "active" — typically operator-log-in
     at or after origin departure — and past stops are pruned, so origin's

@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-03 (PR #46).
+Last edited 2026-05-03 (PR #47).
 
 ---
 
@@ -24,10 +24,6 @@ sequencing still matters.
 
 ### P2 — Medium-effort metric additions
 
-- **NOTES-11 Service-delivered ratio.** % of scheduled trips that actually
-  ran. Most rider-felt failures are missing buses, not late ones, and
-  we currently can't see this at all. Needs a schedule-side count from
-  GTFS calendar/calendar_dates joined to trips, denominator-style.
 - **NOTES-12 End-to-end excess trip time.** From `runs`: median, p95, %
   of runs with actual > 110% of scheduled. Captures dwell + in-vehicle
   delay, not just wait. The metric MBTA OPMI is rolling out for buses.
@@ -118,30 +114,31 @@ at 0) is what the eventual UI version should resemble.
 
 ---
 
-## NOTES-11. Service-delivered ratio
-
-**Severity: medium-high (single most rider-felt failure mode we
-currently can't see).**
-
-Per route per date: `delivered_runs / scheduled_runs`. Scheduled count
-comes from GTFS `calendar` + `calendar_dates` joined to `trips`.
-Delivered count = `runs` (PR #45) with `stops_observed >= 3` (the
-`RUN_EXISTED` filter — applied at query time, not materialized).
-
-The MBTA's "76% of timepoints met standard" stat exists *because* they
-measure scheduled vs. delivered. We don't.
-
----
-
 ## NOTES-12. End-to-end excess trip time
 
 **Severity: medium.**
 
-Per route per date: median actual trip duration, p95, and % of runs
+Per route per date: median actual trip duration, p95, and % of trips
 where actual > 110% of scheduled. Computed from `runs` (PR #45 — knows
-first/last observed stop_event timestamps and scheduled bounds). Apply
-`RUN_HAS_ENDPOINTS` filter. Captures dwell + in-vehicle delay; the
-metric MBTA OPMI is rolling out for buses.
+first/last observed stop_event timestamps and scheduled bounds).
+
+**Per-trip dedup.** `runs` has one row per `(service_date, trip_id,
+source)`, so each trip appears twice. For trip duration the
+endpoint-asymmetry rule from PR #46 applies: proximity has the better
+origin observation (78-93% literal `sched_first_seq` coverage), TU has
+the better destination (87-97% literal `sched_last_seq`). So per trip:
+`actual_duration = TU_row.last_obs_ts − proximity_row.first_obs_ts`,
+falling back to single-source bounds when only one source has the
+trip. `scheduled_duration = sched_last_arrival_ts −
+sched_first_arrival_ts` (identical across the trip's source rows).
+Both endpoints must be present after source-picking — apply
+`origin_dev_sec IS NOT NULL` on the proximity row and
+`destination_dev_sec IS NOT NULL` on the TU row before counting the
+trip in the metric, otherwise duration is computed off the wrong
+stops and excess-time is biased low.
+
+Captures dwell + in-vehicle delay; the metric MBTA OPMI is rolling out
+for buses.
 
 ---
 
@@ -162,11 +159,26 @@ roll-up.
 **Severity: medium (unique value-add from the TripUpdates feed
 (PRs #29, #30) — not derivable from positions at all).**
 
-Direct from TripUpdates `SKIPPED` stop_time_updates. Probe found 13.5%
-of STUs flagged SKIPPED — significant, and operationally important
-(skipped stops disproportionately hurt riders at low-frequency stops).
-Per route per day, per stop. Could expose worst-skipped stops on
-RouteDetail.
+Direct from `stop_events` rows where `schedule_relationship = 'SKIPPED'`
+and `source = 'trip_update'` — already first-class in the table since
+PR #43, no separate pipeline. Probe found 13.5% of STUs flagged
+SKIPPED — significant, and operationally important (skipped stops
+disproportionately hurt riders at low-frequency stops). Per route per
+day, per stop. Could expose worst-skipped stops on RouteDetail.
+
+**Denominator definition.** Skip rate is
+`SKIPPED_stop_events / scheduled_stops_on_runs_that_actually_ran`.
+Using all GTFS-scheduled stops as the denominator conflates skipped
+stops with stops that were never reached because the run was cancelled
+outright — those should fall out via the service-delivered ratio
+(PR #47), not inflate skip rate. So restrict the denominator to stops
+belonging to TU runs where `stops_observed >= 3` (the same RUN_EXISTED
+filter the service-delivered ratio uses). Equivalent SQL: sum `runs.stops_skipped` over qualifying TU
+runs (numerator) divided by sum `runs.stops_scheduled` over the same
+runs (denominator), grouped by `(route_id, service_date[, stop_id])`.
+Per-stop ranking ("worst-skipped stops on RouteDetail") needs the
+stop_id breakdown — fall back to `stop_events` directly when the per-run
+roll-up loses the stop dimension.
 
 ---
 
@@ -219,10 +231,10 @@ both get updated.
 **Severity: low.**
 
 Current grade (A–F) is OTP-only, computed in `api/aggregations.py`.
-With service-delivered and EWT landing, the rubric should incorporate
-them — service-delivered especially, since that's the most
-rider-felt failure mode. Worth a separate decision conversation
-about weighting before implementing.
+With service-delivered (PR #47) shipped and EWT still pending, the
+rubric should incorporate both — service-delivered especially, since
+that's the most rider-felt failure mode. Worth a separate decision
+conversation about weighting before implementing.
 
 ---
 
@@ -297,7 +309,7 @@ So: keep collecting raw, then add retention.
 
 ### Dependencies
 
-- Independent of NOTES-11 through NOTES-20.
+- Independent of NOTES-12 through NOTES-20.
 
 ---
 
@@ -358,7 +370,7 @@ script is reliable.
 
 ### Dependencies
 
-- Independent of NOTES-11 through NOTES-21. Can land any time.
+- Independent of NOTES-12 through NOTES-21. Can land any time.
 - Side note: the 6-month-stale GTFS also means
   `route_metrics_daily` numbers for the last several months may be
   unreliable. We're slated to drop that table anyway (NOTES-19), so

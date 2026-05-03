@@ -12,7 +12,16 @@ from datetime import datetime
 import pytest
 from sqlalchemy import text
 
-from src.models import Calendar, Route, Run, StopEvent, StopTime, Trip, TripUpdateSnapshot
+from src.models import (
+    Calendar,
+    Route,
+    RouteServiceProfile,
+    Run,
+    StopEvent,
+    StopTime,
+    Trip,
+    TripUpdateSnapshot,
+)
 from src.service_profile import compute_route_service_profile
 from src.wmata_collector import WMATADataCollector
 
@@ -1171,3 +1180,182 @@ def test_compute_otp_split_all_timepoints_uses_proximity_stop_events(db_session)
     assert a["early"] == 1
     assert a["on_time"] == 1
     assert a["late"] == 1
+
+
+# --- service-delivered ratio (PR #47) ---
+
+
+def _profile(route_id: str, day_type: str, hour: int, scheduled_trips: int) -> RouteServiceProfile:
+    """Test factory for RouteServiceProfile rows; only the fields the metric reads."""
+    return RouteServiceProfile(
+        route_id=route_id,
+        day_type=day_type,
+        hour=hour,
+        scheduled_trips=scheduled_trips,
+        is_frequent=False,
+    )
+
+
+def _run(trip_id: str, source: str, stops_observed: int, **overrides) -> Run:
+    """Test factory for Run rows; defaults to Sunday 2026-05-03 / route R1 / dir 0."""
+    base = {
+        "service_date": "2026-05-03",
+        "route_id": "R1",
+        "direction_id": 0,
+        "trip_id": trip_id,
+        "source": source,
+        "stops_observed": stops_observed,
+    }
+    base.update(overrides)
+    return Run(**base)
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_basic_ratio(db_session):
+    """Sunday with 5 scheduled, 4 distinct trips delivered → ratio 0.80."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _profile("R1", "sunday", 8, 2),
+            _profile("R1", "sunday", 9, 3),  # 5 scheduled
+            _run("T1", "proximity", 10),
+            _run("T2", "proximity", 5),
+            _run("T3", "trip_update", 7),
+            _run("T4", "proximity", 3),  # boundary: == 3 counts
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["day_type"] == "sunday"
+    assert out["scheduled_trips"] == 5
+    assert out["delivered_trips"] == 4
+    assert out["ratio"] == 0.80
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_dedups_per_source(db_session):
+    """Same trip_id appearing in both proximity and trip_update counts once."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _profile("R1", "sunday", 8, 4),
+            _run("T1", "proximity", 10),
+            _run("T1", "trip_update", 12),  # same trip — dedupe
+            _run("T2", "trip_update", 8),
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["delivered_trips"] == 2  # T1, T2
+    assert out["scheduled_trips"] == 4
+    assert out["ratio"] == 0.5
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_filters_below_three_stops(db_session):
+    """Runs with stops_observed < 3 don't count as delivered (RUN_EXISTED filter)."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _profile("R1", "sunday", 8, 3),
+            _run("T1", "proximity", 2),  # below threshold — excluded
+            _run("T2", "proximity", 3),  # exactly threshold — included
+            _run("T3", "trip_update", 0),  # zero — excluded
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["delivered_trips"] == 1
+    assert out["ratio"] == round(1 / 3, 4)
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_no_schedule_returns_none_ratio(db_session):
+    """Route with delivered runs but no schedule → ratio None (not 0, not error)."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add(_run("T1", "proximity", 10))
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["scheduled_trips"] == 0
+    assert out["delivered_trips"] == 1
+    assert out["ratio"] is None
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_zero_delivered_returns_zero_ratio(db_session):
+    """Scheduled but nothing delivered → ratio 0.0 (distinct from None)."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add(_profile("R1", "sunday", 8, 5))
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["scheduled_trips"] == 5
+    assert out["delivered_trips"] == 0
+    assert out["ratio"] == 0.0
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_uses_correct_day_type(db_session):
+    """Weekday date pulls weekday profile rows, ignoring saturday/sunday rows."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _profile("R1", "weekday", 8, 10),
+            _profile("R1", "saturday", 8, 5),
+            _profile("R1", "sunday", 8, 3),
+            # 2026-05-04 is a Monday
+            _run("T1", "proximity", 10, service_date="2026-05-04"),
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 4))
+    assert out["day_type"] == "weekday"
+    assert out["scheduled_trips"] == 10
+    assert out["delivered_trips"] == 1
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_for_routes_unions_profile_and_runs(db_session):
+    """Fan-out includes a route from profile only AND a route from runs only."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered_for_routes
+
+    db_session.add_all(
+        [
+            _profile("R_PROF_ONLY", "sunday", 8, 4),  # scheduled, no delivered
+            _run("T1", "proximity", 10, route_id="R_RUNS_ONLY"),  # delivered, unscheduled
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered_for_routes(db_session, date(2026, 5, 3))
+    by_route = {r["route_id"]: r for r in out}
+    assert "R_PROF_ONLY" in by_route and "R_RUNS_ONLY" in by_route
+    assert by_route["R_PROF_ONLY"]["delivered_trips"] == 0
+    assert by_route["R_PROF_ONLY"]["ratio"] == 0.0
+    assert by_route["R_RUNS_ONLY"]["scheduled_trips"] == 0
+    assert by_route["R_RUNS_ONLY"]["ratio"] is None
