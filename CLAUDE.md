@@ -21,13 +21,13 @@ without asking. See `NOTES.md` for the active punch list.
 - **GTFS schedule is versioned via `is_current`.** All queries against
   `routes`, `stops`, `trips`, `stop_times`, `calendar`, `calendar_dates`
   must filter `is_current=True`. `scripts/reload_gtfs_complete.py`
-  *partially* refreshes GTFS — it correctly versions
-  routes/stops/trips/stop_times/calendar via UPDATE, but for
-  agencies/feed_info/timepoints/timepoint_times/route_service_profile it
-  attempts a plain DELETE that crashes on FK violations on a populated
-  DB (NOTES.md NOTES-22). Per-table commits make a partial run durable,
-  so half-migrated state is the norm. `scripts/init_database.py` is
-  first-time setup only and refuses to run if snapshots already exist.
+  refreshes GTFS in a single transaction: versioned tables get UPDATE
+  (mark old `is_current=False`) + INSERT new; `agencies` is upserted by
+  `agency_id` so the FK target stays stable; the remaining unversioned
+  tables (feed_info / timepoints / timepoint_times / route_service_profile)
+  are truncated and reinserted. Any failure rolls back to the prior
+  snapshot — there is no partial-migration state. `scripts/init_database.py`
+  is first-time setup only and refuses to run if snapshots already exist.
 
 - **GTFS-based OTP is primary.** WMATA's `BusPositions` deviation field was
   validated and found unreliable (up to 7.7 min discrepancies). Don't use
