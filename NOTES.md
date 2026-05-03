@@ -215,3 +215,42 @@ worst of both options.
    and bump them to match.
 
 Not coupled to any other work — can be done in a 5-minute PR whenever.
+
+---
+
+## 5. Add per-run schedule-deviation chart to the dashboard — OPEN
+
+**Severity: low (enhancement, depends on run-level metrics shipping first).**
+
+### Idea
+
+Line chart of schedule deviation (y-axis, seconds, +late / -early) vs.
+stop_sequence (x-axis) for a single bus run. Shows how a bus drifts
+across its trip — late starts that recover, early holds, accumulating
+drift, segments where the bus loses time. The daily-batch metric can't
+support this view; the per-run table can.
+
+### Prototype
+
+Section 4 of `analysis/run_quality.ipynb` builds the chart for one run
+on D80 / 2025-10-20. The shape (orange line + green on-time band, axhline
+at 0) is what the eventual UI version should resemble.
+
+### Blockers / dependencies
+
+1. Run-level materialized table needs to land first (currently only an
+   exploratory CSV exists). The chart needs per-stop deviation, which is
+   not in `route_metrics_daily`.
+2. API endpoint to expose one run's stop deviations:
+   `/api/runs/{run_id}/deviations` returning `[{stop_sequence, stop_id,
+   stop_name, scheduled, actual, deviation_sec}]`.
+3. Frontend route — could live on `RouteDetail` as a "recent runs" list
+   that links into a per-run drill-down page.
+
+### Open product questions
+
+- Default selection: today's runs? last completed run? worst-deviation run?
+- Should the chart show a single run, or overlay multiple runs of the
+  same trip across days to make patterns visible?
+- Tooltip needs to show the actual stop name and timestamps, not just
+  numbers — useful for spotting where buses always lose time.
