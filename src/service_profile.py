@@ -23,20 +23,33 @@ This intentionally excludes Wed-only and Fri-only service variants. For
 the downstream consumers (frequent-route classification, denominator for
 service-delivered ratio) the Tuesday profile is a good steady-state proxy.
 
+Trunk-stop arrivals (not trip starts)
+-------------------------------------
+Headway is computed from `arrival_time` at the route's trunk stop — the
+stop served by the most current trips for that route+day_type. Trip-start
+times are unreliable: GTFS encodes block continuations as separate
+trip_ids that share the same start minute (e.g., D80 has four trip_ids
+all starting at 10:00:00 ±15s), which produces phantom 0-second headways
+at the origin. By the time those buses reach a mid-route trunk stop they
+spread out and headway calculations become honest.
+
+Because a single stop only sees one direction's buses, this naturally
+handles bidirectional routes — `mean_headway_min` reflects the rider
+experience at a typical trunk stop in the more-served direction.
+
 Post-midnight times
 -------------------
 GTFS stop_times.arrival_time may use HH ≥ 24 to represent service that
 extends past midnight (a 25:30 trip is physically 01:30 AM on the next
-calendar day). We bucket such trips by `hour % 24` so they aggregate with
-clock-time peers, but use raw seconds for the headway sort. This produces
-the right classification: late-night extensions don't masquerade as
-frequent service via stale mod-24 collisions.
+calendar day). We bucket arrivals by `hour % 24` so they aggregate with
+clock-time peers. Mixed-hour buckets (rare, only on routes that run
+through midnight on both ends of the service day) inflate the headway
+via a 24-hour gap, which keeps `is_frequent=False` — the right answer.
 """
 
 from collections import defaultdict
 from collections.abc import Iterable
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.models import Calendar, StopTime, Trip
@@ -65,24 +78,46 @@ def _service_ids_for_day_type(db: Session, day_type: str) -> list[str]:
     return [sid for (sid,) in rows]
 
 
-def _trip_starts_for_services(db: Session, service_ids: Iterable[str]):
-    """Yield (route_id, start_seconds) for each current trip in the given services."""
+def _trunk_stop_arrivals(
+    db: Session, service_ids: Iterable[str]
+) -> dict[str, list[str]]:
+    """
+    For every route active in `service_ids`, identify the trunk stop (most-served
+    stop_id across current trips) and return its arrival_time list, ordered.
+
+    Returns: {route_id: [arrival_time, ...]}
+    """
+    service_ids = list(service_ids)
+    if not service_ids:
+        return {}
+
+    # One pass over the join, materializing (route_id, stop_id, arrival_time).
     rows = (
-        db.query(
-            Trip.route_id,
-            func.min(StopTime.arrival_time).label("start_time"),
-        )
+        db.query(Trip.route_id, StopTime.stop_id, StopTime.arrival_time)
         .join(StopTime, StopTime.trip_id == Trip.trip_id)
         .filter(
             Trip.is_current,
             StopTime.is_current,
-            Trip.service_id.in_(list(service_ids)),
+            Trip.service_id.in_(service_ids),
         )
-        .group_by(Trip.trip_id, Trip.route_id)
         .all()
     )
-    for route_id, start_time in rows:
-        yield route_id, _parse_gtfs_time_to_seconds(start_time)
+
+    # Per route, count arrivals per stop and collect all arrival times.
+    per_route_stop_count: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    per_route_stop_arrivals: dict[str, dict[str, list[str]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for route_id, stop_id, arrival_time in rows:
+        per_route_stop_count[route_id][stop_id] += 1
+        per_route_stop_arrivals[route_id][stop_id].append(arrival_time)
+
+    # Pick the trunk stop per route — most-served, with stop_id as a stable tiebreaker.
+    trunk_arrivals: dict[str, list[str]] = {}
+    for route_id, stop_counts in per_route_stop_count.items():
+        trunk_stop_id = max(stop_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        trunk_arrivals[route_id] = sorted(per_route_stop_arrivals[route_id][trunk_stop_id])
+    return trunk_arrivals
 
 
 def compute_route_service_profile(db: Session) -> list[dict]:
@@ -99,29 +134,34 @@ def compute_route_service_profile(db: Session) -> list[dict]:
         if not service_ids:
             continue
 
-        bucket: dict[tuple[str, int], list[int]] = defaultdict(list)
-        for route_id, start_seconds in _trip_starts_for_services(db, service_ids):
-            hour = (start_seconds // 3600) % 24
-            bucket[(route_id, hour)].append(start_seconds)
+        trunk_arrivals = _trunk_stop_arrivals(db, service_ids)
 
-        for (route_id, hour), starts in bucket.items():
-            starts.sort()
-            scheduled_trips = len(starts)
-            mean_headway_min: float | None = None
-            if scheduled_trips >= 2:
-                gaps = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
-                mean_headway_min = sum(gaps) / len(gaps) / 60.0
-            is_frequent = (
-                mean_headway_min is not None and mean_headway_min <= FREQUENT_HEADWAY_MIN
-            )
-            results.append(
-                {
-                    "route_id": route_id,
-                    "day_type": day_type,
-                    "hour": hour,
-                    "scheduled_trips": scheduled_trips,
-                    "mean_headway_min": mean_headway_min,
-                    "is_frequent": is_frequent,
-                }
-            )
+        for route_id, arrival_times in trunk_arrivals.items():
+            bucket: dict[int, list[int]] = defaultdict(list)
+            for t in arrival_times:
+                sec = _parse_gtfs_time_to_seconds(t)
+                hour = (sec // 3600) % 24
+                bucket[hour].append(sec)
+
+            for hour, secs in bucket.items():
+                secs.sort()
+                scheduled_trips = len(secs)
+                mean_headway_min: float | None = None
+                if scheduled_trips >= 2:
+                    gaps = [secs[i + 1] - secs[i] for i in range(len(secs) - 1)]
+                    mean_headway_min = sum(gaps) / len(gaps) / 60.0
+                is_frequent = (
+                    mean_headway_min is not None
+                    and mean_headway_min <= FREQUENT_HEADWAY_MIN
+                )
+                results.append(
+                    {
+                        "route_id": route_id,
+                        "day_type": day_type,
+                        "hour": hour,
+                        "scheduled_trips": scheduled_trips,
+                        "mean_headway_min": mean_headway_min,
+                        "is_frequent": is_frequent,
+                    }
+                )
     return results
