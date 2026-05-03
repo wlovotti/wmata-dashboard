@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-03.
+Last edited 2026-05-03 (PR #45).
 
 ---
 
@@ -17,14 +17,9 @@ The bulk of open work is a metrics redesign anchored on materialized
 recomputation from raw positions. The `stop_events` table is in place
 (PRs #42, #43, #44), with two derivation paths (proximity + trip_update)
 and a comparison harness confirming the two sources agree to within a
-few seconds for 93% of events. Downstream metrics (NOTES-8 onward) build
-on that foundation — sequencing still matters.
-
-### P0 — Foundation (gates the rest)
-
-- **NOTES-8 `runs` aggregation.** Trivial roll-up over `stop_events`. No
-  single `is_complete` flag — each metric applies its own filter at
-  query time.
+few seconds for 93% of events. The `runs` aggregation over `stop_events`
+landed in PR #45. Downstream metrics build on that foundation —
+sequencing still matters.
 
 ### P1 — Quick wins on the new foundation (small, no new tables)
 
@@ -60,8 +55,8 @@ on that foundation — sequencing still matters.
   data layer.
 - **NOTES-18 Update grading rubric.** Currently OTP-only; should
   incorporate service-delivered and EWT once those land.
-- **NOTES-5 Per-run deviation chart.** Becomes feasible once
-  `stop_events` and `runs` exist.
+- **NOTES-5 Per-run deviation chart.** Now a thin API + frontend wrapper
+  over `runs` (PR #45) and `stop_events` (PRs #42, #43, #44).
 
 ### P5 — Cleanup
 
@@ -91,9 +86,9 @@ on that foundation — sequencing still matters.
 
 ## NOTES-5. Add per-run schedule-deviation chart to the dashboard
 
-**Severity: low (enhancement). Blocked on NOTES-8 `runs`; once that
-exists the chart is a thin API + frontend wrapper on top of the
-stop_events foundation (PRs #42, #43, #44).**
+**Severity: low (enhancement). Now unblocked: the `runs` table (PR #45)
+plus the stop_events foundation (PRs #42, #43, #44) supply everything
+the chart needs. Remaining work is API + frontend.**
 
 ### Idea
 
@@ -109,15 +104,13 @@ Section 4 of `analysis/run_quality.ipynb` builds the chart for one run
 on D80 / 2025-10-20. The shape (orange line + green on-time band, axhline
 at 0) is what the eventual UI version should resemble.
 
-### Blockers / dependencies
+### Remaining work
 
-1. Run-level materialized table needs to land first (currently only an
-   exploratory CSV exists). The chart needs per-stop deviation, which is
-   not in `route_metrics_daily`.
-2. API endpoint to expose one run's stop deviations:
+1. API endpoint to expose one run's stop deviations:
    `/api/runs/{run_id}/deviations` returning `[{stop_sequence, stop_id,
-   stop_name, scheduled, actual, deviation_sec}]`.
-3. Frontend route — could live on `RouteDetail` as a "recent runs" list
+   stop_name, scheduled, actual, deviation_sec}]`. Reads `stop_events`
+   directly for the per-stop list; uses `runs` for the run summary.
+2. Frontend route — could live on `RouteDetail` as a "recent runs" list
    that links into a per-run drill-down page.
 
 ### Open product questions
@@ -127,23 +120,6 @@ at 0) is what the eventual UI version should resemble.
   same trip across days to make patterns visible?
 - Tooltip needs to show the actual stop name and timestamps, not just
   numbers — useful for spotting where buses always lose time.
-
----
-
-## NOTES-8. `runs` table as aggregation over `stop_events`
-
-**Severity: medium. Depends on the stop_events table (PRs #42, #43, #44).**
-
-Trivial aggregation per (trip_id, vehicle_id, service_date). No
-materialized `is_complete` flag — each downstream metric applies the
-filter it needs at query time:
-
-- `RUN_HAS_ENDPOINTS`: `first_obs_seq ≤ 3 AND last_obs_seq ≥ stops_scheduled - 3`
-- `RUN_FULLY_OBSERVED`: coverage ≥ 70% AND endpoints AND `max_gap_sec < 300`
-- `RUN_EXISTED`: ≥ 3 stop_events
-
-Lift `compute_schedule_anchor()` from `analysis/run_quality.py` into
-the pipeline — the post-midnight rollover fix is load-bearing.
 
 ---
 
@@ -169,8 +145,8 @@ currently can't see).**
 
 Per route per date: `delivered_runs / scheduled_runs`. Scheduled count
 comes from GTFS `calendar` + `calendar_dates` joined to `trips`.
-Delivered count = distinct runs in `stop_events` with at least 3
-observed stops (or whatever we settle on for `RUN_EXISTED`).
+Delivered count = `runs` (PR #45) with `stops_observed >= 3` (the
+`RUN_EXISTED` filter — applied at query time, not materialized).
 
 The MBTA's "76% of timepoints met standard" stat exists *because* they
 measure scheduled vs. delivered. We don't.
@@ -182,10 +158,10 @@ measure scheduled vs. delivered. We don't.
 **Severity: medium.**
 
 Per route per date: median actual trip duration, p95, and % of runs
-where actual > 110% of scheduled. Computed from `runs` (which knows
-first/last observed stop_event). Apply `RUN_HAS_ENDPOINTS` filter.
-Captures dwell + in-vehicle delay; the metric MBTA OPMI is rolling
-out for buses.
+where actual > 110% of scheduled. Computed from `runs` (PR #45 — knows
+first/last observed stop_event timestamps and scheduled bounds). Apply
+`RUN_HAS_ENDPOINTS` filter. Captures dwell + in-vehicle delay; the
+metric MBTA OPMI is rolling out for buses.
 
 ---
 
@@ -341,7 +317,7 @@ So: keep collecting raw, then add retention.
 
 ### Dependencies
 
-- Independent of NOTES-8 through NOTES-20.
+- Independent of NOTES-10 through NOTES-20.
 
 ---
 
@@ -402,7 +378,7 @@ script is reliable.
 
 ### Dependencies
 
-- Independent of NOTES-8 through NOTES-21. Can land any time.
+- Independent of NOTES-10 through NOTES-21. Can land any time.
 - Side note: the 6-month-stale GTFS also means
   `route_metrics_daily` numbers for the last several months may be
   unreliable. We're slated to drop that table anyway (NOTES-19), so

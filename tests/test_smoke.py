@@ -12,7 +12,7 @@ from datetime import datetime
 import pytest
 from sqlalchemy import text
 
-from src.models import Calendar, Route, StopEvent, StopTime, Trip, TripUpdateSnapshot
+from src.models import Calendar, Route, Run, StopEvent, StopTime, Trip, TripUpdateSnapshot
 from src.service_profile import compute_route_service_profile
 from src.wmata_collector import WMATADataCollector
 
@@ -728,3 +728,254 @@ def test_save_trip_updates_bulk_inserts(db_session):
     assert row.stop_sequence == 5
     assert row.vehicle_id is None
     assert row.snapshot_ts == snapshot_ts
+
+
+def _se(**overrides) -> StopEvent:
+    """Build a StopEvent with sensible defaults for run-aggregation tests."""
+    defaults = {
+        "service_date": "2026-05-03",
+        "trip_id": "TRIP_A",
+        "route_id": "R1",
+        "direction_id": 0,
+        "vehicle_id": "V1",
+        "stop_id": "S1",
+        "stop_sequence": 1,
+        "scheduled_arrival_ts": None,
+        "scheduled_departure_ts": None,
+        "observed_arrival_ts": None,
+        "deviation_sec": None,
+        "source": "trip_update",
+        "schedule_relationship": "SCHEDULED",
+    }
+    defaults.update(overrides)
+    return StopEvent(**defaults)
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_basic_observed_run():
+    """One trip's stop_events collapse to one run with first/last seq, ts, gap, deviations."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    derived_at = datetime(2026, 5, 3, 20, 0, 0)
+    events = [
+        _se(
+            stop_sequence=1,
+            stop_id="S1",
+            scheduled_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+            observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 30),
+            deviation_sec=30,
+        ),
+        _se(
+            stop_sequence=2,
+            stop_id="S2",
+            scheduled_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
+            observed_arrival_ts=datetime(2026, 5, 3, 14, 6, 0),
+            deviation_sec=60,
+        ),
+        # 4-minute gap (no S3 observation between S2 and S4) — drives max_gap_sec
+        _se(
+            stop_sequence=4,
+            stop_id="S4",
+            scheduled_arrival_ts=datetime(2026, 5, 3, 14, 12, 0),
+            observed_arrival_ts=datetime(2026, 5, 3, 14, 10, 0),
+            deviation_sec=-120,
+        ),
+    ]
+    rows = aggregate_run_rows(
+        events, sched_counts={"TRIP_A": 5}, service_date_str="2026-05-03", derived_at=derived_at
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["trip_id"] == "TRIP_A"
+    assert r["source"] == "trip_update"
+    assert r["stops_observed"] == 3
+    assert r["stops_skipped"] == 0
+    assert r["stops_scheduled"] == 5
+    assert r["first_obs_seq"] == 1
+    assert r["last_obs_seq"] == 4
+    assert r["first_obs_ts"] == datetime(2026, 5, 3, 14, 0, 30)
+    assert r["last_obs_ts"] == datetime(2026, 5, 3, 14, 10, 0)
+    # Gaps in observed-arrival order: 14:00:30→14:06:00 = 330s; 14:06:00→14:10:00 = 240s.
+    assert r["max_gap_sec"] == 330
+    # Deviations: -120, 30, 60. p50 = 30, p95 = ~58 (numpy linear interp).
+    assert r["dev_p50_sec"] == 30
+    assert r["dev_p95_sec"] in (57, 58)  # numpy interp tolerance
+    # Schedule bounds lifted from the observed rows
+    assert r["sched_first_arrival_ts"] == datetime(2026, 5, 3, 14, 0, 0)
+    assert r["sched_last_arrival_ts"] == datetime(2026, 5, 3, 14, 12, 0)
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_splits_by_source():
+    """TU and proximity stop_events for the same trip produce two run rows."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(
+            stop_sequence=1,
+            source="trip_update",
+            observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+        ),
+        _se(
+            stop_sequence=1, source="proximity", observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 5)
+        ),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_counts={},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    sources = sorted(r["source"] for r in rows)
+    assert sources == ["proximity", "trip_update"]
+    assert all(r["stops_observed"] == 1 for r in rows)
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_skipped_separate_from_observed():
+    """SKIPPED events count against stops_skipped, not stops_observed."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(stop_sequence=1, observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0)),
+        _se(stop_sequence=2, observed_arrival_ts=None, schedule_relationship="SKIPPED"),
+        _se(stop_sequence=3, observed_arrival_ts=datetime(2026, 5, 3, 14, 5, 0)),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_counts={"TRIP_A": 3},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["stops_observed"] == 2
+    assert r["stops_skipped"] == 1
+    assert r["first_obs_seq"] == 1
+    assert r["last_obs_seq"] == 3
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_post_midnight_run_keeps_service_date():
+    """A run that crosses midnight reports service_date from stop_events, not calendar day."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    # Trip starts 23:50 service_date 2026-05-03 (Eastern), runs past midnight.
+    # All stop_events carry service_date='2026-05-03'; last observation lands 2026-05-04 03:55 UTC.
+    events = [
+        _se(
+            stop_sequence=1,
+            scheduled_arrival_ts=datetime(2026, 5, 4, 3, 50, 0),
+            observed_arrival_ts=datetime(2026, 5, 4, 3, 51, 0),
+            deviation_sec=60,
+        ),
+        _se(
+            stop_sequence=10,
+            scheduled_arrival_ts=datetime(2026, 5, 4, 4, 30, 0),
+            observed_arrival_ts=datetime(2026, 5, 4, 4, 31, 0),
+            deviation_sec=60,
+        ),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_counts={"TRIP_A": 10},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 4, 5, 0, 0),
+    )
+    assert rows[0]["service_date"] == "2026-05-03"
+    assert rows[0]["sched_first_arrival_ts"] == datetime(2026, 5, 4, 3, 50, 0)
+    assert rows[0]["sched_last_arrival_ts"] == datetime(2026, 5, 4, 4, 30, 0)
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_latest_non_null_vehicle_wins():
+    """vehicle_id resolves to the latest non-null value across the group's events."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(stop_sequence=1, vehicle_id=None),
+        _se(stop_sequence=2, vehicle_id="V_FIRST"),
+        _se(stop_sequence=3, vehicle_id=None),
+        _se(stop_sequence=4, vehicle_id="V_LAST"),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_counts={},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    assert rows[0]["vehicle_id"] == "V_LAST"
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_no_observed_yields_zero_stats():
+    """A trip where every stop is SKIPPED still emits a row, with null obs/dev fields."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(
+            stop_sequence=1,
+            observed_arrival_ts=None,
+            schedule_relationship="SKIPPED",
+            scheduled_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+        ),
+        _se(
+            stop_sequence=2,
+            observed_arrival_ts=None,
+            schedule_relationship="SKIPPED",
+            scheduled_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
+        ),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_counts={"TRIP_A": 2},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["stops_observed"] == 0
+    assert r["stops_skipped"] == 2
+    assert r["first_obs_seq"] is None
+    assert r["last_obs_seq"] is None
+    assert r["max_gap_sec"] is None
+    assert r["dev_p50_sec"] is None
+
+
+@pytest.mark.smoke
+def test_run_unique_constraint_rejects_duplicate(db_session):
+    """The (service_date, trip_id, source) unique constraint holds."""
+    from sqlalchemy.exc import IntegrityError
+
+    base = {
+        "service_date": "2026-05-03",
+        "trip_id": "TRIP_DUP",
+        "route_id": "R1",
+        "direction_id": 0,
+        "source": "proximity",
+        "stops_observed": 5,
+    }
+    db_session.add(Run(**base))
+    db_session.commit()
+
+    db_session.add(Run(**base))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.smoke
+def test_run_persists_with_both_sources(db_session):
+    """The same trip can have one run per source — proximity and trip_update coexist."""
+    common = {
+        "service_date": "2026-05-03",
+        "trip_id": "TRIP_BOTH",
+        "route_id": "R1",
+        "direction_id": 0,
+        "stops_observed": 10,
+    }
+    db_session.add_all([Run(**common, source="trip_update"), Run(**common, source="proximity")])
+    db_session.commit()
+
+    rows = db_session.query(Run).filter_by(trip_id="TRIP_BOTH").order_by(Run.source).all()
+    assert [r.source for r in rows] == ["proximity", "trip_update"]
