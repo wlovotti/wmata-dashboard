@@ -179,7 +179,6 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "min_headway_minutes": None,  # Not in summary table
             "max_headway_minutes": None,  # Not in summary table
             "avg_speed_mph": sanitize_float(summary.avg_speed_mph),
-            "total_arrivals_analyzed": getattr(summary, "total_arrivals_analyzed", 0) or 0,
             "total_positions": getattr(summary, "total_positions_7d", 0) or 0,
             "unique_vehicles": getattr(summary, "unique_vehicles_7d", 0) or 0,
             "unique_trips": getattr(summary, "unique_trips_7d", 0) or 0,
@@ -201,7 +200,6 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "min_headway_minutes": None,
             "max_headway_minutes": None,
             "avg_speed_mph": None,
-            "total_arrivals_analyzed": 0,
             "total_positions": 0,
             "unique_vehicles": 0,
             "unique_trips": 0,

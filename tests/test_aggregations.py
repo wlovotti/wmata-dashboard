@@ -217,7 +217,6 @@ class TestGetRouteDetailMetrics:
         assert result["avg_headway_minutes"] is None
         assert result["avg_speed_mph"] is None
         assert result["grade"] == "N/A"
-        assert result["total_arrivals_analyzed"] == 0
         assert result["total_positions"] == 0
 
     def test_route_detail_nonexistent_route(self, db_session):
