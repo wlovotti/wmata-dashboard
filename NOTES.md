@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-03 (PR #45).
+Last edited 2026-05-03 (PR #46).
 
 ---
 
@@ -18,14 +18,9 @@ recomputation from raw positions. The `stop_events` table is in place
 (PRs #42, #43, #44), with two derivation paths (proximity + trip_update)
 and a comparison harness confirming the two sources agree to within a
 few seconds for 93% of events. The `runs` aggregation over `stop_events`
-landed in PR #45. Downstream metrics build on that foundation —
+landed in PR #45, and the OTP origin/destination split (`src/otp_metrics.py`)
+landed in PR #46. Downstream metrics build on that foundation —
 sequencing still matters.
-
-### P1 — Quick wins on the new foundation (small, no new tables)
-
-- **NOTES-10 OTP at origin / destination split.** Already have stop-level
-  data — just filter to first/last stop_sequence per trip. Distinguishes
-  dispatch problems from run-time problems from recovery problems.
 
 ### P2 — Medium-effort metric additions
 
@@ -120,21 +115,6 @@ at 0) is what the eventual UI version should resemble.
   same trip across days to make patterns visible?
 - Tooltip needs to show the actual stop name and timestamps, not just
   numbers — useful for spotting where buses always lose time.
-
----
-
-## NOTES-10. OTP split: origin vs. destination
-
-**Severity: low.**
-
-Add `otp_origin_pct` and `otp_destination_pct` alongside the existing
-all-timepoints OTP. Origin lateness = dispatch problem. Destination
-lateness = run-time / traffic problem. Mid-route lateness with
-on-time destination = recovery in action. Three different operational
-stories that the current single number conflates.
-
-Implementation: filter `stop_events` to `stop_sequence == 1` and
-`stop_sequence == max(stop_sequence)` per trip.
 
 ---
 
@@ -317,7 +297,7 @@ So: keep collecting raw, then add retention.
 
 ### Dependencies
 
-- Independent of NOTES-10 through NOTES-20.
+- Independent of NOTES-11 through NOTES-20.
 
 ---
 
@@ -378,7 +358,7 @@ script is reliable.
 
 ### Dependencies
 
-- Independent of NOTES-10 through NOTES-21. Can land any time.
+- Independent of NOTES-11 through NOTES-21. Can land any time.
 - Side note: the 6-month-stale GTFS also means
   `route_metrics_daily` numbers for the last several months may be
   unreliable. We're slated to drop that table anyway (NOTES-19), so

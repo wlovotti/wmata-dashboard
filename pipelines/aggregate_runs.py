@@ -47,15 +47,20 @@ from src.timezones import eastern_today
 
 def aggregate_run_rows(
     events: list[StopEvent],
-    sched_counts: dict[str, int],
+    sched_index: dict[str, dict],
     service_date_str: str,
     derived_at: datetime,
 ) -> list[dict]:
     """Group stop_events by (trip_id, source) and produce one run row per group.
 
     Pure function — takes the materialized stop_events plus a per-trip schedule
-    count and returns insertable row dicts. No DB access, so it's the natural
+    summary and returns insertable row dicts. No DB access, so it's the natural
     test seam for run-level aggregation logic.
+
+    `sched_index` maps trip_id to a dict with keys `count`, `first_seq`,
+    `last_seq` (count of stop_times rows + min/max of stop_sequence in current
+    GTFS for the trip). The min/max can't be inferred from the count because
+    WMATA's GTFS uses non-contiguous stop_sequence values — see Run docstring.
     """
     groups: dict[tuple[str, str], list[StopEvent]] = defaultdict(list)
     for e in events:
@@ -110,6 +115,29 @@ def aggregate_run_rows(
         sched_first = min(sched_arrivals) if sched_arrivals else None
         sched_last = max(sched_arrivals) if sched_arrivals else None
 
+        # Endpoint deviations — pulled from the literal scheduled endpoints
+        # (sched_first_seq, sched_last_seq from current GTFS), not from
+        # first/last observed. See "Source asymmetry" in Run docstring for
+        # which source carries usable origin vs destination data.
+        sched = sched_index.get(trip_id, {})
+        sched_first_seq = sched.get("first_seq")
+        sched_last_seq = sched.get("last_seq")
+        origin_dev_sec: int | None = None
+        destination_dev_sec: int | None = None
+        for e in group:
+            if (
+                sched_first_seq is not None
+                and e.stop_sequence == sched_first_seq
+                and e.deviation_sec is not None
+            ):
+                origin_dev_sec = e.deviation_sec
+            if (
+                sched_last_seq is not None
+                and e.stop_sequence == sched_last_seq
+                and e.deviation_sec is not None
+            ):
+                destination_dev_sec = e.deviation_sec
+
         rows.append(
             {
                 "service_date": service_date_str,
@@ -118,7 +146,9 @@ def aggregate_run_rows(
                 "direction_id": direction_id,
                 "source": source,
                 "vehicle_id": vehicle_id,
-                "stops_scheduled": sched_counts.get(trip_id),
+                "stops_scheduled": sched.get("count"),
+                "sched_first_seq": sched_first_seq,
+                "sched_last_seq": sched_last_seq,
                 "sched_first_arrival_ts": sched_first,
                 "sched_last_arrival_ts": sched_last,
                 "stops_observed": len(observed),
@@ -130,6 +160,8 @@ def aggregate_run_rows(
                 "max_gap_sec": max_gap_sec,
                 "dev_p50_sec": dev_p50_sec,
                 "dev_p95_sec": dev_p95_sec,
+                "origin_dev_sec": origin_dev_sec,
+                "destination_dev_sec": destination_dev_sec,
                 "derived_at": derived_at,
             }
         )
@@ -171,15 +203,25 @@ def aggregate_runs_for_route_date(
         }
 
     trip_ids = {e.trip_id for e in events}
-    sched_counts: dict[str, int] = dict(
-        db.query(StopTime.trip_id, func.count(StopTime.id))
+    # One scan over stop_times: count + min/max stop_sequence per trip. The
+    # min/max are needed for origin/destination dev extraction (sequences are
+    # non-contiguous and don't start at 1 — see Run docstring).
+    sched_index: dict[str, dict] = {}
+    for tid, n, mn, mx in (
+        db.query(
+            StopTime.trip_id,
+            func.count(StopTime.id),
+            func.min(StopTime.stop_sequence),
+            func.max(StopTime.stop_sequence),
+        )
         .filter(StopTime.trip_id.in_(trip_ids), StopTime.is_current)
         .group_by(StopTime.trip_id)
         .all()
-    )
+    ):
+        sched_index[tid] = {"count": n, "first_seq": mn, "last_seq": mx}
 
     derived_at = datetime.utcnow()
-    rows = aggregate_run_rows(events, sched_counts, service_date_str, derived_at)
+    rows = aggregate_run_rows(events, sched_index, service_date_str, derived_at)
 
     rows_written = 0
     if rows:
@@ -191,6 +233,8 @@ def aggregate_runs_for_route_date(
                 "direction_id",
                 "vehicle_id",
                 "stops_scheduled",
+                "sched_first_seq",
+                "sched_last_seq",
                 "sched_first_arrival_ts",
                 "sched_last_arrival_ts",
                 "stops_observed",
@@ -202,6 +246,8 @@ def aggregate_runs_for_route_date(
                 "max_gap_sec",
                 "dev_p50_sec",
                 "dev_p95_sec",
+                "origin_dev_sec",
+                "destination_dev_sec",
                 "derived_at",
             )
         }
