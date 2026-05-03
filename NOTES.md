@@ -86,6 +86,11 @@ gate the later ones.
 - **#20 Tighter rider-experience OTP.** A stricter window alongside
   WMATA's official. Tracked but not yet scoped — user wants
   comparability with WMATA's scorecard for now.
+- **#21 Retention job for `trip_update_snapshots`.** Raw feed table grows
+  ~5 GB/day (measured: 247 bytes/row × ~20.6M rows/day). Append-only by
+  design — the rows are evidence for #7's derivation, not durable history.
+  Add a daily DELETE for snapshots > 14 days old once #7 ships. ~6 weeks
+  of disk runway, so not urgent until then.
 
 ### Independent of the redesign
 
@@ -617,3 +622,54 @@ WMATA's published scorecard for now. Future option: expose a stricter
 "rider-experience OTP" alongside the official one (e.g., −60s / +180s).
 Trivial to add once the constants are centralized per #9 — could even
 be a query-parameter toggle on the API.
+
+---
+
+## 21. Retention job for `trip_update_snapshots` — OPEN, P5
+
+**Severity: low until #7 ships, then medium (becomes urgent ~6 weeks
+after collection starts).**
+
+### The problem
+
+`trip_update_snapshots` is intentionally an append-only evidence trail,
+not durable history. Measured storage as of 2026-05-03 (first snapshots):
+**247 bytes/row including indexes**, ~7,150 rows per 30s tick →
+**~20.6M rows/day, ~4.74 GB/day, ~33 GB/week**. With ~204 GB free on
+the user's laptop, that's about 6 weeks of runway before disk pressure.
+On a future cloud VM with smaller disks the runway shrinks further.
+
+### Why it's not urgent yet
+
+The whole point of #7 is to derive one compact `stop_event` row per
+actual arrival from the trail of raw observations that supported the
+derivation. Once #7 is producing stop_events reliably, the underlying
+raw rows for any (trip_id, stop_id) pair that's been derived can be
+dropped. After derivation the steady state is ~50-80k stop_events per
+day, comparable to vehicle_positions — manageable indefinitely.
+
+So: keep collecting raw, ship #7, then add retention.
+
+### Implementation
+
+1. Daily cron (or pipeline step appended to whatever derives stop_events):
+   ```sql
+   DELETE FROM trip_update_snapshots
+    WHERE snapshot_ts < now() - interval '14 days';
+   ```
+   14 days gives a comfortable window to re-derive if #7 has a bug
+   that requires reprocessing.
+2. After the first run, `VACUUM` (not `VACUUM FULL` — the table is
+   high-churn, regular vacuum keeps bloat in check without locks).
+3. If the table is still getting unwieldy on disk, switch to native
+   Postgres partitioning by `snapshot_ts` (one partition per day).
+   Retention then becomes `DROP PARTITION` — instant and lock-light,
+   vs. a long DELETE on a multi-GB table. Only worth the complexity
+   if (a) we keep the table for months, or (b) the daily DELETE
+   becomes slow enough to interfere with collection writes.
+
+### Dependencies
+
+- Blocked on **#7 `stop_events`** landing first. Adding retention
+  before stop_events would silently throw away derivation evidence.
+- Independent of #8-#20.
