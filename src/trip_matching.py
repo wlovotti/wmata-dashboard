@@ -7,7 +7,6 @@ matching as a fallback for edge cases where the RT trip_id is missing or invalid
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -51,7 +50,7 @@ def find_matching_trip(
     max_time_diff_minutes: float = 15.0,
     max_distance_meters: float = 500.0,
     prefer_rt_trip_id: bool = True,
-) -> Optional[tuple[Trip, float]]:
+) -> tuple[Trip, float] | None:
     """
     Find the scheduled trip that best matches a vehicle's real-time position.
 

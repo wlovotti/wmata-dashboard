@@ -8,7 +8,7 @@ source. Read-only and idempotent — safe to run repeatedly.
 import os
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import requests
 from dotenv import load_dotenv
@@ -32,9 +32,7 @@ def fetch() -> gtfs_realtime_pb2.FeedMessage:
 def summarize(feed: gtfs_realtime_pb2.FeedMessage) -> None:
     """Print a structured summary of the feed for human inspection."""
     header = feed.header
-    feed_ts = (
-        datetime.fromtimestamp(header.timestamp, tz=timezone.utc) if header.timestamp else None
-    )
+    feed_ts = datetime.fromtimestamp(header.timestamp, tz=UTC) if header.timestamp else None
     print("=" * 72)
     print("FEED HEADER")
     print(f"  gtfs_realtime_version: {header.gtfs_realtime_version}")
@@ -163,7 +161,7 @@ def summarize(feed: gtfs_realtime_pb2.FeedMessage) -> None:
         if tu.HasField("vehicle"):
             print(f"  vehicle: id={tu.vehicle.id!r}  label={tu.vehicle.label!r}")
         if tu.HasField("timestamp"):
-            ts = datetime.fromtimestamp(tu.timestamp, tz=timezone.utc)
+            ts = datetime.fromtimestamp(tu.timestamp, tz=UTC)
             print(f"  trip_update.timestamp: {ts}  ({tu.timestamp})")
         print(f"  stop_time_updates ({len(tu.stop_time_update)}):")
         for j, stu in enumerate(tu.stop_time_update[:6]):
@@ -171,7 +169,7 @@ def summarize(feed: gtfs_realtime_pb2.FeedMessage) -> None:
             if stu.HasField("arrival"):
                 bits = []
                 if stu.arrival.HasField("time"):
-                    arr_ts = datetime.fromtimestamp(stu.arrival.time, tz=timezone.utc)
+                    arr_ts = datetime.fromtimestamp(stu.arrival.time, tz=UTC)
                     bits.append(f"time={arr_ts}")
                 if stu.arrival.HasField("delay"):
                     bits.append(f"delay={stu.arrival.delay}s")
@@ -182,7 +180,7 @@ def summarize(feed: gtfs_realtime_pb2.FeedMessage) -> None:
             if stu.HasField("departure"):
                 bits = []
                 if stu.departure.HasField("time"):
-                    dep_ts = datetime.fromtimestamp(stu.departure.time, tz=timezone.utc)
+                    dep_ts = datetime.fromtimestamp(stu.departure.time, tz=UTC)
                     bits.append(f"time={dep_ts}")
                 if stu.departure.HasField("delay"):
                     bits.append(f"delay={stu.departure.delay}s")

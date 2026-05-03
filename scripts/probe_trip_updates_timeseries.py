@@ -18,8 +18,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import requests
 from dotenv import load_dotenv
@@ -40,7 +39,7 @@ class StuObservation:
 
     snapshot_idx: int
     feed_ts: int
-    predicted_arrival_ts: Optional[int]
+    predicted_arrival_ts: int | None
     schedule_relationship: str
     vehicle_id: str
 
@@ -152,18 +151,16 @@ def analyze(by_key: dict[tuple[str, str], list[StuObservation]], n_snapshots: in
         examples_shown += 1
         last = obs[-1]
         last_pred = (
-            datetime.fromtimestamp(last.predicted_arrival_ts, tz=timezone.utc).strftime("%H:%M:%S")
+            datetime.fromtimestamp(last.predicted_arrival_ts, tz=UTC).strftime("%H:%M:%S")
             if last.predicted_arrival_ts
             else "?"
         )
         first_pred = (
-            datetime.fromtimestamp(obs[0].predicted_arrival_ts, tz=timezone.utc).strftime(
-                "%H:%M:%S"
-            )
+            datetime.fromtimestamp(obs[0].predicted_arrival_ts, tz=UTC).strftime("%H:%M:%S")
             if obs[0].predicted_arrival_ts
             else "?"
         )
-        last_feed_ts = datetime.fromtimestamp(last.feed_ts, tz=timezone.utc).strftime("%H:%M:%S")
+        last_feed_ts = datetime.fromtimestamp(last.feed_ts, tz=UTC).strftime("%H:%M:%S")
         print(
             f"  trip={trip_id} stop={stop_id} vehicle={last.vehicle_id} "
             f"first_pred={first_pred} last_pred={last_pred} last_feed={last_feed_ts} "
@@ -186,11 +183,11 @@ def analyze(by_key: dict[tuple[str, str], list[StuObservation]], n_snapshots: in
         print(f"  trip={trip_id} stop={stop_id} vehicle={obs[0].vehicle_id}")
         for o in obs:
             ts = (
-                datetime.fromtimestamp(o.predicted_arrival_ts, tz=timezone.utc).strftime("%H:%M:%S")
+                datetime.fromtimestamp(o.predicted_arrival_ts, tz=UTC).strftime("%H:%M:%S")
                 if o.predicted_arrival_ts
                 else "?"
             )
-            feed_ts = datetime.fromtimestamp(o.feed_ts, tz=timezone.utc).strftime("%H:%M:%S")
+            feed_ts = datetime.fromtimestamp(o.feed_ts, tz=UTC).strftime("%H:%M:%S")
             print(f"    snapshot {o.snapshot_idx}  feed={feed_ts}  pred_arrival={ts}")
 
 
