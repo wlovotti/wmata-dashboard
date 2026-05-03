@@ -33,6 +33,9 @@ build/
 # Visualization outputs
 visualizations/output/
 
+# Analysis output (regenerable from analysis/ scripts)
+analysis/*.csv
+
 # IDE
 .vscode/
 .idea/

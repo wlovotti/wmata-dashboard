@@ -184,3 +184,73 @@ Two reasonable paths:
 If you don't have a strong product reason to keep it, deleting is cheaper.
 The current state — keeping the code without exposing the feature — is the
 worst of both options.
+
+---
+
+## 4. Bump Python from 3.9 to 3.11 or 3.12 — OPEN
+
+**Severity: low (maintenance, not blocking).**
+
+### Evidence
+
+- `pyproject.toml:6` pins `requires-python = ">=3.9"`.
+- `pyproject.toml:43` pins `target-version = "py39"` for ruff.
+- `.venv` runs Python 3.9.6.
+- Python 3.9 reached end of life on 2025-10-31; VS Code's Jupyter
+  extension surfaces a "no longer supported" warning when loading the
+  kernel. Nothing breaks today, but no further security patches upstream.
+
+### Fix
+
+1. Pick a target — 3.11 or 3.12 are both safe; 3.13 is fine if you want
+   the latest. None of the current deps (sqlalchemy 2, pandas 2,
+   fastapi, gtfs-realtime-bindings, psycopg/psycopg2, jupyter) require
+   anything older.
+2. Update `requires-python` in `pyproject.toml`.
+3. Update `target-version` in the ruff config (`py311` / `py312`).
+4. `uv sync --extra postgres --extra viz --extra dev` to rebuild the
+   venv against the new interpreter (uv will fetch it if not installed).
+5. `uv run pytest -m smoke` and a one-off `uv run python -c "import api.main"` to confirm imports cleanly.
+6. CI: check `.github/workflows/` for any `python-version: '3.9'` pins
+   and bump them to match.
+
+Not coupled to any other work — can be done in a 5-minute PR whenever.
+
+---
+
+## 5. Add per-run schedule-deviation chart to the dashboard — OPEN
+
+**Severity: low (enhancement, depends on run-level metrics shipping first).**
+
+### Idea
+
+Line chart of schedule deviation (y-axis, seconds, +late / -early) vs.
+stop_sequence (x-axis) for a single bus run. Shows how a bus drifts
+across its trip — late starts that recover, early holds, accumulating
+drift, segments where the bus loses time. The daily-batch metric can't
+support this view; the per-run table can.
+
+### Prototype
+
+Section 4 of `analysis/run_quality.ipynb` builds the chart for one run
+on D80 / 2025-10-20. The shape (orange line + green on-time band, axhline
+at 0) is what the eventual UI version should resemble.
+
+### Blockers / dependencies
+
+1. Run-level materialized table needs to land first (currently only an
+   exploratory CSV exists). The chart needs per-stop deviation, which is
+   not in `route_metrics_daily`.
+2. API endpoint to expose one run's stop deviations:
+   `/api/runs/{run_id}/deviations` returning `[{stop_sequence, stop_id,
+   stop_name, scheduled, actual, deviation_sec}]`.
+3. Frontend route — could live on `RouteDetail` as a "recent runs" list
+   that links into a per-run drill-down page.
+
+### Open product questions
+
+- Default selection: today's runs? last completed run? worst-deviation run?
+- Should the chart show a single run, or overlay multiple runs of the
+  same trip across days to make patterns visible?
+- Tooltip needs to show the actual stop name and timestamps, not just
+  numbers — useful for spotting where buses always lose time.
