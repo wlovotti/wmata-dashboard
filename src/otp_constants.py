@@ -3,7 +3,7 @@ On-time performance window constants.
 
 Centralizes the early/late thresholds used to classify schedule deviations
 across all OTP calculations. Defined here so future tightening (e.g.
-NOTES.md #20 rider-experience window) is a one-line change.
+NOTES.md NOTES-20 rider-experience window) is a one-line change.
 
 Aligned with WMATA's published scorecard standard for schedule-based
 timepoints: -2 minutes early to +7 minutes late.

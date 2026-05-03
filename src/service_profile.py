@@ -2,8 +2,8 @@
 Compute the per-(route, day_type, hour) scheduled service profile from GTFS.
 
 Used by the GTFS reload to populate the `route_service_profile` table.
-Reference data for downstream metrics (NOTES.md #11 service-delivered ratio,
-#15 EWT for frequent routes).
+Reference data for downstream metrics (NOTES.md NOTES-11
+service-delivered ratio, NOTES-15 EWT for frequent routes).
 
 Day-type representative-day strategy
 ------------------------------------
