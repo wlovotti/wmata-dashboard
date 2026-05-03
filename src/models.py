@@ -442,8 +442,8 @@ class RouteServiceProfile(Base):
     Per-(route, day_type, hour) scheduled service profile derived from GTFS.
 
     Reference data for downstream metrics: scheduled_trips is the denominator
-    for service-delivered ratio (NOTES.md #11), and is_frequent is the gate
-    for EWT (NOTES.md #15). Derived fresh on every GTFS reload — no
+    for service-delivered ratio (NOTES.md NOTES-11), and is_frequent is the
+    gate for EWT (NOTES.md NOTES-15). Derived fresh on every GTFS reload — no
     versioning, the table is rewritten in place to match the current GTFS
     snapshot.
 
