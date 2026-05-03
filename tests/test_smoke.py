@@ -12,7 +12,7 @@ from datetime import datetime
 import pytest
 from sqlalchemy import text
 
-from src.models import Calendar, Route, StopTime, Trip, TripUpdateSnapshot
+from src.models import Calendar, Route, StopEvent, StopTime, Trip, TripUpdateSnapshot
 from src.service_profile import compute_route_service_profile
 from src.wmata_collector import WMATADataCollector
 
@@ -144,6 +144,127 @@ def test_trip_update_snapshot_persists(db_session):
     assert persisted[1].schedule_relationship == "SKIPPED"
     assert persisted[1].predicted_arrival_ts is None
     assert persisted[0].snapshot_ts == persisted[1].snapshot_ts
+
+
+@pytest.mark.smoke
+def test_stop_event_persists_with_both_sources(db_session):
+    """A real-world arrival can have two stop_events — one per derivation source."""
+    common = {
+        "service_date": "2026-05-03",
+        "trip_id": "TRIP_X",
+        "route_id": "D80",
+        "direction_id": 0,
+        "stop_id": "STOP_5",
+        "stop_sequence": 5,
+        "scheduled_arrival_ts": datetime(2026, 5, 3, 14, 30, 0),
+        "scheduled_departure_ts": datetime(2026, 5, 3, 14, 30, 30),
+        "observed_arrival_ts": datetime(2026, 5, 3, 14, 31, 15),
+        "deviation_sec": 75,
+    }
+    db_session.add_all(
+        [
+            StopEvent(**common, source="trip_update", schedule_relationship="SCHEDULED"),
+            StopEvent(
+                **common,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+                match_distance_m=18.4,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    rows = (
+        db_session.query(StopEvent)
+        .filter_by(trip_id="TRIP_X", stop_sequence=5)
+        .order_by(StopEvent.source)
+        .all()
+    )
+    assert [r.source for r in rows] == ["proximity", "trip_update"]
+    assert rows[0].match_distance_m == 18.4
+    assert rows[1].match_distance_m is None
+
+
+@pytest.mark.smoke
+def test_stop_event_unique_constraint_rejects_duplicate(db_session):
+    """The (service_date, trip_id, stop_sequence, source) unique constraint holds."""
+    from sqlalchemy.exc import IntegrityError
+
+    base = {
+        "service_date": "2026-05-03",
+        "trip_id": "TRIP_Y",
+        "route_id": "D80",
+        "direction_id": 1,
+        "stop_id": "STOP_3",
+        "stop_sequence": 3,
+        "source": "trip_update",
+        "schedule_relationship": "SCHEDULED",
+        "observed_arrival_ts": datetime(2026, 5, 3, 15, 0, 0),
+    }
+    db_session.add(StopEvent(**base))
+    db_session.commit()
+
+    db_session.add(StopEvent(**base))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.smoke
+def test_stop_event_skipped_has_null_observed(db_session):
+    """SKIPPED stop_events are valid with no observed_arrival_ts."""
+    db_session.add(
+        StopEvent(
+            service_date="2026-05-03",
+            trip_id="TRIP_Z",
+            route_id="D80",
+            direction_id=0,
+            stop_id="STOP_7",
+            stop_sequence=7,
+            source="trip_update",
+            schedule_relationship="SKIPPED",
+            scheduled_arrival_ts=datetime(2026, 5, 3, 16, 0, 0),
+            observed_arrival_ts=None,
+        )
+    )
+    db_session.commit()
+
+    row = db_session.query(StopEvent).filter_by(trip_id="TRIP_Z").one()
+    assert row.schedule_relationship == "SKIPPED"
+    assert row.observed_arrival_ts is None
+
+
+@pytest.mark.smoke
+def test_parse_gtfs_time_handles_post_midnight_hours():
+    """GTFS HH:MM:SS with HH ≥ 24 parses into the next calendar day in UTC."""
+    from datetime import date
+
+    from pipelines.derive_stop_events import _parse_gtfs_time_to_dt
+
+    # 24:21:00 anchored at 2026-05-02 service date = 2026-05-03 00:21 Eastern = 04:21 UTC (EDT)
+    crossover = _parse_gtfs_time_to_dt("24:21:00", date(2026, 5, 2))
+    assert crossover == datetime(2026, 5, 3, 4, 21, 0)
+
+    # Normal daytime: 14:30:00 anchored at 2026-05-03 = 18:30 UTC (EDT, UTC-4)
+    daytime = _parse_gtfs_time_to_dt("14:30:00", date(2026, 5, 3))
+    assert daytime == datetime(2026, 5, 3, 18, 30, 0)
+
+    # Garbage input returns None
+    assert _parse_gtfs_time_to_dt("not-a-time", date(2026, 5, 3)) is None
+
+
+@pytest.mark.smoke
+def test_parse_trip_start_date_round_trip():
+    """trip_start_date YYYYMMDD parses to a date; bad inputs return None."""
+    from datetime import date
+
+    from pipelines.derive_stop_events import _parse_trip_start_date
+
+    assert _parse_trip_start_date("20260503") == date(2026, 5, 3)
+    assert _parse_trip_start_date(None) is None
+    assert _parse_trip_start_date("") is None
+    assert _parse_trip_start_date("2026-05-03") is None  # wrong format
+    assert _parse_trip_start_date("20260230") is None  # invalid date
 
 
 @pytest.mark.smoke
