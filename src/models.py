@@ -441,15 +441,15 @@ class TripUpdateSnapshot(Base):
 class StopEvent(Base):
     """
     Per-(trip, stop) observed arrival or skip — the foundational unit of the
-    metrics redesign (NOTES.md NOTES-7).
+    metrics redesign, replacing the daily-batch recompute-from-positions model
+    (PRs #42, #43, #44).
 
     One row per (service_date, trip_id, stop_sequence, source). Two rows per
     real-world event when both sources observe it (one source='trip_update',
-    one source='proximity'). The duplication is intentional — Phase B2 of the
-    redesign is the agreement study comparing the two derivation paths, and
-    collapsing them prematurely would destroy the evidence the study needs.
-    Downstream consumers should pick a source explicitly or aggregate with a
-    deliberate tie-break.
+    one source='proximity'). The duplication is intentional — keeping each
+    source's evidence separate is what makes the agreement comparison
+    (`pipelines/compare_stop_event_sources.py`) possible. Downstream consumers
+    should pick a source explicitly or aggregate with a deliberate tie-break.
 
     Direction is denormalized as a column (not in the unique key) because
     direction_id is fully determined by trip_id. The denorm exists to make

@@ -8,36 +8,20 @@ are churn.
 
 Last edited 2026-05-03.
 
-> Phase B1 of NOTES-7 is in flight on `feature/trip-update-derivation`:
-> the trip_update-source derivation pipeline
-> (`pipelines/derive_stop_events_trip_updates.py`) lands here, plus a
-> small refactor that lifts shared parse helpers into
-> `pipelines/stop_events_common.py`. NOTES-7 stays open until the
-> comparison harness (Phase B2) is in. Smoke-tested on 2026-05-03:
-> 19.25M TU snapshots → 207k stop_events across all routes in 282 s;
-> cross-source agreement vs the proximity pipeline is tight (median
-> |delta| = 10 s, p95 |delta| = 56 s on the 76,748 events present in both
-> sources, 93% of all proximity events).
-
 ---
 
 ## Active priorities
 
 The bulk of open work is a metrics redesign anchored on materialized
 **stop events** as the foundational unit, replacing the daily-batch
-recomputation from raw positions. Sequencing matters — the early phases
-gate the later ones.
-
-NOTES-7 derivation needs ~7 days of accumulated TripUpdates data before
-it can run — earliest start ~2026-05-10.
+recomputation from raw positions. The `stop_events` table is in place
+(PRs #42, #43, #44), with two derivation paths (proximity + trip_update)
+and a comparison harness confirming the two sources agree to within a
+few seconds for 93% of events. Downstream metrics (NOTES-8 onward) build
+on that foundation — sequencing still matters.
 
 ### P0 — Foundation (gates the rest)
 
-- **NOTES-7 `stop_events` table.** One row per (trip_id, stop_id, observed
-  arrival), with `source` column (`'trip_update'` | `'proximity'`). Both
-  sources can coexist — they're independent observations. Replaces the
-  current re-derive-on-every-batch model. Blocked on ~7 days of
-  TripUpdates collection (PRs #29, #30).
 - **NOTES-8 `runs` aggregation.** Trivial roll-up over `stop_events`. No
   single `is_complete` flag — each metric applies its own filter at
   query time.
@@ -89,10 +73,10 @@ it can run — earliest start ~2026-05-10.
   comparability with WMATA's scorecard for now.
 - **NOTES-21 Retention job for `trip_update_snapshots`.** Raw feed table
   grows ~5 GB/day (measured: 247 bytes/row × ~20.6M rows/day).
-  Append-only by design — the rows are evidence for NOTES-7's
-  derivation, not durable history. Add a daily DELETE for snapshots > 14
-  days old once NOTES-7 ships. ~6 weeks of disk runway, so not urgent
-  until then.
+  Append-only by design — the rows are evidence for the trip_update
+  derivation pipeline (PR #43), not durable history. Add a daily DELETE
+  for snapshots > 14 days old now that the derivation is in. ~6 weeks
+  of disk runway, so not urgent yet.
 
 ### Independent of the redesign
 
@@ -107,9 +91,9 @@ it can run — earliest start ~2026-05-10.
 
 ## NOTES-5. Add per-run schedule-deviation chart to the dashboard
 
-**Severity: low (enhancement). Blocked on NOTES-7 `stop_events` and
-NOTES-8 `runs`; once those exist the chart is a thin API + frontend
-wrapper.**
+**Severity: low (enhancement). Blocked on NOTES-8 `runs`; once that
+exists the chart is a thin API + frontend wrapper on top of the
+stop_events foundation (PRs #42, #43, #44).**
 
 ### Idea
 
@@ -146,51 +130,9 @@ at 0) is what the eventual UI version should resemble.
 
 ---
 
-## NOTES-7. Materialize `stop_events`
-
-**Severity: high (foundational). Depends on TripUpdates collection
-(PRs #29, #30) having a week of data.**
-
-Replaces the current "re-derive arrivals from positions every nightly
-batch" model. One row per observed arrival at a stop, with `source`
-column allowing both derivation paths to coexist.
-
-### Schema sketch
-
-```
-stop_events
-  trip_id, vehicle_id, service_date    -- run key
-  stop_id, stop_sequence               -- stop on the trip
-  scheduled_arrival_ts                 -- from GTFS
-  observed_arrival_ts                  -- inferred or predicted
-  deviation_sec                        -- observed - scheduled
-  source                               -- 'trip_update' | 'proximity'
-  match_distance_m                     -- nullable, proximity source only
-  was_skipped                          -- from TripUpdates SCHEDULED='SKIPPED'
-```
-
-### Derivation paths
-
-- **`source='trip_update'`**: from `trip_update_snapshots` raw rows
-  (PRs #29, #30). For each (trip_id, stop_id) observed across snapshots,
-  the last seen `predicted_arrival_ts` before the row stops appearing =
-  inferred actual arrival. Uncertainty bounded by polling interval (30s).
-- **`source='proximity'`**: lift the existing logic from
-  `src/analytics.py:calculate_line_level_otp()` (vehicle position
-  within 50m of a scheduled stop) into the pipeline, materialize once.
-
-### Comparison study after a week
-
-For (trip_id, stop_id) pairs observed by both sources, measure:
-agreement rate (both within 60s), median absolute difference, which
-correlates better with GTFS scheduled time. Calibrates which to trust
-as primary.
-
----
-
 ## NOTES-8. `runs` table as aggregation over `stop_events`
 
-**Severity: medium. Depends on NOTES-7.**
+**Severity: medium. Depends on the stop_events table (PRs #42, #43, #44).**
 
 Trivial aggregation per (trip_id, vehicle_id, service_date). No
 materialized `is_complete` flag — each downstream metric applies the
@@ -355,8 +297,8 @@ change — could even be a query-parameter toggle on the API.
 
 ## NOTES-21. Retention job for `trip_update_snapshots`
 
-**Severity: low until NOTES-7 ships, then medium (becomes urgent ~6
-weeks after collection starts).**
+**Severity: medium now that the trip_update derivation has shipped
+(PR #43) — becomes urgent ~6 weeks after collection starts.**
 
 ### The problem
 
@@ -369,15 +311,15 @@ On a future cloud VM with smaller disks the runway shrinks further.
 
 ### Why it's not urgent yet
 
-The whole point of NOTES-7 is to derive one compact `stop_event` row
-per actual arrival from the trail of raw observations that supported
-the derivation. Once NOTES-7 is producing stop_events reliably, the
-underlying raw rows for any (trip_id, stop_id) pair that's been derived
-can be dropped. After derivation the steady state is ~50-80k
-stop_events per day, comparable to vehicle_positions — manageable
+The point of the trip_update derivation pipeline (PR #43) is to convert
+the trail of raw observations into one compact `stop_event` row per
+actual arrival. Now that the pipeline is producing stop_events
+reliably, the underlying raw rows for any (trip_id, stop_id) pair that's
+been derived can be dropped. After derivation the steady state is
+~50–80k stop_events per day, comparable to vehicle_positions — manageable
 indefinitely.
 
-So: keep collecting raw, ship NOTES-7, then add retention.
+So: keep collecting raw, then add retention.
 
 ### Implementation
 
@@ -386,8 +328,8 @@ So: keep collecting raw, ship NOTES-7, then add retention.
    DELETE FROM trip_update_snapshots
     WHERE snapshot_ts < now() - interval '14 days';
    ```
-   14 days gives a comfortable window to re-derive if NOTES-7 has a bug
-   that requires reprocessing.
+   14 days gives a comfortable window to re-derive if the derivation
+   pipeline has a bug that requires reprocessing.
 2. After the first run, `VACUUM` (not `VACUUM FULL` — the table is
    high-churn, regular vacuum keeps bloat in check without locks).
 3. If the table is still getting unwieldy on disk, switch to native
@@ -399,8 +341,6 @@ So: keep collecting raw, ship NOTES-7, then add retention.
 
 ### Dependencies
 
-- Blocked on **NOTES-7 `stop_events`** landing first. Adding retention
-  before stop_events would silently throw away derivation evidence.
 - Independent of NOTES-8 through NOTES-20.
 
 ---
@@ -462,7 +402,7 @@ script is reliable.
 
 ### Dependencies
 
-- Independent of NOTES-7 through NOTES-21. Can land any time.
+- Independent of NOTES-8 through NOTES-21. Can land any time.
 - Side note: the 6-month-stale GTFS also means
   `route_metrics_daily` numbers for the last several months may be
   unreliable. We're slated to drop that table anyway (NOTES-19), so

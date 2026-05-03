@@ -1,5 +1,5 @@
 """
-Shared helpers for stop_events derivation pipelines (NOTES.md NOTES-7).
+Shared helpers for the stop_events derivation pipelines.
 
 Both `derive_stop_events.py` (proximity source) and
 `derive_stop_events_trip_updates.py` (trip_update source) parse GTFS schedule
