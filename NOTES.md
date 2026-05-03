@@ -4,7 +4,7 @@ Forward-looking punch list. Completed items are removed once their PRs
 merge — see git log and PR descriptions for history. Item numbers
 (`NOTES-N`) are stable; new items take the next number.
 
-Last reconciled 2026-05-03 (through PR #37).
+Last reconciled 2026-05-03 (through PR #38).
 
 ---
 

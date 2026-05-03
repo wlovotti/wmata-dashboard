@@ -36,6 +36,10 @@ visualizations/output/
 # Analysis output (regenerable from analysis/ scripts)
 analysis/*.csv
 
+# Test / runtime artifacts
+.coverage
+logs/
+
 # IDE
 .vscode/
 .idea/
