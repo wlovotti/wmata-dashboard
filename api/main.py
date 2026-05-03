@@ -60,7 +60,7 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "service": "wmata-dashboard-api",
         "version": "1.0.0",
-        "checks": {}
+        "checks": {},
     }
 
     # Check database connectivity
@@ -71,24 +71,26 @@ async def health_check():
             db.execute("SELECT 1").scalar()
             health_status["checks"]["database"] = {
                 "status": "healthy",
-                "message": "Database connection successful"
+                "message": "Database connection successful",
             }
 
             # Check for recent data collection (last 5 minutes)
             five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
-            recent_data_count = db.query(VehiclePosition).filter(
-                VehiclePosition.timestamp >= five_minutes_ago
-            ).count()
+            recent_data_count = (
+                db.query(VehiclePosition)
+                .filter(VehiclePosition.timestamp >= five_minutes_ago)
+                .count()
+            )
 
             if recent_data_count > 0:
                 health_status["checks"]["data_collection"] = {
                     "status": "healthy",
-                    "message": f"Recent data: {recent_data_count} vehicle positions in last 5 min"
+                    "message": f"Recent data: {recent_data_count} vehicle positions in last 5 min",
                 }
             else:
                 health_status["checks"]["data_collection"] = {
                     "status": "warning",
-                    "message": "No recent data collected in last 5 minutes"
+                    "message": "No recent data collected in last 5 minutes",
                 }
                 health_status["status"] = "degraded"
         finally:
@@ -97,7 +99,7 @@ async def health_check():
         health_status["status"] = "unhealthy"
         health_status["checks"]["database"] = {
             "status": "unhealthy",
-            "message": f"Database connection failed: {str(e)}"
+            "message": f"Database connection failed: {str(e)}",
         }
 
     return health_status

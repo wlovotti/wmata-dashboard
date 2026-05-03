@@ -9,6 +9,7 @@ Run with: pytest tests/test_models.py
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, Stop, StopTime, Trip, VehiclePosition
 
@@ -140,7 +141,7 @@ def test_route_metrics_daily_creation(db_session, sample_route):
         otp_percentage=82.0,
         avg_headway_minutes=11.5,
         avg_speed_mph=19.0,
-        total_observations=50,
+        total_arrivals=50,
         computed_at=datetime.utcnow(),
     )
     db_session.add(daily)
@@ -170,25 +171,30 @@ def test_query_vehicle_positions_by_route(db_session, sample_route, sample_vehic
 
 def test_route_metrics_unique_constraint(db_session, sample_route):
     """Test that route_id is unique in RouteMetricsSummary"""
-    summary1 = RouteMetricsSummary(
-        route_id=sample_route.route_id,
-        otp_percentage=85.0,
-        computed_at=datetime.utcnow(),
-    )
-    db_session.add(summary1)
-    db_session.commit()
+    route_id = sample_route.route_id
 
-    # Trying to add another summary for the same route should fail or replace
-    # (depending on database constraints)
-    summary2 = RouteMetricsSummary(
-        route_id=sample_route.route_id,
-        otp_percentage=90.0,
-        computed_at=datetime.utcnow(),
+    db_session.add(
+        RouteMetricsSummary(
+            route_id=route_id,
+            otp_percentage=85.0,
+            computed_at=datetime.utcnow(),
+        )
     )
-    db_session.add(summary2)
+    db_session.flush()
 
-    # This will raise an IntegrityError in PostgreSQL if constraint is enforced
-    # For in-memory SQLite test, we just verify query returns one record
-    db_session.commit()
-    count = db_session.query(RouteMetricsSummary).filter_by(route_id=sample_route.route_id).count()
-    assert count >= 1  # At least one record exists
+    # Inside a SAVEPOINT so the failing flush doesn't unwind the outer
+    # test transaction managed by the db_session fixture.
+    savepoint = db_session.begin_nested()
+    db_session.add(
+        RouteMetricsSummary(
+            route_id=route_id,
+            otp_percentage=90.0,
+            computed_at=datetime.utcnow(),
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    savepoint.rollback()
+
+    count = db_session.query(RouteMetricsSummary).filter_by(route_id=route_id).count()
+    assert count == 1

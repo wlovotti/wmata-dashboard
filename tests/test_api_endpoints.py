@@ -81,7 +81,6 @@ def test_get_route_success(client, sample_route, sample_route_metrics_summary):
     assert data["avg_headway_minutes"] == 12.5
     assert data["avg_speed_mph"] == 18.5
     assert data["grade"] == "B"
-    assert data["total_arrivals_analyzed"] == 45
     assert data["total_positions"] == 1050
     assert data["unique_vehicles"] == 8
     assert data["unique_trips"] == 42

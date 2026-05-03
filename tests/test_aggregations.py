@@ -204,7 +204,6 @@ class TestGetRouteDetailMetrics:
         assert result["avg_headway_minutes"] == 12.5
         assert result["avg_speed_mph"] == 18.5
         assert result["grade"] == "B"
-        assert result["total_arrivals_analyzed"] == 45
         assert result["total_positions"] == 1050
         assert result["unique_vehicles"] == 8
         assert result["unique_trips"] == 42

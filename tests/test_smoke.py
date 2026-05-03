@@ -8,6 +8,7 @@ Run with: pytest -m smoke
 """
 
 import pytest
+from sqlalchemy import text
 
 from src.models import Route
 
@@ -16,7 +17,7 @@ from src.models import Route
 def test_database_connection(db_session):
     """Test that database connection works"""
     # Should be able to execute a simple query
-    result = db_session.execute("SELECT 1").scalar()
+    result = db_session.execute(text("SELECT 1")).scalar()
     assert result == 1
 
 
