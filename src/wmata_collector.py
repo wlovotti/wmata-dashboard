@@ -596,8 +596,8 @@ class WMATADataCollector:
                 current_status=vehicle_data.get("current_status"),
                 # Additional data
                 occupancy_status=vehicle_data.get("occupancy_status"),
-                # Timestamps
-                timestamp=datetime.fromtimestamp(vehicle_data["timestamp"])
+                # Timestamps — naive UTC (see src/timezones.py for convention)
+                timestamp=datetime.utcfromtimestamp(vehicle_data["timestamp"])
                 if vehicle_data["timestamp"]
                 else datetime.utcnow(),
             )

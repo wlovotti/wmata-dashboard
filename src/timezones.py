@@ -1,0 +1,63 @@
+"""Timezone conventions for the WMATA dashboard.
+
+Storage convention: every datetime column in the database holds a NAIVE
+UTC value. There are no `timestamptz` columns; the tz info is implicit
+in this rule.
+
+Service-date convention: WMATA buses run on Washington DC local time.
+Anything user-facing — "today's metrics", "last 7 days", a service date
+in route_metrics_daily — is an Eastern question even though the storage
+is UTC. Use the helpers here to bridge the two; never call
+``datetime.now()`` (naive local) for date math.
+
+This module exists because vehicle_positions.timestamp was historically
+written via ``datetime.fromtimestamp`` (naive local) while every other
+timestamp column used UTC, which silently mis-aligned the two by 4
+hours on every join.
+"""
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import func
+
+EASTERN = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
+
+
+def eastern_today():
+    """Return the current Eastern date (the WMATA service date)."""
+    return datetime.now(EASTERN).date()
+
+
+def eastern_midnight_as_utc(date):
+    """Convert midnight on the given Eastern-zone date to a naive UTC datetime.
+
+    Use when filtering naive-UTC timestamp columns by an Eastern service
+    date. ``zoneinfo`` handles DST transitions correctly, so this is safe
+    across the spring-forward and fall-back boundaries.
+    """
+    aware = datetime.combine(date, datetime.min.time(), tzinfo=EASTERN)
+    return aware.astimezone(UTC).replace(tzinfo=None)
+
+
+def eastern_day_bounds_utc(date):
+    """Return (start, end) naive-UTC datetimes spanning one Eastern service day.
+
+    Equivalent to (eastern_midnight_as_utc(date), eastern_midnight_as_utc(date+1))
+    but expressed in one call. Note end - start may be 23 or 25 hours on DST
+    transition days — that's correct service-day semantics.
+    """
+    start = eastern_midnight_as_utc(date)
+    end = eastern_midnight_as_utc(date + timedelta(days=1))
+    return start, end
+
+
+def to_eastern_sql(naive_utc_col):
+    """SQLAlchemy expression: convert a naive-UTC timestamp column to naive Eastern.
+
+    Use when extracting service-date components in SQL (e.g., to match
+    ``CalendarDate.date`` in YYYYMMDD form). The double ``timezone()`` is
+    Postgres's idiom for "this naive value is UTC; reinterpret it as Eastern".
+    """
+    return func.timezone("America/New_York", func.timezone("UTC", naive_utc_col))
