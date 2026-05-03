@@ -2,7 +2,7 @@
 
 ## Overview
 
-This dashboard uses **GTFS-based calculations as the primary OTP metric**, with WMATA's BusPositions API deviation data as supplementary validation.
+This dashboard uses **GTFS-based calculations as the primary OTP metric**. WMATA's BusPositions API was evaluated as a supplementary source but its `Deviation` field was found unreliable (up to 7.7 min discrepancies vs GTFS) and is no longer used.
 
 ## Primary Method: GTFS-Based OTP
 
@@ -57,39 +57,9 @@ Breaks down OTP by time of day:
 
 Overall route performance. Uses simple average (all arrivals weighted equally).
 
-## Supplementary Method: BusPositions API
+## Why BusPositions Was Rejected
 
-### Data Source
-- **WMATA BusPositions API**: Proprietary JSON endpoint
-- Provides `Deviation` field (schedule adherence in minutes)
-
-### Calculation Method
-
-`calculate_otp_from_bus_positions(db, route_id)`
-
-Simply classifies observations based on the `deviation` field:
-- Early: deviation < -1.0 minutes
-- On-time: -1.0 <= deviation <= 5.0 minutes
-- Late: deviation > 5.0 minutes
-
-### ⚠️  Why Supplementary Only?
-
-**Validation Results** (from `debug/validate_deviation.py`):
-- 75% of observations match within 1 minute
-- But 25% have significant discrepancies (up to 7.7 minutes difference!)
-- Average difference: 2.48 minutes
-
-**Possible Reasons for Discrepancies:**
-1. WMATA may use different/updated schedules than published GTFS
-2. Different calculation methodology
-3. Different stop/location matching logic
-4. Potential errors in WMATA's calculation system
-
-### Use Cases for BusPositions Deviation
-
-1. **Cross-validation**: Compare against GTFS-based calculations
-2. **Schedule discrepancy detection**: Large differences may indicate outdated GTFS data
-3. **Performance monitoring**: Track if WMATA's internal metrics align with public metrics
+WMATA's `BusPositions` JSON API exposes a `Deviation` field (schedule adherence in minutes) that looked promising as a supplementary OTP source. Validation showed it diverges from GTFS-based calculations by up to 7.7 minutes on ~25% of observations (avg difference 2.48 min), most likely because WMATA uses internal schedules that differ from the published GTFS feed. The integration was removed; GTFS-based OTP is the only source.
 
 ## Accuracy Limitations
 
@@ -116,12 +86,11 @@ Simply classifies observations based on the `deviation` field:
 
 - `src/analytics.py`: All OTP calculation functions
 - `src/trip_matching.py`: GTFS-RT to GTFS static matching
-- `src/models.py`: Database models (VehiclePosition, BusPosition)
+- `src/models.py`: Database models (VehiclePosition)
 - `src/wmata_collector.py`: Data collection from APIs
 
 ## Validation Scripts
 
-- `debug/validate_deviation.py`: Compare WMATA vs GTFS-based calculations
 - `debug/check_early_arrivals.py`: Analyze distribution of lateness
 - `tests/test_multi_level_otp.py`: Test all three OTP levels
 
