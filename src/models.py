@@ -437,6 +437,50 @@ class TripUpdateSnapshot(Base):
     )
 
 
+class RouteServiceProfile(Base):
+    """
+    Per-(route, day_type, hour) scheduled service profile derived from GTFS.
+
+    Reference data for downstream metrics: scheduled_trips is the denominator
+    for service-delivered ratio (NOTES.md #11), and is_frequent is the gate
+    for EWT (NOTES.md #15). Derived fresh on every GTFS reload — no
+    versioning, the table is rewritten in place to match the current GTFS
+    snapshot.
+
+    `is_frequent` follows the standard rider-experience definition: mean
+    scheduled headway ≤ 15 minutes for that hour-of-day. We deliberately
+    avoid WMATA's published "headway-based" route list because that's
+    operational policy, not encoded in GTFS, and we want the schedule to
+    classify routes itself.
+    """
+
+    __tablename__ = "route_service_profile"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(String, nullable=False, index=True)
+    day_type = Column(String, nullable=False)  # 'weekday' | 'saturday' | 'sunday'
+    hour = Column(Integer, nullable=False)  # 0..23, trip start hour at origin
+
+    scheduled_trips = Column(Integer, nullable=False)
+    mean_headway_min = Column(Float)  # NULL when scheduled_trips < 2
+    is_frequent = Column(Boolean, nullable=False, default=False)
+
+    snapshot_id = Column(
+        Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
+    )
+    computed_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index(
+            "idx_route_service_profile_unique",
+            "route_id",
+            "day_type",
+            "hour",
+            unique=True,
+        ),
+    )
+
+
 class RouteMetricsDaily(Base):
     """
     Pre-computed daily performance metrics for routes.

@@ -36,6 +36,7 @@ from src.models import (
     FeedInfo,
     GTFSSnapshot,
     Route,
+    RouteServiceProfile,
     Shape,
     Stop,
     StopTime,
@@ -43,6 +44,7 @@ from src.models import (
     TimepointTime,
     Trip,
 )
+from src.service_profile import compute_route_service_profile
 
 load_dotenv()
 
@@ -429,6 +431,17 @@ def reload_complete_gtfs():
                 db.commit()
 
             print(f"\r  ✓ Loaded {total_tp:,} timepoint_times")
+
+            # Route Service Profile (derived from the just-loaded GTFS)
+            print("→ Computing route_service_profile...")
+            db.execute(text("DELETE FROM route_service_profile"))
+            db.commit()
+
+            profile_rows = compute_route_service_profile(db)
+            for row in profile_rows:
+                db.add(RouteServiceProfile(snapshot_id=snapshot_id, **row))
+            db.commit()
+            print(f"  ✓ Loaded {len(profile_rows):,} route_service_profile rows")
 
             print("\n" + "=" * 70)
             print("✓ Complete GTFS Reload Successful!")
