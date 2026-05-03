@@ -1,5 +1,5 @@
 """
-Create the stop_events table on an existing database (NOTES.md NOTES-7).
+Create the stop_events table on an existing database.
 
 Idempotent — Base.metadata.create_all only creates tables that do not yet
 exist. Safe to re-run. Does not touch any other table.

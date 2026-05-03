@@ -1,6 +1,6 @@
 """
-Derive `stop_events` rows from VehiclePosition data (NOTES.md NOTES-7,
-`source='proximity'` half).
+Derive `stop_events` rows from VehiclePosition data — the `source='proximity'`
+half of the stop_events foundation (PRs #42, #43, #44).
 
 The proximity derivation matches each vehicle position to the nearest scheduled
 stop within 50 m, then keeps the FIRST detection per (trip_id, stop_sequence)

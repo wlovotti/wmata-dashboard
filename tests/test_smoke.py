@@ -471,6 +471,238 @@ def test_compute_route_service_profile_classifies_frequent(db_session):
 
 
 @pytest.mark.smoke
+def test_compare_stop_event_sources_classifies_pairings(db_session):
+    """Comparison correctly partitions events into both / TU-only / proximity-only."""
+    from datetime import date
+
+    from pipelines.compare_stop_event_sources import compare_stop_event_sources
+
+    sd = "2026-05-03"
+    base = {"service_date": sd, "route_id": "R1", "direction_id": 0, "stop_id": "S1"}
+
+    # Pair 1: both sources, TU is 30s after prox
+    db_session.add_all(
+        [
+            StopEvent(
+                **base,
+                trip_id="T1",
+                stop_sequence=1,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 30),
+            ),
+            StopEvent(
+                **base,
+                trip_id="T1",
+                stop_sequence=1,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+                match_distance_m=22.0,
+            ),
+        ]
+    )
+    # Pair 2: both sources, TU is 10s before prox
+    db_session.add_all(
+        [
+            StopEvent(
+                **base,
+                trip_id="T2",
+                stop_sequence=1,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 15, 0, 50),
+            ),
+            StopEvent(
+                **base,
+                trip_id="T2",
+                stop_sequence=1,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 15, 1, 0),
+                match_distance_m=15.0,
+            ),
+        ]
+    )
+    # TU only — proximity missed it
+    db_session.add(
+        StopEvent(
+            **base,
+            trip_id="T3",
+            stop_sequence=1,
+            source="trip_update",
+            schedule_relationship="SCHEDULED",
+            observed_arrival_ts=datetime(2026, 5, 3, 16, 0, 0),
+        )
+    )
+    # Proximity only — TU has no prediction
+    db_session.add(
+        StopEvent(
+            **base,
+            trip_id="T4",
+            stop_sequence=1,
+            source="proximity",
+            schedule_relationship="SCHEDULED",
+            observed_arrival_ts=datetime(2026, 5, 3, 17, 0, 0),
+            match_distance_m=42.0,
+        )
+    )
+    # SKIPPED in TU — must be excluded by the observed_arrival_ts IS NOT NULL filter,
+    # NOT counted as "TU only"
+    db_session.add(
+        StopEvent(
+            **base,
+            trip_id="T5",
+            stop_sequence=1,
+            source="trip_update",
+            schedule_relationship="SKIPPED",
+            observed_arrival_ts=None,
+        )
+    )
+    db_session.commit()
+
+    report = compare_stop_event_sources(db_session, date(2026, 5, 3))
+
+    assert report["both_count"] == 2
+    assert report["tu_only_count"] == 1
+    assert report["proximity_only_count"] == 1
+    assert report["tu_total"] == 3  # 2 paired + 1 TU-only
+    assert report["proximity_total"] == 3  # 2 paired + 1 prox-only
+    # |Δ| = {30, 10}; median = 20. Signed Δ (TU − prox) = {+30, −10}; median = 10.
+    d = report["delta_stats"]
+    assert d["n"] == 2
+    assert d["abs_median_sec"] == 20.0
+    assert d["signed_median_sec"] == 10.0
+    # Coverage: 2 BOTH out of 3 prox total → 2/3
+    assert abs(report["coverage_of_proximity"] - (2 / 3)) < 1e-9
+
+
+@pytest.mark.smoke
+def test_compare_stop_event_sources_per_route_breakdown(db_session):
+    """Per-route output groups counts and Δ stats by route_id, sorted by activity."""
+    from datetime import date
+
+    from pipelines.compare_stop_event_sources import compare_stop_event_sources
+
+    sd = "2026-05-03"
+    # R_BIG: 2 paired events. R_SMALL: 1 TU-only.
+    db_session.add_all(
+        [
+            StopEvent(
+                service_date=sd,
+                trip_id="A",
+                route_id="R_BIG",
+                direction_id=0,
+                stop_id="S1",
+                stop_sequence=1,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 5),
+            ),
+            StopEvent(
+                service_date=sd,
+                trip_id="A",
+                route_id="R_BIG",
+                direction_id=0,
+                stop_id="S1",
+                stop_sequence=1,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+                match_distance_m=10.0,
+            ),
+            StopEvent(
+                service_date=sd,
+                trip_id="A",
+                route_id="R_BIG",
+                direction_id=0,
+                stop_id="S2",
+                stop_sequence=2,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
+            ),
+            StopEvent(
+                service_date=sd,
+                trip_id="A",
+                route_id="R_BIG",
+                direction_id=0,
+                stop_id="S2",
+                stop_sequence=2,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
+                match_distance_m=18.0,
+            ),
+            StopEvent(
+                service_date=sd,
+                trip_id="B",
+                route_id="R_SMALL",
+                direction_id=0,
+                stop_id="S1",
+                stop_sequence=1,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 18, 0, 0),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    report = compare_stop_event_sources(db_session, date(2026, 5, 3))
+    per_route = {r["route_id"]: r for r in report["per_route"]}
+    assert per_route["R_BIG"]["both_count"] == 2
+    assert per_route["R_BIG"]["tu_only_count"] == 0
+    assert per_route["R_SMALL"]["tu_only_count"] == 1
+    assert per_route["R_SMALL"]["both_count"] == 0
+    # Sort order: R_BIG (4 events) before R_SMALL (1 event).
+    assert report["per_route"][0]["route_id"] == "R_BIG"
+
+
+@pytest.mark.smoke
+def test_compare_stop_event_sources_route_filter(db_session):
+    """`route_id` arg restricts the slice and suppresses the per_route field."""
+    from datetime import date
+
+    from pipelines.compare_stop_event_sources import compare_stop_event_sources
+
+    sd = "2026-05-03"
+    db_session.add_all(
+        [
+            StopEvent(
+                service_date=sd,
+                trip_id="X",
+                route_id="KEEP",
+                direction_id=0,
+                stop_id="S1",
+                stop_sequence=1,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+            ),
+            StopEvent(
+                service_date=sd,
+                trip_id="Y",
+                route_id="DROP",
+                direction_id=0,
+                stop_id="S1",
+                stop_sequence=1,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    report = compare_stop_event_sources(db_session, date(2026, 5, 3), route_id="KEEP")
+    assert report["tu_total"] == 1
+    assert report["proximity_total"] == 0
+    assert "per_route" not in report
+    assert report["route_id"] == "KEEP"
+
+
+@pytest.mark.smoke
 def test_save_trip_updates_bulk_inserts(db_session):
     """_save_trip_updates persists a list of dicts produced by the collector."""
     collector = WMATADataCollector(api_key="unused", db_session=db_session)

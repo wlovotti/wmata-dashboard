@@ -1,6 +1,6 @@
 """
-Derive `stop_events` rows from TripUpdate snapshots (NOTES.md NOTES-7,
-`source='trip_update'` half).
+Derive `stop_events` rows from TripUpdate snapshots — the `source='trip_update'`
+half of the stop_events foundation (PRs #42, #43, #44).
 
 The trip_update derivation works backwards from a different signal than the
 proximity path: GTFS-RT TripUpdates publishes a refining `predicted_arrival_ts`
@@ -20,8 +20,9 @@ Service-date attribution: trip_update_snapshots itself does not record
 `trip_start_date` (the GTFS-RT TripDescriptor field), so we cross-reference
 vehicle_positions for the same trip_id on the target service_date. Trips that
 appear in TU but not VP for the day (~1.2k of ~6k on a representative day) are
-skipped here — they need a separate fallback pass to be assigned a service date,
-and the comparison study (Phase B2) is the right place to design that.
+skipped here. The comparison harness (`compare_stop_event_sources.py`,
+PR #44) shows the resulting TU coverage of proximity is 93% on the events
+both sources see — the missing 1.2k is a known fallback gap, not silent loss.
 
 Idempotent: re-running the same (route, service_date) upserts via the
 `uq_stop_events_run_stop_source` constraint, replacing prior derivations.
