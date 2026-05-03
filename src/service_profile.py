@@ -78,9 +78,7 @@ def _service_ids_for_day_type(db: Session, day_type: str) -> list[str]:
     return [sid for (sid,) in rows]
 
 
-def _trunk_stop_arrivals(
-    db: Session, service_ids: Iterable[str]
-) -> dict[str, list[str]]:
+def _trunk_stop_arrivals(db: Session, service_ids: Iterable[str]) -> dict[str, list[str]]:
     """
     For every route active in `service_ids`, identify the trunk stop (most-served
     stop_id across current trips) and return its arrival_time list, ordered.
@@ -151,8 +149,7 @@ def compute_route_service_profile(db: Session) -> list[dict]:
                     gaps = [secs[i + 1] - secs[i] for i in range(len(secs) - 1)]
                     mean_headway_min = sum(gaps) / len(gaps) / 60.0
                 is_frequent = (
-                    mean_headway_min is not None
-                    and mean_headway_min <= FREQUENT_HEADWAY_MIN
+                    mean_headway_min is not None and mean_headway_min <= FREQUENT_HEADWAY_MIN
                 )
                 results.append(
                     {
