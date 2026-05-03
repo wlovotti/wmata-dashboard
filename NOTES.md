@@ -8,6 +8,14 @@ are churn.
 
 Last edited 2026-05-03.
 
+> Phases A1+A2 of NOTES-7 are in flight on `feature/stop-events-schema`:
+> the `stop_events` table, model, and proximity-source derivation pipeline
+> (`pipelines/derive_stop_events.py`) land here. NOTES-7 stays open until
+> the trip_update derivation (Phase B1) and comparison harness (Phase B2)
+> are in. Smoke-tested on 2026-05-03: 266k positions → 167k matches →
+> 82k stop_events across all routes in 88 s, deviations bounded ±35 min.
+> NOTES-22 (broken `reload_gtfs_complete.py`) folded in as a ride-along.
+
 ---
 
 ## Active priorities
@@ -85,13 +93,12 @@ it can run — earliest start ~2026-05-10.
 
 ### Independent of the redesign
 
-- **NOTES-22 Direction-aware `find_reference_stop`.** Existing analytics
-  function picks a reference stop without filtering to one direction
-  when callers pass `direction_id=None`. On routes whose terminus stops
-  serve both directions under one `stop_id` (most WMATA routes — D80
-  Friendship Heights and Union Station each see all 268 daily trips),
-  this auto-selects a terminus and produces ~2x-too-tight headways.
-  Independent fix; doesn't depend on the metrics redesign.
+- **NOTES-22 Fix `reload_gtfs_complete.py` and put GTFS reload on a
+  schedule.** Found while wiring up Phase A2: the script crashes mid-flow
+  on FK violations, and even when it works it isn't scheduled, so our
+  GTFS snapshot was 6 months stale. CLAUDE.md's claim that the script
+  "correctly invalidates the prior snapshot" is wrong — fix the script,
+  add a smoke test, then schedule it.
 
 ---
 
@@ -395,54 +402,67 @@ So: keep collecting raw, ship NOTES-7, then add retention.
 
 ---
 
-## NOTES-22. Direction-aware `find_reference_stop`
+## NOTES-22. Fix `reload_gtfs_complete.py` and put GTFS reload on a schedule
 
-**Severity: medium (corrupts current headway numbers on affected routes).
-Independent of the metrics redesign.**
+**Severity: high — silently corrupts metrics. Discovered while wiring up
+the Phase A2 proximity derivation: our GTFS snapshot was 6 months stale
+(2025-10-28), and almost every RT trip_id resolved to a different route
+in current GTFS (or to no trip at all).**
 
-### The problem
+### Two problems, one root cause
 
-`src/analytics.py:326 find_reference_stop()` picks a reference stop by
-counting trips per `stop_id` across the route's current trips. When the
-caller passes `direction_id=None`, both directions are pooled. For most
-WMATA routes the auto-selected stop is then a terminus / layover bay
-that serves all trips in both directions under one `stop_id` (e.g., D80
-Friendship Heights and Union Station each carry 268 = 134 dir-0 + 134
-dir-1 daily trips). The downstream `calculate_headways()` then computes
-gaps between consecutive arrivals at that bidirectional stop, producing
-roughly 2x-too-tight headway numbers.
+1. **The reload script crashes mid-flow.** `scripts/reload_gtfs_complete.py`
+   does `db.execute(text("DELETE FROM agencies"))` (line 288) without
+   first invalidating the FK from `routes.agency_id`, so it raises
+   `psycopg2.errors.ForeignKeyViolation` on any populated DB. CLAUDE.md's
+   claim that the script "correctly invalidates the prior snapshot" is
+   wrong — it invalidates routes/stops/trips/stop_times/calendar via
+   UPDATE (lines 146–162), but for agencies/feed_info/timepoints/
+   timepoint_times/route_service_profile it does a plain DELETE. The
+   per-table commits before the failure mean partial migrations stick:
+   running the script today left the DB with snapshot-5 routes/trips/
+   stops/stop_times marked current, but agencies still on snapshot 4.
 
-The function further sorts "common stops" by mean `stop_sequence`, but
-sequence numbers in dir-0 and dir-1 are different orderings of different
-stops — averaging them across directions is meaningless.
-
-### Evidence
-
-- Same bug shape as the one fixed in `src/service_profile.py` during
-  the route_service_profile rollout (PR #37). Verified by inspecting
-  D80 stop counts in the live DB — termini have all 268 trips,
-  mid-route stops have 134.
-- CLAUDE.md "Non-obvious gotchas" now documents the rule: per-route stop
-  aggregations must group by `(route_id, direction_id, stop_id)`, never
-  `(route_id, stop_id)` alone.
+2. **There is no automated reload.** The script is invoked manually,
+   and nobody invoked it for 6 months. By the time we noticed, every
+   downstream metric was being computed against a schedule WMATA had
+   long since revised. The OTP numbers in `route_metrics_daily` for
+   any recent date are likely junk for routes whose trip_id space
+   churned.
 
 ### Fix
 
-1. Make `direction_id` a required parameter on `find_reference_stop` (or
-   require callers to loop over directions and pass each explicitly).
-2. Filter candidate stops to those served by exactly one `direction_id`
-   on this route — `HAVING COUNT(DISTINCT t.direction_id) = 1`.
-3. Audit callers (`calculate_headways`, `calculate_headways_batch`,
-   anywhere reference stops are chosen) to ensure direction is plumbed.
-4. Re-run a few representative routes' headways before/after to quantify
-   the shift. Expect roughly 2x looser numbers on routes whose previous
-   reference stop was a terminus.
-5. Decide whether `route_metrics_daily` / `route_metrics_summary` need
-   to be backfilled with corrected numbers, or accept that those tables
-   are slated for replacement (NOTES-19) and don't bother.
+1. **Make the script transactional or idempotent end-to-end.** Either
+   wrap the whole reload in a single `BEGIN`/`COMMIT` so a partial
+   failure rolls back, or rewrite each table's reload as
+   "invalidate-then-insert-new-snapshot" (matching the pattern that
+   already works for routes/stops/trips). The DELETE-then-INSERT
+   pattern for agencies/feed_info/timepoints can't survive FKs; the
+   versioned pattern can.
+2. **Add a smoke test** that reloads against an empty DB and against a
+   populated DB and asserts both succeed.
+3. **Schedule it.** A daily or weekly cron / GitHub Action invoking
+   `reload_gtfs_complete.py`, with alerting on failure. Frequency is
+   a judgment call — WMATA revises GTFS roughly quarterly, but
+   real-time operational schedule changes (added trips, suspended
+   routes) only land in TripUpdates / VehiclePositions, not in static
+   GTFS, so daily is overkill.
+4. **Surface staleness in the dashboard.** The newest GTFS snapshot
+   date should appear somewhere visible (a footer line on RouteList?)
+   so a stale schedule is observable instead of silent.
+
+### Scope decision
+
+Fold the script fix into NOTES-22's PR. Cron / scheduling and dashboard
+freshness indicator are separate items — file as follow-on once the
+script is reliable.
 
 ### Dependencies
 
 - Independent of NOTES-7 through NOTES-21. Can land any time.
-- Will probably shift `headway_*` columns in `route_metrics_daily` /
-  `route_metrics_summary`, so worth flagging in the PR description.
+- Side note: the 6-month-stale GTFS also means
+  `route_metrics_daily` numbers for the last several months may be
+  unreliable. We're slated to drop that table anyway (NOTES-19), so
+  not worth backfilling. Worth flagging to anyone reviewing historical
+  trend numbers in the meantime.
+

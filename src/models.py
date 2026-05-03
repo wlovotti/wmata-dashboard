@@ -9,6 +9,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -434,6 +435,89 @@ class TripUpdateSnapshot(Base):
     __table_args__ = (
         Index("idx_tu_trip_stop_snap", "trip_id", "stop_id", "snapshot_ts"),
         Index("idx_tu_route_snap", "route_id", "snapshot_ts"),
+    )
+
+
+class StopEvent(Base):
+    """
+    Per-(trip, stop) observed arrival or skip — the foundational unit of the
+    metrics redesign (NOTES.md NOTES-7).
+
+    One row per (service_date, trip_id, stop_sequence, source). Two rows per
+    real-world event when both sources observe it (one source='trip_update',
+    one source='proximity'). The duplication is intentional — Phase B2 of the
+    redesign is the agreement study comparing the two derivation paths, and
+    collapsing them prematurely would destroy the evidence the study needs.
+    Downstream consumers should pick a source explicitly or aggregate with a
+    deliberate tie-break.
+
+    Direction is denormalized as a column (not in the unique key) because
+    direction_id is fully determined by trip_id. The denorm exists to make
+    per-direction stop aggregations fast and to enforce the CLAUDE.md rule
+    that any per-route, per-stop aggregation must group by
+    (route_id, direction_id, stop_id) — never (route_id, stop_id) alone.
+
+    service_date is in the unique key because GTFS-RT's TripDescriptor
+    requires (trip_id, start_date) to disambiguate trip instances — the same
+    trip_id runs every weekday. Without service_date the same trip on
+    consecutive days collides.
+
+    Scheduled times are snapshotted at write time, not joined live. GTFS gets
+    re-versioned (is_current); historical rows must keep what was scheduled
+    when the bus actually ran, not what the latest GTFS snapshot now says.
+    """
+
+    __tablename__ = "stop_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Trip / run identification — see class docstring on uniqueness key.
+    service_date = Column(String, nullable=False)  # YYYY-MM-DD, Eastern operational day
+    trip_id = Column(String, nullable=False)
+    route_id = Column(String, nullable=False)
+    direction_id = Column(Integer, nullable=False)
+    vehicle_id = Column(String)  # nullable: ~40% of trip_updates lack vehicle.id
+
+    # Stop within the trip
+    stop_id = Column(String, nullable=False)
+    stop_sequence = Column(Integer, nullable=False)
+
+    # Schedule snapshot (naive UTC, captured at derivation time)
+    scheduled_arrival_ts = Column(DateTime)
+    scheduled_departure_ts = Column(DateTime)
+
+    # Observation
+    observed_arrival_ts = Column(DateTime)  # nullable for SKIPPED / NO_DATA
+    deviation_sec = Column(Integer)  # observed - scheduled; nullable when no schedule match
+
+    # Provenance
+    source = Column(String, nullable=False)  # 'trip_update' | 'proximity'
+    schedule_relationship = Column(
+        String, nullable=False, default="SCHEDULED"
+    )  # 'SCHEDULED' | 'SKIPPED' | 'NO_DATA' | 'ADDED'
+    match_distance_m = Column(Float)  # proximity source only — diagnostic for matcher quality
+    derived_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "service_date",
+            "trip_id",
+            "stop_sequence",
+            "source",
+            name="uq_stop_events_run_stop_source",
+        ),
+        # Per-route per-day aggregations (most common access pattern)
+        Index("idx_stop_events_route_date", "route_id", "service_date"),
+        # Per-direction per-stop time series — headways, EWT, bunching
+        Index(
+            "idx_stop_events_route_dir_stop_obs",
+            "route_id",
+            "direction_id",
+            "stop_id",
+            "observed_arrival_ts",
+        ),
+        # Bare stop time-series queries (e.g., NOTES-14 stop-skip rate)
+        Index("idx_stop_events_stop_obs", "stop_id", "observed_arrival_ts"),
     )
 
 
