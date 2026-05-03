@@ -521,6 +521,85 @@ class StopEvent(Base):
     )
 
 
+class Run(Base):
+    """
+    Per-(service_date, trip_id, source) aggregation over `stop_events`.
+
+    A "run" is one bus's pass through one trip on one service date — the natural
+    unit for trip-level metrics like end-to-end excess time (NOTES.md NOTES-12),
+    per-run deviation charts (NOTES-5), and the delivered-runs numerator for
+    service-delivered ratio (NOTES-11). One row per (service_date, trip_id,
+    source); the source dimension propagates from stop_events so the
+    proximity/trip_update agreement story extends to the run level.
+
+    `vehicle_id` is informational, not in the unique key. The rare same-day
+    vehicle reassignment shows up as a single run with the latest non-null
+    vehicle_id seen across the run's stop_events; if vehicle-swap-aware
+    accounting becomes load-bearing it can graduate to its own column.
+
+    No materialized `is_complete` flag — each downstream metric applies its
+    own filter at query time:
+      - RUN_HAS_ENDPOINTS: first_obs_seq <= 3 AND last_obs_seq >= stops_scheduled - 3
+      - RUN_FULLY_OBSERVED: stops_observed/stops_scheduled >= 0.7 AND endpoints
+                            AND (max_gap_sec IS NULL OR max_gap_sec < 300)
+      - RUN_EXISTED: stops_observed >= 3
+    Storing the per-stop deviations (already in stop_events) and re-aggregating
+    on demand keeps run-level filters trivially adjustable without re-deriving.
+
+    Schedule snapshot fields (`sched_first_arrival_ts`, `sched_last_arrival_ts`,
+    `stops_scheduled`) are denormalized at derivation time. The post-midnight
+    anchor problem is already solved upstream — `stop_events.scheduled_arrival_ts`
+    is parsed against the stop_event's own service_date — so this aggregation
+    just lifts min/max from observed rows. Trips where every stop_event lacks
+    a scheduled match still get a row with these fields null.
+    """
+
+    __tablename__ = "runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Identity — see class docstring on uniqueness key.
+    service_date = Column(String, nullable=False)  # YYYY-MM-DD, Eastern operational day
+    trip_id = Column(String, nullable=False)
+    route_id = Column(String, nullable=False)
+    direction_id = Column(Integer, nullable=False)
+    source = Column(String, nullable=False)  # 'trip_update' | 'proximity'
+
+    # Vehicle — informational; latest non-null seen across the run's stop_events.
+    vehicle_id = Column(String)
+
+    # Schedule context (snapshotted from the underlying stop_events)
+    stops_scheduled = Column(Integer)  # count from current GTFS stop_times for this trip
+    sched_first_arrival_ts = Column(DateTime)
+    sched_last_arrival_ts = Column(DateTime)
+
+    # Observation aggregates
+    stops_observed = Column(Integer, nullable=False, default=0)  # rows with observed_arrival_ts
+    stops_skipped = Column(Integer, nullable=False, default=0)  # SKIPPED rows (NOTES-14)
+    first_obs_seq = Column(Integer)
+    last_obs_seq = Column(Integer)
+    first_obs_ts = Column(DateTime)  # earliest observed_arrival_ts
+    last_obs_ts = Column(DateTime)  # latest observed_arrival_ts
+    max_gap_sec = Column(Integer)  # largest gap between consecutive observed arrivals (by ts)
+
+    # Per-stop deviation distribution across observed stops
+    dev_p50_sec = Column(Integer)
+    dev_p95_sec = Column(Integer)
+
+    derived_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "service_date",
+            "trip_id",
+            "source",
+            name="uq_runs_service_trip_source",
+        ),
+        Index("idx_runs_route_date", "route_id", "service_date"),
+        Index("idx_runs_trip_date", "trip_id", "service_date"),
+    )
+
+
 class RouteServiceProfile(Base):
     """
     Per-(route, day_type, hour) scheduled service profile derived from GTFS.
