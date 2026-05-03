@@ -781,8 +781,9 @@ def test_aggregate_run_rows_basic_observed_run():
             deviation_sec=-120,
         ),
     ]
+    sched_index = {"TRIP_A": {"count": 5, "first_seq": 1, "last_seq": 5}}
     rows = aggregate_run_rows(
-        events, sched_counts={"TRIP_A": 5}, service_date_str="2026-05-03", derived_at=derived_at
+        events, sched_index=sched_index, service_date_str="2026-05-03", derived_at=derived_at
     )
     assert len(rows) == 1
     r = rows[0]
@@ -791,6 +792,8 @@ def test_aggregate_run_rows_basic_observed_run():
     assert r["stops_observed"] == 3
     assert r["stops_skipped"] == 0
     assert r["stops_scheduled"] == 5
+    assert r["sched_first_seq"] == 1
+    assert r["sched_last_seq"] == 5
     assert r["first_obs_seq"] == 1
     assert r["last_obs_seq"] == 4
     assert r["first_obs_ts"] == datetime(2026, 5, 3, 14, 0, 30)
@@ -803,6 +806,10 @@ def test_aggregate_run_rows_basic_observed_run():
     # Schedule bounds lifted from the observed rows
     assert r["sched_first_arrival_ts"] == datetime(2026, 5, 3, 14, 0, 0)
     assert r["sched_last_arrival_ts"] == datetime(2026, 5, 3, 14, 12, 0)
+    # Origin observed (stop_sequence == sched_first_seq == 1), but destination
+    # (sched_last_seq == 5) was not observed in this group.
+    assert r["origin_dev_sec"] == 30
+    assert r["destination_dev_sec"] is None
 
 
 @pytest.mark.smoke
@@ -822,7 +829,7 @@ def test_aggregate_run_rows_splits_by_source():
     ]
     rows = aggregate_run_rows(
         events,
-        sched_counts={},
+        sched_index={},
         service_date_str="2026-05-03",
         derived_at=datetime(2026, 5, 3, 20, 0, 0),
     )
@@ -843,7 +850,7 @@ def test_aggregate_run_rows_skipped_separate_from_observed():
     ]
     rows = aggregate_run_rows(
         events,
-        sched_counts={"TRIP_A": 3},
+        sched_index={"TRIP_A": {"count": 3, "first_seq": 1, "last_seq": 3}},
         service_date_str="2026-05-03",
         derived_at=datetime(2026, 5, 3, 20, 0, 0),
     )
@@ -878,7 +885,7 @@ def test_aggregate_run_rows_post_midnight_run_keeps_service_date():
     ]
     rows = aggregate_run_rows(
         events,
-        sched_counts={"TRIP_A": 10},
+        sched_index={"TRIP_A": {"count": 10, "first_seq": 1, "last_seq": 10}},
         service_date_str="2026-05-03",
         derived_at=datetime(2026, 5, 4, 5, 0, 0),
     )
@@ -900,7 +907,7 @@ def test_aggregate_run_rows_latest_non_null_vehicle_wins():
     ]
     rows = aggregate_run_rows(
         events,
-        sched_counts={},
+        sched_index={},
         service_date_str="2026-05-03",
         derived_at=datetime(2026, 5, 3, 20, 0, 0),
     )
@@ -928,7 +935,7 @@ def test_aggregate_run_rows_no_observed_yields_zero_stats():
     ]
     rows = aggregate_run_rows(
         events,
-        sched_counts={"TRIP_A": 2},
+        sched_index={"TRIP_A": {"count": 2, "first_seq": 1, "last_seq": 2}},
         service_date_str="2026-05-03",
         derived_at=datetime(2026, 5, 3, 20, 0, 0),
     )
@@ -979,3 +986,188 @@ def test_run_persists_with_both_sources(db_session):
 
     rows = db_session.query(Run).filter_by(trip_id="TRIP_BOTH").order_by(Run.source).all()
     assert [r.source for r in rows] == ["proximity", "trip_update"]
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_endpoint_dev_uses_literal_sched_seq():
+    """origin/destination_dev_sec read from stop_events at sched_first_seq / sched_last_seq.
+
+    Critically, NOT from min/max(observed stop_sequence) — WMATA's GTFS uses
+    non-contiguous sequences (~99.9% of trips start at seq 2 with arbitrary
+    gaps), so first observed != literal scheduled origin in general.
+    """
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    # Realistic WMATA-shaped trip: scheduled stops at seqs [2, 4, 5, 8].
+    # The bus only got observed at seqs 4, 5, 8 — origin (seq 2) was missed.
+    events = [
+        _se(stop_sequence=4, observed_arrival_ts=datetime(2026, 5, 3, 14, 5, 0), deviation_sec=20),
+        _se(stop_sequence=5, observed_arrival_ts=datetime(2026, 5, 3, 14, 7, 0), deviation_sec=40),
+        _se(stop_sequence=8, observed_arrival_ts=datetime(2026, 5, 3, 14, 12, 0), deviation_sec=80),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_index={"TRIP_A": {"count": 4, "first_seq": 2, "last_seq": 8}},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    r = rows[0]
+    # Origin is seq 2 — never observed — even though first observed seq is 4.
+    assert r["sched_first_seq"] == 2
+    assert r["sched_last_seq"] == 8
+    assert r["first_obs_seq"] == 4  # bus first seen mid-route
+    assert r["origin_dev_sec"] is None  # no event at seq 2
+    assert r["destination_dev_sec"] == 80  # event at seq 8 → its deviation
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_endpoint_dev_null_when_no_sched_index():
+    """When the trip is missing from sched_index, endpoint devs default to null."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(stop_sequence=2, observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0), deviation_sec=10),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_index={},  # no entry for TRIP_A
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    r = rows[0]
+    assert r["sched_first_seq"] is None
+    assert r["sched_last_seq"] is None
+    assert r["origin_dev_sec"] is None
+    assert r["destination_dev_sec"] is None
+
+
+@pytest.mark.smoke
+def test_compute_otp_split_picks_proximity_for_origin_tu_for_destination(db_session):
+    """The split aggregator pulls origin from proximity runs, destination from TU runs."""
+    from datetime import date
+
+    from src.otp_metrics import compute_otp_split
+
+    sd = "2026-05-03"
+    common = {
+        "service_date": sd,
+        "route_id": "R1",
+        "direction_id": 0,
+        "stops_observed": 10,
+    }
+    # Proximity runs supply origin; their destination_dev_sec is null (matches reality).
+    db_session.add_all(
+        [
+            Run(
+                **common,
+                trip_id="T1",
+                source="proximity",
+                origin_dev_sec=-30,
+                destination_dev_sec=None,
+            ),  # on-time
+            Run(
+                **common,
+                trip_id="T2",
+                source="proximity",
+                origin_dev_sec=600,
+                destination_dev_sec=None,
+            ),  # late (>420s)
+            Run(
+                **common,
+                trip_id="T3",
+                source="proximity",
+                origin_dev_sec=None,
+                destination_dev_sec=None,
+            ),  # origin not observed — excluded
+        ]
+    )
+    # TU runs supply destination; their origin_dev_sec is null (matches reality).
+    db_session.add_all(
+        [
+            Run(
+                **common,
+                trip_id="T1",
+                source="trip_update",
+                origin_dev_sec=None,
+                destination_dev_sec=-180,
+            ),  # early (< -120s)
+            Run(
+                **common,
+                trip_id="T2",
+                source="trip_update",
+                origin_dev_sec=None,
+                destination_dev_sec=60,
+            ),  # on-time
+        ]
+    )
+    db_session.commit()
+
+    out = compute_otp_split(db_session, "R1", date(2026, 5, 3))
+    # Origin from proximity: T1 on-time, T2 late, T3 excluded (null) → n=2, 50% on-time, 50% late
+    o = out["origin"]
+    assert o["source"] == "proximity"
+    assert o["n"] == 2
+    assert o["on_time"] == 1
+    assert o["late"] == 1
+    assert o["early"] == 0
+    assert o["on_time_pct"] == 50.0
+    # Destination from TU: T1 early, T2 on-time → n=2, 50% early, 50% on-time
+    d = out["destination"]
+    assert d["source"] == "trip_update"
+    assert d["n"] == 2
+    assert d["early"] == 1
+    assert d["on_time"] == 1
+    assert d["late"] == 0
+    # All-timepoints reads from stop_events; we didn't add any → n=0
+    assert out["all_timepoints"]["n"] == 0
+
+
+@pytest.mark.smoke
+def test_compute_otp_split_returns_n_zero_when_no_data(db_session):
+    """No matching runs/stop_events → all three sub-blocks return {'n': 0} with no rates."""
+    from datetime import date
+
+    from src.otp_metrics import compute_otp_split
+
+    out = compute_otp_split(db_session, "GHOST", date(2026, 5, 3))
+    assert out["origin"]["n"] == 0
+    assert "on_time_pct" not in out["origin"]
+    assert out["destination"]["n"] == 0
+    assert out["all_timepoints"]["n"] == 0
+
+
+@pytest.mark.smoke
+def test_compute_otp_split_all_timepoints_uses_proximity_stop_events(db_session):
+    """All-timepoints OTP reads from proximity stop_events — TU stop_events are ignored."""
+    from datetime import date
+
+    from src.otp_metrics import compute_otp_split
+
+    base = {
+        "service_date": "2026-05-03",
+        "route_id": "R2",
+        "direction_id": 0,
+        "trip_id": "T1",
+        "stop_id": "S1",
+        "schedule_relationship": "SCHEDULED",
+        "observed_arrival_ts": datetime(2026, 5, 3, 14, 0, 0),
+    }
+    # Three proximity events: one early, one on-time, one late
+    db_session.add_all(
+        [
+            StopEvent(**base, stop_sequence=2, source="proximity", deviation_sec=-300),
+            StopEvent(**base, stop_sequence=3, source="proximity", deviation_sec=0),
+            StopEvent(**base, stop_sequence=4, source="proximity", deviation_sec=500),
+            # TU events should be excluded from all-timepoints
+            StopEvent(**base, stop_sequence=2, source="trip_update", deviation_sec=999),
+        ]
+    )
+    db_session.commit()
+
+    out = compute_otp_split(db_session, "R2", date(2026, 5, 3))
+    a = out["all_timepoints"]
+    assert a["source"] == "proximity"
+    assert a["n"] == 3  # TU event excluded
+    assert a["early"] == 1
+    assert a["on_time"] == 1
+    assert a["late"] == 1

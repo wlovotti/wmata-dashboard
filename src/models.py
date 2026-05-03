@@ -538,20 +538,55 @@ class Run(Base):
     accounting becomes load-bearing it can graduate to its own column.
 
     No materialized `is_complete` flag — each downstream metric applies its
-    own filter at query time:
-      - RUN_HAS_ENDPOINTS: first_obs_seq <= 3 AND last_obs_seq >= stops_scheduled - 3
-      - RUN_FULLY_OBSERVED: stops_observed/stops_scheduled >= 0.7 AND endpoints
-                            AND (max_gap_sec IS NULL OR max_gap_sec < 300)
+    own filter at query time. Useful per-row filters:
       - RUN_EXISTED: stops_observed >= 3
-    Storing the per-stop deviations (already in stop_events) and re-aggregating
-    on demand keeps run-level filters trivially adjustable without re-deriving.
+      - RUN_DECENT_COVERAGE: stops_observed * 1.0 / stops_scheduled >= 0.7
+                             AND (max_gap_sec IS NULL OR max_gap_sec < 300)
+
+    A literal "both endpoints observed in this row" filter is intentionally
+    NOT defined — the data won't support it as a per-source predicate (see
+    "Source asymmetry" below). Cross-source endpoint completeness, if ever
+    needed, requires joining a trip's TU and proximity rows.
+
+    --- Source asymmetry (load-bearing for endpoint metrics) ---
+    The two derivation sources have nearly inverse blind spots at the
+    literal scheduled endpoints, measured 2026-05-03 across 6 routes
+    (~1.3k runs):
+      - TripUpdate observes the literal origin (sched_first_seq) in
+        ~0% of runs. WMATA's TU feed only contains a trip after the
+        AVL system marks it "active" (typically operator-log-in at /
+        after origin departure), and past stops are pruned. By the time
+        a trip first appears in the feed, origin's StopTimeUpdate is
+        already gone. The first published prediction is for the second
+        stop in 87-100% of runs.
+      - Proximity observes the literal destination (sched_last_seq) in
+        only 0-5% of runs. Layover bays are typically off-route (>50m
+        from the published last-stop point), so the bus parks outside
+        the proximity radius; ~60s position polling also lets buses
+        pass and dwell at the last stop without an in-window ping.
+
+    Consequence: pick the source per endpoint.
+      - origin_dev_sec is populated for proximity runs (78-93% literal
+        coverage), null for trip_update runs.
+      - destination_dev_sec is populated for trip_update runs (87-97%
+        literal coverage), rarely populated for proximity runs.
+    The OTP origin/destination split (NOTES.md NOTES-10) reads
+    origin_dev_sec from proximity rows and destination_dev_sec from
+    trip_update rows.
 
     Schedule snapshot fields (`sched_first_arrival_ts`, `sched_last_arrival_ts`,
-    `stops_scheduled`) are denormalized at derivation time. The post-midnight
-    anchor problem is already solved upstream — `stop_events.scheduled_arrival_ts`
-    is parsed against the stop_event's own service_date — so this aggregation
-    just lifts min/max from observed rows. Trips where every stop_event lacks
-    a scheduled match still get a row with these fields null.
+    `sched_first_seq`, `sched_last_seq`, `stops_scheduled`) are denormalized at
+    derivation time. The post-midnight anchor problem is already solved
+    upstream — `stop_events.scheduled_arrival_ts` is parsed against the
+    stop_event's own service_date — so this aggregation just lifts min/max
+    from observed rows. Trips where every stop_event lacks a scheduled match
+    still get a row with these fields null.
+
+    `sched_first_seq` / `sched_last_seq` are the actual GTFS endpoint
+    stop_sequence values for the trip, queried from `stop_times` at
+    derivation time. They cannot be inferred from `stops_scheduled` because
+    WMATA's GTFS uses non-contiguous stop_sequence values (almost every
+    trip starts at sequence 2, not 1, with arbitrary gaps thereafter).
     """
 
     __tablename__ = "runs"
@@ -570,6 +605,8 @@ class Run(Base):
 
     # Schedule context (snapshotted from the underlying stop_events)
     stops_scheduled = Column(Integer)  # count from current GTFS stop_times for this trip
+    sched_first_seq = Column(Integer)  # min(stop_sequence) in current GTFS for this trip
+    sched_last_seq = Column(Integer)  # max(stop_sequence) in current GTFS for this trip
     sched_first_arrival_ts = Column(DateTime)
     sched_last_arrival_ts = Column(DateTime)
 
@@ -585,6 +622,12 @@ class Run(Base):
     # Per-stop deviation distribution across observed stops
     dev_p50_sec = Column(Integer)
     dev_p95_sec = Column(Integer)
+
+    # Endpoint deviations — see "Source asymmetry" in class docstring.
+    # origin_dev_sec is meaningful from proximity runs; destination_dev_sec
+    # from trip_update runs. Both null when the literal endpoint wasn't observed.
+    origin_dev_sec = Column(Integer)
+    destination_dev_sec = Column(Integer)
 
     derived_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
