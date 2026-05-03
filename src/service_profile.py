@@ -23,19 +23,18 @@ This intentionally excludes Wed-only and Fri-only service variants. For
 the downstream consumers (frequent-route classification, denominator for
 service-delivered ratio) the Tuesday profile is a good steady-state proxy.
 
-Trunk-stop arrivals (not trip starts)
--------------------------------------
-Headway is computed from `arrival_time` at the route's trunk stop — the
-stop served by the most current trips for that route+day_type. Trip-start
-times are unreliable: GTFS encodes block continuations as separate
-trip_ids that share the same start minute (e.g., D80 has four trip_ids
-all starting at 10:00:00 ±15s), which produces phantom 0-second headways
-at the origin. By the time those buses reach a mid-route trunk stop they
-spread out and headway calculations become honest.
-
-Because a single stop only sees one direction's buses, this naturally
-handles bidirectional routes — `mean_headway_min` reflects the rider
-experience at a typical trunk stop in the more-served direction.
+Trunk-stop arrivals (not trip starts), one direction only
+---------------------------------------------------------
+Headway is computed from `arrival_time` at the route's trunk stop, defined
+as the most-served stop on the route that is served by **only one
+direction**. The unidirectional constraint matters: many routes have
+terminus stops served by every trip in both directions (e.g., D80's
+Friendship Heights and Union Station endpoints each see all 268 daily
+trips = 134 dir-0 + 134 dir-1), which would double the apparent
+frequency. Picking a mid-route stop unique to one direction gives the
+honest rider-experience headway. Trip-start times also can't be used —
+SQL `MIN(arrival_time)` is a string min, broken on WMATA's unpadded
+single-digit hour times (`"10:00:07"` < `"9:58:27"` lexicographically).
 
 Post-midnight times
 -------------------
@@ -80,8 +79,12 @@ def _service_ids_for_day_type(db: Session, day_type: str) -> list[str]:
 
 def _trunk_stop_arrivals(db: Session, service_ids: Iterable[str]) -> dict[str, list[str]]:
     """
-    For every route active in `service_ids`, identify the trunk stop (most-served
-    stop_id across current trips) and return its arrival_time list, ordered.
+    For every route active in `service_ids`, pick the most-served stop that
+    serves only one direction of the route, and return its arrival_time list.
+
+    The unidirectional constraint avoids termini and other bidirectional hubs
+    that would otherwise double the apparent frequency. If no unidirectional
+    stop exists (rare, loop routes), the route is skipped.
 
     Returns: {route_id: [arrival_time, ...]}
     """
@@ -89,9 +92,10 @@ def _trunk_stop_arrivals(db: Session, service_ids: Iterable[str]) -> dict[str, l
     if not service_ids:
         return {}
 
-    # One pass over the join, materializing (route_id, stop_id, arrival_time).
+    # One pass over the join, materializing (route_id, stop_id, direction_id,
+    # arrival_time). Direction lets us flag bidirectional stops.
     rows = (
-        db.query(Trip.route_id, StopTime.stop_id, StopTime.arrival_time)
+        db.query(Trip.route_id, Trip.direction_id, StopTime.stop_id, StopTime.arrival_time)
         .join(StopTime, StopTime.trip_id == Trip.trip_id)
         .filter(
             Trip.is_current,
@@ -101,20 +105,26 @@ def _trunk_stop_arrivals(db: Session, service_ids: Iterable[str]) -> dict[str, l
         .all()
     )
 
-    # Per route, count arrivals per stop and collect all arrival times.
-    per_route_stop_count: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    per_route_stop_arrivals: dict[str, dict[str, list[str]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    for route_id, stop_id, arrival_time in rows:
-        per_route_stop_count[route_id][stop_id] += 1
-        per_route_stop_arrivals[route_id][stop_id].append(arrival_time)
+    # Per (route, stop): set of directions seen, count of arrivals, list of times.
+    stop_dirs: dict[tuple[str, str], set[int]] = defaultdict(set)
+    stop_count: dict[tuple[str, str], int] = defaultdict(int)
+    stop_times: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for route_id, direction_id, stop_id, arrival_time in rows:
+        key = (route_id, stop_id)
+        stop_dirs[key].add(direction_id)
+        stop_count[key] += 1
+        stop_times[key].append(arrival_time)
 
-    # Pick the trunk stop per route — most-served, with stop_id as a stable tiebreaker.
+    # Group stops by route, restrict to unidirectional stops, pick the most-served.
+    per_route: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for (route_id, stop_id), directions in stop_dirs.items():
+        if len(directions) == 1:
+            per_route[route_id].append((stop_id, stop_count[(route_id, stop_id)]))
+
     trunk_arrivals: dict[str, list[str]] = {}
-    for route_id, stop_counts in per_route_stop_count.items():
-        trunk_stop_id = max(stop_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
-        trunk_arrivals[route_id] = sorted(per_route_stop_arrivals[route_id][trunk_stop_id])
+    for route_id, stops in per_route.items():
+        trunk_stop_id = max(stops, key=lambda sc: (sc[1], sc[0]))[0]
+        trunk_arrivals[route_id] = sorted(stop_times[(route_id, trunk_stop_id)])
     return trunk_arrivals
 
 
