@@ -27,8 +27,8 @@ from sqlalchemy import and_, func
 
 from src.analytics import (
     calculate_average_speed,
-    calculate_headways,
     calculate_line_level_otp,
+    calculate_route_headways,
     get_exception_service_dates,
 )
 from src.database import get_session
@@ -139,7 +139,7 @@ def compute_metrics_for_route_day(
     # Compute headway
     headway_start = time.time()
     try:
-        headway_result = calculate_headways(
+        headway_result = calculate_route_headways(
             db, route_id, start_time=start_time, end_time=end_time, positions=positions
         )
         avg_headway = headway_result.get("avg_headway_minutes")

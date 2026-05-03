@@ -1,5 +1,8 @@
 """
-Investigate the D80 headway anomaly (0.05 minute headway)
+Investigate the D80 headway anomaly (0.05 minute headway).
+
+Loops over both directions to inspect each independently — the original
+single-call form predates the direction-aware reference-stop fix.
 """
 from src.analytics import calculate_headways
 from src.database import get_session
@@ -11,7 +14,8 @@ try:
     print("D80 Headway Detail Investigation")
     print("=" * 80)
 
-    result = calculate_headways(db, 'D80')
+    # Inspect direction 0; rerun with direction_id=1 to see the other direction.
+    result = calculate_headways(db, 'D80', direction_id=0)
 
     print(f"\nReference stop: {result['stop_name']} ({result['stop_id']})")
     print(f"Direction: {result['direction_id']}")

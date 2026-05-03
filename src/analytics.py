@@ -323,63 +323,64 @@ def get_vehicle_positions(
     return positions
 
 
-def find_reference_stop(db: Session, route_id: str, direction_id: int | None = None) -> str | None:
+def find_reference_stop(db: Session, route_id: str, direction_id: int) -> str | None:
     """
-    Find a good reference stop for headway measurement.
+    Find a good reference stop for headway measurement on one direction of a route.
 
     A good reference stop is one that:
-    - All (or most) trips on the route pass through
-    - Is roughly in the middle of the route (not first or last stop)
+    - Is served by trips in only one direction of the route. Termini and
+      other bidirectional stops would otherwise pool both directions and
+      double the apparent frequency (most WMATA termini, e.g. D80
+      Friendship Heights and Union Station, serve all 268 daily trips =
+      134 dir-0 + 134 dir-1 under one stop_id).
+    - Is served by trips in the requested direction.
+    - Has many trips passing through it (≥80% of the most-served single-
+      direction stop on the route).
+    - Is roughly in the middle of the candidates by stop_sequence.
 
     Args:
         db: Database session
         route_id: Route to analyze
-        direction_id: Optional direction filter
+        direction_id: Required — find a reference stop for this direction.
 
     Returns:
-        stop_id of the reference stop, or None if not found
+        stop_id of the reference stop, or None if no suitable stop exists
+        (rare; loop routes or routes where every served stop is bidirectional).
     """
-    # Get all trips for this route/direction (current version only)
-    trip_query = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current)
-    if direction_id is not None:
-        trip_query = trip_query.filter(Trip.direction_id == direction_id)
-
-    trips = trip_query.all()
-    if not trips:
-        return None
-
-    # OPTIMIZATION: Batch-load ALL stop_times for this route's trips at once
-    trip_ids = [t.trip_id for t in trips]
-    all_stop_times = (
-        db.query(StopTime).filter(StopTime.trip_id.in_(trip_ids), StopTime.is_current).all()
+    # Pull every (trip_direction, stop_id, stop_sequence) on this route across
+    # both directions — the cross-direction view is what flags bidirectional stops.
+    rows = (
+        db.query(Trip.direction_id, StopTime.stop_id, StopTime.stop_sequence)
+        .join(StopTime, StopTime.trip_id == Trip.trip_id)
+        .filter(Trip.route_id == route_id, Trip.is_current, StopTime.is_current)
+        .all()
     )
-
-    # Count how many trips pass through each stop
-    stop_counts = {}
-    stop_avg_sequence = {}
-
-    for st in all_stop_times:
-        if st.stop_id not in stop_counts:
-            stop_counts[st.stop_id] = 0
-            stop_avg_sequence[st.stop_id] = []
-        stop_counts[st.stop_id] += 1
-        stop_avg_sequence[st.stop_id].append(st.stop_sequence)
-
-    if not stop_counts:
+    if not rows:
         return None
 
-    # Find stop that appears in most trips and is in the middle of the route
-    max_count = max(stop_counts.values())
-    common_stops = [sid for sid, count in stop_counts.items() if count >= max_count * 0.8]
+    stop_dirs: dict[str, set[int]] = {}
+    stop_dir_counts: dict[str, int] = {}
+    stop_dir_sequences: dict[str, list[int]] = {}
+    for trip_dir, stop_id, stop_seq in rows:
+        stop_dirs.setdefault(stop_id, set()).add(trip_dir)
+        if trip_dir == direction_id:
+            stop_dir_counts[stop_id] = stop_dir_counts.get(stop_id, 0) + 1
+            stop_dir_sequences.setdefault(stop_id, []).append(stop_seq)
 
-    # Among common stops, pick one in the middle (by average sequence number)
-    if common_stops:
-        middle_stop = sorted(
-            common_stops, key=lambda sid: sum(stop_avg_sequence[sid]) / len(stop_avg_sequence[sid])
-        )[len(common_stops) // 2]
-        return middle_stop
+    # Restrict to stops served by exactly one direction (which, by
+    # construction of stop_dir_counts above, is the requested direction).
+    candidates = {sid: count for sid, count in stop_dir_counts.items() if len(stop_dirs[sid]) == 1}
+    if not candidates:
+        return None
 
-    return None
+    max_count = max(candidates.values())
+    common_stops = [sid for sid, count in candidates.items() if count >= max_count * 0.8]
+
+    middle_stop = sorted(
+        common_stops,
+        key=lambda sid: sum(stop_dir_sequences[sid]) / len(stop_dir_sequences[sid]),
+    )[len(common_stops) // 2]
+    return middle_stop
 
 
 def _process_positions_batch(
@@ -901,9 +902,9 @@ def calculate_average_speed_batch(
 def calculate_headways(
     db: Session,
     route_id: str,
+    direction_id: int,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
-    direction_id: int | None = None,
     stop_id: str | None = None,
     proximity_meters: float = 50.0,
     max_headway_minutes: float = 120.0,
@@ -911,7 +912,7 @@ def calculate_headways(
     positions: list | None = None,  # Pre-loaded positions (for batch processing)
 ) -> dict:
     """
-    Calculate headways (time between consecutive buses) for a route.
+    Calculate headways (time between consecutive buses) for one direction of a route.
 
     Headway is measured as the time between consecutive vehicles passing a reference stop.
     This is how transit agencies actually measure headway - at a specific location on the route.
@@ -927,9 +928,11 @@ def calculate_headways(
     Args:
         db: Database session
         route_id: Route to analyze (e.g., 'C51')
+        direction_id: Required — direction (0 or 1 from GTFS) to measure
+            headways for. Use ``calculate_route_headways`` to aggregate
+            both directions of a route.
         start_time: Start of analysis period
         end_time: End of analysis period
-        direction_id: Optional direction filter (0 or 1 from GTFS)
         stop_id: Optional specific stop to measure headway at (if None, auto-select)
         proximity_meters: Distance threshold to consider vehicle "at stop"
         max_headway_minutes: Headways above this are flagged as data gaps
@@ -965,28 +968,18 @@ def calculate_headways(
     if positions is None:
         positions = get_vehicle_positions(db, route_id, start_time, end_time, direction_id)
     else:
-        # Filter pre-loaded positions by time range and direction if specified
-        if start_time or end_time or direction_id is not None:
-            # Need to get direction from trips for filtering
-            if direction_id is not None:
-                trip_directions = {
-                    t.trip_id: t.direction_id
-                    for t in db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
-                }
-                positions = [
-                    p
-                    for p in positions
-                    if (start_time is None or p.timestamp >= start_time)
-                    and (end_time is None or p.timestamp <= end_time)
-                    and (direction_id is None or trip_directions.get(p.trip_id) == direction_id)
-                ]
-            else:
-                positions = [
-                    p
-                    for p in positions
-                    if (start_time is None or p.timestamp >= start_time)
-                    and (end_time is None or p.timestamp <= end_time)
-                ]
+        # Filter pre-loaded positions by time range and direction
+        trip_directions = {
+            t.trip_id: t.direction_id
+            for t in db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
+        }
+        positions = [
+            p
+            for p in positions
+            if (start_time is None or p.timestamp >= start_time)
+            and (end_time is None or p.timestamp <= end_time)
+            and trip_directions.get(p.trip_id) == direction_id
+        ]
 
     if not positions:
         return {
@@ -1038,15 +1031,13 @@ def calculate_headways(
             mask &= (hours >= service_start_hour) | (hours <= end_hour_next_day)
 
     # Direction filter (requires checking trip_direction_map)
-    if direction_id is not None:
-        direction_matches = np.array(
-            [
-                pos.trip_id in trip_direction_map
-                and trip_direction_map[pos.trip_id] == direction_id
-                for pos in positions
-            ]
-        )
-        mask &= direction_matches
+    direction_matches = np.array(
+        [
+            pos.trip_id in trip_direction_map and trip_direction_map[pos.trip_id] == direction_id
+            for pos in positions
+        ]
+    )
+    mask &= direction_matches
 
     # Apply mask to get filtered indices
     filtered_indices = np.where(mask)[0]
@@ -1070,22 +1061,6 @@ def calculate_headways(
     # This represents the departure time (when bus leaves the stop)
     # Matches the OTP methodology for consistency
     passage_times = deduplicate_stop_passages(observations)
-
-    # If no direction filter specified, we should only compare vehicles in the same direction
-    # Separate passages by direction
-    if direction_id is None and passage_times:
-        # Count vehicles by direction
-        direction_counts = {}
-        for passage in passage_times:
-            dir_id = passage["direction"]
-            direction_counts[dir_id] = direction_counts.get(dir_id, 0) + 1
-
-        # Use the direction with more vehicles
-        if direction_counts:
-            primary_direction = max(direction_counts, key=direction_counts.get)
-            passage_times = [p for p in passage_times if p["direction"] == primary_direction]
-            # Update direction_id for return value
-            direction_id = primary_direction
 
     # Sort by passage time (timestamp key from deduplicated observations)
     passage_times.sort(key=lambda x: x["timestamp"])
@@ -1161,6 +1136,100 @@ def calculate_headways(
         "gaps_detected": len(flagged_gaps),
         "vehicles_passed_stop": len(passage_times),
         "max_headway_threshold": max_headway_minutes,
+    }
+
+
+def calculate_route_headways(
+    db: Session,
+    route_id: str,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    proximity_meters: float = 50.0,
+    max_headway_minutes: float = 120.0,
+    use_service_hours: bool = True,
+    positions: list | None = None,
+) -> dict:
+    """
+    Compute route-level headway stats by aggregating per-direction results.
+
+    Headway must be measured per direction — pooling both directions at a
+    bidirectional stop (e.g. a terminus) doubles the apparent frequency.
+    This wrapper calls ``calculate_headways`` once per direction present
+    on the route and aggregates avg/min/max in the same shape that
+    ``calculate_headways_batch`` uses (avg-of-avgs, min-of-mins, max-of-maxes).
+
+    Args:
+        db: Database session
+        route_id: Route to analyze (e.g., 'C51')
+        start_time: Start of analysis period
+        end_time: End of analysis period
+        proximity_meters: Distance threshold to consider vehicle "at stop"
+        max_headway_minutes: Headways above this are flagged as data gaps
+        use_service_hours: If True, only calculate during scheduled service hours
+        positions: Pre-loaded positions (optional, for batch processing performance)
+
+    Returns:
+        Dictionary with route-level avg/min/max headway stats and a
+        ``per_direction`` map of the underlying single-direction results.
+    """
+    directions = sorted(
+        d
+        for (d,) in db.query(Trip.direction_id)
+        .filter(Trip.route_id == route_id, Trip.is_current)
+        .distinct()
+        .all()
+    )
+    if not directions:
+        return {
+            "route_id": route_id,
+            "avg_headway_minutes": None,
+            "min_headway_minutes": None,
+            "max_headway_minutes": None,
+            "count": 0,
+            "per_direction": {},
+        }
+
+    per_direction: dict[int, dict] = {}
+    for direction_id in directions:
+        per_direction[direction_id] = calculate_headways(
+            db,
+            route_id,
+            direction_id=direction_id,
+            start_time=start_time,
+            end_time=end_time,
+            proximity_meters=proximity_meters,
+            max_headway_minutes=max_headway_minutes,
+            use_service_hours=use_service_hours,
+            positions=positions,
+        )
+
+    valid = [
+        r
+        for r in per_direction.values()
+        if "error" not in r and r.get("avg_headway_minutes") is not None
+    ]
+    if not valid:
+        return {
+            "route_id": route_id,
+            "avg_headway_minutes": None,
+            "min_headway_minutes": None,
+            "max_headway_minutes": None,
+            "count": 0,
+            "per_direction": per_direction,
+        }
+
+    avg_headway = sum(r["avg_headway_minutes"] for r in valid) / len(valid)
+    min_headway = min(r["min_headway_minutes"] for r in valid)
+    max_headway = max(r["max_headway_minutes"] for r in valid)
+    total_count = sum(r["count"] for r in valid)
+
+    return {
+        "route_id": route_id,
+        "avg_headway_minutes": round(avg_headway, 2),
+        "min_headway_minutes": round(min_headway, 2),
+        "max_headway_minutes": round(max_headway, 2),
+        "count": total_count,
+        "per_direction": per_direction,
     }
 
 
@@ -2354,9 +2423,9 @@ if __name__ == "__main__":
             f"   Data duration: {summary.get('data_time_range', {}).get('duration_minutes', 0):.1f} minutes"
         )
 
-        # Calculate headways
+        # Calculate headways (route-level: averages both directions)
         print("\n2. Headway Analysis:")
-        headways = calculate_headways(db, "C51")
+        headways = calculate_route_headways(db, "C51")
         print(f"   Average headway: {headways.get('avg_headway_minutes')} minutes")
         print(f"   Min headway: {headways.get('min_headway_minutes')} minutes")
         print(f"   Max headway: {headways.get('max_headway_minutes')} minutes")

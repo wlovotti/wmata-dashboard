@@ -1,7 +1,7 @@
 """
-Test headway calculation with updated methodology
+Test headway calculation with updated methodology (route-level: per-direction averaged).
 """
-from src.analytics import calculate_headways
+from src.analytics import calculate_route_headways
 from src.database import get_session
 
 db = get_session()
@@ -18,28 +18,26 @@ try:
         print(f"\n{route_id}:")
         print("-" * 70)
 
-        result = calculate_headways(db, route_id)
+        result = calculate_route_headways(db, route_id)
 
-        if 'error' in result:
-            print(f"  Error: {result['error']}")
+        if result['avg_headway_minutes'] is None:
+            print("  No valid headways for any direction")
             continue
 
-        print(f"  Reference stop: {result['stop_name']} ({result['stop_id']})")
-        print(f"  Direction: {result['direction_id']}")
-        print(f"  Vehicles passed stop: {result['vehicles_passed_stop']}")
-        print(f"  Valid headways: {result['count']}")
-        print(f"  Gaps detected: {result['gaps_detected']}")
+        print(f"  Valid headways (across directions): {result['count']}")
+        print(f"  Average headway: {result['avg_headway_minutes']} minutes")
+        print(f"  Min headway: {result['min_headway_minutes']} minutes")
+        print(f"  Max headway: {result['max_headway_minutes']} minutes")
 
-        if result['avg_headway_minutes']:
-            print(f"  Average headway: {result['avg_headway_minutes']} minutes")
-            print(f"  Min headway: {result['min_headway_minutes']} minutes")
-            print(f"  Max headway: {result['max_headway_minutes']} minutes")
-
-        # Show a few sample headways
-        if result['valid_headways']:
-            print("\n  Sample headways:")
-            for hw in result['valid_headways'][:3]:
-                print(f"    Vehicle {hw['previous_vehicle']} -> {hw['current_vehicle']}: {hw['headway_minutes']} min")
+        for direction_id, dir_result in sorted(result['per_direction'].items()):
+            if 'error' in dir_result or dir_result.get('avg_headway_minutes') is None:
+                continue
+            print(
+                f"    dir {direction_id}: "
+                f"avg={dir_result['avg_headway_minutes']} min, "
+                f"count={dir_result['count']}, "
+                f"stop={dir_result.get('stop_name')} ({dir_result.get('stop_id')})"
+            )
 
 finally:
     db.close()
