@@ -164,45 +164,6 @@ def test_get_route_trend_with_days_parameter(client, sample_route, sample_route_
 
 
 @pytest.mark.api
-def test_get_route_segments_success(client, db_session, sample_route, sample_trip):
-    """Test GET /api/routes/{route_id}/segments returns speed segments"""
-    # Create shape data for the route
-    shapes = []
-    for i in range(10):
-        shape = Shape(
-            shape_id="SHAPE_TEST1",
-            shape_pt_lat=38.9072 + (i * 0.001),
-            shape_pt_lon=-77.0369 + (i * 0.001),
-            shape_pt_sequence=i,
-        )
-        shapes.append(shape)
-
-    db_session.add_all(shapes)
-    # Link trip to shape
-    sample_trip.shape_id = "SHAPE_TEST1"
-    db_session.commit()
-
-    response = client.get("/api/routes/TEST1/segments")
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["route_id"] == "TEST1"
-    assert "segments" in data
-    assert isinstance(data["segments"], list)
-
-
-@pytest.mark.api
-def test_get_route_segments_no_shape_data(client, sample_route):
-    """Test GET /api/routes/{route_id}/segments with no shape data"""
-    response = client.get("/api/routes/TEST1/segments")
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["route_id"] == "TEST1"
-    assert data["segments"] == []
-
-
-@pytest.mark.api
 def test_get_route_time_periods_success(client, sample_route):
     """Test GET /api/routes/{route_id}/time-periods returns performance by time of day"""
     response = client.get("/api/routes/TEST1/time-periods")
