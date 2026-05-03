@@ -389,6 +389,54 @@ class VehiclePosition(Base):
     )
 
 
+class TripUpdateSnapshot(Base):
+    """
+    Append-only raw rows from the WMATA GTFS-RT TripUpdates feed.
+
+    One row per (trip_id, stop_id) entry in a single feed snapshot. The same
+    snapshot_ts is shared across every row materialized from one feed pull,
+    so per-pair time series can be reconstructed by ORDER BY snapshot_ts.
+    Stop entries drop out of the feed once the bus passes them — the last
+    predicted_arrival_ts before disappearance is WMATA's effective claimed
+    actual arrival, the basis for derived stop_events.
+    """
+
+    __tablename__ = "trip_update_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Snapshot context — same value across all rows from one feed pull.
+    snapshot_ts = Column(DateTime, nullable=False, index=True)
+
+    # Trip identification
+    trip_id = Column(String, nullable=False, index=True)
+    route_id = Column(String, index=True)
+    vehicle_id = Column(
+        String
+    )  # ~40% of trip_updates carry vehicle.id; rest are pure schedule predictions
+
+    # Stop within the trip
+    stop_id = Column(String, nullable=False)
+    stop_sequence = Column(Integer)
+
+    # Predictions from the StopTimeUpdate
+    predicted_arrival_ts = Column(DateTime)
+    predicted_departure_ts = Column(DateTime)
+    schedule_relationship = Column(
+        String
+    )  # 'SCHEDULED' | 'SKIPPED' | 'NO_DATA' | 'UNSCHEDULED' | 'UNSET'
+
+    collected_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # Indexes target the two main access patterns:
+    #   - per-pair time series: WHERE trip_id=? AND stop_id=? ORDER BY snapshot_ts
+    #   - route-level slices over a time window
+    __table_args__ = (
+        Index("idx_tu_trip_stop_snap", "trip_id", "stop_id", "snapshot_ts"),
+        Index("idx_tu_route_snap", "route_id", "snapshot_ts"),
+    )
+
+
 class RouteMetricsDaily(Base):
     """
     Pre-computed daily performance metrics for routes.

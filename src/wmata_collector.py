@@ -11,7 +11,7 @@ from google.transit import gtfs_realtime_pb2
 from sqlalchemy.orm import Session
 
 from src.database import get_session, init_db
-from src.models import Route, Shape, Stop, StopTime, Trip, VehiclePosition
+from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
 
 # Load environment variables from .env file
 load_dotenv()
@@ -463,6 +463,112 @@ class WMATADataCollector:
             self._save_vehicle_positions(route_vehicles)
 
         return route_vehicles
+
+    def get_realtime_trip_updates(self, timeout=10):
+        """Fetch the GTFS-RT TripUpdates feed and flatten it to per-stop rows.
+
+        Returns a tuple ``(snapshot_ts, rows)`` where ``snapshot_ts`` is the
+        feed header timestamp (datetime, UTC) and ``rows`` is a list of dicts
+        — one per StopTimeUpdate — ready for ``_save_trip_updates``. Returns
+        ``(None, [])`` on any network or parse error so callers can keep
+        polling without crashing the loop.
+        """
+        print("\nFetching real-time trip updates...")
+        sys.stdout.flush()
+
+        url = f"{BASE_URL}/bus-gtfsrt-tripupdates.pb"
+
+        try:
+            response = requests.get(url, headers=self.headers, timeout=timeout)
+
+            if response.status_code != 200:
+                print(f"✗ Error fetching trip updates: {response.status_code}")
+                return None, []
+
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(response.content)
+
+            snapshot_ts = (
+                datetime.utcfromtimestamp(feed.header.timestamp)
+                if feed.header.timestamp
+                else datetime.utcnow()
+            )
+
+            rows = []
+            for entity in feed.entity:
+                if not entity.HasField("trip_update"):
+                    continue
+                tu = entity.trip_update
+                trip_id = tu.trip.trip_id or None
+                route_id = tu.trip.route_id or None
+                vehicle_id = tu.vehicle.id if (tu.HasField("vehicle") and tu.vehicle.id) else None
+
+                for stu in tu.stop_time_update:
+                    if not stu.stop_id:
+                        continue
+
+                    predicted_arrival_ts = None
+                    if stu.HasField("arrival") and stu.arrival.HasField("time"):
+                        predicted_arrival_ts = datetime.utcfromtimestamp(stu.arrival.time)
+
+                    predicted_departure_ts = None
+                    if stu.HasField("departure") and stu.departure.HasField("time"):
+                        predicted_departure_ts = datetime.utcfromtimestamp(stu.departure.time)
+
+                    if stu.HasField("schedule_relationship"):
+                        schedule_relationship = stu.ScheduleRelationship.Name(
+                            stu.schedule_relationship
+                        )
+                    else:
+                        schedule_relationship = "UNSET"
+
+                    rows.append(
+                        {
+                            "snapshot_ts": snapshot_ts,
+                            "trip_id": trip_id,
+                            "route_id": route_id,
+                            "vehicle_id": vehicle_id,
+                            "stop_id": stu.stop_id,
+                            "stop_sequence": stu.stop_sequence
+                            if stu.HasField("stop_sequence")
+                            else None,
+                            "predicted_arrival_ts": predicted_arrival_ts,
+                            "predicted_departure_ts": predicted_departure_ts,
+                            "schedule_relationship": schedule_relationship,
+                        }
+                    )
+
+            print(
+                f"  ✓ Snapshot {snapshot_ts.isoformat()}: {len(feed.entity)} entities, "
+                f"{len(rows)} stop_time_updates"
+            )
+            return snapshot_ts, rows
+
+        except requests.exceptions.Timeout:
+            print(f"✗ Timeout: Request took longer than {timeout} seconds")
+            return None, []
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Network error: {e}")
+            return None, []
+        except Exception as e:
+            print(f"✗ Error parsing trip updates: {e}")
+            return None, []
+
+    def _save_trip_updates(self, rows):
+        """Bulk-insert one snapshot's worth of TripUpdate rows.
+
+        ``rows`` should be the second element returned by
+        ``get_realtime_trip_updates``. Append-only: no upsert, no dedup —
+        every snapshot pull becomes a fresh batch of rows.
+        """
+        if not rows:
+            return 0
+
+        objects = [TripUpdateSnapshot(**row) for row in rows]
+        self.db.bulk_save_objects(objects)
+        self.db.commit()
+        print(f"  Saved {len(objects)} trip update rows to database")
+        return len(objects)
 
     def _save_vehicle_positions(self, vehicles):
         """Save vehicle positions to database with all GTFS-RT fields"""
