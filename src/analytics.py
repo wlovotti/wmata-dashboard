@@ -23,6 +23,7 @@ from src.models import (
     Trip,
     VehiclePosition,
 )
+from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
 
 # Load environment variables
 load_dotenv()
@@ -531,8 +532,8 @@ def _process_positions_batch(
 def calculate_line_level_otp_batch(
     positions_df: pd.DataFrame,
     route_ids: Optional[list] = None,
-    early_threshold_seconds: int = -60,
-    late_threshold_seconds: int = 300,
+    early_threshold_seconds: int = OTP_EARLY_SEC,
+    late_threshold_seconds: int = OTP_LATE_SEC,
 ) -> dict:
     """
     Calculate line-level OTP for multiple routes simultaneously using vectorized operations.
@@ -548,8 +549,8 @@ def calculate_line_level_otp_batch(
                       route_id, vehicle_id, trip_id, stop_id, timestamp,
                       scheduled_time, diff_seconds, latitude, longitude, speed
         route_ids: Optional list of route_ids to filter to (None = all routes in df)
-        early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
-        late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
+        early_threshold_seconds: Threshold for "early" (default: WMATA -2 min)
+        late_threshold_seconds: Threshold for "late" (default: WMATA +7 min)
 
     Returns:
         Dictionary keyed by route_id:
@@ -1228,17 +1229,17 @@ def calculate_on_time_performance(
     route_id: str,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    early_threshold_seconds: int = -60,  # More than 1 min early (LA Metro standard)
-    late_threshold_seconds: int = 300,  # More than 5 min late (LA Metro standard)
+    early_threshold_seconds: int = OTP_EARLY_SEC,
+    late_threshold_seconds: int = OTP_LATE_SEC,
     min_match_confidence: float = 0.3,  # Minimum confidence for trip matching
 ) -> dict:
     """
     Calculate on-time performance by comparing actual vehicle positions to schedule.
 
-    Uses LA Metro's on-time definition (stricter than WMATA's 2min/-7min standard):
-    - Early: More than 1 minute early (< -60 seconds)
-    - On-time: Between 1 min early and 5 min late (-60 to +300 seconds)
-    - Late: More than 5 minutes late (> +300 seconds)
+    Uses WMATA's published scorecard window:
+    - Early: More than 2 minutes early (< -120 seconds)
+    - On-time: Between 2 min early and 7 min late (-120 to +420 seconds)
+    - Late: More than 7 minutes late (> +420 seconds)
 
     Since WMATA's GTFS-RT trip_ids don't match GTFS static trip_ids, this function:
     1. Uses approximate trip matching to find scheduled trip for each vehicle
@@ -1251,8 +1252,8 @@ def calculate_on_time_performance(
         route_id: Route to analyze
         start_time: Start of analysis period
         end_time: End of analysis period
-        early_threshold_seconds: Seconds early to be considered "early" (default: -60, LA Metro)
-        late_threshold_seconds: Seconds late to be considered "late" (default: +300, LA Metro)
+        early_threshold_seconds: Seconds early to be considered "early" (default: WMATA -2 min)
+        late_threshold_seconds: Seconds late to be considered "late" (default: WMATA +7 min)
         min_match_confidence: Minimum confidence score for trip matching (0-1)
 
     Returns:
@@ -1452,8 +1453,8 @@ def calculate_stop_level_otp(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
     proximity_meters: float = 50.0,
-    early_threshold_seconds: int = -60,
-    late_threshold_seconds: int = 300,
+    early_threshold_seconds: int = OTP_EARLY_SEC,
+    late_threshold_seconds: int = OTP_LATE_SEC,
     min_match_confidence: float = 0.3,
 ) -> dict:
     """
@@ -1469,8 +1470,8 @@ def calculate_stop_level_otp(
         start_time: Start of analysis period
         end_time: End of analysis period
         proximity_meters: Distance threshold to consider vehicle "at stop" (default: 50m)
-        early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
-        late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
+        early_threshold_seconds: Threshold for "early" (default: WMATA -2 min)
+        late_threshold_seconds: Threshold for "late" (default: WMATA +7 min)
         min_match_confidence: Minimum confidence for trip matching
 
     Returns:
@@ -1596,8 +1597,8 @@ def calculate_time_period_otp(
     route_id: str,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    early_threshold_seconds: int = -60,
-    late_threshold_seconds: int = 300,
+    early_threshold_seconds: int = OTP_EARLY_SEC,
+    late_threshold_seconds: int = OTP_LATE_SEC,
     min_match_confidence: float = 0.3,
 ) -> dict:
     """
@@ -1618,8 +1619,8 @@ def calculate_time_period_otp(
         route_id: Route to analyze
         start_time: Start of analysis period
         end_time: End of analysis period
-        early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
-        late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
+        early_threshold_seconds: Threshold for "early" (default: WMATA -2 min)
+        late_threshold_seconds: Threshold for "late" (default: WMATA +7 min)
         min_match_confidence: Minimum confidence for trip matching
 
     Returns:
@@ -1755,8 +1756,8 @@ def calculate_line_level_otp(
     route_id: str,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    early_threshold_seconds: int = -60,
-    late_threshold_seconds: int = 300,
+    early_threshold_seconds: int = OTP_EARLY_SEC,
+    late_threshold_seconds: int = OTP_LATE_SEC,
     min_match_confidence: float = 0.3,
     sample_rate: int = 1,  # Process every Nth position (3 = every 3 minutes with 60s polling)
     positions: Optional[list] = None,  # Pre-loaded positions (for batch processing)
@@ -1781,8 +1782,8 @@ def calculate_line_level_otp(
         route_id: Route to analyze
         start_time: Start of analysis period
         end_time: End of analysis period
-        early_threshold_seconds: Threshold for "early" (-60 = 1 min early, LA Metro)
-        late_threshold_seconds: Threshold for "late" (+300 = 5 min late, LA Metro)
+        early_threshold_seconds: Threshold for "early" (default: WMATA -2 min)
+        late_threshold_seconds: Threshold for "late" (default: WMATA +7 min)
         min_match_confidence: Minimum confidence for trip matching (only used for fallback)
         sample_rate: Process every Nth position (default: 3, for 3-minute intervals)
         positions: Pre-loaded positions (optional, for batch processing performance)
