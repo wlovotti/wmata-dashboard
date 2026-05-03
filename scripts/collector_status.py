@@ -8,7 +8,7 @@ vehicle_positions. Exits 0 if everything is healthy; exits 1 if any
 hard check fails (process down, stale data, recent errors).
 
 Usage: uv run python scripts/collector_status.py
-       (or via the /status slash command)
+       (or via the /collector-status slash command)
 """
 
 import re
