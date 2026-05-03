@@ -5,7 +5,6 @@ Analytics module for calculating transit performance metrics
 import math
 import os
 from datetime import datetime, timedelta
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -236,9 +235,9 @@ def get_route_service_hours(db: Session, route_id: str) -> tuple[int, int]:
 def get_vehicle_positions(
     db: Session,
     route_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
-    direction_id: Optional[int] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    direction_id: int | None = None,
     exclude_exception_dates: bool = True,
 ) -> list[VehiclePosition]:
     """
@@ -324,9 +323,7 @@ def get_vehicle_positions(
     return positions
 
 
-def find_reference_stop(
-    db: Session, route_id: str, direction_id: Optional[int] = None
-) -> Optional[str]:
+def find_reference_stop(db: Session, route_id: str, direction_id: int | None = None) -> str | None:
     """
     Find a good reference stop for headway measurement.
 
@@ -531,7 +528,7 @@ def _process_positions_batch(
 
 def calculate_line_level_otp_batch(
     positions_df: pd.DataFrame,
-    route_ids: Optional[list] = None,
+    route_ids: list | None = None,
     early_threshold_seconds: int = OTP_EARLY_SEC,
     late_threshold_seconds: int = OTP_LATE_SEC,
 ) -> dict:
@@ -637,7 +634,7 @@ def calculate_line_level_otp_batch(
 
 def calculate_headways_batch(
     positions_df: pd.DataFrame,
-    route_ids: Optional[list] = None,
+    route_ids: list | None = None,
     max_headway_minutes: float = 120.0,
 ) -> dict:
     """
@@ -830,7 +827,7 @@ def calculate_headways_batch(
 
 def calculate_average_speed_batch(
     positions_df: pd.DataFrame,
-    route_ids: Optional[list] = None,
+    route_ids: list | None = None,
 ) -> dict:
     """
     Calculate average speed for multiple routes simultaneously using vectorized operations.
@@ -904,14 +901,14 @@ def calculate_average_speed_batch(
 def calculate_headways(
     db: Session,
     route_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
-    direction_id: Optional[int] = None,
-    stop_id: Optional[str] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    direction_id: int | None = None,
+    stop_id: str | None = None,
     proximity_meters: float = 50.0,
     max_headway_minutes: float = 120.0,
     use_service_hours: bool = True,
-    positions: Optional[list] = None,  # Pre-loaded positions (for batch processing)
+    positions: list | None = None,  # Pre-loaded positions (for batch processing)
 ) -> dict:
     """
     Calculate headways (time between consecutive buses) for a route.
@@ -1200,7 +1197,7 @@ def find_nearest_stop(
     latitude: float,
     longitude: float,
     max_distance_meters: float = 200.0,
-) -> Optional[tuple[Stop, float]]:
+) -> tuple[Stop, float] | None:
     """
     Find the nearest stop on a route to given coordinates.
 
@@ -1227,8 +1224,8 @@ def find_nearest_stop(
 def calculate_on_time_performance(
     db: Session,
     route_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     early_threshold_seconds: int = OTP_EARLY_SEC,
     late_threshold_seconds: int = OTP_LATE_SEC,
     min_match_confidence: float = 0.3,  # Minimum confidence for trip matching
@@ -1450,8 +1447,8 @@ def calculate_stop_level_otp(
     db: Session,
     route_id: str,
     stop_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     proximity_meters: float = 50.0,
     early_threshold_seconds: int = OTP_EARLY_SEC,
     late_threshold_seconds: int = OTP_LATE_SEC,
@@ -1595,8 +1592,8 @@ def calculate_stop_level_otp(
 def calculate_time_period_otp(
     db: Session,
     route_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     early_threshold_seconds: int = OTP_EARLY_SEC,
     late_threshold_seconds: int = OTP_LATE_SEC,
     min_match_confidence: float = 0.3,
@@ -1754,18 +1751,17 @@ def calculate_time_period_otp(
 def calculate_line_level_otp(
     db: Session,
     route_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     early_threshold_seconds: int = OTP_EARLY_SEC,
     late_threshold_seconds: int = OTP_LATE_SEC,
     min_match_confidence: float = 0.3,
     sample_rate: int = 1,  # Process every Nth position (3 = every 3 minutes with 60s polling)
-    positions: Optional[list] = None,  # Pre-loaded positions (for batch processing)
-    trips: Optional[dict] = None,  # Pre-loaded trips map {trip_id: Trip} (for batch processing)
-    stop_times: Optional[
-        dict
-    ] = None,  # Pre-loaded stop_times map {trip_id: [StopTime]} (for batch processing)
-    stops: Optional[dict] = None,  # Pre-loaded stops map {stop_id: Stop} (for batch processing)
+    positions: list | None = None,  # Pre-loaded positions (for batch processing)
+    trips: dict | None = None,  # Pre-loaded trips map {trip_id: Trip} (for batch processing)
+    stop_times: dict
+    | None = None,  # Pre-loaded stop_times map {trip_id: [StopTime]} (for batch processing)
+    stops: dict | None = None,  # Pre-loaded stops map {stop_id: Stop} (for batch processing)
 ) -> dict:
     """
     Calculate overall line-level on-time performance for a route (HIGHLY OPTIMIZED).
@@ -2089,11 +2085,11 @@ def calculate_line_level_otp(
 def calculate_average_speed(
     db: Session,
     route_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     min_trip_duration_minutes: float = 5.0,
     max_speed_mph: float = 60.0,
-    positions: Optional[list] = None,  # Pre-loaded positions (for batch processing)
+    positions: list | None = None,  # Pre-loaded positions (for batch processing)
 ) -> dict:
     """
     Calculate average speed for vehicles on a route using actual shape data.

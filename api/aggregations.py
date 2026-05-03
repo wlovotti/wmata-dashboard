@@ -7,7 +7,6 @@ optimized for fast API responses and dashboard visualization.
 
 import math
 from datetime import datetime, timedelta
-from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -38,7 +37,7 @@ def sanitize_float(value):
         return None
 
 
-def calculate_performance_grade(otp_percentage: Optional[float]) -> str:
+def calculate_performance_grade(otp_percentage: float | None) -> str:
     """
     Calculate letter grade from OTP percentage
 
