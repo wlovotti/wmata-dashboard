@@ -27,122 +27,25 @@ Usage:
 
 import argparse
 import time
-from collections import defaultdict
 from datetime import date as date_type
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from pipelines.stop_events_common import (
+    build_stop_time_index,
+    parse_trip_start_date,
+    resolve_stop_time,
+)
 from src.database import get_session
 from src.models import Route, Stop, StopEvent, StopTime, Trip, VehiclePosition
 from src.timezones import eastern_today
 
 PROXIMITY_THRESHOLD_M = 50.0
 EARTH_RADIUS_M = 6_371_000
-EASTERN = ZoneInfo("America/New_York")
-UTC = ZoneInfo("UTC")
-
-
-def _parse_gtfs_time_to_dt(time_str: str, anchor: date_type) -> datetime | None:
-    """Parse a GTFS HH:MM:SS string into a naive UTC datetime anchored at the given service date.
-
-    GTFS times can have HH ≥ 24 for trips that extend past midnight on the same
-    service day; in that case the returned datetime is on the next calendar day.
-    The anchor is interpreted as the Eastern service date and converted to UTC.
-    Returns None on parse failure.
-    """
-    try:
-        hours, minutes, seconds = (int(x) for x in time_str.split(":"))
-    except (ValueError, AttributeError):
-        return None
-
-    days_offset, hour_within_day = divmod(hours, 24)
-    eastern_midnight = datetime.combine(anchor, datetime.min.time())
-    naive_eastern = eastern_midnight + timedelta(
-        days=days_offset, hours=hour_within_day, minutes=minutes, seconds=seconds
-    )
-    aware = naive_eastern.replace(tzinfo=EASTERN)
-    return aware.astimezone(UTC).replace(tzinfo=None)
-
-
-def _parse_trip_start_date(trip_start_date: str | None) -> date_type | None:
-    """Parse a GTFS-RT trip_start_date (YYYYMMDD) into a date, or None if unparseable."""
-    if not trip_start_date or len(trip_start_date) != 8:
-        return None
-    try:
-        return datetime.strptime(trip_start_date, "%Y%m%d").date()
-    except ValueError:
-        return None
-
-
-def _build_stop_time_index(
-    stop_times: list[StopTime],
-) -> dict[tuple[str, str], list[dict]]:
-    """Group stop_times by (trip_id, stop_id) → list of raw schedule entries.
-
-    Raw GTFS time strings are kept here, not datetimes, because the same trip
-    template runs on multiple service dates — the datetime anchor depends on
-    the observation's `trip_start_date`, not on a pipeline-wide constant.
-
-    A list rather than a single entry because GTFS allows one trip to visit the
-    same stop_id at multiple stop_sequence values (loop / out-and-back patterns).
-    Caller picks the closest sequence by observation time when more than one exists.
-    """
-    index: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for st in stop_times:
-        index[(st.trip_id, st.stop_id)].append(
-            {
-                "stop_sequence": st.stop_sequence,
-                "arrival_time": st.arrival_time,
-                "departure_time": st.departure_time,
-            }
-        )
-    return index
-
-
-def _resolve_stop_time(
-    candidates: list[dict],
-    observed_ts: datetime,
-    service_date: date_type,
-) -> dict | None:
-    """Pick the closest-in-time stop_sequence candidate and resolve its scheduled times.
-
-    For the WMATA case there is always exactly one candidate per (trip_id, stop_id).
-    The temporal-proximity tie-break is defensive against GTFS loop routes. Returns
-    a dict with `stop_sequence`, `scheduled_arrival_ts`, `scheduled_departure_ts`
-    parsed against the given (per-position) service_date, or None if no candidates.
-    """
-    if not candidates:
-        return None
-    chosen = candidates[0]
-    if len(candidates) > 1:
-        chosen = min(
-            candidates,
-            key=lambda c: abs(
-                (
-                    _parse_gtfs_time_to_dt(c["arrival_time"], service_date) - observed_ts
-                ).total_seconds()
-                if c["arrival_time"]
-                else float("inf")
-            ),
-        )
-    return {
-        "stop_sequence": chosen["stop_sequence"],
-        "scheduled_arrival_ts": (
-            _parse_gtfs_time_to_dt(chosen["arrival_time"], service_date)
-            if chosen["arrival_time"]
-            else None
-        ),
-        "scheduled_departure_ts": (
-            _parse_gtfs_time_to_dt(chosen["departure_time"], service_date)
-            if chosen["departure_time"]
-            else None
-        ),
-    }
 
 
 def derive_proximity_stop_events(
@@ -235,7 +138,7 @@ def derive_proximity_stop_events(
     stop_lat_rad = np.radians([s.stop_lat for s in stops])
     stop_lon_rad = np.radians([s.stop_lon for s in stops])
 
-    stop_time_index = _build_stop_time_index(stop_times)
+    stop_time_index = build_stop_time_index(stop_times)
 
     # For each (trip_id, stop_sequence), keep the FIRST in-proximity observation
     # plus its match distance. Subsequent observations within proximity are ignored
@@ -273,8 +176,8 @@ def derive_proximity_stop_events(
         # not the pipeline-wide service_date arg, in case a position's
         # trip_start_date drifts (e.g., legacy rows that lack the field fall
         # back to the requested service_date).
-        position_service_date = _parse_trip_start_date(pos.trip_start_date) or service_date
-        chosen = _resolve_stop_time(candidates, pos.timestamp, position_service_date)
+        position_service_date = parse_trip_start_date(pos.trip_start_date) or service_date
+        chosen = resolve_stop_time(candidates, pos.timestamp, position_service_date)
         if chosen is None:
             continue
 

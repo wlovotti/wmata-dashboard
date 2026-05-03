@@ -8,13 +8,16 @@ are churn.
 
 Last edited 2026-05-03.
 
-> Phases A1+A2 of NOTES-7 are in flight on `feature/stop-events-schema`:
-> the `stop_events` table, model, and proximity-source derivation pipeline
-> (`pipelines/derive_stop_events.py`) land here. NOTES-7 stays open until
-> the trip_update derivation (Phase B1) and comparison harness (Phase B2)
-> are in. Smoke-tested on 2026-05-03: 266k positions → 167k matches →
-> 82k stop_events across all routes in 88 s, deviations bounded ±35 min.
-> NOTES-22 (broken `reload_gtfs_complete.py`) folded in as a ride-along.
+> Phase B1 of NOTES-7 is in flight on `feature/trip-update-derivation`:
+> the trip_update-source derivation pipeline
+> (`pipelines/derive_stop_events_trip_updates.py`) lands here, plus a
+> small refactor that lifts shared parse helpers into
+> `pipelines/stop_events_common.py`. NOTES-7 stays open until the
+> comparison harness (Phase B2) is in. Smoke-tested on 2026-05-03:
+> 19.25M TU snapshots → 207k stop_events across all routes in 282 s;
+> cross-source agreement vs the proximity pipeline is tight (median
+> |delta| = 10 s, p95 |delta| = 56 s on the 76,748 events present in both
+> sources, 93% of all proximity events).
 
 ---
 

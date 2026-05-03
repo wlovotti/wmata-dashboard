@@ -239,18 +239,18 @@ def test_parse_gtfs_time_handles_post_midnight_hours():
     """GTFS HH:MM:SS with HH ≥ 24 parses into the next calendar day in UTC."""
     from datetime import date
 
-    from pipelines.derive_stop_events import _parse_gtfs_time_to_dt
+    from pipelines.stop_events_common import parse_gtfs_time_to_dt
 
     # 24:21:00 anchored at 2026-05-02 service date = 2026-05-03 00:21 Eastern = 04:21 UTC (EDT)
-    crossover = _parse_gtfs_time_to_dt("24:21:00", date(2026, 5, 2))
+    crossover = parse_gtfs_time_to_dt("24:21:00", date(2026, 5, 2))
     assert crossover == datetime(2026, 5, 3, 4, 21, 0)
 
     # Normal daytime: 14:30:00 anchored at 2026-05-03 = 18:30 UTC (EDT, UTC-4)
-    daytime = _parse_gtfs_time_to_dt("14:30:00", date(2026, 5, 3))
+    daytime = parse_gtfs_time_to_dt("14:30:00", date(2026, 5, 3))
     assert daytime == datetime(2026, 5, 3, 18, 30, 0)
 
     # Garbage input returns None
-    assert _parse_gtfs_time_to_dt("not-a-time", date(2026, 5, 3)) is None
+    assert parse_gtfs_time_to_dt("not-a-time", date(2026, 5, 3)) is None
 
 
 @pytest.mark.smoke
@@ -258,13 +258,121 @@ def test_parse_trip_start_date_round_trip():
     """trip_start_date YYYYMMDD parses to a date; bad inputs return None."""
     from datetime import date
 
-    from pipelines.derive_stop_events import _parse_trip_start_date
+    from pipelines.stop_events_common import parse_trip_start_date
 
-    assert _parse_trip_start_date("20260503") == date(2026, 5, 3)
-    assert _parse_trip_start_date(None) is None
-    assert _parse_trip_start_date("") is None
-    assert _parse_trip_start_date("2026-05-03") is None  # wrong format
-    assert _parse_trip_start_date("20260230") is None  # invalid date
+    assert parse_trip_start_date("20260503") == date(2026, 5, 3)
+    assert parse_trip_start_date(None) is None
+    assert parse_trip_start_date("") is None
+    assert parse_trip_start_date("2026-05-03") is None  # wrong format
+    assert parse_trip_start_date("20260230") is None  # invalid date
+
+
+@pytest.mark.smoke
+def test_last_snapshots_per_stop_picks_final_state_and_last_prediction():
+    """Final state = absolute-last snapshot; observed = last snapshot with non-null pred_arr."""
+    from pipelines.derive_stop_events_trip_updates import _last_snapshots_per_stop
+    from src.models import TripUpdateSnapshot
+
+    # One (trip, stop_seq): three snapshots. Last has null pred_arr (bus passed,
+    # WMATA cleared the prediction). Middle has the most recent non-null pred_arr.
+    snaps = [
+        TripUpdateSnapshot(
+            trip_id="T1",
+            stop_id="S5",
+            stop_sequence=5,
+            snapshot_ts=datetime(2026, 5, 3, 14, 30, 0),
+            predicted_arrival_ts=datetime(2026, 5, 3, 14, 35, 0),
+            schedule_relationship="SCHEDULED",
+            vehicle_id="V1",
+        ),
+        TripUpdateSnapshot(
+            trip_id="T1",
+            stop_id="S5",
+            stop_sequence=5,
+            snapshot_ts=datetime(2026, 5, 3, 14, 33, 0),
+            predicted_arrival_ts=datetime(2026, 5, 3, 14, 34, 30),
+            schedule_relationship="SCHEDULED",
+            vehicle_id="V1",
+        ),
+        TripUpdateSnapshot(
+            trip_id="T1",
+            stop_id="S5",
+            stop_sequence=5,
+            snapshot_ts=datetime(2026, 5, 3, 14, 35, 30),
+            predicted_arrival_ts=None,
+            schedule_relationship="SCHEDULED",
+            vehicle_id="V1",
+        ),
+    ]
+    out = _last_snapshots_per_stop(snaps)
+    entry = out[("T1", 5)]
+    assert entry["final_snapshot_ts"] == datetime(2026, 5, 3, 14, 35, 30)
+    assert entry["last_predicted_arrival_ts"] == datetime(2026, 5, 3, 14, 34, 30)
+    assert entry["final_schedule_relationship"] == "SCHEDULED"
+
+
+@pytest.mark.smoke
+def test_last_snapshots_per_stop_marks_skipped():
+    """A SKIPPED final state propagates regardless of earlier SCHEDULED snapshots."""
+    from pipelines.derive_stop_events_trip_updates import _last_snapshots_per_stop
+    from src.models import TripUpdateSnapshot
+
+    snaps = [
+        TripUpdateSnapshot(
+            trip_id="T2",
+            stop_id="S3",
+            stop_sequence=3,
+            snapshot_ts=datetime(2026, 5, 3, 14, 0, 0),
+            predicted_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
+            schedule_relationship="SCHEDULED",
+            vehicle_id=None,
+        ),
+        TripUpdateSnapshot(
+            trip_id="T2",
+            stop_id="S3",
+            stop_sequence=3,
+            snapshot_ts=datetime(2026, 5, 3, 14, 4, 30),
+            predicted_arrival_ts=None,
+            schedule_relationship="SKIPPED",
+            vehicle_id=None,
+        ),
+    ]
+    out = _last_snapshots_per_stop(snaps)
+    assert out[("T2", 3)]["final_schedule_relationship"] == "SKIPPED"
+
+
+@pytest.mark.smoke
+def test_last_snapshots_per_stop_skips_null_sequence():
+    """Snapshots without stop_sequence (rare WMATA quirk) are dropped from output."""
+    from pipelines.derive_stop_events_trip_updates import _last_snapshots_per_stop
+    from src.models import TripUpdateSnapshot
+
+    snaps = [
+        TripUpdateSnapshot(
+            trip_id="T3",
+            stop_id="S1",
+            stop_sequence=None,
+            snapshot_ts=datetime(2026, 5, 3, 14, 0, 0),
+            predicted_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
+            schedule_relationship="SCHEDULED",
+        ),
+    ]
+    assert _last_snapshots_per_stop(snaps) == {}
+
+
+@pytest.mark.smoke
+def test_eastern_window_utc_brackets_service_day():
+    """The window starts before service_date and extends past midnight into the next day."""
+    from datetime import date
+
+    from pipelines.derive_stop_events_trip_updates import _eastern_window_utc
+
+    start, end = _eastern_window_utc(date(2026, 5, 3))
+    # 2026-05-03 03:00 ET (EDT, UTC-4) = 07:00 UTC; 2026-05-04 04:00 ET = 08:00 UTC
+    assert start == datetime(2026, 5, 3, 7, 0, 0)
+    assert end == datetime(2026, 5, 4, 8, 0, 0)
+    # Window is wider than 24h
+    assert (end - start).total_seconds() > 24 * 3600
 
 
 @pytest.mark.smoke
