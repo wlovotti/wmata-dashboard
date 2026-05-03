@@ -1,10 +1,12 @@
 # Code Review Notes
 
-Forward-looking punch list. Completed items are removed once their PRs
-merge — see git log and PR descriptions for history. Item numbers
-(`NOTES-N`) are stable; new items take the next number.
+Forward-looking punch list. Completed items are removed in the same
+PR that closes them — see git log and PR descriptions for history.
+Item numbers (`NOTES-N`) are stable; new items take the next number.
+NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
+are churn.
 
-Last reconciled 2026-05-03 (through PR #38).
+Last edited 2026-05-03.
 
 ---
 
