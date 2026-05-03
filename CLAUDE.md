@@ -53,6 +53,24 @@ without asking. See `NOTES.md` for the active punch list.
 - **Tests use SQLite in-memory** (`tests/conftest.py`), but production code
   is Postgres-only. Don't conflate the two when reasoning about queries.
 
+- **`stop_id` is not direction-unique.** Most WMATA stops are split by
+  direction (NB stop and SB stop are different `stop_id`s on opposite
+  sides of a street), but **termini, layover bays, and some hubs serve
+  both directions under one `stop_id`**. Any per-route, per-stop
+  aggregation must group by `(route_id, direction_id, stop_id)` — never
+  `(route_id, stop_id)` alone — or it silently double-counts at shared
+  stops and produces metrics that look ~2x too tight. For "reference
+  stop" selection, restrict to stops where
+  `COUNT(DISTINCT direction_id) = 1` for trips on the route.
+
+- **GTFS times are unpadded strings.** WMATA stores `arrival_time` as
+  `9:06:00` (no leading zero on the hour), so SQL `MIN(arrival_time)`
+  does the wrong thing — `"10:00:07" < "9:58:27"` lexicographically.
+  Don't string-min/max GTFS times. Parse to integer seconds in
+  application code (`src/service_profile.py:_parse_gtfs_time_to_seconds`),
+  or `LPAD(arrival_time, 8, '0')` before sorting. Also: hours can be
+  `≥ 24` for service that extends past midnight on the same service day.
+
 ## Commands
 
 ```bash

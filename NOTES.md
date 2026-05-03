@@ -90,6 +90,14 @@ gate the later ones.
 ### Independent of the redesign
 
 - **#4 Python 3.9 → 3.11/3.12.** Small isolated PR, can land anytime.
+- **#22 Direction-aware `find_reference_stop`.** Existing analytics
+  function picks a reference stop without filtering to one direction
+  when callers pass `direction_id=None`. On routes whose terminus stops
+  serve both directions under one `stop_id` (most WMATA routes — D80
+  Friendship Heights and Union Station each see all 268 daily trips),
+  this auto-selects a terminus and produces ~2x-too-tight headways. Bug
+  shape verified during #16 work. Independent fix; doesn't depend on
+  the metrics redesign.
 
 ---
 
@@ -483,3 +491,56 @@ So: keep collecting raw, ship #7, then add retention.
 - Blocked on **#7 `stop_events`** landing first. Adding retention
   before stop_events would silently throw away derivation evidence.
 - Independent of #8-#20.
+
+---
+
+## 22. Direction-aware `find_reference_stop` — OPEN
+
+**Severity: medium (corrupts current headway numbers on affected routes).
+Independent of the metrics redesign.**
+
+### The problem
+
+`src/analytics.py:326 find_reference_stop()` picks a reference stop by
+counting trips per `stop_id` across the route's current trips. When the
+caller passes `direction_id=None`, both directions are pooled. For most
+WMATA routes the auto-selected stop is then a terminus / layover bay
+that serves all trips in both directions under one `stop_id` (e.g., D80
+Friendship Heights and Union Station each carry 268 = 134 dir-0 + 134
+dir-1 daily trips). The downstream `calculate_headways()` then computes
+gaps between consecutive arrivals at that bidirectional stop, producing
+roughly 2x-too-tight headway numbers.
+
+The function further sorts "common stops" by mean `stop_sequence`, but
+sequence numbers in dir-0 and dir-1 are different orderings of different
+stops — averaging them across directions is meaningless.
+
+### Evidence
+
+- Same bug shape as the one fixed in `src/service_profile.py` during
+  #16 work (PR #37). Verified by inspecting D80 stop counts in the live
+  DB — termini have all 268 trips, mid-route stops have 134.
+- CLAUDE.md "Non-obvious gotchas" now documents the rule: per-route stop
+  aggregations must group by `(route_id, direction_id, stop_id)`, never
+  `(route_id, stop_id)` alone.
+
+### Fix
+
+1. Make `direction_id` a required parameter on `find_reference_stop` (or
+   require callers to loop over directions and pass each explicitly).
+2. Filter candidate stops to those served by exactly one `direction_id`
+   on this route — `HAVING COUNT(DISTINCT t.direction_id) = 1`.
+3. Audit callers (`calculate_headways`, `calculate_headways_batch`,
+   anywhere reference stops are chosen) to ensure direction is plumbed.
+4. Re-run a few representative routes' headways before/after to quantify
+   the shift. Expect roughly 2x looser numbers on routes whose previous
+   reference stop was a terminus.
+5. Decide whether `route_metrics_daily` / `route_metrics_summary` need
+   to be backfilled with corrected numbers, or accept that those tables
+   are slated for replacement (#19) and don't bother.
+
+### Dependencies
+
+- Independent of #6-#21. Can land any time.
+- Will probably shift `headway_*` columns in `route_metrics_daily` /
+  `route_metrics_summary`, so worth flagging in the PR description.

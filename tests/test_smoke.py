@@ -12,7 +12,8 @@ from datetime import datetime
 import pytest
 from sqlalchemy import text
 
-from src.models import Route, TripUpdateSnapshot
+from src.models import Calendar, Route, StopTime, Trip, TripUpdateSnapshot
+from src.service_profile import compute_route_service_profile
 from src.wmata_collector import WMATADataCollector
 
 
@@ -162,6 +163,82 @@ def test_timezones_helpers_round_trip():
     # Eastern midnight = UTC 04:00 (EDT) or 05:00 (EST). Both have minute=0.
     assert start.minute == 0
     assert start.tzinfo is None  # Helper returns naive UTC
+
+
+@pytest.mark.smoke
+def test_compute_route_service_profile_classifies_frequent(db_session):
+    """compute_route_service_profile flags is_frequent for a 10-min headway weekday route."""
+    db_session.add(
+        Calendar(
+            service_id="WK",
+            monday=1,
+            tuesday=1,
+            wednesday=1,
+            thursday=1,
+            friday=1,
+            saturday=0,
+            sunday=0,
+            start_date="20260101",
+            end_date="20261231",
+            is_current=True,
+        )
+    )
+    # Six trips on route FREQ at 08:00, 08:10, ..., 08:50 — 10-min headway, frequent.
+    # Two trips on route SPARSE at 08:00, 08:30 — 30-min headway, not frequent.
+    for i, mins in enumerate(range(0, 60, 10)):
+        trip_id = f"FREQ-{i}"
+        db_session.add(
+            Trip(
+                trip_id=trip_id,
+                route_id="FREQ",
+                service_id="WK",
+                is_current=True,
+            )
+        )
+        db_session.add(
+            StopTime(
+                trip_id=trip_id,
+                stop_id="S1",
+                arrival_time=f"08:{mins:02d}:00",
+                departure_time=f"08:{mins:02d}:00",
+                stop_sequence=1,
+                is_current=True,
+            )
+        )
+    for i, mins in enumerate([0, 30]):
+        trip_id = f"SPARSE-{i}"
+        db_session.add(
+            Trip(
+                trip_id=trip_id,
+                route_id="SPARSE",
+                service_id="WK",
+                is_current=True,
+            )
+        )
+        db_session.add(
+            StopTime(
+                trip_id=trip_id,
+                stop_id="S1",
+                arrival_time=f"08:{mins:02d}:00",
+                departure_time=f"08:{mins:02d}:00",
+                stop_sequence=1,
+                is_current=True,
+            )
+        )
+    db_session.commit()
+
+    rows = compute_route_service_profile(db_session)
+    by_key = {(r["route_id"], r["day_type"], r["hour"]): r for r in rows}
+
+    freq = by_key[("FREQ", "weekday", 8)]
+    assert freq["scheduled_trips"] == 6
+    assert abs(freq["mean_headway_min"] - 10.0) < 0.01
+    assert freq["is_frequent"] is True
+
+    sparse = by_key[("SPARSE", "weekday", 8)]
+    assert sparse["scheduled_trips"] == 2
+    assert abs(sparse["mean_headway_min"] - 30.0) < 0.01
+    assert sparse["is_frequent"] is False
 
 
 @pytest.mark.smoke
