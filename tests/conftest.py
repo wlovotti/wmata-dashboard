@@ -8,7 +8,6 @@ Provides fixtures for:
 - Environment variable mocking
 """
 
-import os
 from datetime import datetime, timedelta
 from typing import Generator
 
@@ -16,9 +15,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
+import api.main
 from api.main import app
-from src.database import get_session
 from src.models import (
     Base,
     Route,
@@ -35,9 +35,16 @@ def test_engine():
     """
     Create an in-memory SQLite engine for testing
 
-    Session-scoped so it's created once for all tests
+    Session-scoped so it's created once for all tests. StaticPool +
+    check_same_thread=False keeps the in-memory DB visible across threads
+    (TestClient runs requests on a worker thread).
     """
-    engine = create_engine("sqlite:///:memory:", echo=False)
+    engine = create_engine(
+        "sqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(bind=engine)
     yield engine
     engine.dispose()
@@ -63,22 +70,29 @@ def db_session(test_engine) -> Generator[Session, None, None]:
 
 
 @pytest.fixture(scope="function")
-def client(db_session):
+def client(db_session, monkeypatch):
     """
-    FastAPI TestClient with database dependency override
+    FastAPI TestClient that routes API DB calls through the test session.
 
-    All API requests will use the test database session
+    api.main calls get_session() directly (not via fastapi.Depends), so
+    app.dependency_overrides has no effect. Monkeypatch the bound name in
+    api.main, and shim .close() to a no-op so the per-request close in the
+    handlers doesn't break the surrounding test transaction.
     """
-    def override_get_session():
-        try:
-            yield db_session
-        finally:
-            pass
 
-    app.dependency_overrides[get_session] = override_get_session
+    class _SessionProxy:
+        def __init__(self, session):
+            self._session = session
+
+        def __getattr__(self, name):
+            return getattr(self._session, name)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(api.main, "get_session", lambda: _SessionProxy(db_session))
     with TestClient(app) as test_client:
         yield test_client
-    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -189,7 +203,6 @@ def sample_route_metrics_summary(db_session, sample_route) -> RouteMetricsSummar
         headway_cv=0.256,
         avg_speed_mph=18.5,
         total_observations=150,
-        total_arrivals_analyzed=45,
         total_positions_7d=1050,
         unique_vehicles_7d=8,
         unique_trips_7d=42,
@@ -214,8 +227,7 @@ def sample_route_metrics_daily(db_session, sample_route) -> RouteMetricsDaily:
         avg_headway_minutes=11.8,
         headway_std_dev_minutes=2.9,
         avg_speed_mph=19.2,
-        total_observations=25,
-        total_arrivals_analyzed=8,
+        total_arrivals=8,
         computed_at=datetime.utcnow(),
     )
     db_session.add(daily)
