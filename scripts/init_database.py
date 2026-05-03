@@ -1,6 +1,9 @@
 """
-One-time database initialization script
-Run this once to set up the database and load GTFS static data
+One-time database initialization script.
+
+Refuses to run if GTFS snapshots already exist. To refresh GTFS data on an
+already-populated database, use scripts/reload_gtfs_complete.py instead —
+it correctly invalidates the prior snapshot before inserting new rows.
 
 Usage:
   python scripts/init_database.py              # Interactive mode (prompts for confirmation)
@@ -463,6 +466,24 @@ def main():
     print("\n[1/2] Creating database tables with complete GTFS schema...")
     init_db()
     print("✓ Database tables created")
+
+    # Refuse to re-run on a populated database. init_database.py is for
+    # first-time setup only; refreshes must use reload_gtfs_complete.py,
+    # which invalidates the prior snapshot before inserting new rows.
+    db = get_session()
+    try:
+        existing_snapshots = db.query(GTFSSnapshot).count()
+    finally:
+        db.close()
+
+    if existing_snapshots > 0:
+        print(
+            f"\n✗ Database already has {existing_snapshots} GTFS snapshot(s). "
+            "init_database.py is for first-time setup only.\n"
+            "  To refresh GTFS data, run: "
+            "uv run python scripts/reload_gtfs_complete.py"
+        )
+        sys.exit(1)
 
     # Get database session and load GTFS data
     db = get_session()
