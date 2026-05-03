@@ -112,7 +112,6 @@ The dashboard will be available at `http://localhost:5173`
   - Supported metrics: `otp`, `early`, `late`, `headway`, `headway_std_dev`, `speed`
 - `GET /api/routes/{route_id}/time-periods` - Get performance by time of day
 - `GET /api/routes/{route_id}/shapes` - Get GTFS shapes for map visualization
-- `GET /api/routes/{route_id}/segments` - Get speed segments for map visualization
 
 Example:
 ```bash

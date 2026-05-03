@@ -13,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.aggregations import (
     get_all_routes_scorecard,
     get_route_detail_metrics,
-    get_route_speed_segments,
     get_route_time_period_summary,
     get_route_trend_data,
 )
@@ -174,31 +173,6 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
     db = get_session()
     try:
         result = get_route_trend_data(db, route_id, metric=metric, days=days)
-        if result.get("error"):
-            raise HTTPException(status_code=404, detail=result["error"])
-        return result
-    finally:
-        db.close()
-
-
-@app.get("/api/routes/{route_id}/segments")
-async def get_route_segments_endpoint(route_id: str, days: int = 7):
-    """
-    Get average speed by route segment for map visualization
-
-    Returns speed data for each stop-to-stop segment along the route,
-    including geographic coordinates for map display.
-
-    Args:
-        route_id: Route identifier (e.g., 'C51')
-        days: Number of days to analyze (default: 7)
-
-    Returns:
-        List of route segments with coordinates and average speeds
-    """
-    db = get_session()
-    try:
-        result = get_route_speed_segments(db, route_id, days=days)
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         return result

@@ -103,7 +103,15 @@ retry stacked snapshot 4 on top of snapshot 2 without flipping
 
 ---
 
-## 2. BusPosition code is dead in production
+## 2. BusPosition code is dead in production — RESOLVED 2026-05-02
+
+**Status: fixed.** All BusPosition code removed (model, collector methods,
+analytics function, four `debug/` scripts, `docs/SESSION_SUMMARY.md`); docs
+updated; `bus_positions` table dropped (was 0 rows, 96 kB). PR #23.
+
+Original findings preserved below for reference.
+
+---
 
 **Severity: low (cleanup, no functional impact)**
 
@@ -134,7 +142,18 @@ Total: ~250 lines + one table.
 
 ---
 
-## 3. Speed segments endpoint unreachable from the UI
+## 3. Speed segments endpoint unreachable from the UI — RESOLVED 2026-05-02
+
+**Status: fixed (deleted).** No product reason to expose the feature, so
+the endpoint and its supporting code were removed rather than wired into
+the UI: `/api/routes/{id}/segments` route and `get_route_speed_segments()`
+deleted from `api/main.py` / `api/aggregations.py`; `showSpeedSegments`
+prop and segment fetch/render branches removed from `RouteMap.jsx`;
+related tests and docs cleaned up.
+
+Original findings preserved below for reference.
+
+---
 
 **Severity: low (cleanup, no functional impact)**
 

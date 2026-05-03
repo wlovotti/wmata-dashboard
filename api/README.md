@@ -85,33 +85,6 @@ Get time-series trend data for a metric.
 }
 ```
 
-### `GET /api/routes/{route_id}/segments`
-Get average speed by route segment for map visualization.
-
-**Path Parameters:**
-- `route_id` (string): Route identifier
-
-**Query Parameters:**
-- `days` (int, default=7): Number of days to analyze
-
-**Response:**
-```json
-{
-  "route_id": "C51",
-  "segments": [
-    {
-      "from_stop": "STOP_A",
-      "to_stop": "STOP_B",
-      "from_coords": [38.9, -77.0],
-      "to_coords": [38.91, -77.01],
-      "avg_speed_mph": 15.2,
-      "speed_category": "normal",
-      "shape_points": [[38.9,-77.0], [38.901,-77.005]]
-    }
-  ]
-}
-```
-
 ### `GET /api/routes/{route_id}/time-periods`
 Get performance metrics by time of day.
 
@@ -177,4 +150,3 @@ open http://localhost:8000/docs
 
 **TODO:**
 - ⏳ GET /api/routes/{route_id}/trend (daily time-series)
-- ⏳ GET /api/routes/{route_id}/segments (speed by segment)
