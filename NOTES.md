@@ -1,7 +1,96 @@
 # Code Review Notes
 
-Findings from a code review on 2026-05-02. Each item was verified against the
-code and database directly, not inferred from CLAUDE.md.
+Findings from a code review on 2026-05-02 plus the metrics-redesign plan
+captured 2026-05-03. Each item was verified against the code and database
+directly, not inferred from CLAUDE.md.
+
+---
+
+## Active priorities (updated 2026-05-03)
+
+The bulk of open work is a metrics redesign anchored on materialized
+**stop events** as the foundational unit, replacing the daily-batch
+recomputation from raw positions. Sequencing matters — the early phases
+gate the later ones.
+
+### P0 — Foundation (gates the rest)
+
+- **#6 TripUpdates collection.** WMATA publishes a GTFS-RT TripUpdates feed
+  we currently don't consume. Snapshot probes (`scripts/probe_trip_updates.py`,
+  `scripts/probe_trip_updates_timeseries.py`) confirm 84.7% of stops carry
+  predicted arrival times; 13.5% are explicitly `SKIPPED`. The "last
+  prediction before the stop disappears from the feed" is the mechanism
+  for deriving WMATA's own claimed actual arrival times. This must land
+  first, then run for ~7 days to gather data before deriving stop_events.
+- **#7 `stop_events` table.** One row per (trip_id, stop_id, observed
+  arrival), with `source` column (`'trip_update'` | `'proximity'`). Both
+  sources can coexist — they're independent observations. Replaces the
+  current re-derive-on-every-batch model.
+- **#8 `runs` aggregation.** Trivial roll-up over `stop_events`. No single
+  `is_complete` flag — each metric applies its own filter at query time.
+
+### P1 — Quick wins on the new foundation (small, no new tables)
+
+- **#9 OTP window swap to WMATA's official.** Schedule-based: −2 min /
+  +7 min. Headway-based (frequent routes): scheduled headway + 3 min.
+  Currently using −60s / +300s, which makes our numbers diverge from
+  WMATA's published scorecard. Constants centralized in one module so
+  later tightening is a one-line change. (See `memory/project_otp_window.md`.)
+- **#10 OTP at origin / destination split.** Already have stop-level data
+  — just filter to first/last stop_sequence per trip. Distinguishes
+  dispatch problems from run-time problems from recovery problems.
+
+### P2 — Medium-effort metric additions
+
+- **#11 Service-delivered ratio.** % of scheduled trips that actually
+  ran. Most rider-felt failures are missing buses, not late ones, and
+  we currently can't see this at all. Needs a schedule-side count from
+  GTFS calendar/calendar_dates joined to trips, denominator-style.
+- **#12 End-to-end excess trip time.** From `runs`: median, p95, % of
+  runs with actual > 110% of scheduled. Captures dwell + in-vehicle
+  delay, not just wait. The metric MBTA OPMI is rolling out for buses.
+- **#13 Bunching count.** Count and rate of headways < 0.5 × scheduled.
+  Complements existing CV metric (which hides bunching in averages).
+- **#14 Stop-skip rate.** Direct from TripUpdates `SKIPPED`
+  stop_time_updates — data we can't derive from positions at all. Per
+  route, per day, per stop. Unique value-add from the TripUpdates feed.
+- **#15 Excess Wait Time (EWT) for frequent routes.** AWT =
+  `mean(h²) / (2·mean(h))` from observed headways at each stop-hour;
+  SWT same for scheduled. EWT = AWT − SWT, aggregated to (route, date,
+  time_period) where the route is frequent (scheduled headway ≤ 15 min).
+  TfL's standard rider-experience metric.
+
+### P3 — Reference data
+
+- **#16 Service profile (span / frequency).** New `route_service_profile`
+  table populated from GTFS only when schedule reloads. Columns:
+  `route_id`, `day_type`, `hour`, `scheduled_trips`, `mean_headway_min`,
+  `is_frequent`. Useful as denominator for #11 and as the source of the
+  frequent-route flag for #15.
+
+### P4 — Surface to API + UI
+
+- **#17 New API fields and panels on `RouteDetail`.** Each new metric
+  needs to land somewhere in the UI; sequencing here can lag the data
+  layer.
+- **#18 Update grading rubric.** Currently OTP-only; should incorporate
+  service-delivered and EWT once those land.
+- **#5 Per-run deviation chart** (renumbered, see below). Becomes
+  feasible once `stop_events` and `runs` exist.
+
+### P5 — Cleanup
+
+- **#19 Drop `route_metrics_daily` and `route_metrics_summary`.** Once
+  the new metrics fully replace them. Coexist for now to avoid UI
+  breakage during the transition.
+- **#20 Tighter rider-experience OTP.** A stricter window alongside
+  WMATA's official. Tracked but not yet scoped — user wants
+  comparability with WMATA's scorecard for now.
+
+### Independent of the redesign
+
+- **#4 Python 3.9 → 3.11/3.12** (renumbered, see below). Small isolated
+  PR, can land anytime.
 
 ---
 
@@ -189,7 +278,8 @@ worst of both options.
 
 ## 4. Bump Python from 3.9 to 3.11 or 3.12 — OPEN
 
-**Severity: low (maintenance, not blocking).**
+**Severity: low (maintenance, not blocking). Independent of the metrics
+redesign — can land anytime.**
 
 ### Evidence
 
@@ -220,7 +310,8 @@ Not coupled to any other work — can be done in a 5-minute PR whenever.
 
 ## 5. Add per-run schedule-deviation chart to the dashboard — OPEN
 
-**Severity: low (enhancement, depends on run-level metrics shipping first).**
+**Severity: low (enhancement). Now blocked specifically on #7 `stop_events`
+and #8 `runs`; once those exist the chart is a thin API + frontend wrapper.**
 
 ### Idea
 
@@ -254,3 +345,275 @@ at 0) is what the eventual UI version should resemble.
   same trip across days to make patterns visible?
 - Tooltip needs to show the actual stop name and timestamps, not just
   numbers — useful for spotting where buses always lose time.
+
+---
+
+## 6. Collect WMATA TripUpdates feed — OPEN, P0
+
+**Severity: high (foundational for the metrics redesign).**
+
+WMATA publishes a GTFS-RT TripUpdates feed at
+`https://api.wmata.com/gtfs/bus-gtfsrt-tripupdates.pb` that we currently
+don't consume. It contains forward-looking predicted arrival timestamps
+per (trip_id, stop_id) — the agency's own claim about when each bus will
+hit each stop, refined as buses move.
+
+### What probes confirmed (2026-05-03)
+
+- 777 trip_updates per snapshot, 8,640 stop_time_updates, 70 routes.
+- 84.7% of STUs have `arrival.time` populated.
+- 13.5% are explicitly `SKIPPED` — data we cannot derive from positions
+  at all (becomes #14 stop-skip rate).
+- 40% of trip_updates carry `vehicle.id`; the other 60% are pure
+  schedule predictions for trips not yet picked up by a bus.
+- Median prediction volatility across snapshots = 8s (predictions are
+  mostly stable but updated as buses progress).
+- Stops drop out of the feed once buses pass them. The last predicted
+  `arrival.time` before a stop disappears ≈ WMATA's inferred actual
+  arrival. This is the mechanism for deriving stop_events.
+
+### Implementation
+
+1. New table `trip_update_snapshots`: append-only raw rows
+   `(trip_id, stop_id, stop_sequence, snapshot_ts, predicted_arrival_ts,
+   schedule_relationship, vehicle_id)`.
+2. New `get_realtime_trip_updates()` method on
+   `src/wmata_collector.py` mirroring the existing positions method.
+3. New `scripts/continuous_trip_updates_collector.py` polling at 30s
+   (vs. positions at 60s — TripUpdates needs faster polling because
+   actuals are inferred from gap-to-dropoff).
+4. API budget: 60s positions + 30s trip_updates = 4,320 calls/day,
+   well under WMATA's 50,000/day limit.
+5. Run for ~7 days before deriving stop_events from the data, to confirm
+   the dropoff mechanism works at scale and to pick the right
+   bus-passed-the-stop heuristic.
+
+### Probe scripts
+
+`scripts/probe_trip_updates.py` (single snapshot summary) and
+`scripts/probe_trip_updates_timeseries.py` (multi-snapshot dropoff
+analysis) are kept as ongoing diagnostics — useful for spot-checking
+feed health.
+
+---
+
+## 7. Materialize `stop_events` — OPEN, P0
+
+**Severity: high (foundational). Depends on #6 having a week of data.**
+
+Replaces the current "re-derive arrivals from positions every nightly
+batch" model. One row per observed arrival at a stop, with `source`
+column allowing both derivation paths to coexist.
+
+### Schema sketch
+
+```
+stop_events
+  trip_id, vehicle_id, service_date    -- run key
+  stop_id, stop_sequence               -- stop on the trip
+  scheduled_arrival_ts                 -- from GTFS
+  observed_arrival_ts                  -- inferred or predicted
+  deviation_sec                        -- observed - scheduled
+  source                               -- 'trip_update' | 'proximity'
+  match_distance_m                     -- nullable, proximity source only
+  was_skipped                          -- from TripUpdates SCHEDULED='SKIPPED'
+```
+
+### Derivation paths
+
+- **`source='trip_update'`**: from #6 raw snapshots. For each
+  (trip_id, stop_id) observed across snapshots, the last seen
+  `predicted_arrival_ts` before the row stops appearing = inferred
+  actual arrival. Uncertainty bounded by polling interval (30s).
+- **`source='proximity'`**: lift the existing logic from
+  `src/analytics.py:calculate_line_level_otp()` (vehicle position
+  within 50m of a scheduled stop) into the pipeline, materialize once.
+
+### Comparison study after a week
+
+For (trip_id, stop_id) pairs observed by both sources, measure:
+agreement rate (both within 60s), median absolute difference, which
+correlates better with GTFS scheduled time. Calibrates which to trust
+as primary.
+
+---
+
+## 8. `runs` table as aggregation over `stop_events` — OPEN, P0
+
+**Severity: medium. Depends on #7.**
+
+Trivial aggregation per (trip_id, vehicle_id, service_date). No
+materialized `is_complete` flag — each downstream metric applies the
+filter it needs at query time:
+
+- `RUN_HAS_ENDPOINTS`: `first_obs_seq ≤ 3 AND last_obs_seq ≥ stops_scheduled - 3`
+- `RUN_FULLY_OBSERVED`: coverage ≥ 70% AND endpoints AND `max_gap_sec < 300`
+- `RUN_EXISTED`: ≥ 3 stop_events
+
+Lift `compute_schedule_anchor()` from `analysis/run_quality.py` into
+the pipeline — the post-midnight rollover fix is load-bearing.
+
+---
+
+## 9. OTP window: switch to WMATA's official −2 / +7 — OPEN, P1
+
+**Severity: low (small change, makes our numbers comparable to WMATA's
+own scorecard).**
+
+Currently using −60s / +300s for stop-level OTP. WMATA's published
+standard is **−2 min / +7 min** for schedule-based timepoints, and
+**scheduled headway + 3 min** for headway-based routes (70, 79, X2,
+90, 92, 16Y, Metroway). User considers WMATA's window lax but values
+comparability for now. Implement as named constants (`OTP_EARLY_SEC`,
+`OTP_LATE_SEC`) in one module so later tightening is one line.
+
+See `memory/project_otp_window.md`.
+
+---
+
+## 10. OTP split: origin vs. destination — OPEN, P1
+
+**Severity: low.**
+
+Add `otp_origin_pct` and `otp_destination_pct` alongside the existing
+all-timepoints OTP. Origin lateness = dispatch problem. Destination
+lateness = run-time / traffic problem. Mid-route lateness with
+on-time destination = recovery in action. Three different operational
+stories that the current single number conflates.
+
+Implementation: filter `stop_events` to `stop_sequence == 1` and
+`stop_sequence == max(stop_sequence)` per trip.
+
+---
+
+## 11. Service-delivered ratio — OPEN, P2
+
+**Severity: medium-high (single most rider-felt failure mode we
+currently can't see).**
+
+Per route per date: `delivered_runs / scheduled_runs`. Scheduled count
+comes from GTFS `calendar` + `calendar_dates` joined to `trips`.
+Delivered count = distinct runs in `stop_events` with at least 3
+observed stops (or whatever we settle on for `RUN_EXISTED`).
+
+The MBTA's "76% of timepoints met standard" stat exists *because* they
+measure scheduled vs. delivered. We don't.
+
+---
+
+## 12. End-to-end excess trip time — OPEN, P2
+
+**Severity: medium.**
+
+Per route per date: median actual trip duration, p95, and % of runs
+where actual > 110% of scheduled. Computed from `runs` (which knows
+first/last observed stop_event). Apply `RUN_HAS_ENDPOINTS` filter.
+Captures dwell + in-vehicle delay; the metric MBTA OPMI is rolling
+out for buses.
+
+---
+
+## 13. Bunching count — OPEN, P2
+
+**Severity: low-medium.**
+
+Count + rate of headways < 0.5 × scheduled headway, per (route, date,
+time_period). Complements existing headway CV (which hides bunching
+in averages). Likely lives in a new `route_headway_metrics` table
+keyed by (route_id, date, time_period) since this is a stop-hour
+roll-up.
+
+---
+
+## 14. Stop-skip rate — OPEN, P2
+
+**Severity: medium (unique value-add from #6 — not derivable from
+positions at all).**
+
+Direct from TripUpdates `SKIPPED` stop_time_updates. Probe found 13.5%
+of STUs flagged SKIPPED — significant, and operationally important
+(skipped stops disproportionately hurt riders at low-frequency stops).
+Per route per day, per stop. Could expose worst-skipped stops on
+RouteDetail.
+
+---
+
+## 15. EWT (Excess Wait Time) for frequent routes — OPEN, P2
+
+**Severity: medium-high (the standard rider-experience metric for
+frequent service; TfL's flagship metric).**
+
+For each (route, stop, hour) where the route is frequent (scheduled
+headway ≤ 15 min):
+- AWT = `mean(actual_headway²) / (2 · mean(actual_headway))`
+- SWT = same formula on scheduled headways
+- EWT = AWT − SWT (in seconds, rider-weighted)
+
+Aggregate to (route, date, time_period). EWT in minutes is more
+intuitive than headway CV for non-experts and weights bunching pain
+correctly.
+
+Implementation needs the `is_frequent` flag from #16.
+
+---
+
+## 16. Service profile table — OPEN, P3
+
+**Severity: low (reference data, supports #11 and #15).**
+
+New `route_service_profile` table populated from GTFS only when the
+schedule reloads (so populated by `scripts/reload_gtfs_complete.py`).
+Columns:
+- `route_id`, `day_type` (weekday/Saturday/Sunday), `hour`
+- `scheduled_trips` (count for that hour)
+- `mean_headway_min`
+- `is_frequent` (mean_headway_min ≤ 15)
+
+Static-ish reference data; cheap to compute.
+
+---
+
+## 17. API + UI surface — OPEN, P4
+
+**Severity: low (last step, depends on data layer).**
+
+Each new metric needs an API field and a UI element. Probably one PR
+per metric or grouped 2-3 at a time, since UI changes require manual
+testing in the browser. RouteList scorecard and RouteDetail drill-down
+both get updated.
+
+---
+
+## 18. Grading rubric refresh — OPEN, P4
+
+**Severity: low.**
+
+Current grade (A–F) is OTP-only, computed in `api/aggregations.py`.
+With service-delivered and EWT landing, the rubric should incorporate
+them — service-delivered especially, since that's the most
+rider-felt failure mode. Worth a separate decision conversation
+about weighting before implementing.
+
+---
+
+## 19. Drop `route_metrics_daily` / `route_metrics_summary` — OPEN, P5
+
+**Severity: low (cleanup, after the new metrics fully replace them).**
+
+Both tables and the daily batch pipeline that populates them
+(`pipelines/compute_daily_metrics.py`) become dead code once the new
+stop_events-based pipeline covers all current API consumers. Coexist
+for now to avoid UI breakage during the transition. Track as one
+final cleanup PR after #17 lands.
+
+---
+
+## 20. Tighter rider-experience OTP — OPEN, P5
+
+**Severity: low (deferred).**
+
+User considers WMATA's −2 / +7 window lax but wants comparability with
+WMATA's published scorecard for now. Future option: expose a stricter
+"rider-experience OTP" alongside the official one (e.g., −60s / +180s).
+Trivial to add once the constants are centralized per #9 — could even
+be a query-parameter toggle on the API.

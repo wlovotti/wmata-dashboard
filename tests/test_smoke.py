@@ -7,10 +7,13 @@ These should run fast (<10s) and fail fast if something is fundamentally broken.
 Run with: pytest -m smoke
 """
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy import text
 
-from src.models import Route
+from src.models import Route, TripUpdateSnapshot
+from src.wmata_collector import WMATADataCollector
 
 
 @pytest.mark.smoke
@@ -98,3 +101,73 @@ def test_critical_modules_import():
     assert Route is not None
     assert Stop is not None
     assert Trip is not None
+
+
+@pytest.mark.smoke
+def test_trip_update_snapshot_persists(db_session):
+    """TripUpdateSnapshot rows insert and read back with a shared snapshot_ts."""
+    snapshot_ts = datetime(2026, 5, 3, 14, 30, 0)
+    rows = [
+        TripUpdateSnapshot(
+            snapshot_ts=snapshot_ts,
+            trip_id="TRIP_A",
+            route_id="R1",
+            vehicle_id="V1",
+            stop_id="S1",
+            stop_sequence=1,
+            predicted_arrival_ts=datetime(2026, 5, 3, 14, 31, 0),
+            schedule_relationship="SCHEDULED",
+        ),
+        TripUpdateSnapshot(
+            snapshot_ts=snapshot_ts,
+            trip_id="TRIP_A",
+            route_id="R1",
+            vehicle_id="V1",
+            stop_id="S2",
+            stop_sequence=2,
+            predicted_arrival_ts=None,
+            schedule_relationship="SKIPPED",
+        ),
+    ]
+    db_session.add_all(rows)
+    db_session.commit()
+
+    persisted = (
+        db_session.query(TripUpdateSnapshot)
+        .filter_by(trip_id="TRIP_A")
+        .order_by(TripUpdateSnapshot.stop_sequence)
+        .all()
+    )
+    assert len(persisted) == 2
+    assert persisted[0].stop_id == "S1"
+    assert persisted[1].schedule_relationship == "SKIPPED"
+    assert persisted[1].predicted_arrival_ts is None
+    assert persisted[0].snapshot_ts == persisted[1].snapshot_ts
+
+
+@pytest.mark.smoke
+def test_save_trip_updates_bulk_inserts(db_session):
+    """_save_trip_updates persists a list of dicts produced by the collector."""
+    collector = WMATADataCollector(api_key="unused", db_session=db_session)
+    snapshot_ts = datetime(2026, 5, 3, 15, 0, 0)
+    rows = [
+        {
+            "snapshot_ts": snapshot_ts,
+            "trip_id": "TRIP_B",
+            "route_id": "R2",
+            "vehicle_id": None,
+            "stop_id": "S10",
+            "stop_sequence": 5,
+            "predicted_arrival_ts": datetime(2026, 5, 3, 15, 5, 0),
+            "predicted_departure_ts": None,
+            "schedule_relationship": "SCHEDULED",
+        }
+    ]
+
+    saved = collector._save_trip_updates(rows)
+    assert saved == 1
+
+    row = db_session.query(TripUpdateSnapshot).filter_by(trip_id="TRIP_B").one()
+    assert row.stop_sequence == 5
+    assert row.vehicle_id is None
+    assert row.snapshot_ts == snapshot_ts
