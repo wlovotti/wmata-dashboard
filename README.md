@@ -141,7 +141,6 @@ curl 'http://localhost:8000/api/routes/C51/trend?days=30&metric=otp'
 
 **Real-time Data:**
 - VehiclePosition - GTFS-RT vehicle positions (primary, includes speed)
-- BusPosition - WMATA BusPositions API (supplementary)
 
 **Aggregations:**
 - RouteMetricsDaily - Daily performance metrics per route (OTP, headway, speed, bunching metrics)

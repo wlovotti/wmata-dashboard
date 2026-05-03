@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session
 
 from src.database import get_session
 from src.models import (
-    BusPosition,
     CalendarDate,
     Route,
     Shape,
@@ -2082,124 +2081,6 @@ def calculate_line_level_otp(
         "thresholds": {
             "early_threshold_seconds": early_threshold_seconds,
             "late_threshold_seconds": late_threshold_seconds,
-        },
-    }
-
-
-def calculate_otp_from_bus_positions(
-    db: Session,
-    route_id: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
-    early_threshold_minutes: float = -1.0,  # LA Metro: more than 1 min early
-    late_threshold_minutes: float = 5.0,  # LA Metro: more than 5 min late
-) -> dict:
-    """
-    Calculate on-time performance using WMATA's BusPositions API deviation data.
-
-    ⚠️  WARNING: Use this as SUPPLEMENTARY data only, not primary OTP metrics.
-    Validation shows WMATA's deviation can differ significantly from GTFS-based
-    calculations (some observations differ by 7+ minutes). Possible reasons:
-    - WMATA may use different/updated schedules than published GTFS
-    - Different calculation methodology
-    - Potential errors in WMATA's system
-
-    RECOMMENDED: Use calculate_line_level_otp() (GTFS-based) as primary metric,
-    and this function for comparison/validation.
-
-    Benefits of this approach:
-    - Much simpler (no trip matching or stop calculations)
-    - Faster to compute
-    - Useful for detecting schedule discrepancies
-
-    Uses LA Metro's on-time definition:
-    - Early: More than 1 minute early (deviation < -1.0)
-    - On-time: Between 1 min early and 5 min late (-1.0 <= deviation <= 5.0)
-    - Late: More than 5 minutes late (deviation > 5.0)
-
-    Args:
-        db: Database session
-        route_id: Route to analyze
-        start_time: Start of analysis period
-        end_time: End of analysis period
-        early_threshold_minutes: Minutes early to be considered "early" (default: -1.0, LA Metro)
-        late_threshold_minutes: Minutes late to be considered "late" (default: 5.0, LA Metro)
-
-    Returns:
-        Dictionary with on-time performance statistics
-    """
-    # Query bus positions
-    query = db.query(BusPosition).filter(BusPosition.route_id == route_id)
-
-    if start_time:
-        query = query.filter(BusPosition.timestamp >= start_time)
-    if end_time:
-        query = query.filter(BusPosition.timestamp <= end_time)
-
-    positions = query.order_by(BusPosition.timestamp).all()
-
-    if not positions:
-        return {
-            "route_id": route_id,
-            "data_source": "bus_positions_api",
-            "on_time_percentage": None,
-            "early_percentage": None,
-            "late_percentage": None,
-            "observations": 0,
-            "early_count": 0,
-            "on_time_count": 0,
-            "late_count": 0,
-            "unique_vehicles": 0,
-        }
-
-    # Filter out positions without deviation data
-    positions_with_deviation = [p for p in positions if p.deviation is not None]
-
-    if not positions_with_deviation:
-        return {
-            "route_id": route_id,
-            "data_source": "bus_positions_api",
-            "on_time_percentage": None,
-            "early_percentage": None,
-            "late_percentage": None,
-            "observations": 0,
-            "early_count": 0,
-            "on_time_count": 0,
-            "late_count": 0,
-            "unique_vehicles": 0,
-            "note": "No deviation data available in collected positions",
-        }
-
-    # Classify based on deviation (already in minutes!)
-    early_count = sum(1 for p in positions_with_deviation if p.deviation < early_threshold_minutes)
-    late_count = sum(1 for p in positions_with_deviation if p.deviation > late_threshold_minutes)
-    on_time_count = len(positions_with_deviation) - early_count - late_count
-
-    total = len(positions_with_deviation)
-    unique_vehicles = len({p.vehicle_id for p in positions_with_deviation})
-
-    # Calculate average deviation
-    avg_deviation = sum(p.deviation for p in positions_with_deviation) / total
-
-    return {
-        "route_id": route_id,
-        "data_source": "bus_positions_api",
-        "time_range": {
-            "start": start_time.isoformat() if start_time else None,
-            "end": end_time.isoformat() if end_time else None,
-        },
-        "on_time_percentage": round((on_time_count / total) * 100, 2) if total > 0 else None,
-        "early_percentage": round((early_count / total) * 100, 2) if total > 0 else None,
-        "late_percentage": round((late_count / total) * 100, 2) if total > 0 else None,
-        "observations": total,
-        "early_count": early_count,
-        "on_time_count": on_time_count,
-        "late_count": late_count,
-        "unique_vehicles": unique_vehicles,
-        "avg_deviation_minutes": round(avg_deviation, 2),
-        "thresholds": {
-            "early_threshold_minutes": early_threshold_minutes,
-            "late_threshold_minutes": late_threshold_minutes,
         },
     }
 

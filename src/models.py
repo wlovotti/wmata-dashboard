@@ -389,51 +389,6 @@ class VehiclePosition(Base):
     )
 
 
-class BusPosition(Base):
-    """
-    Real-time bus position data from WMATA's BusPositions API.
-
-    This is WMATA's proprietary API that provides richer data than GTFS-RT,
-    including schedule deviation which is crucial for accurate OTP metrics.
-    """
-
-    __tablename__ = "bus_positions"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    vehicle_id = Column(String, nullable=False, index=True)
-    route_id = Column(String, nullable=False, index=True)
-    trip_id = Column(String, index=True)
-    latitude = Column(Float, nullable=False)
-    longitude = Column(Float, nullable=False)
-
-    # Schedule adherence in minutes (negative = early, positive = late)
-    deviation = Column(Float)
-
-    # Timestamp from API (when vehicle position was recorded)
-    timestamp = Column(DateTime, nullable=False, index=True)
-
-    # Direction info
-    direction_num = Column(Integer)
-    direction_text = Column(String)
-
-    # Trip details
-    trip_headsign = Column(String)
-    trip_start_time = Column(DateTime)
-    trip_end_time = Column(DateTime)
-    block_number = Column(String, index=True)
-
-    # When we collected this data
-    collected_at = Column(DateTime, default=datetime.utcnow, index=True)
-
-    # Composite indexes for efficient queries
-    __table_args__ = (
-        Index("idx_bus_vehicle_timestamp", "vehicle_id", "timestamp"),
-        Index("idx_bus_route_timestamp", "route_id", "timestamp"),
-        Index("idx_bus_trip_timestamp", "trip_id", "timestamp"),
-        Index("idx_bus_block_timestamp", "block_number", "timestamp"),
-    )
-
-
 class RouteMetricsDaily(Base):
     """
     Pre-computed daily performance metrics for routes.
