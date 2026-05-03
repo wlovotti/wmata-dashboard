@@ -42,6 +42,7 @@ from src.models import (
     Trip,
     VehiclePosition,
 )
+from src.timezones import eastern_day_bounds_utc, eastern_today, to_eastern_sql
 
 # Load environment variables
 load_dotenv()
@@ -91,9 +92,9 @@ def compute_metrics_for_route_day(
     Returns:
         Dictionary with computed metrics, or None if insufficient data
     """
-    # Define time range for this day
-    start_time = datetime.combine(date, datetime.min.time())
-    end_time = start_time + timedelta(days=1)
+    # Define time range for this Eastern service day, in naive UTC for the
+    # vehicle_positions filter (storage convention: see src/timezones.py)
+    start_time, end_time = eastern_day_bounds_utc(date)
 
     # Check if we have enough data (use pre-computed count if available)
     if position_count is None:
@@ -216,8 +217,8 @@ def compute_metrics_batch(
     Returns:
         Dictionary mapping route_id -> metrics dict (or None if insufficient data)
     """
-    start_time = datetime.combine(date, datetime.min.time())
-    end_time = start_time + timedelta(days=1)
+    # Eastern service-day bounds in naive UTC (storage convention: see src/timezones.py)
+    start_time, end_time = eastern_day_bounds_utc(date)
 
     print(f"\n{'=' * 70}")
     print(f"Batch processing {len(routes)} routes for {date.isoformat()}")
@@ -248,10 +249,11 @@ def compute_metrics_batch(
     # Use database-agnostic date formatting
     database_url = os.getenv("DATABASE_URL", "sqlite:///./wmata_dashboard.db")
     if database_url.startswith("postgresql"):
-        # PostgreSQL: use to_char
-        date_format_expr = func.to_char(VehiclePosition.timestamp, "YYYYMMDD")
+        # PostgreSQL: convert UTC storage → Eastern service date for the join
+        date_format_expr = func.to_char(to_eastern_sql(VehiclePosition.timestamp), "YYYYMMDD")
     else:
-        # SQLite: use strftime
+        # SQLite (test fixtures only): no timezone support; format as-is.
+        # Tests don't exercise CalendarDate exception filtering at scale.
         date_format_expr = func.strftime("%Y%m%d", VehiclePosition.timestamp)
 
     query = query.filter(
@@ -619,8 +621,8 @@ def compute_daily_metrics(
                 )
                 return
         else:
-            # Default: last N days
-            end_date_default = datetime.now().date()
+            # Default: last N Eastern service days
+            end_date_default = eastern_today()
             dates = [end_date_default - timedelta(days=i) for i in range(days)]
             print(f"Found {len(routes)} routes for last {days} days")
 

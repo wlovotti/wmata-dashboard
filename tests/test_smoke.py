@@ -146,6 +146,25 @@ def test_trip_update_snapshot_persists(db_session):
 
 
 @pytest.mark.smoke
+def test_timezones_helpers_round_trip():
+    """eastern_day_bounds_utc converts an Eastern date to a 24h UTC window."""
+    from datetime import date, timedelta
+
+    from src.timezones import eastern_day_bounds_utc, eastern_today
+
+    today = eastern_today()
+    assert isinstance(today, date)
+
+    start, end = eastern_day_bounds_utc(today)
+    # On non-DST-transition days the window is exactly 24h.
+    span = end - start
+    assert span == timedelta(hours=24)
+    # Eastern midnight = UTC 04:00 (EDT) or 05:00 (EST). Both have minute=0.
+    assert start.minute == 0
+    assert start.tzinfo is None  # Helper returns naive UTC
+
+
+@pytest.mark.smoke
 def test_save_trip_updates_bulk_inserts(db_session):
     """_save_trip_updates persists a list of dicts produced by the collector."""
     collector = WMATADataCollector(api_key="unused", db_session=db_session)

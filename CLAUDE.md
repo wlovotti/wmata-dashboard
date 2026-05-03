@@ -29,6 +29,13 @@ without asking. See `NOTES.md` for the active punch list.
   validated and found unreliable (up to 7.7 min discrepancies). Don't use
   it for OTP.
 
+- **Datetime storage is naive UTC.** Every `DateTime` column in the DB
+  holds UTC. Service-date semantics ("today", "last 7 days") are an
+  Eastern question — use `src/timezones.py` (`eastern_today`,
+  `eastern_day_bounds_utc`, `to_eastern_sql`). Never call `datetime.now()`
+  for date math; never call `datetime.fromtimestamp()` for storage. The
+  only legitimate uses of naive local time are stdout log prefixes.
+
 ## Non-obvious gotchas
 
 - **Trip matching uses GTFS-RT `trip_id` directly** (`src/trip_matching.py`,

@@ -223,10 +223,12 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     Returns:
         Time-series data for the specified metric
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
-    # Calculate date range
-    end_date = datetime.now().date()
+    from src.timezones import eastern_today
+
+    # Calculate date range in Eastern (the WMATA service date)
+    end_date = eastern_today()
     start_date = end_date - timedelta(days=days)
 
     # Get daily metrics from database
