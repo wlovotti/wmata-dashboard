@@ -52,3 +52,7 @@ logs/
 # API keys
 **/config.py
 **/*_key.py
+
+# Claude Code (keep .claude/commands/ tracked; ignore runtime + per-dev local config)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
