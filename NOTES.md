@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-03 (PR #48).
+Last edited 2026-05-04 (PR for NOTES-12).
 
 ---
 
@@ -78,6 +78,12 @@ sequencing still matters.
   Show the newest `gtfs_snapshots.snapshot_date` somewhere visible
   (footer on RouteList?) so a stale schedule is observable instead
   of silent.
+- **NOTES-25 Add `tests/` to the lint scope.** CI lints
+  `src/ scripts/ api/ pipelines/` only — `tests/` is omitted from
+  the path list (not from `[tool.ruff]` config), so test code drifts.
+  Small one-off: `ruff check tests/ --fix` clears the existing
+  violations, then add `tests/` to both lint args in
+  `.github/workflows/test.yml` and the CLAUDE.md command.
 
 ---
 
@@ -358,4 +364,30 @@ start looking off. Pure read; thin API addition.
 ### Dependencies
 
 - Independent of NOTES-12 through NOTES-21 and NOTES-23.
+
+---
+
+## NOTES-25. Add `tests/` to the lint scope
+
+**Severity: low — tooling hygiene.**
+
+`.github/workflows/test.yml` and the CLAUDE.md commands lint
+`src/ scripts/ api/ pipelines/` only. The `tests/` directory is
+omitted from the path list — not from `[tool.ruff]` in
+`pyproject.toml`, which has no per-directory exclusion — so test
+code drifts. Probed 2026-05-04: 7 pre-existing violations
+(unused imports, deprecated `typing.Generator`, unsorted
+imports), all auto-fixable.
+
+### Implementation
+
+1. `uv run ruff check tests/ --fix && uv run ruff format tests/`
+   to clear existing violations.
+2. Add `tests/` to both lint args in `.github/workflows/test.yml`
+   (the `ruff check` step and the `ruff format --check` step).
+3. Update the CLAUDE.md `ruff check` command to include `tests/`.
+
+### Dependencies
+
+- Independent of every other open NOTES item.
 
