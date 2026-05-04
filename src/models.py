@@ -516,7 +516,7 @@ class StopEvent(Base):
             "stop_id",
             "observed_arrival_ts",
         ),
-        # Bare stop time-series queries (e.g., NOTES-14 stop-skip rate)
+        # Bare stop time-series queries (e.g., stop-skip rate)
         Index("idx_stop_events_stop_obs", "stop_id", "observed_arrival_ts"),
     )
 
@@ -526,8 +526,8 @@ class Run(Base):
     Per-(service_date, trip_id, source) aggregation over `stop_events`.
 
     A "run" is one bus's pass through one trip on one service date — the natural
-    unit for trip-level metrics like end-to-end excess time (NOTES.md NOTES-12),
-    per-run deviation charts (NOTES-5), and the delivered-runs numerator for
+    unit for trip-level metrics like end-to-end excess time (PR #49), per-run
+    deviation charts (NOTES-5), and the delivered-runs numerator for
     service-delivered ratio (PR #47). One row per (service_date, trip_id,
     source); the source dimension propagates from stop_events so the
     proximity/trip_update agreement story extends to the run level.
@@ -611,7 +611,7 @@ class Run(Base):
 
     # Observation aggregates
     stops_observed = Column(Integer, nullable=False, default=0)  # rows with observed_arrival_ts
-    stops_skipped = Column(Integer, nullable=False, default=0)  # SKIPPED rows (NOTES-14)
+    stops_skipped = Column(Integer, nullable=False, default=0)  # SKIPPED rows for stop-skip rate
     first_obs_seq = Column(Integer)
     last_obs_seq = Column(Integer)
     first_obs_ts = Column(DateTime)  # earliest observed_arrival_ts

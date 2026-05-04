@@ -14,7 +14,7 @@ SKIPPED stops are first-class: WMATA marks ~9% of stops with
 `schedule_relationship = SKIPPED` (typically pre-announced cancellations or
 detours). The pipeline emits one row per skipped stop with `observed_arrival_ts`
 NULL and `schedule_relationship = SKIPPED` so downstream metrics can compute
-skip rates (NOTES-14) without re-parsing the raw feed.
+skip rates without re-parsing the raw feed.
 
 Service-date attribution: trip_update_snapshots itself does not record
 `trip_start_date` (the GTFS-RT TripDescriptor field), so we cross-reference

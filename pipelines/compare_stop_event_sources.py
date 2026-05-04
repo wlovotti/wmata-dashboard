@@ -18,8 +18,8 @@ The comparison computes:
 
 It does NOT cross-check SKIPPED stops: proximity can't observe a skip, so
 a TU SKIPPED row has `observed_arrival_ts IS NULL` and is filtered out by
-the same predicate that protects the |Δ| math. Skip-rate measurement is
-NOTES.md NOTES-14, a separate scope.
+the same predicate that protects the |Δ| math. Skip-rate measurement lives
+in `src/stop_skip.py`, a separate scope.
 
 Run on 2026-05-03 baseline (all routes): TU 207k, proximity 82k, BOTH
 77k (93% of proximity); |Δ| median 10s, p95 56s, p99 265s; signed bias
