@@ -1,5 +1,5 @@
 """
-Create the route_headway_metrics table on an existing database (NOTES-13).
+Create the route_headway_metrics table on an existing database (PR #53).
 
 Idempotent — `create(checkfirst=True)` only creates the table if it does not
 yet exist. Safe to re-run. Does not touch any other table.

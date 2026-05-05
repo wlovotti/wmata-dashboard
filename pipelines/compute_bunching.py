@@ -1,5 +1,5 @@
 """
-Materialize bunching rates into `route_headway_metrics` (NOTES-13).
+Materialize bunching rates into `route_headway_metrics` (PR #53).
 
 Computes per-(route, service_date, time_period) bunching counts via
 `src/bunching.py` and upserts five rows per route per service_date — one

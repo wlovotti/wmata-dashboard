@@ -776,7 +776,7 @@ class RouteMetricsSummary(Base):
 class RouteHeadwayMetrics(Base):
     """
     Per-(route, service_date, time_period) bunching rate, materialized from
-    `stop_events` (NOTES-13).
+    `stop_events` (PR #53).
 
     Bunching is the rider-experience tail that headway CV averages away: a
     pair of buses arriving abnormally close implies a long gap behind them.
