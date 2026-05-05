@@ -771,3 +771,48 @@ class RouteMetricsSummary(Base):
 
     # Metadata
     computed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RouteHeadwayMetrics(Base):
+    """
+    Per-(route, service_date, time_period) bunching rate, materialized from
+    `stop_events` (PR #53).
+
+    Bunching is the rider-experience tail that headway CV averages away: a
+    pair of buses arriving abnormally close implies a long gap behind them.
+    A pair counts as bunched when the observed headway is below
+    max(0.25 × cell-hour mean scheduled headway, 120s) — see `src/bunching.py`
+    for threshold rationale (CTA's 0.25× ratio + SFMTA/TransitMatters' 2-min
+    floor).
+
+    All routes get rows; non-frequent routes still produce meaningful counts
+    (a 5-min observed gap on a 30-min route is a long-gap signal even if
+    operational holding doesn't apply). Use `total_headways` to gauge
+    sample size — `bunching_rate` is NULL for cells with no eligible
+    observed/scheduled pairs.
+
+    Keyed by (route_id, date, time_period). Idempotent re-derivation upserts
+    via the unique constraint.
+    """
+
+    __tablename__ = "route_headway_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(String, nullable=False)
+    date = Column(String, nullable=False)  # YYYY-MM-DD, Eastern service day
+    time_period = Column(String, nullable=False)  # one of EWT_TIME_PERIODS labels
+
+    day_type = Column(String, nullable=False)  # weekday | saturday | sunday
+
+    # Bunching counts: the metric and its denominator. bunching_rate is NULL
+    # iff total_headways == 0 (no eligible pairs in the period).
+    bunching_count = Column(Integer, nullable=False, default=0)
+    total_headways = Column(Integer, nullable=False, default=0)
+    bunching_rate = Column(Float)
+
+    computed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("route_id", "date", "time_period", name="uq_route_headway_metrics_key"),
+        Index("idx_route_headway_metrics_route_date", "route_id", "date"),
+    )
