@@ -3,7 +3,7 @@ Compute the per-(route, day_type, hour) scheduled service profile from GTFS.
 
 Used by the GTFS reload to populate the `route_service_profile` table.
 Reference data for downstream metrics (service-delivered ratio, PR #47;
-NOTES-15 EWT for frequent routes).
+EWT for frequent routes — see `src/ewt.py`).
 
 Day-type representative-day strategy
 ------------------------------------

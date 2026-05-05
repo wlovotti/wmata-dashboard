@@ -22,8 +22,8 @@ runs. See the Run model docstring for the full source-asymmetry write-up.
 All-timepoints OTP uses `proximity` stop_events to match the existing
 `route_metrics_daily` semantics (position-derived, comparable to what
 WMATA publishes). Future variants (rider-experience window per NOTES-20,
-EWT for frequent routes per NOTES-15) layer on the same per-stop deviation
-data.
+EWT for frequent routes — see `src/ewt.py`) layer on the same per-stop
+deviation data.
 """
 
 from __future__ import annotations

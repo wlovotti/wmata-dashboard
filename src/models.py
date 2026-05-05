@@ -647,10 +647,13 @@ class RouteServiceProfile(Base):
     Per-(route, day_type, hour) scheduled service profile derived from GTFS.
 
     Reference data for downstream metrics: scheduled_trips is the denominator
-    for service-delivered ratio (PR #47), and is_frequent is the gate for
-    EWT (NOTES.md NOTES-15). Derived fresh on every GTFS reload — no
-    versioning, the table is rewritten in place to match the current GTFS
-    snapshot.
+    for service-delivered ratio (PR #47), and is_frequent flags route-level
+    frequent service for UI/filtering. (EWT — see `src/ewt.py` — uses a
+    per-(direction, stop, hour) cell-level frequent classification computed
+    inline from the schedule, not this route-level flag, because pooling all
+    stops on a frequent route pulls in branch-stop sparse-coverage cells.)
+    Derived fresh on every GTFS reload — no versioning, the table is
+    rewritten in place to match the current GTFS snapshot.
 
     `is_frequent` follows the standard rider-experience definition: mean
     scheduled headway ≤ 15 minutes for that hour-of-day. We deliberately
