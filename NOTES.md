@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-04 (PR for NOTES-15).
+Last edited 2026-05-04 (PR for NOTES-13).
 
 ---
 
@@ -21,12 +21,6 @@ few seconds for 93% of events. The `runs` aggregation over `stop_events`
 landed in PR #45, and the OTP origin/destination split (`src/otp_metrics.py`)
 landed in PR #46. Downstream metrics build on that foundation —
 sequencing still matters.
-
-### P2 — Medium-effort metric additions
-
-- **NOTES-13 Bunching count.** Count and rate of headways < 0.5 ×
-  scheduled. Complements existing CV metric (which hides bunching in
-  averages).
 
 ### P4 — Surface to API + UI
 
@@ -112,18 +106,6 @@ at 0) is what the eventual UI version should resemble.
   same trip across days to make patterns visible?
 - Tooltip needs to show the actual stop name and timestamps, not just
   numbers — useful for spotting where buses always lose time.
-
----
-
-## NOTES-13. Bunching count
-
-**Severity: low-medium.**
-
-Count + rate of headways < 0.5 × scheduled headway, per (route, date,
-time_period). Complements existing headway CV (which hides bunching
-in averages). Likely lives in a new `route_headway_metrics` table
-keyed by (route_id, date, time_period) since this is a stop-hour
-roll-up.
 
 ---
 
@@ -221,7 +203,7 @@ So: keep collecting raw, then add retention.
 
 ### Dependencies
 
-- Independent of NOTES-13 through NOTES-20.
+- Independent of NOTES-14 through NOTES-20.
 
 ---
 
@@ -246,7 +228,7 @@ stale before the script fix.
 ### Dependencies
 
 - Builds on the script reliability landed in PR #48.
-- Independent of NOTES-13 through NOTES-21.
+- Independent of NOTES-14 through NOTES-21.
 
 ---
 
@@ -263,7 +245,7 @@ start looking off. Pure read; thin API addition.
 
 ### Dependencies
 
-- Independent of NOTES-13 through NOTES-21 and NOTES-23.
+- Independent of NOTES-14 through NOTES-21 and NOTES-23.
 
 ---
 
