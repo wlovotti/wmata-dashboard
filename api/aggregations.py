@@ -17,20 +17,26 @@ from src.analytics import (
     calculate_time_period_otp,
 )
 from src.bunching import (
+    compute_bunching_for_route_date,
     compute_bunching_headline_for_route,
     compute_bunching_headline_for_routes,
 )
 from src.ewt import (
     _day_type_for,
+    compute_ewt_for_route_date,
     compute_ewt_headline_for_route,
     compute_ewt_headline_for_routes,
     fetch_scheduled_cell_hours_for_routes,
 )
-from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, StopEvent
+from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, RouteServiceProfile, StopEvent
 from src.otp_metrics import compute_otp_split, compute_otp_split_for_routes
 from src.service_delivered import (
     compute_service_delivered,
     compute_service_delivered_for_routes,
+)
+from src.service_profile import (
+    classify_route_frequency,
+    compute_route_frequency_classes,
 )
 
 # Per-service-date cache of the new live-computed scorecard metrics. The
@@ -273,6 +279,9 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
     # Get today's live metrics (cached)
     live = get_live_metrics_for_today(db)
 
+    # Frequency class per route (GTFS-derived, ~2ms — no caching needed).
+    freq_classes = compute_route_frequency_classes(db)
+
     scorecard = []
 
     for summary in summaries:
@@ -297,6 +306,7 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
                 if summary.last_data_timestamp
                 else None,
                 "computed_at": summary.computed_at.isoformat() if summary.computed_at else None,
+                "frequency_class": freq_classes.get(summary.route_id),
                 **_live_metric_fields(live.get(summary.route_id)),
             }
         )
@@ -318,6 +328,7 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
                     "total_observations": 0,
                     "data_updated_at": None,
                     "computed_at": None,
+                    "frequency_class": freq_classes.get(route.route_id),
                     **_live_metric_fields(live.get(route.route_id)),
                 }
             )
@@ -354,6 +365,19 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
     # Live metrics for today (single-route compute on cache miss).
     live_fields = _live_metric_fields(get_live_metrics_for_route_today(db, route_id))
 
+    # Frequency class — single-route lookup against route_service_profile.
+    headways = [
+        h
+        for (h,) in db.query(RouteServiceProfile.mean_headway_min)
+        .filter(
+            RouteServiceProfile.route_id == route_id,
+            RouteServiceProfile.day_type == "weekday",
+            RouteServiceProfile.mean_headway_min.isnot(None),
+        )
+        .all()
+    ]
+    frequency_class = classify_route_frequency(headways, route_id)
+
     # Return summary metrics if available
     if summary:
         return {
@@ -378,6 +402,7 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "unique_vehicles": getattr(summary, "unique_vehicles_7d", 0) or 0,
             "unique_trips": getattr(summary, "unique_trips_7d", 0) or 0,
             "grade": calculate_performance_grade(summary.otp_percentage),
+            "frequency_class": frequency_class,
             **live_fields,
         }
     else:
@@ -400,6 +425,7 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "unique_vehicles": 0,
             "unique_trips": 0,
             "grade": "N/A",
+            "frequency_class": frequency_class,
             **live_fields,
         }
 
@@ -470,6 +496,61 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
             trend_data.append({"date": day_metric.date, response_key: value})
 
     return {"route_id": route_id, "metric": metric, "days": days, "trend_data": trend_data}
+
+
+def get_route_period_drilldown(db: Session, route_id: str) -> dict:
+    """Per-time-period EWT and bunching for one route on the latest service_date.
+
+    Surfaces the AM peak vs evening variance the headline scorecard collapses.
+    Anchors on the same `_latest_service_date_with_stop_events` as the headline
+    so the drilldown numbers reconcile with the scorecard above them.
+
+    Returns `{"error": ...}` if the route is missing. Returns empty `ewt` /
+    `bunching` lists when no stop_events have been derived yet.
+    """
+    route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
+    if not route:
+        return {"error": f"Route {route_id} not found"}
+
+    service_date = _latest_service_date_with_stop_events(db)
+    if service_date is None:
+        return {
+            "route_id": route_id,
+            "service_date": None,
+            "day_type": None,
+            "ewt": [],
+            "bunching": [],
+        }
+
+    ewt_rows = compute_ewt_for_route_date(db, route_id, service_date)
+    bunching_rows = compute_bunching_for_route_date(db, route_id, service_date)
+
+    return {
+        "route_id": route_id,
+        "service_date": service_date.isoformat(),
+        "day_type": _day_type_for(service_date),
+        "ewt": [
+            {
+                "time_period": r["time_period"],
+                "ewt_seconds": sanitize_float(r["ewt_seconds"]),
+                "awt_seconds": sanitize_float(r["awt_seconds"]),
+                "swt_seconds": sanitize_float(r["swt_seconds"]),
+                "n_observed_headways": r["n_observed_headways"],
+                "n_scheduled_headways": r["n_scheduled_headways"],
+                "frequent_cell_hours": r["frequent_cell_hours"],
+            }
+            for r in ewt_rows
+        ],
+        "bunching": [
+            {
+                "time_period": r["time_period"],
+                "bunching_rate": sanitize_float(r["bunching_rate"]),
+                "bunching_count": r["bunching_count"],
+                "total_headways": r["total_headways"],
+            }
+            for r in bunching_rows
+        ],
+    }
 
 
 def get_route_time_period_summary(db: Session, route_id: str, days: int = 7) -> dict:

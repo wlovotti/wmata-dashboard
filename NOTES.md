@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-04 (PR for NOTES-17 headline scorecard piece).
+Last edited 2026-05-05 (PR closing NOTES-17 with the period drilldown).
 
 ---
 
@@ -24,13 +24,16 @@ sequencing still matters.
 
 ### P4 — Surface to API + UI
 
-- **NOTES-17 New API fields and panels on `RouteDetail` / `RouteList`.**
-  Headline scorecard (service-delivered, OTP origin/destination split,
-  EWT, bunching) wired into both `/api/routes` and `/api/routes/{id}`
-  with vectorized live compute + per-service-date TTL cache. Remaining:
-  per-time-period drilldown charts for EWT and bunching on RouteDetail.
+- **NOTES-26 Investigate widespread 0% service-delivered.** 78% of
+  routes show 0 delivered on the latest service date despite non-zero
+  scheduled. Likely trip_id matching mismatch, possibly Sunday-only
+  artifact. Blocks NOTES-18 weighting decisions until fixed.
 - **NOTES-18 Update grading rubric.** Currently OTP-only; should
-  incorporate service-delivered and EWT once those land.
+  incorporate service-delivered and EWT now that both have shipped.
+- **NOTES-27 Investigate observation-coverage gaps in trip_update
+  derivation.** EWT was clamped at 0 in the API (was occasionally
+  negative due to thin observed headways). Surface coverage_ratio in
+  the UI so thin-data periods are visibly flagged.
 - **NOTES-5 Per-run deviation chart.** Now a thin API + frontend wrapper
   over `runs` (PR #45) and `stop_events` (PRs #42, #43, #44).
 
@@ -111,55 +114,16 @@ at 0) is what the eventual UI version should resemble.
 
 ---
 
-## NOTES-17. API + UI surface
-
-**Severity: low (last step, depends on data layer).**
-
-### What landed (headline scorecard PR)
-
-All four new metrics now flow through the API and into the UI as
-single-number scorecard fields on both RouteList and RouteDetail:
-service-delivered ratio, OTP origin/destination split, EWT (frequent
-service only), bunching rate.
-
-The compute path is **live, not precomputed** — a deliberate departure
-from the legacy `route_metrics_summary` shape. The four functions read
-from the materialized `runs` / `stop_events` / `route_service_profile`
-foundation, so per-route work is sub-200ms. Vectorized all-routes
-variants of EWT and bunching headline (`compute_ewt_headline_for_routes`,
-`compute_bunching_headline_for_routes`) share the scheduled-stop_times
-fetch (the dominant ~1.7s cost) in `api/aggregations.py:_compute_live_metrics_uncached`,
-and the result is cached per service_date with a 60s TTL. Cold load
-~3s, warm <50ms.
-
-The cache anchors on the latest `service_date` that has stop_events
-(via `_latest_service_date_with_stop_events`), not `eastern_today()` —
-today's data may not yet be derived by the
-`pipelines/derive_stop_events*.py` pipelines.
-
-The grade and legacy fields (avg_headway_minutes, avg_speed_mph,
-total_observations) still come from `route_metrics_summary` for UI
-continuity. NOTES-19 retires that path once nothing reads from it.
-
-### What's left
-
-- Per-time-period drilldown charts on RouteDetail for EWT and
-  bunching — surfaces the AM peak vs evening variance the headline
-  collapses. Existing `compute_ewt_for_route_date` and
-  `compute_bunching_for_route_date` already produce the 5-period
-  rows; this is API + frontend wiring only.
-
----
-
 ## NOTES-18. Grading rubric refresh
 
 **Severity: low.**
 
 Current grade (A–F) is OTP-only, computed in `api/aggregations.py`.
-With service-delivered (PR #47) shipped and EWT still pending, the
-rubric should incorporate both — service-delivered especially, since
-that's the most rider-felt failure mode. Worth a separate decision
-conversation about weighting before implementing.
+With service-delivered (PR #47) and EWT (PR #52) both shipped and now
+surfaced through the UI, the rubric should incorporate both —
+service-delivered especially, since that's the most rider-felt failure
+mode. Worth a separate decision conversation about weighting before
+implementing.
 
 ---
 
@@ -170,8 +134,11 @@ conversation about weighting before implementing.
 Both tables and the daily batch pipeline that populates them
 (`pipelines/compute_daily_metrics.py`) become dead code once the new
 stop_events-based pipeline covers all current API consumers. Coexist
-for now to avoid UI breakage during the transition. Track as one
-final cleanup PR after NOTES-17 lands.
+for now to avoid UI breakage during the transition. With NOTES-17
+closed, the only remaining `route_metrics_summary` consumers are the
+legacy scorecard fields (avg_headway_minutes, avg_speed_mph,
+total_observations) and the OTP-only grade — track as one final cleanup
+PR once those move to the new path.
 
 ---
 
@@ -303,4 +270,88 @@ imports), all auto-fixable.
 ### Dependencies
 
 - Independent of every other open NOTES item.
+
+---
+
+## NOTES-26. Investigate widespread 0% service-delivered
+
+**Severity: medium — most rider-felt failure mode and the metric is
+suspect.**
+
+On the latest service date (2026-05-03, Sunday), 98 of 126 routes show
+`service_delivered_ratio == 0` with non-zero `scheduled_trips`. Only 6
+routes show non-zero delivered. The compute path
+(`src/service_delivered.py`) requires `Run.trip_id IN scheduled_trip_ids`
+— so any mismatch between real-time `trip_id` strings and the GTFS
+`Trip.trip_id` strings would zero out delivered. Sunday is also a thin
+collection day, but the bias is too extreme to be solely that.
+
+### Hypotheses to probe
+
+1. **trip_id format drift**: WMATA's TripUpdate feed may emit `trip_id`
+   values that don't exactly match the static GTFS strings (suffixes,
+   prefixes, version codes). Spot-check `Run.trip_id` vs `Trip.trip_id`
+   on a route with 0 delivered (e.g., C83) — if the formats differ, the
+   IN filter is the bug.
+2. **Sunday-only artifact**: re-run the metric for the most recent
+   weekday and saturday and compare distributions. If weekdays look
+   normal, this is observation thinness on Sundays, not a code bug.
+3. **Calendar / service_id matching**: `_scheduled_trip_ids_query`
+   filters `Calendar.<day_type> == 1` — confirm Sunday service_ids
+   resolve to actual trips for the routes showing 0%.
+4. **Holiday awareness**: `compute_service_delivered` notes a known
+   limitation around `calendar_dates` exceptions (federal holidays
+   running Sunday service on a weekday). Worth re-checking whether
+   2026-05-03 has any exception entries.
+
+### Why this matters
+
+Service-delivered is the headline rider-felt metric. If 78% of routes
+look like total failures every Sunday (and possibly other days), the
+scorecard is misleading and grade weighting (NOTES-18) can't proceed
+until this is trustworthy.
+
+### Dependencies
+
+- Blocks NOTES-18 (grading rubric refresh) for any weighting that
+  includes service-delivered until the metric is verified trustworthy.
+
+---
+
+## NOTES-27. Negative EWT root cause — observation coverage gaps
+
+**Severity: low — the surfaced metric is now clamped at 0 (PR closing
+NOTES-17), but the underlying observation gap that caused it is
+unresolved.**
+
+EWT (`src/ewt.py`) was producing negative values in some periods —
+e.g., C21 PM Peak on 2026-05-03 showed AWT=308s, SWT=360s, EWT=−52s
+with only 244 observed headways out of 2100 scheduled (11.6%). When
+the trip_update derivation misses arrivals, the observed headways we
+*do* capture are biased toward steady ones (the long gaps don't get
+paired up because one endpoint of the pair is missing), so AWT comes
+out artificially low and EWT goes negative.
+
+The clamp is a UI fix, not a data fix. The underlying issue is that
+the trip_update derivation pipeline (`pipelines/derive_stop_events_*`)
+is missing arrivals during certain periods on certain routes. Worth
+investigating:
+
+1. **Per-period coverage histogram**: for every (route, date, period),
+   plot `n_observed_headways / n_scheduled_headways`. Routes/periods
+   below ~50% coverage should be flagged in the UI as "thin data" so
+   the EWT clamp's silent floor doesn't mask the gap.
+2. **Cross-check with proximity derivation**: PR #44's proximity
+   derivation has different blind spots than trip_update. If a period
+   shows 11% TU coverage but 80% proximity coverage, the issue is
+   trip_update-specific (and the bunching/EWT pipelines could
+   optionally fall back to proximity for that period).
+3. **Surface coverage in the API/UI**: add a `coverage_ratio` field
+   alongside EWT/bunching so the frontend can show "data thin" badges
+   on periods where the metric is unreliable.
+
+### Dependencies
+
+- Independent. Could be tackled alongside the per-run deviation chart
+  (NOTES-5) since both probe the trip_update derivation's coverage.
 

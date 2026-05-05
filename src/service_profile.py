@@ -51,7 +51,7 @@ from collections.abc import Iterable
 
 from sqlalchemy.orm import Session
 
-from src.models import Calendar, StopTime, Trip
+from src.models import Calendar, Route, RouteServiceProfile, StopTime, Trip
 
 # Day-of-week column on `Calendar` chosen to represent each day_type bucket.
 DAY_TYPE_REPRESENTATIVE_FIELD = {
@@ -61,6 +61,82 @@ DAY_TYPE_REPRESENTATIVE_FIELD = {
 }
 
 FREQUENT_HEADWAY_MIN = 15.0
+
+# WMATA's published frequency classes mapped to a P90 weekday-headway threshold.
+# "or better" wording in WMATA's legend implies the threshold should hold across
+# the service day, not just at peak. P90 (vs strict max) absorbs late-night
+# single-trip artifacts (e.g., a route with one isolated 2 AM trip producing an
+# implausible 700-min "headway" in that hour) without ignoring real off-peak
+# slowness. Imperfect against WMATA's branded labels — those are operational
+# policy, not strictly derivable from GTFS — but consistent and explainable.
+FREQUENCY_CLASS_THRESHOLDS_MIN: list[tuple[float, str]] = [
+    (12.0, "high"),
+    (20.0, "medium"),
+    (30.0, "low"),
+]
+FREQUENCY_CLASS_LIMITED = "limited"
+FREQUENCY_CLASS_LIMITED_STOP = "limited_stop"
+
+
+def _percentile(sorted_values: list[float], pct: float) -> float | None:
+    """Nearest-rank percentile on an already-sorted list. Returns None if empty."""
+    if not sorted_values:
+        return None
+    idx = int(round(pct * (len(sorted_values) - 1)))
+    return sorted_values[idx]
+
+
+def classify_route_frequency(weekday_hour_headways_min: list[float], route_id: str) -> str | None:
+    """Classify a route into one of the WMATA frequency bands.
+
+    Inputs: every non-NULL `mean_headway_min` for the route on weekdays, one
+    per hour-of-day the route runs. Output: 'high' / 'medium' / 'low' /
+    'limited' / 'limited_stop', or None when there's no usable schedule data.
+    Limited-stop is detected by the 'X' suffix convention WMATA uses on
+    skip-stop variants (A1X, D4X, etc.) — those override frequency-based
+    classification per the published map legend.
+    """
+    if route_id.endswith("X"):
+        return FREQUENCY_CLASS_LIMITED_STOP
+    if not weekday_hour_headways_min:
+        return None
+    p90 = _percentile(sorted(weekday_hour_headways_min), 0.90)
+    if p90 is None:
+        return None
+    for threshold, label in FREQUENCY_CLASS_THRESHOLDS_MIN:
+        if p90 <= threshold:
+            return label
+    return FREQUENCY_CLASS_LIMITED
+
+
+def compute_route_frequency_classes(db: Session) -> dict[str, str]:
+    """Return `{route_id: frequency_class}` for every current route.
+
+    One pass over `route_service_profile` (weekday rows) plus one pass over
+    `routes` for the X-suffix limited-stop set. Routes without any non-NULL
+    `mean_headway_min` get omitted unless they're limited-stop, where the
+    suffix alone classifies them.
+    """
+    rows = (
+        db.query(RouteServiceProfile.route_id, RouteServiceProfile.mean_headway_min)
+        .filter(
+            RouteServiceProfile.day_type == "weekday",
+            RouteServiceProfile.mean_headway_min.isnot(None),
+        )
+        .all()
+    )
+    by_route: dict[str, list[float]] = defaultdict(list)
+    for route_id, headway in rows:
+        by_route[route_id].append(float(headway))
+
+    all_route_ids = {r for (r,) in db.query(Route.route_id).filter(Route.is_current).all()}
+
+    classes: dict[str, str] = {}
+    for rid in all_route_ids:
+        cls = classify_route_frequency(by_route.get(rid, []), rid)
+        if cls is not None:
+            classes[rid] = cls
+    return classes
 
 
 def _parse_gtfs_time_to_seconds(t: str) -> int:

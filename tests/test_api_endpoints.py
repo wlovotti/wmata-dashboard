@@ -183,6 +183,33 @@ def test_get_route_time_periods_with_days(client, sample_route):
 
 
 @pytest.mark.api
+def test_get_route_period_drilldown_success(client, sample_route):
+    """Test GET /api/routes/{route_id}/period-drilldown returns the expected envelope.
+
+    With no stop_events derived in the test DB, the endpoint anchors on no
+    service_date and returns empty period lists — but the response shape
+    should still be the documented one.
+    """
+    response = client.get("/api/routes/TEST1/period-drilldown")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["route_id"] == "TEST1"
+    assert data["service_date"] is None
+    assert data["day_type"] is None
+    assert data["ewt"] == []
+    assert data["bunching"] == []
+
+
+@pytest.mark.api
+def test_get_route_period_drilldown_not_found(client):
+    """Test GET /api/routes/{route_id}/period-drilldown 404s for unknown routes."""
+    response = client.get("/api/routes/NONEXISTENT/period-drilldown")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+@pytest.mark.api
 def test_get_route_shapes_success(client, db_session, sample_route, sample_trip):
     """Test GET /api/routes/{route_id}/shapes returns GTFS shapes"""
     # Create shape data

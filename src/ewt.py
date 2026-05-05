@@ -310,7 +310,10 @@ def compute_ewt_for_route_date(
         sched = sched_pool.get(label, [])
         awt = compute_awt(obs)
         swt = compute_awt(sched)
-        ewt = (awt - swt) if (awt is not None and swt is not None) else None
+        # Clamp at 0: EWT is rider-felt excess wait. Sparse observation coverage
+        # (NOTES-27) can drive AWT below SWT — a measurement artifact, not a
+        # real "service ran better than scheduled" signal. AWT/SWT remain raw.
+        ewt = max(0.0, awt - swt) if (awt is not None and swt is not None) else None
         rows.append(
             {
                 "route_id": route_id,
