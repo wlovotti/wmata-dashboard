@@ -6,14 +6,56 @@ optimized for fast API responses and dashboard visualization.
 """
 
 import math
+import time
 from datetime import datetime, timedelta
+from threading import Lock
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.analytics import (
     calculate_time_period_otp,
 )
-from src.models import Route, RouteMetricsDaily, RouteMetricsSummary
+from src.bunching import (
+    compute_bunching_headline_for_route,
+    compute_bunching_headline_for_routes,
+)
+from src.ewt import (
+    _day_type_for,
+    compute_ewt_headline_for_route,
+    compute_ewt_headline_for_routes,
+    fetch_scheduled_cell_hours_for_routes,
+)
+from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, StopEvent
+from src.otp_metrics import compute_otp_split, compute_otp_split_for_routes
+from src.service_delivered import (
+    compute_service_delivered,
+    compute_service_delivered_for_routes,
+)
+
+# Per-service-date cache of the new live-computed scorecard metrics. The
+# scheduled stop_times fetch (~1.7s) dominates cost; observed stop_events are
+# the only thing that changes minute-to-minute. A short TTL keeps the
+# scorecard within ~60s of fresh while amortizing the scheduled fetch across
+# every page load in the window.
+_LIVE_METRICS_TTL_SEC = 60.0
+_live_metrics_cache: dict[str, tuple[float, dict[str, dict]]] = {}
+_live_metrics_lock = Lock()
+
+
+def _latest_service_date_with_stop_events(db: Session):
+    """Return the most recent service_date that has any stop_events, or None.
+
+    The new metrics depend on `stop_events`, which is materialized by the
+    derivation pipelines (`pipelines/derive_stop_events*.py`) — typically run
+    after a day completes. Today's date may have no derived events yet, so
+    the scorecard should anchor on whatever the latest derived date is, not
+    `eastern_today()`. Cache key naturally advances when the pipeline runs.
+    """
+    row = db.query(func.max(StopEvent.service_date)).scalar()
+    if not row:
+        return None
+    return datetime.strptime(row, "%Y-%m-%d").date()
 
 
 def sanitize_float(value):
@@ -61,26 +103,175 @@ def calculate_performance_grade(otp_percentage: float | None) -> str:
         return "F"
 
 
+def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]:
+    """One-pass live compute of the four new scorecard metrics for every route.
+
+    EWT and bunching share the scheduled-cell-hour fetch (the dominant cost,
+    ~1.7s for ~422k stop_times rows). Service-delivered and OTP split are
+    independent and cheap. Returns `{route_id: {service_delivered, otp_split,
+    ewt, bunching}}` — each sub-key is the dict shape from the corresponding
+    compute function, or None when the route has no entry in that source.
+    """
+    day_type = _day_type_for(service_date)
+    sched = fetch_scheduled_cell_hours_for_routes(db, day_type)
+    ewt_by_route = compute_ewt_headline_for_routes(db, service_date, sched_by_route_cell_hour=sched)
+    bunching_by_route = compute_bunching_headline_for_routes(
+        db, service_date, sched_by_route_cell_hour=sched
+    )
+    sd_by_route = {r["route_id"]: r for r in compute_service_delivered_for_routes(db, service_date)}
+    otp_by_route = {r["route_id"]: r for r in compute_otp_split_for_routes(db, service_date)}
+
+    all_routes = set(ewt_by_route) | set(bunching_by_route) | set(sd_by_route) | set(otp_by_route)
+    return {
+        route_id: {
+            "service_delivered": sd_by_route.get(route_id),
+            "otp_split": otp_by_route.get(route_id),
+            "ewt": ewt_by_route.get(route_id),
+            "bunching": bunching_by_route.get(route_id),
+        }
+        for route_id in all_routes
+    }
+
+
+def _compute_single_route_live_metrics(db: Session, route_id: str, service_date) -> dict:
+    """Single-route equivalent of `_compute_live_metrics_uncached` for one route.
+
+    Used on RouteDetail when the all-routes scorecard cache is cold — computing
+    one route directly (~150ms) is much faster than triggering the full ~3s
+    scorecard build just to pluck a single entry.
+    """
+    return {
+        "service_delivered": compute_service_delivered(db, route_id, service_date),
+        "otp_split": compute_otp_split(db, route_id, service_date),
+        "ewt": compute_ewt_headline_for_route(db, route_id, service_date),
+        "bunching": compute_bunching_headline_for_route(db, route_id, service_date),
+    }
+
+
+def get_live_metrics_for_route_today(db: Session, route_id: str) -> dict | None:
+    """Latest derived service_date's live metrics for one route, cached when warm.
+
+    On a warm cache (any /api/routes call within the TTL), returns the cached
+    bundle for `route_id` instantly. On cold cache, computes single-route
+    directly without warming the full scorecard cache — RouteDetail shouldn't
+    pay the all-routes price.
+
+    Returns `None` if there are no stop_events at all (DB freshly initialized).
+    """
+    service_date = _latest_service_date_with_stop_events(db)
+    if service_date is None:
+        return None
+    cache_key = service_date.isoformat()
+
+    with _live_metrics_lock:
+        cached = _live_metrics_cache.get(cache_key)
+    if cached is not None and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC:
+        return cached[1].get(route_id) or _compute_single_route_live_metrics(
+            db, route_id, service_date
+        )
+
+    return _compute_single_route_live_metrics(db, route_id, service_date)
+
+
+def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
+    """Cached-by-service-date wrapper around `_compute_live_metrics_uncached`.
+
+    Anchors on the latest service_date that has stop_events (today's data may
+    not yet be derived — see `_latest_service_date_with_stop_events`). Reuses
+    the cached result if computed within `_LIVE_METRICS_TTL_SEC` (default 60s).
+    Cold-cache cost is the full ~3s; warm-cache cost is dict access.
+    Concurrent callers may both compute on a cold miss — acceptable
+    thundering-herd cost in single-process dev. Returns an empty dict if no
+    stop_events exist at all.
+    """
+    service_date = _latest_service_date_with_stop_events(db)
+    if service_date is None:
+        return {}
+    cache_key = service_date.isoformat()
+
+    with _live_metrics_lock:
+        cached = _live_metrics_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
+                return value
+
+    result = _compute_live_metrics_uncached(db, service_date)
+
+    with _live_metrics_lock:
+        _live_metrics_cache[cache_key] = (time.monotonic(), result)
+    return result
+
+
+def _live_metric_fields(metrics: dict | None) -> dict:
+    """Flatten the per-route live-metrics bundle into scorecard fields.
+
+    Used by both scorecard and detail endpoints. Returns a dict with the new
+    fields all set to None when `metrics` is None — i.e. the route had no
+    entry in any of the four live sources for the day.
+    """
+    if metrics is None:
+        return {
+            "service_delivered_ratio": None,
+            "service_delivered_scheduled": None,
+            "service_delivered_delivered": None,
+            "otp_origin_pct": None,
+            "otp_destination_pct": None,
+            "otp_all_pct": None,
+            "ewt_seconds": None,
+            "ewt_n_observed": None,
+            "bunching_rate": None,
+            "bunching_count": None,
+            "bunching_total_headways": None,
+        }
+    sd = metrics.get("service_delivered") or {}
+    otp = metrics.get("otp_split") or {}
+    ewt = metrics.get("ewt") or {}
+    bun = metrics.get("bunching") or {}
+    return {
+        "service_delivered_ratio": sd.get("ratio"),
+        "service_delivered_scheduled": sd.get("scheduled_trips"),
+        "service_delivered_delivered": sd.get("delivered_trips"),
+        "otp_origin_pct": (otp.get("origin") or {}).get("on_time_pct"),
+        "otp_destination_pct": (otp.get("destination") or {}).get("on_time_pct"),
+        "otp_all_pct": (otp.get("all_timepoints") or {}).get("on_time_pct"),
+        "ewt_seconds": ewt.get("ewt_seconds"),
+        "ewt_n_observed": ewt.get("n_observed_headways"),
+        "bunching_rate": bun.get("bunching_rate"),
+        "bunching_count": bun.get("bunching_count"),
+        "bunching_total_headways": bun.get("total_headways"),
+    }
+
+
 def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
     """
-    Get performance scorecard for all routes from pre-computed summary table
+    Get performance scorecard for all routes.
 
-    Returns pre-computed metrics for all routes. Much faster than live calculation.
-    Data is updated by nightly batch job (pipelines/compute_daily_metrics.py).
+    Combines two data layers:
+      * **Legacy fields** (otp_percentage, avg_headway_minutes, etc.) from the
+        pre-computed `route_metrics_summary` table — populated by the nightly
+        batch job. Will be retired in NOTES-19 once new metrics fully replace.
+      * **New live metrics** (service-delivered, OTP origin/destination split,
+        EWT headline, bunching headline) computed live from `runs` and
+        `stop_events` for today's service date. Cached by service_date with a
+        short TTL — see `get_live_metrics_for_today`.
 
     Args:
         db: Database session
         days: Number of days to analyze (ignored, uses pre-computed summaries)
 
     Returns:
-        List of route summaries with performance metrics
+        List of route summaries with both legacy and new performance metrics.
     """
     # Get all routes (current version only)
     routes = db.query(Route).filter(Route.is_current).all()
     route_map = {r.route_id: r for r in routes}
 
-    # Get pre-computed summaries
+    # Get pre-computed summaries (legacy fields)
     summaries = db.query(RouteMetricsSummary).all()
+
+    # Get today's live metrics (cached)
+    live = get_live_metrics_for_today(db)
 
     scorecard = []
 
@@ -106,10 +297,11 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
                 if summary.last_data_timestamp
                 else None,
                 "computed_at": summary.computed_at.isoformat() if summary.computed_at else None,
+                **_live_metric_fields(live.get(summary.route_id)),
             }
         )
 
-    # Add routes without computed metrics
+    # Add routes without computed legacy metrics — but still surface live ones.
     summary_route_ids = {s.route_id for s in summaries}
     for route in routes:
         if route.route_id not in summary_route_ids:
@@ -126,6 +318,7 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
                     "total_observations": 0,
                     "data_updated_at": None,
                     "computed_at": None,
+                    **_live_metric_fields(live.get(route.route_id)),
                 }
             )
 
@@ -155,8 +348,11 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
     if not route:
         return {"error": f"Route {route_id} not found"}
 
-    # Get pre-computed summary metrics (includes position stats)
+    # Get pre-computed summary metrics (legacy, includes position stats)
     summary = db.query(RouteMetricsSummary).filter(RouteMetricsSummary.route_id == route_id).first()
+
+    # Live metrics for today (single-route compute on cache miss).
+    live_fields = _live_metric_fields(get_live_metrics_for_route_today(db, route_id))
 
     # Return summary metrics if available
     if summary:
@@ -182,6 +378,7 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "unique_vehicles": getattr(summary, "unique_vehicles_7d", 0) or 0,
             "unique_trips": getattr(summary, "unique_trips_7d", 0) or 0,
             "grade": calculate_performance_grade(summary.otp_percentage),
+            **live_fields,
         }
     else:
         # No pre-computed metrics available
@@ -203,6 +400,7 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "unique_vehicles": 0,
             "unique_trips": 0,
             "grade": "N/A",
+            **live_fields,
         }
 
 

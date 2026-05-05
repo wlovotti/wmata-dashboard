@@ -83,6 +83,7 @@ from src.ewt import (
     _day_type_for,
     _period_for_hour,
     _scheduled_headways_by_cell_hour,
+    fetch_scheduled_cell_hours_for_routes,
 )
 from src.models import StopEvent
 
@@ -239,3 +240,155 @@ def compute_bunching_for_routes(
     for r in route_ids:
         out.extend(compute_bunching_for_route_date(db, r, service_date))
     return out
+
+
+def _bunching_headline_from_counts(
+    route_id: str,
+    service_date_str: str,
+    day_type: str,
+    bunched: int,
+    total: int,
+) -> dict:
+    """Build the headline result dict from already-summed bunched/total counts.
+
+    Shared by `compute_bunching_headline_for_route` and the vectorized
+    `compute_bunching_headline_for_routes` so both produce identical output.
+    """
+    rate = (bunched / total) if total > 0 else None
+    return {
+        "route_id": route_id,
+        "service_date": service_date_str,
+        "day_type": day_type,
+        "bunching_count": bunched,
+        "total_headways": total,
+        "bunching_rate": round(rate, 4) if rate is not None else None,
+    }
+
+
+def compute_bunching_headline_for_route(
+    db: Session,
+    route_id: str,
+    service_date: date_type,
+) -> dict:
+    """Single-route bunching collapsed to one rate for the day.
+
+    Sums bunched pairs and total observed pairs across every cell-hour with a
+    defined threshold; rate = bunched / total. Mathematically clean — the
+    per-period variant just buckets the same counts and reports the ratio per
+    bucket, so summing over all buckets is the natural daily aggregate.
+
+    Returns the same dict shape as one period row from `compute_bunching_for_route_date`,
+    minus the `time_period` key.
+    """
+    service_date_str = service_date.isoformat()
+    day_type = _day_type_for(service_date)
+
+    sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
+    obs_by_cell_hour = _scheduled_observed_headways_by_cell_hour(db, route_id, service_date_str)
+
+    bunched = 0
+    total = 0
+    for cell_hour, observed in obs_by_cell_hour.items():
+        threshold = _cell_hour_threshold_sec(sched_by_cell_hour.get(cell_hour, []))
+        if threshold is None:
+            continue
+        for headway in observed:
+            if headway > MAX_OBSERVED_HEADWAY_SEC:
+                continue
+            total += 1
+            if headway < threshold:
+                bunched += 1
+
+    return _bunching_headline_from_counts(route_id, service_date_str, day_type, bunched, total)
+
+
+def compute_bunching_headline_for_routes(
+    db: Session,
+    service_date: date_type,
+    route_ids: list[str] | None = None,
+    sched_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] | None = None,
+) -> dict[str, dict]:
+    """Vectorized headline bunching for all routes — two SQL passes, no per-route loop.
+
+    Mirrors `compute_ewt_headline_for_routes` but with bunching's stricter
+    observed filter: `schedule_relationship='SCHEDULED'` excludes ADDED
+    real-time-only trips, which are service supplementation rather than
+    bunching when they slot between two scheduled buses.
+
+    Pass `sched_by_route_cell_hour` to skip the scheduled fetch — used by the
+    scorecard path to share scheduled data with EWT.
+
+    Returns `{route_id: headline_dict}`. Pass `route_ids` to restrict.
+    """
+    service_date_str = service_date.isoformat()
+    day_type = _day_type_for(service_date)
+
+    if sched_by_route_cell_hour is None:
+        sched_by_route_cell_hour = fetch_scheduled_cell_hours_for_routes(db, day_type, route_ids)
+
+    # All observed stop_events for the date, every route, one query.
+    # Stricter filter than EWT: schedule_relationship='SCHEDULED' only.
+    obs_q = (
+        db.query(
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+        )
+        .filter(
+            StopEvent.service_date == service_date_str,
+            StopEvent.source == "trip_update",
+            StopEvent.schedule_relationship == "SCHEDULED",
+            StopEvent.observed_arrival_ts.isnot(None),
+        )
+        .order_by(
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+        )
+    )
+    if route_ids is not None:
+        obs_q = obs_q.filter(StopEvent.route_id.in_(route_ids))
+
+    obs_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    prev_key: tuple[str, int, str] | None = None
+    prev_ts: datetime | None = None
+    for route_id, direction_id, stop_id, ts in obs_q.all():
+        key = (route_id, direction_id, stop_id)
+        if prev_key == key and prev_ts is not None:
+            delta = (ts - prev_ts).total_seconds()
+            if delta > 0:
+                obs_by_route_cell_hour[route_id][
+                    (direction_id, stop_id, _eastern_hour(prev_ts))
+                ].append(delta)
+        prev_key = key
+        prev_ts = ts
+
+    # Per-route headline aggregation.
+    all_routes = set(sched_by_route_cell_hour.keys()) | set(obs_by_route_cell_hour.keys())
+    if route_ids is not None:
+        all_routes &= set(route_ids)
+
+    results: dict[str, dict] = {}
+    for route_id in all_routes:
+        sched_cells = sched_by_route_cell_hour.get(route_id, {})
+        obs_cells = obs_by_route_cell_hour.get(route_id, {})
+        bunched = 0
+        total = 0
+        for cell_hour, observed in obs_cells.items():
+            threshold = _cell_hour_threshold_sec(sched_cells.get(cell_hour, []))
+            if threshold is None:
+                continue
+            for headway in observed:
+                if headway > MAX_OBSERVED_HEADWAY_SEC:
+                    continue
+                total += 1
+                if headway < threshold:
+                    bunched += 1
+        results[route_id] = _bunching_headline_from_counts(
+            route_id, service_date_str, day_type, bunched, total
+        )
+    return results

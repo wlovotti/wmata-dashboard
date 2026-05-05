@@ -353,3 +353,220 @@ def compute_ewt_for_routes(
     for r in route_ids:
         out.extend(compute_ewt_for_route_date(db, r, service_date))
     return out
+
+
+def _ewt_headline_from_pools(
+    route_id: str,
+    service_date_str: str,
+    day_type: str,
+    obs_pool: list[float],
+    sched_pool: list[float],
+    freq_cells: int,
+) -> dict:
+    """Build the headline result dict from already-pooled observed/scheduled lists.
+
+    Shared by `compute_ewt_headline_for_route` and the vectorized
+    `compute_ewt_headline_for_routes` so both produce identical output.
+    """
+    awt = compute_awt(obs_pool)
+    swt = compute_awt(sched_pool)
+    ewt = (awt - swt) if (awt is not None and swt is not None) else None
+    return {
+        "route_id": route_id,
+        "service_date": service_date_str,
+        "day_type": day_type,
+        "awt_seconds": round(awt, 2) if awt is not None else None,
+        "swt_seconds": round(swt, 2) if swt is not None else None,
+        "ewt_seconds": round(ewt, 2) if ewt is not None else None,
+        "n_observed_headways": len(obs_pool),
+        "n_scheduled_headways": len(sched_pool),
+        "frequent_cell_hours": freq_cells,
+    }
+
+
+def compute_ewt_headline_for_route(
+    db: Session,
+    route_id: str,
+    service_date: date_type,
+) -> dict:
+    """Single-route EWT collapsed to one rider-weighted number for the day.
+
+    Pools every frequent (direction, stop, hour) cell on the route into a single
+    observed pool and a single scheduled pool, then computes AWT/SWT/EWT once.
+    Mathematically equivalent to "EWT across the whole day for this route at
+    every cell where service is actually frequent" — non-frequent cell-hours
+    drop out by the same gating used in the per-period variant.
+
+    Returns the same dict shape as one period row from `compute_ewt_for_route_date`,
+    minus the `time_period` key.
+    """
+    service_date_str = service_date.isoformat()
+    day_type = _day_type_for(service_date)
+
+    sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
+    obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str)
+
+    obs_pool: list[float] = []
+    sched_pool: list[float] = []
+    freq_cells = 0
+    for cell_hour, sched_headways in sched_by_cell_hour.items():
+        if not _is_cell_hour_frequent(sched_headways):
+            continue
+        sched_pool.extend(sched_headways)
+        obs_pool.extend(obs_by_cell_hour.get(cell_hour, []))
+        freq_cells += 1
+
+    return _ewt_headline_from_pools(
+        route_id, service_date_str, day_type, obs_pool, sched_pool, freq_cells
+    )
+
+
+def fetch_scheduled_cell_hours_for_routes(
+    db: Session,
+    day_type: str,
+    route_ids: list[str] | None = None,
+) -> dict[str, dict[CellHour, list[float]]]:
+    """Vectorized scheduled-headway-per-(direction, stop, hour) for every route.
+
+    Single SQL pass joining `trips`, `stop_times`, and `calendar` for the
+    representative weekday of `day_type`. Returns
+    `{route_id: {(direction_id, stop_id, hour): [scheduled_headway_sec, ...]}}`
+    — each list is consecutive scheduled headways within that cell, bucketed
+    by the earlier arrival's hour-of-day.
+
+    The dominant cost in the live scorecard path. Both EWT and bunching
+    consume this; the API layer fetches it once and shares it to avoid
+    paying the ~1.7s cost twice. Schedule data only changes on GTFS reload,
+    so it's also a natural candidate for module-level caching with a long
+    TTL if the cost ever needs further amortization.
+    """
+    field_name = DAY_TYPE_REPRESENTATIVE_FIELD[day_type]
+    field = getattr(Calendar, field_name)
+
+    sched_q = (
+        db.query(
+            Trip.route_id,
+            Trip.direction_id,
+            StopTime.stop_id,
+            StopTime.arrival_time,
+        )
+        .join(StopTime, StopTime.trip_id == Trip.trip_id)
+        .join(Calendar, Calendar.service_id == Trip.service_id)
+        .filter(
+            Trip.is_current,
+            StopTime.is_current,
+            Calendar.is_current,
+            field == 1,
+        )
+    )
+    if route_ids is not None:
+        sched_q = sched_q.filter(Trip.route_id.in_(route_ids))
+
+    sched_by_route_cell: dict[tuple[str, int, str], list[int]] = defaultdict(list)
+    for route_id, direction_id, stop_id, arrival_time in sched_q.all():
+        if arrival_time is None:
+            continue
+        sched_by_route_cell[(route_id, direction_id, stop_id)].append(
+            _parse_gtfs_time_to_seconds(arrival_time)
+        )
+
+    sched_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for (route_id, direction, stop), secs in sched_by_route_cell.items():
+        secs.sort()
+        for i in range(len(secs) - 1):
+            delta = secs[i + 1] - secs[i]
+            if delta > 0:
+                hour = (secs[i] // 3600) % 24
+                sched_by_route_cell_hour[route_id][(direction, stop, hour)].append(float(delta))
+    return sched_by_route_cell_hour
+
+
+def compute_ewt_headline_for_routes(
+    db: Session,
+    service_date: date_type,
+    route_ids: list[str] | None = None,
+    sched_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] | None = None,
+) -> dict[str, dict]:
+    """Vectorized headline EWT for all routes — two SQL passes, no per-route loop.
+
+    Pulls all scheduled stop_times (joined to trips and calendar for the
+    representative weekday) and all observed `stop_events` on the date in one
+    query each, then groups by (route, direction, stop) in Python and
+    aggregates per route.
+
+    Pass `sched_by_route_cell_hour` to skip the scheduled fetch — used by the
+    scorecard path to share scheduled data with bunching.
+
+    Returns `{route_id: headline_dict}`. Routes with no scheduled service on
+    the day_type don't appear; routes with scheduled service but no observed
+    arrivals appear with `awt_seconds=None`. Pass `route_ids` to restrict.
+    """
+    service_date_str = service_date.isoformat()
+    day_type = _day_type_for(service_date)
+
+    if sched_by_route_cell_hour is None:
+        sched_by_route_cell_hour = fetch_scheduled_cell_hours_for_routes(db, day_type, route_ids)
+
+    # All observed stop_events for the date, every route, one query.
+    obs_q = (
+        db.query(
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+        )
+        .filter(
+            StopEvent.service_date == service_date_str,
+            StopEvent.source == "trip_update",
+            StopEvent.observed_arrival_ts.isnot(None),
+        )
+        .order_by(
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+        )
+    )
+    if route_ids is not None:
+        obs_q = obs_q.filter(StopEvent.route_id.in_(route_ids))
+
+    obs_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    prev_key: tuple[str, int, str] | None = None
+    prev_ts: datetime | None = None
+    for route_id, direction_id, stop_id, ts in obs_q.all():
+        key = (route_id, direction_id, stop_id)
+        if prev_key == key and prev_ts is not None:
+            delta = (ts - prev_ts).total_seconds()
+            if delta > 0:
+                obs_by_route_cell_hour[route_id][
+                    (direction_id, stop_id, _eastern_hour(prev_ts))
+                ].append(delta)
+        prev_key = key
+        prev_ts = ts
+
+    # Per-route headline aggregation.
+    all_routes = set(sched_by_route_cell_hour.keys())
+    if route_ids is not None:
+        all_routes &= set(route_ids)
+
+    results: dict[str, dict] = {}
+    for route_id in all_routes:
+        sched_cells = sched_by_route_cell_hour.get(route_id, {})
+        obs_cells = obs_by_route_cell_hour.get(route_id, {})
+        obs_pool: list[float] = []
+        sched_pool: list[float] = []
+        freq_cells = 0
+        for cell_hour, sched_headways in sched_cells.items():
+            if not _is_cell_hour_frequent(sched_headways):
+                continue
+            sched_pool.extend(sched_headways)
+            obs_pool.extend(obs_cells.get(cell_hour, []))
+            freq_cells += 1
+        results[route_id] = _ewt_headline_from_pools(
+            route_id, service_date_str, day_type, obs_pool, sched_pool, freq_cells
+        )
+    return results

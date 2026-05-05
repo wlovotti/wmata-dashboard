@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-04 (PR for NOTES-13).
+Last edited 2026-05-04 (PR for NOTES-17 headline scorecard piece).
 
 ---
 
@@ -24,9 +24,11 @@ sequencing still matters.
 
 ### P4 — Surface to API + UI
 
-- **NOTES-17 New API fields and panels on `RouteDetail`.** Each new
-  metric needs to land somewhere in the UI; sequencing here can lag the
-  data layer.
+- **NOTES-17 New API fields and panels on `RouteDetail` / `RouteList`.**
+  Headline scorecard (service-delivered, OTP origin/destination split,
+  EWT, bunching) wired into both `/api/routes` and `/api/routes/{id}`
+  with vectorized live compute + per-service-date TTL cache. Remaining:
+  per-time-period drilldown charts for EWT and bunching on RouteDetail.
 - **NOTES-18 Update grading rubric.** Currently OTP-only; should
   incorporate service-delivered and EWT once those land.
 - **NOTES-5 Per-run deviation chart.** Now a thin API + frontend wrapper
@@ -113,10 +115,39 @@ at 0) is what the eventual UI version should resemble.
 
 **Severity: low (last step, depends on data layer).**
 
-Each new metric needs an API field and a UI element. Probably one PR
-per metric or grouped 2-3 at a time, since UI changes require manual
-testing in the browser. RouteList scorecard and RouteDetail drill-down
-both get updated.
+### What landed (headline scorecard PR)
+
+All four new metrics now flow through the API and into the UI as
+single-number scorecard fields on both RouteList and RouteDetail:
+service-delivered ratio, OTP origin/destination split, EWT (frequent
+service only), bunching rate.
+
+The compute path is **live, not precomputed** — a deliberate departure
+from the legacy `route_metrics_summary` shape. The four functions read
+from the materialized `runs` / `stop_events` / `route_service_profile`
+foundation, so per-route work is sub-200ms. Vectorized all-routes
+variants of EWT and bunching headline (`compute_ewt_headline_for_routes`,
+`compute_bunching_headline_for_routes`) share the scheduled-stop_times
+fetch (the dominant ~1.7s cost) in `api/aggregations.py:_compute_live_metrics_uncached`,
+and the result is cached per service_date with a 60s TTL. Cold load
+~3s, warm <50ms.
+
+The cache anchors on the latest `service_date` that has stop_events
+(via `_latest_service_date_with_stop_events`), not `eastern_today()` —
+today's data may not yet be derived by the
+`pipelines/derive_stop_events*.py` pipelines.
+
+The grade and legacy fields (avg_headway_minutes, avg_speed_mph,
+total_observations) still come from `route_metrics_summary` for UI
+continuity. NOTES-19 retires that path once nothing reads from it.
+
+### What's left
+
+- Per-time-period drilldown charts on RouteDetail for EWT and
+  bunching — surfaces the AM peak vs evening variance the headline
+  collapses. Existing `compute_ewt_for_route_date` and
+  `compute_bunching_for_route_date` already produce the 5-period
+  rows; this is API + frontend wiring only.
 
 ---
 
