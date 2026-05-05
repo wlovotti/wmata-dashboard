@@ -505,6 +505,53 @@ main {
   font-size: 1.25rem;
 }
 
+.drilldown-anchor {
+  margin: -0.5rem 0 1rem;
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
+.drilldown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.5rem;
+}
+
+.drilldown-chart h3 {
+  margin: 0 0 0.75rem;
+  color: #1e293b;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.drilldown-empty {
+  color: #64748b;
+  font-size: 0.9rem;
+  padding: 2rem 0;
+  text-align: center;
+}
+
+.chart-tooltip {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  color: #1e293b;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.chart-tooltip-title {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.chart-tooltip-meta {
+  margin-top: 0.25rem;
+  color: #64748b;
+  font-size: 0.75rem;
+}
+
 .detail-info {
   background: white;
   border-radius: 0.75rem;

@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import RouteMap from './RouteMap'
+import PeriodDrilldown from './PeriodDrilldown'
+import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 
 function RouteDetail() {
   const { routeId } = useParams()
@@ -74,9 +76,11 @@ function RouteDetail() {
         </button>
         <div className="route-title">
           <h1>
-            <span className="route-badge-large" style={{
-              backgroundColor: hasMetrics ? '#002F6C' : '#919D9D'
-            }}>
+            <span
+              className="route-badge-large"
+              style={{ backgroundColor: badgeColor(routeData.frequency_class, hasMetrics) }}
+              title={FREQUENCY_CLASS_LABELS[routeData.frequency_class] || ''}
+            >
               {routeData.route_name}
             </span>
             {routeData.route_long_name}
@@ -144,6 +148,8 @@ function RouteDetail() {
           )}
         </div>
       </div>
+
+      {hasMetrics && <PeriodDrilldown routeId={routeId} />}
 
       <div className="chart-container">
         <h2>Route Map</h2>

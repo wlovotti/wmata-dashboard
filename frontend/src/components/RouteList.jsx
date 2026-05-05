@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -226,9 +227,13 @@ function RouteList() {
                 style={{ cursor: 'pointer' }}
               >
                 <td className="route-id">
-                  <span className="route-badge" style={{
-                    backgroundColor: route.otp_all_pct != null ? '#002F6C' : '#919D9D'
-                  }}>
+                  <span
+                    className="route-badge"
+                    style={{
+                      backgroundColor: badgeColor(route.frequency_class, route.otp_all_pct != null),
+                    }}
+                    title={FREQUENCY_CLASS_LABELS[route.frequency_class] || ''}
+                  >
                     {route.route_name}
                   </span>
                 </td>

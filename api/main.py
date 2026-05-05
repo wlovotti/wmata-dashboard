@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.aggregations import (
     get_all_routes_scorecard,
     get_route_detail_metrics,
+    get_route_period_drilldown,
     get_route_time_period_summary,
     get_route_trend_data,
 )
@@ -200,6 +201,31 @@ async def get_route_time_periods(route_id: str, days: int = 7):
     db = get_session()
     try:
         result = get_route_time_period_summary(db, route_id, days=days)
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    finally:
+        db.close()
+
+
+@app.get("/api/routes/{route_id}/period-drilldown")
+async def get_route_period_drilldown_endpoint(route_id: str):
+    """
+    Per-time-period EWT and bunching for one route on the latest service_date.
+
+    Returns the AM peak / midday / PM peak / evening / night breakdown that
+    the headline scorecard fields (`ewt_seconds`, `bunching_rate`) collapse.
+    Anchors on the same service_date as the headline so the rows reconcile.
+
+    Args:
+        route_id: Route identifier (e.g., 'C51')
+
+    Returns:
+        EWT and bunching rows keyed by time_period, plus the anchor service_date.
+    """
+    db = get_session()
+    try:
+        result = get_route_period_drilldown(db, route_id)
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         return result
