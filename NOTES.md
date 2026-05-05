@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-04 (PR for NOTES-14; folds in missed NOTES-12 cleanup from PR #49).
+Last edited 2026-05-04 (PR for NOTES-15).
 
 ---
 
@@ -27,11 +27,6 @@ sequencing still matters.
 - **NOTES-13 Bunching count.** Count and rate of headways < 0.5 ×
   scheduled. Complements existing CV metric (which hides bunching in
   averages).
-- **NOTES-15 Excess Wait Time (EWT) for frequent routes.** AWT =
-  `mean(h²) / (2·mean(h))` from observed headways at each stop-hour;
-  SWT same for scheduled. EWT = AWT − SWT, aggregated to (route, date,
-  time_period) where the route is frequent (scheduled headway ≤ 15 min).
-  TfL's standard rider-experience metric.
 
 ### P4 — Surface to API + UI
 
@@ -132,39 +127,6 @@ roll-up.
 
 ---
 
-## NOTES-15. EWT (Excess Wait Time) for frequent routes
-
-**Severity: medium-high. EWT is the standard rider-experience metric
-for frequent service (TfL's flagship; also adopted by MBTA OPMI and
-NYC MTA), and is the dashboard's answer to rider experience on
-frequent routes — superseding any "headway+3min" OTP variant.**
-
-For each (route, stop, hour) where the route is frequent (scheduled
-headway ≤ 15 min):
-- AWT = `mean(actual_headway²) / (2 · mean(actual_headway))`
-- SWT = same formula on scheduled headways
-- EWT = AWT − SWT (in seconds, rider-weighted)
-
-Aggregate to (route, date, time_period). EWT in minutes is more
-intuitive than headway CV for non-experts and weights bunching pain
-correctly.
-
-The `is_frequent` flag comes from the `route_service_profile` table
-(PR #37) — derived from the GTFS schedule itself (mean scheduled
-headway ≤ 15 min for that hour-of-day), **not from a hardcoded route
-list**. WMATA's published "headway-based" designation (70, 79, X2,
-90, 92, 16Y, Metroway) is operational policy and isn't encoded in
-GTFS via `frequencies.txt`, so we don't trust it; we let the schedule
-data classify routes itself.
-
-This is also the reason the dashboard applies WMATA's −2/+7
-schedule-based window uniformly to all routes (no special headway
-OTP rule). Frequent-route OTP will look harsher than WMATA's
-published frequent-route number; that's intentional, and EWT
-provides the meaningful rider-experience comparison.
-
----
-
 ## NOTES-17. API + UI surface
 
 **Severity: low (last step, depends on data layer).**
@@ -207,7 +169,7 @@ final cleanup PR after NOTES-17 lands.
 User considers WMATA's −2 / +7 window lax but wants comparability with
 WMATA's published scorecard for now. Future option: expose a stricter
 "rider-experience OTP" alongside the official one (e.g., −60s / +180s)
-for non-frequent routes (frequent routes get EWT per NOTES-15 instead).
+for non-frequent routes (frequent routes get EWT instead — see `src/ewt.py`).
 The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
 
