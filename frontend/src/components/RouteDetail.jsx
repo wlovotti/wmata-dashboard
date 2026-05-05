@@ -219,6 +219,56 @@ function RouteDetail() {
           </div>
           <div className="stat-label">Position Records</div>
         </div>
+        <div className="stat-card">
+          <div className="stat-value">
+            {routeData.service_delivered_ratio !== null && routeData.service_delivered_ratio !== undefined
+              ? `${Math.round(routeData.service_delivered_ratio * 100)}%`
+              : 'N/A'}
+          </div>
+          <div className="stat-label">Service Delivered</div>
+          {routeData.service_delivered_scheduled !== null && routeData.service_delivered_scheduled !== undefined && (
+            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+              ({routeData.service_delivered_delivered} of {routeData.service_delivered_scheduled} trips)
+            </div>
+          )}
+        </div>
+        <div className="stat-card">
+          <div className="stat-value" style={{ fontSize: '1.5rem' }}>
+            {routeData.otp_origin_pct !== null && routeData.otp_origin_pct !== undefined
+              ? `${Math.round(routeData.otp_origin_pct)}% / ${Math.round(routeData.otp_destination_pct ?? 0)}%`
+              : 'N/A'}
+          </div>
+          <div className="stat-label">OTP Origin / Destination</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">
+            {routeData.ewt_seconds !== null && routeData.ewt_seconds !== undefined
+              ? `${Math.round(routeData.ewt_seconds)}`
+              : 'N/A'}
+            {routeData.ewt_seconds !== null && routeData.ewt_seconds !== undefined && (
+              <span style={{ fontSize: '1.5rem' }}> sec</span>
+            )}
+          </div>
+          <div className="stat-label">Excess Wait Time</div>
+          {(routeData.ewt_seconds === null || routeData.ewt_seconds === undefined) && (
+            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+              (frequent service only)
+            </div>
+          )}
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">
+            {routeData.bunching_rate !== null && routeData.bunching_rate !== undefined
+              ? `${(routeData.bunching_rate * 100).toFixed(1)}%`
+              : 'N/A'}
+          </div>
+          <div className="stat-label">Bunching Rate</div>
+          {routeData.bunching_total_headways !== null && routeData.bunching_total_headways !== undefined && routeData.bunching_total_headways > 0 && (
+            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+              ({routeData.bunching_count} of {routeData.bunching_total_headways} pairs)
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="chart-container">

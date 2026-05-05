@@ -221,6 +221,15 @@ function RouteList() {
               <th onClick={() => handleSort('otp_percentage')} className="sortable">
                 On-Time % {getSortIcon('otp_percentage')}
               </th>
+              <th onClick={() => handleSort('service_delivered_ratio')} className="sortable">
+                Service Delivered {getSortIcon('service_delivered_ratio')}
+              </th>
+              <th onClick={() => handleSort('ewt_seconds')} className="sortable">
+                EWT {getSortIcon('ewt_seconds')}
+              </th>
+              <th onClick={() => handleSort('bunching_rate')} className="sortable">
+                Bunching {getSortIcon('bunching_rate')}
+              </th>
               <th onClick={() => handleSort('avg_headway_minutes')} className="sortable">
                 Avg Headway {getSortIcon('avg_headway_minutes')}
               </th>
@@ -241,7 +250,7 @@ function RouteList() {
           <tbody>
             {filteredAndSortedRoutes.length === 0 ? (
               <tr>
-                <td colSpan="9" className="empty-state">
+                <td colSpan="12" className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">🔍</div>
                     <p>No routes match your filters</p>
@@ -284,6 +293,21 @@ function RouteList() {
                 <td className="metric">
                   {route.otp_percentage !== null
                     ? `${Math.round(route.otp_percentage)}%`
+                    : '—'}
+                </td>
+                <td className="metric">
+                  {route.service_delivered_ratio !== null && route.service_delivered_ratio !== undefined
+                    ? `${Math.round(route.service_delivered_ratio * 100)}%`
+                    : '—'}
+                </td>
+                <td className="metric">
+                  {route.ewt_seconds !== null && route.ewt_seconds !== undefined
+                    ? `${Math.round(route.ewt_seconds)}s`
+                    : '—'}
+                </td>
+                <td className="metric">
+                  {route.bunching_rate !== null && route.bunching_rate !== undefined
+                    ? `${(route.bunching_rate * 100).toFixed(1)}%`
                     : '—'}
                 </td>
                 <td className="metric">
