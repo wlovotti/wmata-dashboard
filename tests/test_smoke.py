@@ -1210,6 +1210,34 @@ def _run(trip_id: str, source: str, stops_observed: int, **overrides) -> Run:
     return Run(**base)
 
 
+def _gtfs_trip(trip_id: str, route_id: str = "R1", service_id: str = "SUN") -> Trip:
+    """Test factory for GTFS Trip rows; minimal fields the service-delivered query reads."""
+    return Trip(
+        trip_id=trip_id,
+        route_id=route_id,
+        direction_id=0,
+        service_id=service_id,
+        is_current=True,
+    )
+
+
+def _gtfs_calendar(service_id: str = "SUN", **day_flags) -> Calendar:
+    """Test factory for Calendar rows. Pass day flags as kwargs (e.g. sunday=1)."""
+    base = {
+        "monday": 0,
+        "tuesday": 0,
+        "wednesday": 0,
+        "thursday": 0,
+        "friday": 0,
+        "saturday": 0,
+        "sunday": 0,
+        "start_date": "20260101",
+        "end_date": "20261231",
+    }
+    base.update(day_flags)
+    return Calendar(service_id=service_id, is_current=True, **base)
+
+
 @pytest.mark.smoke
 def test_compute_service_delivered_basic_ratio(db_session):
     """Sunday with 5 scheduled, 4 distinct trips delivered → ratio 0.80."""
@@ -1219,8 +1247,12 @@ def test_compute_service_delivered_basic_ratio(db_session):
 
     db_session.add_all(
         [
-            _profile("R1", "sunday", 8, 2),
-            _profile("R1", "sunday", 9, 3),  # 5 scheduled
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("T1"),
+            _gtfs_trip("T2"),
+            _gtfs_trip("T3"),
+            _gtfs_trip("T4"),
+            _gtfs_trip("T5"),  # 5 scheduled trips for R1 on Sunday
             _run("T1", "proximity", 10),
             _run("T2", "proximity", 5),
             _run("T3", "trip_update", 7),
@@ -1245,7 +1277,11 @@ def test_compute_service_delivered_dedups_per_source(db_session):
 
     db_session.add_all(
         [
-            _profile("R1", "sunday", 8, 4),
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("T1"),
+            _gtfs_trip("T2"),
+            _gtfs_trip("T3"),
+            _gtfs_trip("T4"),
             _run("T1", "proximity", 10),
             _run("T1", "trip_update", 12),  # same trip — dedupe
             _run("T2", "trip_update", 8),
@@ -1268,7 +1304,10 @@ def test_compute_service_delivered_filters_below_three_stops(db_session):
 
     db_session.add_all(
         [
-            _profile("R1", "sunday", 8, 3),
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("T1"),
+            _gtfs_trip("T2"),
+            _gtfs_trip("T3"),
             _run("T1", "proximity", 2),  # below threshold — excluded
             _run("T2", "proximity", 3),  # exactly threshold — included
             _run("T3", "trip_update", 0),  # zero — excluded
@@ -1283,7 +1322,12 @@ def test_compute_service_delivered_filters_below_three_stops(db_session):
 
 @pytest.mark.smoke
 def test_compute_service_delivered_no_schedule_returns_none_ratio(db_session):
-    """Route with delivered runs but no schedule → ratio None (not 0, not error)."""
+    """Route with run but no GTFS schedule → ratio None and delivered=0.
+
+    The numerator is "scheduled trips that ran"; an unscheduled run can't
+    contribute. Distinguishes "ran nothing scheduled" from "wasn't supposed
+    to run anything."
+    """
     from datetime import date
 
     from src.service_delivered import compute_service_delivered
@@ -1293,7 +1337,7 @@ def test_compute_service_delivered_no_schedule_returns_none_ratio(db_session):
 
     out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
     assert out["scheduled_trips"] == 0
-    assert out["delivered_trips"] == 1
+    assert out["delivered_trips"] == 0
     assert out["ratio"] is None
 
 
@@ -1304,7 +1348,12 @@ def test_compute_service_delivered_zero_delivered_returns_zero_ratio(db_session)
 
     from src.service_delivered import compute_service_delivered
 
-    db_session.add(_profile("R1", "sunday", 8, 5))
+    db_session.add_all(
+        [
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            *[_gtfs_trip(f"T{i}") for i in range(5)],
+        ]
+    )
     db_session.commit()
 
     out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
@@ -1315,18 +1364,21 @@ def test_compute_service_delivered_zero_delivered_returns_zero_ratio(db_session)
 
 @pytest.mark.smoke
 def test_compute_service_delivered_uses_correct_day_type(db_session):
-    """Weekday date pulls weekday profile rows, ignoring saturday/sunday rows."""
+    """Weekday date pulls Tuesday-Calendar trips, ignoring saturday/sunday."""
     from datetime import date
 
     from src.service_delivered import compute_service_delivered
 
     db_session.add_all(
         [
-            _profile("R1", "weekday", 8, 10),
-            _profile("R1", "saturday", 8, 5),
-            _profile("R1", "sunday", 8, 3),
-            # 2026-05-04 is a Monday
-            _run("T1", "proximity", 10, service_date="2026-05-04"),
+            _gtfs_calendar(service_id="WKD", tuesday=1),
+            *[_gtfs_trip(f"W{i}", service_id="WKD") for i in range(10)],
+            _gtfs_calendar(service_id="SAT", saturday=1),
+            *[_gtfs_trip(f"S{i}", service_id="SAT") for i in range(5)],
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            *[_gtfs_trip(f"U{i}", service_id="SUN") for i in range(3)],
+            # 2026-05-04 is a Monday — should match WKD (Tuesday-flagged) only
+            _run("W0", "proximity", 10, service_date="2026-05-04"),
         ]
     )
     db_session.commit()
@@ -1338,15 +1390,19 @@ def test_compute_service_delivered_uses_correct_day_type(db_session):
 
 
 @pytest.mark.smoke
-def test_compute_service_delivered_for_routes_unions_profile_and_runs(db_session):
-    """Fan-out includes a route from profile only AND a route from runs only."""
+def test_compute_service_delivered_for_routes_unions_gtfs_and_runs(db_session):
+    """Fan-out includes a route from GTFS only AND a route from runs only."""
     from datetime import date
 
     from src.service_delivered import compute_service_delivered_for_routes
 
     db_session.add_all(
         [
-            _profile("R_PROF_ONLY", "sunday", 8, 4),  # scheduled, no delivered
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("T_PROF_1", route_id="R_PROF_ONLY"),
+            _gtfs_trip("T_PROF_2", route_id="R_PROF_ONLY"),
+            _gtfs_trip("T_PROF_3", route_id="R_PROF_ONLY"),
+            _gtfs_trip("T_PROF_4", route_id="R_PROF_ONLY"),
             _run("T1", "proximity", 10, route_id="R_RUNS_ONLY"),  # delivered, unscheduled
         ]
     )
@@ -1355,6 +1411,7 @@ def test_compute_service_delivered_for_routes_unions_profile_and_runs(db_session
     out = compute_service_delivered_for_routes(db_session, date(2026, 5, 3))
     by_route = {r["route_id"]: r for r in out}
     assert "R_PROF_ONLY" in by_route and "R_RUNS_ONLY" in by_route
+    assert by_route["R_PROF_ONLY"]["scheduled_trips"] == 4
     assert by_route["R_PROF_ONLY"]["delivered_trips"] == 0
     assert by_route["R_PROF_ONLY"]["ratio"] == 0.0
     assert by_route["R_RUNS_ONLY"]["scheduled_trips"] == 0
