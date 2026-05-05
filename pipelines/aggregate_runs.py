@@ -3,9 +3,9 @@ Aggregate `stop_events` into `runs` — one row per (service_date, trip_id, sour
 
 This is the C-phase entry point on the stop_events foundation (PRs #42, #43, #44):
 runs is the natural unit for trip-level metrics — end-to-end excess time
-(NOTES.md NOTES-12), per-run deviation charts (NOTES-5), the delivered-runs
-numerator for service-delivered ratio (PR #47), and the OTP origin/destination
-split (PR #46) all build directly on it.
+(PR #49), per-run deviation charts (NOTES-5), the delivered-runs numerator
+for service-delivered ratio (PR #47), and the OTP origin/destination split
+(PR #46) all build directly on it.
 
 The aggregation is intentionally trivial: load a (route_id, service_date) slice
 of stop_events, group by (trip_id, source), compute first/last sequence,

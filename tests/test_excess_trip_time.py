@@ -1,5 +1,5 @@
 """
-Unit tests for src/excess_trip_time.py (NOTES-12).
+Unit tests for src/excess_trip_time.py.
 
 Covers per-trip dedup with the endpoint-asymmetry rule (proximity for origin,
 trip_update for destination), single-source fallback, filtering of trips that

@@ -1,5 +1,5 @@
 """
-End-to-end excess trip time over the runs foundation (NOTES-12).
+End-to-end excess trip time over the runs foundation.
 
 Per (route, service_date): median actual trip duration, p95, and the share of
 trips where actual > 110% of scheduled. Captures dwell + in-vehicle delay over

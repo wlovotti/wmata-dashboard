@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-04 (PR for NOTES-12).
+Last edited 2026-05-04 (PR for NOTES-14; folds in missed NOTES-12 cleanup from PR #49).
 
 ---
 
@@ -24,15 +24,9 @@ sequencing still matters.
 
 ### P2 — Medium-effort metric additions
 
-- **NOTES-12 End-to-end excess trip time.** From `runs`: median, p95, %
-  of runs with actual > 110% of scheduled. Captures dwell + in-vehicle
-  delay, not just wait. The metric MBTA OPMI is rolling out for buses.
 - **NOTES-13 Bunching count.** Count and rate of headways < 0.5 ×
   scheduled. Complements existing CV metric (which hides bunching in
   averages).
-- **NOTES-14 Stop-skip rate.** Direct from TripUpdates `SKIPPED`
-  stop_time_updates — data we can't derive from positions at all. Per
-  route, per day, per stop. Unique value-add from the TripUpdates feed.
 - **NOTES-15 Excess Wait Time (EWT) for frequent routes.** AWT =
   `mean(h²) / (2·mean(h))` from observed headways at each stop-hour;
   SWT same for scheduled. EWT = AWT − SWT, aggregated to (route, date,
@@ -126,34 +120,6 @@ at 0) is what the eventual UI version should resemble.
 
 ---
 
-## NOTES-12. End-to-end excess trip time
-
-**Severity: medium.**
-
-Per route per date: median actual trip duration, p95, and % of trips
-where actual > 110% of scheduled. Computed from `runs` (PR #45 — knows
-first/last observed stop_event timestamps and scheduled bounds).
-
-**Per-trip dedup.** `runs` has one row per `(service_date, trip_id,
-source)`, so each trip appears twice. For trip duration the
-endpoint-asymmetry rule from PR #46 applies: proximity has the better
-origin observation (78-93% literal `sched_first_seq` coverage), TU has
-the better destination (87-97% literal `sched_last_seq`). So per trip:
-`actual_duration = TU_row.last_obs_ts − proximity_row.first_obs_ts`,
-falling back to single-source bounds when only one source has the
-trip. `scheduled_duration = sched_last_arrival_ts −
-sched_first_arrival_ts` (identical across the trip's source rows).
-Both endpoints must be present after source-picking — apply
-`origin_dev_sec IS NOT NULL` on the proximity row and
-`destination_dev_sec IS NOT NULL` on the TU row before counting the
-trip in the metric, otherwise duration is computed off the wrong
-stops and excess-time is biased low.
-
-Captures dwell + in-vehicle delay; the metric MBTA OPMI is rolling out
-for buses.
-
----
-
 ## NOTES-13. Bunching count
 
 **Severity: low-medium.**
@@ -163,34 +129,6 @@ time_period). Complements existing headway CV (which hides bunching
 in averages). Likely lives in a new `route_headway_metrics` table
 keyed by (route_id, date, time_period) since this is a stop-hour
 roll-up.
-
----
-
-## NOTES-14. Stop-skip rate
-
-**Severity: medium (unique value-add from the TripUpdates feed
-(PRs #29, #30) — not derivable from positions at all).**
-
-Direct from `stop_events` rows where `schedule_relationship = 'SKIPPED'`
-and `source = 'trip_update'` — already first-class in the table since
-PR #43, no separate pipeline. Probe found 13.5% of STUs flagged
-SKIPPED — significant, and operationally important (skipped stops
-disproportionately hurt riders at low-frequency stops). Per route per
-day, per stop. Could expose worst-skipped stops on RouteDetail.
-
-**Denominator definition.** Skip rate is
-`SKIPPED_stop_events / scheduled_stops_on_runs_that_actually_ran`.
-Using all GTFS-scheduled stops as the denominator conflates skipped
-stops with stops that were never reached because the run was cancelled
-outright — those should fall out via the service-delivered ratio
-(PR #47), not inflate skip rate. So restrict the denominator to stops
-belonging to TU runs where `stops_observed >= 3` (the same RUN_EXISTED
-filter the service-delivered ratio uses). Equivalent SQL: sum `runs.stops_skipped` over qualifying TU
-runs (numerator) divided by sum `runs.stops_scheduled` over the same
-runs (denominator), grouped by `(route_id, service_date[, stop_id])`.
-Per-stop ranking ("worst-skipped stops on RouteDetail") needs the
-stop_id breakdown — fall back to `stop_events` directly when the per-run
-roll-up loses the stop dimension.
 
 ---
 
@@ -321,7 +259,7 @@ So: keep collecting raw, then add retention.
 
 ### Dependencies
 
-- Independent of NOTES-12 through NOTES-20.
+- Independent of NOTES-13 through NOTES-20.
 
 ---
 
@@ -346,7 +284,7 @@ stale before the script fix.
 ### Dependencies
 
 - Builds on the script reliability landed in PR #48.
-- Independent of NOTES-12 through NOTES-21.
+- Independent of NOTES-13 through NOTES-21.
 
 ---
 
@@ -363,7 +301,7 @@ start looking off. Pure read; thin API addition.
 
 ### Dependencies
 
-- Independent of NOTES-12 through NOTES-21 and NOTES-23.
+- Independent of NOTES-13 through NOTES-21 and NOTES-23.
 
 ---
 
