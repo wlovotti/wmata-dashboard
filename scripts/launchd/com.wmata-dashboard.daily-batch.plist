@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wmata-dashboard.daily-batch</string>
+
+    <!--
+        Run pipelines/run_daily_batch.py once daily at 03:00 local time
+        (Eastern, on the user's machine). After WMATA's service rolls
+        over for the day, so "yesterday's service date" is complete.
+        launchd uses the system's local timezone here — no UTC conversion
+        needed.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!--
+        RunAtLoad=false: don't fire immediately when `launchctl load`
+        runs. Surprising and noisy; install-time validation happens by
+        running the wrapper manually.
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard</string>
+
+    <!--
+        `uv run` resolves the project venv from pyproject.toml. The
+        absolute path to uv is required because launchd jobs do not
+        inherit the user's shell PATH.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>pipelines/run_daily_batch.py</string>
+    </array>
+
+    <!--
+        launchd's stdout/stderr capture is the wrapper's outermost
+        safety net. The wrapper itself writes a structured per-day log
+        at logs/daily_batch_<YYYY-MM-DD>.log; these two files just
+        catch any failure too early to reach that file (e.g., uv not
+        found, working directory missing).
+    -->
+    <key>StandardOutPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/launchd_daily_batch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/launchd_daily_batch.err.log</string>
+</dict>
+</plist>
