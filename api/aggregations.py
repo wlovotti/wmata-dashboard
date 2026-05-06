@@ -711,6 +711,10 @@ def get_run_deviations(db: Session, run_id: int) -> dict | None:
         "vehicle_id": run.vehicle_id,
         "trip_headsign": trip.trip_headsign if trip else None,
         "stops_scheduled": run.stops_scheduled,
+        # stops_observable is the per-source structural ceiling — see
+        # `Run.stops_observable` doc. Surfaced alongside stops_scheduled so
+        # UI completeness checks can avoid the trip_update 1-stop bias.
+        "stops_observable": run.stops_observable,
         "stops_observed": run.stops_observed,
         "first_obs_ts": _utc_naive_to_eastern_iso(run.first_obs_ts),
         "last_obs_ts": _utc_naive_to_eastern_iso(run.last_obs_ts),
@@ -819,6 +823,7 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
                 "start_time": _utc_naive_to_eastern_hhmm(r.first_obs_ts),
                 "end_time": _utc_naive_to_eastern_hhmm(r.last_obs_ts),
                 "stops_scheduled": r.stops_scheduled,
+                "stops_observable": r.stops_observable,
                 "stops_observed": r.stops_observed,
                 "dev_p50_sec": r.dev_p50_sec,
                 "dev_p95_sec": r.dev_p95_sec,

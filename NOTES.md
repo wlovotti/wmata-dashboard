@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (PRs adding NOTES-30 and NOTES-31 — service_delivered short-route bug + trip_update origin-miss bias).
+Last edited 2026-05-06 (PR closing NOTES-31 — `stops_observable` column + per-source denominator; new NOTES-32 tracking stop_skip denominator follow-up).
 
 ---
 
@@ -60,14 +60,12 @@ sequencing still matters.
   structurally unreachable on a route whose GTFS trips have ≤3 stops.
   Currently only A90 is affected, but any future short express hits the
   same bug.
-- **NOTES-31 trip_update source structurally never observes origin.**
-  GTFS-RT TripUpdates only publish refining predictions for *upcoming*
-  stops; by the time a trip first appears in the stream, the origin has
-  already been passed and never gets a finalized arrival_ts. On
-  2026-05-05, 12,435/12,435 trip_update runs missed the origin (gap=0
-  literally never occurs); the median gap is exactly 1. Persist a
-  per-source `stops_observable` so completeness filters, including the
-  `service_delivered` numerator, compare against an honest denominator.
+- **NOTES-32 stop_skip denominator should be `stops_observable`.** The
+  TU rate uses `SUM(stops_scheduled)` as denominator; since TU can never
+  observe (or SKIP) the origin, this overcounts the denominator by ~1
+  per run and biases skip rate down. Now that `stops_observable` lands
+  on every Run row (via the NOTES-31 closing PR), `compute_stop_skip_rate`
+  should switch to `SUM(stops_observable)` for ratio-honest accounting.
 
 ---
 
@@ -260,95 +258,38 @@ semantics elsewhere, and `ceil(n/3)` is a defensible heuristic.
 - Independent of every other open NOTES item.
 - Blast radius is limited to `service_delivered`. OTP / EWT / bunching
   do not use `stops_observed >= 3`.
-- Pairs naturally with NOTES-31: if `stops_observable` lands first, the
-  threshold here can be expressed against it (e.g.
-  `stops_observed >= max(2, stops_observable // 3)`) instead of a flat
-  constant.
+- `stops_observable` is now persisted on every Run row (NOTES-31 closing
+  PR — see git log for `feat(runs): per-source stops_observable`). The
+  threshold here can be expressed against it (e.g. `stops_observed >=
+  max(2, stops_observable // 3)`) without further schema work.
 
 ---
 
-## NOTES-31. trip_update source structurally never observes origin
+## NOTES-32. `compute_stop_skip_rate` denominator should use `stops_observable`
 
-**Severity: medium — 1-stop bias on every trip_update run, propagates
-into completeness filters and any UI surfacing observed/scheduled.**
+**Severity: low — biases skip rate downward by ~1/N per run.**
 
-`runs.stops_observed` runs ~1 short of `stops_scheduled` on every single
-trip_update row. The cause is feed semantics, not a derivation bug.
+`src/stop_skip.py` computes the denominator as `SUM(stops_scheduled)`
+across qualifying TU runs. Since TripUpdates structurally cannot publish
+the origin's StopTimeUpdate (NOTES-31 closing PR), the origin can never
+appear with `schedule_relationship = 'SKIPPED'` either — so it's
+mathematically guaranteed to be a non-skipped contribution to the
+denominator. Including it inflates the denominator by exactly 1 per
+qualifying TU run and pulls the rate down by a fixed factor.
 
-### Evidence (2026-05-05, all routes)
+### Fix
 
-| Source | Runs | Coverage | gap=0 | gap=1 | gap≥2 |
-|---|---|---|---|---|---|
-| trip_update | 12,435 | 94.9% | **0** | 11,266 | 1,169 |
-| proximity   | 12,346 | 46.5% | 4 | 96 | 12,246 |
+Switch the SUM to `Run.stops_observable` in `compute_stop_skip_rate`.
+The `stops_observable` field now lands on every Run row (see git log for
+the NOTES-31 closing PR). No schema change. Update the result key /
+docstring to reflect the change in denominator semantics.
 
-Of the 12,435 trip_update runs, **12,271 (98.7%)** have the exact pattern
-`first_obs_seq > sched_first_seq AND last_obs_seq = sched_last_seq` —
-destination observed, origin missed, no inner gaps. **Zero** runs have
-both endpoints observed. The bias is invariant to route length: gap-1
-share is 100% in the <5-stop bucket, 98.5% in 30-49, 90.0% in 50+.
-
-### Why TripUpdate cannot see the origin
-
-`pipelines/derive_stop_events_trip_updates.py` records, for each
-(trip, stop_sequence) pair, the LAST `predicted_arrival_ts` published by
-the feed before the row drops out — that's the system's final estimate
-of actual arrival. The origin's row never appears in any snapshot we see:
-TripUpdates publishes only *upcoming* stops, and a trip doesn't enter the
-TU stream until the bus is en route. The origin has already been passed
-by the time we receive snapshot #1 for the trip.
-
-This is GTFS-RT spec behavior, not WMATA-specific, and not recoverable
-from the feed alone.
-
-### What we *could* do for origin times (outside this NOTES item)
-
-| Approach | What it gives us | Cost |
-|---|---|---|
-| VehiclePosition match near origin coordinates | Approximate origin departure — proximity already does it when it sees the trip near the stop, 100% origin coverage among observed | proximity overall coverage is only 46.5%; usually we miss the bus during the 60s polling window |
-| First-appearance-in-TU timestamp as proxy | A bound: "origin departed before HH:MM:SS" | Not an arrival time; semantically different signal |
-| Cross-reference VP first observation for the trip | Earliest known position; ≥ origin-departure | Approximation, not finalized arrival |
-
-None of these is the same data point as the recorded `observed_arrival_ts`
-elsewhere in `stop_events`. Reasonable to defer all of them and treat the
-1-stop loss as structural.
-
-### Proposed fix: per-source `stops_observable`
-
-Add `stops_observable` to `Run` (or compute in `aggregate_runs.py` as a
-derived field, then persist):
-
-```
-stops_observable = stops_scheduled - 1          # source = 'trip_update'
-stops_observable = stops_scheduled              # source = 'proximity'
-```
-
-Then every consumer of `stops_observed / stops_scheduled` switches to
-`stops_observed / stops_observable`, and "is this run complete?" becomes
-`stops_observed >= stops_observable` (or a fraction of it). This:
-
-- Makes a missing-origin TU run register as complete instead of perpetually
-  one short.
-- Makes inner-gap miss observations actually visible (right now they hide
-  behind the constant origin miss).
-- Keeps proximity semantics unchanged — proximity *does* see the origin
-  when it sees the trip at all, so its denominator stays at
-  `stops_scheduled`.
-
-### Implementation
-
-1. Add `stops_observable` column to `runs` (Alembic-style or rebuild script;
-   default expression at write time in `aggregate_run_rows`).
-2. Backfill via re-aggregation or `UPDATE runs SET stops_observable =
-   stops_scheduled - CASE WHEN source='trip_update' THEN 1 ELSE 0 END`.
-3. Adjust `compute_service_delivered` (NOTES-30) and any other
-   completeness filter to use `stops_observable`.
-4. Surface `stops_observable` in the API where `stops_scheduled` currently
-   appears for run-level UI fields.
+The per-stop breakdown (`compute_per_stop_skip_rate`) reads `stop_events`
+directly and is unaffected — it already grouped by `(direction_id,
+stop_id)` and never summed `stops_scheduled`.
 
 ### Dependencies
 
-- Pairs with NOTES-30. Doing NOTES-31 first lets NOTES-30 reuse
-  `stops_observable` instead of inventing a separate fix.
-- Independent of the metrics-redesign Phase E sequence (UI-side).
+- Independent of every other open NOTES item.
+- Blast radius is one function and its smoke tests in `tests/test_stop_skip.py`.
 

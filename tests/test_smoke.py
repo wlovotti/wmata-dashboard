@@ -820,6 +820,9 @@ def test_aggregate_run_rows_basic_observed_run():
     assert r["stops_observed"] == 3
     assert r["stops_skipped"] == 0
     assert r["stops_scheduled"] == 5
+    # source = trip_update (the _se default) → observable = scheduled - 1
+    # because the GTFS-RT TU feed never publishes the origin stop's row.
+    assert r["stops_observable"] == 4
     assert r["sched_first_seq"] == 1
     assert r["sched_last_seq"] == 5
     assert r["first_obs_seq"] == 1
@@ -864,6 +867,76 @@ def test_aggregate_run_rows_splits_by_source():
     sources = sorted(r["source"] for r in rows)
     assert sources == ["proximity", "trip_update"]
     assert all(r["stops_observed"] == 1 for r in rows)
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_stops_observable_per_source():
+    """stops_observable = scheduled-1 for trip_update, scheduled for proximity."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(
+            stop_sequence=2,
+            source="trip_update",
+            observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+        ),
+        _se(
+            stop_sequence=2,
+            source="proximity",
+            observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 5),
+        ),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_index={"TRIP_A": {"count": 10, "first_seq": 1, "last_seq": 10}},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    by_source = {r["source"]: r for r in rows}
+    assert by_source["trip_update"]["stops_scheduled"] == 10
+    assert by_source["trip_update"]["stops_observable"] == 9  # origin unobservable
+    assert by_source["proximity"]["stops_scheduled"] == 10
+    assert by_source["proximity"]["stops_observable"] == 10  # full schedule observable
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_stops_observable_null_when_no_sched_match():
+    """A trip missing from sched_index gets stops_observable = None alongside stops_scheduled = None."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(stop_sequence=2, observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0)),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_index={},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    assert rows[0]["stops_scheduled"] is None
+    assert rows[0]["stops_observable"] is None
+
+
+@pytest.mark.smoke
+def test_aggregate_run_rows_stops_observable_floors_at_zero_for_one_stop_tu():
+    """Single-stop TU trip → stops_observable clamps to 0, never negative."""
+    from pipelines.aggregate_runs import aggregate_run_rows
+
+    events = [
+        _se(
+            stop_sequence=1,
+            source="trip_update",
+            observed_arrival_ts=datetime(2026, 5, 3, 14, 0, 0),
+        ),
+    ]
+    rows = aggregate_run_rows(
+        events,
+        sched_index={"TRIP_A": {"count": 1, "first_seq": 1, "last_seq": 1}},
+        service_date_str="2026-05-03",
+        derived_at=datetime(2026, 5, 3, 20, 0, 0),
+    )
+    assert rows[0]["stops_scheduled"] == 1
+    assert rows[0]["stops_observable"] == 0
 
 
 @pytest.mark.smoke
@@ -1781,6 +1854,7 @@ def _seed_run_with_stop_events(db_session, *, with_partial_events=True):
         source="trip_update",
         vehicle_id="V_DEV_1",
         stops_scheduled=4,
+        stops_observable=3,
         sched_first_seq=1,
         sched_last_seq=4,
         stops_observed=3 if with_partial_events else 0,
@@ -1813,6 +1887,7 @@ def test_run_deviations_endpoint_shape_and_ordering(client, db_session):
     assert body["trip_id"] == "DEV_TRIP_1"
     assert body["trip_headsign"] == "Test Headsign"
     assert body["stops_scheduled"] == 4
+    assert body["stops_observable"] == 3
     assert body["stops_observed"] == 3
 
     deviations = body["deviations"]
@@ -1861,6 +1936,7 @@ def test_route_recent_runs_endpoint_returns_most_recent(client, db_session):
     assert row["trip_id"] == "DEV_TRIP_1"
     assert row["headsign"] == "Test Headsign"
     assert row["stops_scheduled"] == 4
+    assert row["stops_observable"] == 3
     assert row["stops_observed"] == 3
     # Eastern-formatted HH:MM (storage is naive UTC; conversion is applied).
     assert row["start_time"] is not None
