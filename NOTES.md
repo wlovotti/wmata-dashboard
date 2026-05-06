@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-05 (PR closing NOTES-5 — per-run deviation chart).
+Last edited 2026-05-05 (PR closing NOTES-28 — scheduled batch via launchd).
 
 ---
 
@@ -62,13 +62,6 @@ sequencing still matters.
   Small one-off: `ruff check tests/ --fix` clears the existing
   violations, then add `tests/` to both lint args in
   `.github/workflows/test.yml` and the CLAUDE.md command.
-- **NOTES-28 Replace daily metrics batch with lazy/live derivation.**
-  The redesign pipelines (`derive_stop_events*.py`, `aggregate_runs.py`,
-  `compute_bunching.py`) have no orchestrator — NOTES-26 was a direct
-  consequence. Before scheduling them, test cheaper alternatives:
-  live PostGIS query for service-delivered, or lazy derivation on API
-  cache miss. Falls back to scheduled batch if both fail at scorecard
-  scale.
 
 ---
 
@@ -175,6 +168,11 @@ operational changes (added trips, suspended routes) land in
 TripUpdates / VehiclePositions, not static GTFS — so daily buys
 nothing.
 
+The established pattern in this repo for local scheduled jobs is
+launchd (see `scripts/launchd/com.wmata-dashboard.daily-batch.plist`,
+landed for NOTES-28). Reusing that for the GTFS reload keeps the
+"one place to look for scheduled work" property.
+
 The failure mode to alert on is the script raising and rolling
 back. The DB stays consistent (the transactional contract from
 PR #48 guarantees that), but the schedule slowly goes stale, and
@@ -228,74 +226,4 @@ imports), all auto-fixable.
 ### Dependencies
 
 - Independent of every other open NOTES item.
-
----
-
-## NOTES-28. Replace daily metrics batch with lazy/live derivation
-
-**Severity: medium — architectural. Closes the class of bug NOTES-26
-exposed.**
-
-### Background
-
-The metrics-redesign pipelines (`pipelines/derive_stop_events.py`,
-`pipelines/derive_stop_events_trip_updates.py`,
-`pipelines/aggregate_runs.py`, `pipelines/compute_bunching.py`) are
-manual CLIs with no orchestrator. NOTES-26 was a direct consequence —
-only 6 routes had been aggregated for 2026-05-03, and the headline
-service-delivered metric showed 0% for the rest. Without a structural
-fix this recurs on every new service date.
-
-The reflexive answer is "schedule them" — daily cron / GitHub Action
-running all four pipelines for yesterday's service date. That works
-but is cumbersome, and the live data is right there. Worth
-investigating cheaper alternatives first.
-
-### Options
-
-1. **Live PostGIS query for service-delivered.** Service-delivered for
-   one (route, date) reduces to: count distinct `trip_id`s in
-   `vehicle_positions` where the position lands within 50 m of ≥3 of
-   the trip's scheduled stops. With a GiST index on `stops.geom` and
-   the existing `(trip_id, timestamp)` index on positions this should
-   be sub-second per route. No `stop_events` / `runs` needed for this
-   metric specifically. Failure mode: the all-routes scorecard
-   (~104 routes) may still need pre-aggregation.
-
-2. **Lazy derivation on API cache miss.** Endpoint asks for
-   `runs[route, date]`; if rows exist, use them; if not, run
-   `derive_stop_events*` + `aggregate_runs` inline for that single
-   (route, date) and persist the rows. First request after midnight
-   pays the cost; subsequent reads are free. No cron, no orchestrator
-   — the `runs` table is the cache.
-
-3. **Streaming derivation in the collector.** First-detection-within-50 m
-   is incremental-friendly: each 60 s tick, derive stop_events for
-   newly-arrived positions. Eliminates batch entirely. Larger
-   structural change in the hot collection path; deferred unless 1
-   and 2 both fail.
-
-4. **Postgres materialized view + cron REFRESH.** Strictly simpler
-   than the Python pipeline but still batch — solves "cumbersome to
-   run" only trivially. Skip.
-
-### What to test first
-
-Time `derive_stop_events.py --route C21 --date today` and
-`derive_stop_events_trip_updates.py --route C21 --date today`
-end-to-end. `aggregate_runs.py` is already known to be 0.05–0.2 s per
-route. If the two derivation steps add up to under ~2 s for one route,
-option 2 (lazy on cache miss) is realistic. If under ~500 ms, option 1
-becomes attractive for the all-routes scorecard too.
-
-### Dependencies
-
-- Resolves the operational hazard that produced NOTES-26.
-- Independent of NOTES-23 (GTFS reload scheduling) — different
-  staleness domains.
-- The per-run deviation endpoints (PR #59) read both `runs` (for the row
-  list and run summary) and `stop_events` directly (for the per-stop
-  deviation chart). Lazy/live derivation will need to cover both —
-  populating `runs` alone leaves the chart blank unless `stop_events`
-  are present too.
 
