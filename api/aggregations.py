@@ -28,7 +28,17 @@ from src.ewt import (
     compute_ewt_headline_for_routes,
     fetch_scheduled_cell_hours_for_routes,
 )
-from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, RouteServiceProfile, StopEvent
+from src.models import (
+    Route,
+    RouteMetricsDaily,
+    RouteMetricsSummary,
+    RouteServiceProfile,
+    Run,
+    Stop,
+    StopEvent,
+    StopTime,
+    Trip,
+)
 from src.otp_metrics import compute_otp_split, compute_otp_split_for_routes
 from src.service_delivered import (
     compute_service_delivered,
@@ -586,4 +596,235 @@ def get_route_time_period_summary(db: Session, route_id: str, days: int = 7) -> 
         "days": days,
         "periods": result.get("periods", {}),
         "thresholds": result.get("thresholds", {}),
+    }
+
+
+def _utc_naive_to_eastern_iso(value):
+    """Convert a naive-UTC datetime to an ISO8601 string in Eastern local time.
+
+    Reads as a naive UTC value (the storage convention from `src/timezones.py`),
+    reinterprets to the America/New_York zone, then drops the tzinfo so the
+    serialized string is "YYYY-MM-DDTHH:MM:SS" in Eastern. Returns None if
+    `value` is None.
+    """
+    if value is None:
+        return None
+    from src.timezones import EASTERN, UTC
+
+    aware_utc = value.replace(tzinfo=UTC)
+    eastern = aware_utc.astimezone(EASTERN).replace(tzinfo=None)
+    return eastern.isoformat()
+
+
+def _utc_naive_to_eastern_hhmm(value):
+    """Convert a naive-UTC datetime to a HH:MM string in Eastern local time.
+
+    Used for the recent-runs row summaries where seconds are noise. Returns
+    None if `value` is None.
+    """
+    if value is None:
+        return None
+    from src.timezones import EASTERN, UTC
+
+    aware_utc = value.replace(tzinfo=UTC)
+    return aware_utc.astimezone(EASTERN).strftime("%H:%M")
+
+
+def get_run_deviations(db: Session, run_id: int) -> dict | None:
+    """Return one run's per-stop schedule deviations, joined with stop names.
+
+    The list is one row per scheduled stop on the run's trip, ordered by
+    stop_sequence. Actual / deviation are populated where a `stop_events` row
+    exists for (service_date, trip_id, stop_sequence) on the run's source;
+    otherwise they're null so the chart can render gaps cleanly.
+
+    Reads from `stop_events` directly — this is a per-row read, not a metric
+    computation, so the pre-aggregation rule in CLAUDE.md doesn't apply.
+
+    Returns None if the run_id is not found.
+    """
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if run is None:
+        return None
+
+    # Pull the trip's scheduled stops from current GTFS as the spine. Trip
+    # is direction-anchored to the run, so joining stops by stop_id is safe
+    # (the stop_id-not-direction-unique gotcha doesn't bite here).
+    sched_rows = (
+        db.query(
+            StopTime.stop_sequence,
+            StopTime.stop_id,
+            Stop.stop_name,
+            StopTime.arrival_time,
+        )
+        .join(Stop, (Stop.stop_id == StopTime.stop_id) & Stop.is_current)
+        .filter(StopTime.trip_id == run.trip_id, StopTime.is_current)
+        .order_by(StopTime.stop_sequence)
+        .all()
+    )
+
+    # Pull the run's observed stop_events keyed by stop_sequence. Filter by
+    # source so we don't blend trip_update and proximity rows for the same
+    # (run, stop) — Run rows are per-source, so the right source is the run's.
+    event_rows = (
+        db.query(StopEvent)
+        .filter(
+            StopEvent.service_date == run.service_date,
+            StopEvent.trip_id == run.trip_id,
+            StopEvent.source == run.source,
+        )
+        .all()
+    )
+    events_by_seq = {e.stop_sequence: e for e in event_rows}
+
+    # Headsign for the header — pulled live from current GTFS Trip.
+    trip = db.query(Trip).filter(Trip.trip_id == run.trip_id, Trip.is_current).first()
+
+    deviations = []
+    for stop_sequence, stop_id, stop_name, _arrival_time in sched_rows:
+        event = events_by_seq.get(stop_sequence)
+        scheduled_iso = (
+            _utc_naive_to_eastern_iso(event.scheduled_arrival_ts) if event is not None else None
+        )
+        actual_iso = (
+            _utc_naive_to_eastern_iso(event.observed_arrival_ts) if event is not None else None
+        )
+        deviation_sec = event.deviation_sec if event is not None else None
+        deviations.append(
+            {
+                "stop_sequence": stop_sequence,
+                "stop_id": stop_id,
+                "stop_name": stop_name,
+                "scheduled": scheduled_iso,
+                "actual": actual_iso,
+                "deviation_sec": deviation_sec,
+            }
+        )
+
+    return {
+        "run_id": run.id,
+        "service_date": run.service_date,
+        "trip_id": run.trip_id,
+        "route_id": run.route_id,
+        "direction_id": run.direction_id,
+        "source": run.source,
+        "vehicle_id": run.vehicle_id,
+        "trip_headsign": trip.trip_headsign if trip else None,
+        "stops_scheduled": run.stops_scheduled,
+        "stops_observed": run.stops_observed,
+        "first_obs_ts": _utc_naive_to_eastern_iso(run.first_obs_ts),
+        "last_obs_ts": _utc_naive_to_eastern_iso(run.last_obs_ts),
+        "dev_p50_sec": run.dev_p50_sec,
+        "dev_p95_sec": run.dev_p95_sec,
+        "deviations": deviations,
+    }
+
+
+def _route_recent_runs_service_date(db: Session, route_id: str):
+    """Pick the service_date for the recent-runs list.
+
+    Today's runs if any exist (early-day or just-aggregated case), otherwise
+    the latest service_date that has runs for the route. Returns None when
+    the route has no aggregated runs at all.
+    """
+    from src.timezones import eastern_today
+
+    today_iso = eastern_today().isoformat()
+    today_count = (
+        db.query(func.count(Run.id))
+        .filter(Run.route_id == route_id, Run.service_date == today_iso)
+        .scalar()
+    )
+    if today_count and today_count > 0:
+        return today_iso
+
+    latest = db.query(func.max(Run.service_date)).filter(Run.route_id == route_id).scalar()
+    return latest
+
+
+def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
+    """Return up to `limit` recent runs for a route on its latest run-bearing date.
+
+    "Latest run-bearing date" is today if there are runs for today, else the
+    most recent service_date with any runs for the route — so the list is
+    populated from page-load on a fresh service day even when today's
+    aggregation hasn't run yet. Each row carries the per-trip headsign (joined
+    from current GTFS) and the run-summary fields stored on the `runs` table.
+
+    Returns `{"error": ...}` if the route is not found.
+    """
+    route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
+    if not route:
+        return {"error": f"Route {route_id} not found"}
+
+    service_date = _route_recent_runs_service_date(db, route_id)
+    if service_date is None:
+        return {
+            "route_id": route_id,
+            "service_date": None,
+            "runs": [],
+        }
+
+    # When both proximity and trip_update runs exist for the same (date, trip),
+    # collapse to one row per trip — the user wants "trips run today", not
+    # "source-rows derived". Prefer trip_update because its destination
+    # observation rate is materially higher (see Run docstring "Source
+    # asymmetry") which means run summaries are more complete.
+    rows = (
+        db.query(Run)
+        .filter(Run.route_id == route_id, Run.service_date == service_date)
+        .order_by(Run.first_obs_ts.desc().nullslast(), Run.id.desc())
+        .all()
+    )
+
+    by_trip: dict[str, Run] = {}
+    for r in rows:
+        existing = by_trip.get(r.trip_id)
+        if existing is None:
+            by_trip[r.trip_id] = r
+            continue
+        # Keep the trip_update one if both sources have a row.
+        if r.source == "trip_update" and existing.source != "trip_update":
+            by_trip[r.trip_id] = r
+
+    chosen_runs = list(by_trip.values())
+    chosen_runs.sort(
+        key=lambda r: (r.first_obs_ts is None, r.first_obs_ts),
+        reverse=True,
+    )
+    chosen_runs = chosen_runs[:limit]
+
+    # Batch-fetch headsigns for the relevant trips.
+    trip_ids = [r.trip_id for r in chosen_runs]
+    headsigns: dict[str, str] = {}
+    if trip_ids:
+        for trip in (
+            db.query(Trip.trip_id, Trip.trip_headsign)
+            .filter(Trip.trip_id.in_(trip_ids), Trip.is_current)
+            .all()
+        ):
+            headsigns[trip.trip_id] = trip.trip_headsign
+
+    return {
+        "route_id": route_id,
+        "service_date": service_date,
+        "runs": [
+            {
+                "run_id": r.id,
+                "trip_id": r.trip_id,
+                "direction_id": r.direction_id,
+                "source": r.source,
+                "vehicle_id": r.vehicle_id,
+                "headsign": headsigns.get(r.trip_id),
+                "start_time": _utc_naive_to_eastern_hhmm(r.first_obs_ts),
+                "end_time": _utc_naive_to_eastern_hhmm(r.last_obs_ts),
+                "stops_scheduled": r.stops_scheduled,
+                "stops_observed": r.stops_observed,
+                "dev_p50_sec": r.dev_p50_sec,
+                "dev_p95_sec": r.dev_p95_sec,
+                "origin_dev_sec": r.origin_dev_sec,
+                "destination_dev_sec": r.destination_dev_sec,
+            }
+            for r in chosen_runs
+        ],
     }

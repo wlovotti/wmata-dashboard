@@ -1678,3 +1678,178 @@ def test_apply_gtfs_to_db_rolls_back_on_failure(db_session):
     # Baseline is intact: no extra snapshot, prior current-route still current.
     assert db_session.query(GTFSSnapshot).count() == baseline_snapshots
     assert db_session.query(Route).filter(Route.is_current).count() == baseline_current_routes
+
+
+def _seed_run_with_stop_events(db_session, *, with_partial_events=True):
+    """Seed a route, trip, 4 stops, scheduled stop_times, a Run, and 3/4 stop_events.
+
+    Returns (run_id, route_id) for the seeded run. Used by the per-run and
+    recent-runs smoke tests; the fourth stop is intentionally left without a
+    stop_event so the chart-rendering "gap" path is covered.
+    """
+    from src.models import Route, Run, Stop, StopEvent, StopTime, Trip
+
+    route = Route(
+        route_id="DEV1",
+        route_short_name="DEV1",
+        route_long_name="Deviation Test Route",
+        route_type=3,
+        is_current=True,
+    )
+    db_session.add(route)
+
+    trip = Trip(
+        trip_id="DEV_TRIP_1",
+        route_id="DEV1",
+        service_id="WEEKDAY",
+        direction_id=0,
+        trip_headsign="Test Headsign",
+        is_current=True,
+    )
+    db_session.add(trip)
+
+    stops = [
+        Stop(stop_id=f"DEV_STOP_{i}", stop_name=f"Stop {i}", stop_lat=38.9, stop_lon=-77.0, is_current=True)
+        for i in range(1, 5)
+    ]
+    db_session.add_all(stops)
+
+    stop_times = [
+        StopTime(
+            trip_id="DEV_TRIP_1",
+            stop_id=f"DEV_STOP_{i}",
+            arrival_time=f"14:{i:02d}:00",
+            departure_time=f"14:{i:02d}:30",
+            stop_sequence=i,
+            is_current=True,
+        )
+        for i in range(1, 5)
+    ]
+    db_session.add_all(stop_times)
+
+    db_session.commit()
+
+    sd = "2025-10-20"
+    if with_partial_events:
+        # Three of four stops observed; one (sequence=3) intentionally missing.
+        observations = [
+            (1, datetime(2025, 10, 20, 18, 1, 30), 90),  # 1:30 late
+            (2, datetime(2025, 10, 20, 18, 2, 0), 60),  # 1:00 late
+            (4, datetime(2025, 10, 20, 18, 4, 45), 165),  # 2:45 late
+        ]
+        for seq, observed, dev in observations:
+            db_session.add(
+                StopEvent(
+                    service_date=sd,
+                    trip_id="DEV_TRIP_1",
+                    route_id="DEV1",
+                    direction_id=0,
+                    stop_id=f"DEV_STOP_{seq}",
+                    stop_sequence=seq,
+                    source="trip_update",
+                    schedule_relationship="SCHEDULED",
+                    scheduled_arrival_ts=datetime(2025, 10, 20, 18, seq, 0),
+                    observed_arrival_ts=observed,
+                    deviation_sec=dev,
+                )
+            )
+
+    run = Run(
+        service_date=sd,
+        trip_id="DEV_TRIP_1",
+        route_id="DEV1",
+        direction_id=0,
+        source="trip_update",
+        vehicle_id="V_DEV_1",
+        stops_scheduled=4,
+        sched_first_seq=1,
+        sched_last_seq=4,
+        stops_observed=3 if with_partial_events else 0,
+        stops_skipped=0,
+        first_obs_seq=1 if with_partial_events else None,
+        last_obs_seq=4 if with_partial_events else None,
+        first_obs_ts=datetime(2025, 10, 20, 18, 1, 30) if with_partial_events else None,
+        last_obs_ts=datetime(2025, 10, 20, 18, 4, 45) if with_partial_events else None,
+        dev_p50_sec=90,
+        dev_p95_sec=165,
+        origin_dev_sec=None,
+        destination_dev_sec=165,
+    )
+    db_session.add(run)
+    db_session.commit()
+    return run.id, "DEV1"
+
+
+@pytest.mark.smoke
+def test_run_deviations_endpoint_shape_and_ordering(client, db_session):
+    """GET /api/runs/{run_id}/deviations returns one row per scheduled stop, ordered."""
+    run_id, _ = _seed_run_with_stop_events(db_session)
+
+    response = client.get(f"/api/runs/{run_id}/deviations")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["run_id"] == run_id
+    assert body["route_id"] == "DEV1"
+    assert body["trip_id"] == "DEV_TRIP_1"
+    assert body["trip_headsign"] == "Test Headsign"
+    assert body["stops_scheduled"] == 4
+    assert body["stops_observed"] == 3
+
+    deviations = body["deviations"]
+    assert len(deviations) == 4
+    assert [d["stop_sequence"] for d in deviations] == [1, 2, 3, 4]
+    assert [d["stop_name"] for d in deviations] == [f"Stop {i}" for i in range(1, 5)]
+
+    # Stops 1, 2, 4 have stop_events.
+    assert deviations[0]["deviation_sec"] == 90
+    assert deviations[0]["actual"] is not None
+    assert deviations[0]["scheduled"] is not None
+    # Stop 3 has no stop_event — actual/deviation must be null so the chart
+    # renders a gap rather than collapsing the line.
+    assert deviations[2]["deviation_sec"] is None
+    assert deviations[2]["actual"] is None
+    assert deviations[2]["scheduled"] is None
+
+    # Last stop carries the worst deviation.
+    assert deviations[3]["deviation_sec"] == 165
+
+
+@pytest.mark.smoke
+def test_run_deviations_endpoint_404_for_unknown_run(client):
+    """Unknown run_id returns 404, not a 500."""
+    response = client.get("/api/runs/999999/deviations")
+    assert response.status_code == 404
+
+
+@pytest.mark.smoke
+def test_route_recent_runs_endpoint_returns_most_recent(client, db_session):
+    """GET /api/routes/{route_id}/recent-runs returns the seeded run on the fallback date."""
+    run_id, route_id = _seed_run_with_stop_events(db_session)
+
+    response = client.get(f"/api/routes/{route_id}/recent-runs")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["route_id"] == route_id
+    # No runs for "today" (Eastern) in this fixture, so the fallback fires.
+    assert body["service_date"] == "2025-10-20"
+
+    runs = body["runs"]
+    assert len(runs) == 1
+    row = runs[0]
+    assert row["run_id"] == run_id
+    assert row["trip_id"] == "DEV_TRIP_1"
+    assert row["headsign"] == "Test Headsign"
+    assert row["stops_scheduled"] == 4
+    assert row["stops_observed"] == 3
+    # Eastern-formatted HH:MM (storage is naive UTC; conversion is applied).
+    assert row["start_time"] is not None
+    assert row["end_time"] is not None
+
+
+@pytest.mark.smoke
+def test_route_recent_runs_endpoint_404_for_unknown_route(client):
+    """Unknown route returns 404."""
+    response = client.get("/api/routes/NOPE/recent-runs")
+    assert response.status_code == 404

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import RouteMap from './RouteMap'
 import PeriodDrilldown from './PeriodDrilldown'
+import RecentRuns from './RecentRuns'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 
 function RouteDetail() {
@@ -171,6 +172,8 @@ function RouteDetail() {
       </div>
 
       {hasMetrics && <PeriodDrilldown routeId={routeId} />}
+
+      <RecentRuns routeId={routeId} />
 
       <div className="chart-container">
         <h2>Route Map</h2>

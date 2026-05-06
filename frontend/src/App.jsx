@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { useState } from 'react'
 import RouteList from './components/RouteList'
 import RouteDetail from './components/RouteDetail'
+import RunDetail from './components/RunDetail'
 import './App.css'
 
 function App() {
@@ -40,6 +41,7 @@ function App() {
         <Routes>
           <Route path="/" element={<RouteList />} />
           <Route path="/route/:routeId" element={<RouteDetail />} />
+          <Route path="/runs/:runId" element={<RunDetail />} />
         </Routes>
       </div>
     </Router>

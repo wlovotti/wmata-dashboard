@@ -653,6 +653,40 @@ main {
   }
 }
 
+.recent-runs-table-wrapper {
+  overflow-x: auto;
+}
+
+.recent-runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.recent-runs-table th,
+.recent-runs-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.recent-runs-table th {
+  color: #64748b;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.recent-runs-row {
+  cursor: pointer;
+  transition: background-color 0.1s ease-in-out;
+}
+
+.recent-runs-row:hover {
+  background-color: #f1f5f9;
+}
+
 @media (max-width: 768px) {
   .header-content {
     flex-direction: column;
