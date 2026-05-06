@@ -432,9 +432,14 @@ class TripUpdateSnapshot(Base):
     # Indexes target the two main access patterns:
     #   - per-pair time series: WHERE trip_id=? AND stop_id=? ORDER BY snapshot_ts
     #   - route-level slices over a time window
+    #   - per-trip snapshots over a time window: the lazy-derivation pipeline
+    #     filters by `trip_id IN (...)` + `snapshot_ts BETWEEN x AND y` (no
+    #     stop_id), and `idx_tu_trip_stop_snap` doesn't help because stop_id
+    #     sits between the two filtered columns.
     __table_args__ = (
         Index("idx_tu_trip_stop_snap", "trip_id", "stop_id", "snapshot_ts"),
         Index("idx_tu_route_snap", "route_id", "snapshot_ts"),
+        Index("idx_tu_trip_snap", "trip_id", "snapshot_ts"),
     )
 
 
