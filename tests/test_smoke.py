@@ -1407,8 +1407,12 @@ def test_compute_service_delivered_filters_ghost_runs_below_floor(db_session):
             _gtfs_trip("T2"),
             _gtfs_trip("T3"),
             # Short-route (3-stop) trips: threshold = max(2, 3//3) = 2
-            _run("T1", "proximity", 1, stops_scheduled=3, stops_observable=3),  # below floor — excluded
-            _run("T2", "proximity", 2, stops_scheduled=3, stops_observable=3),  # at floor — included
+            _run(
+                "T1", "proximity", 1, stops_scheduled=3, stops_observable=3
+            ),  # below floor — excluded
+            _run(
+                "T2", "proximity", 2, stops_scheduled=3, stops_observable=3
+            ),  # at floor — included
             _run("T3", "trip_update", 0, stops_scheduled=3, stops_observable=2),  # zero — excluded
         ]
     )
@@ -1445,7 +1449,9 @@ def test_compute_service_delivered_short_route_two_stops(db_session):
             _run("T1", "proximity", 2, stops_scheduled=2, stops_observable=2),  # delivered
             _run("T2", "proximity", 2, stops_scheduled=2, stops_observable=2),  # delivered
             _run("T3", "proximity", 1, stops_scheduled=2, stops_observable=2),  # 1 stop — excluded
-            _run("T4", "trip_update", 1, stops_scheduled=2, stops_observable=1),  # TU can't reach 2 — excluded
+            _run(
+                "T4", "trip_update", 1, stops_scheduled=2, stops_observable=1
+            ),  # TU can't reach 2 — excluded
         ]
     )
     db_session.commit()
@@ -1471,9 +1477,15 @@ def test_compute_service_delivered_long_route_proportional_threshold(db_session)
             _gtfs_trip("T3"),
             _gtfs_trip("T4"),
             # 30-stop route: proximity stops_observable=30 → threshold=10.
-            _run("T1", "proximity", 9, stops_scheduled=30, stops_observable=30),  # 9 < 10 — excluded
-            _run("T2", "proximity", 10, stops_scheduled=30, stops_observable=30),  # at threshold — included
-            _run("T3", "proximity", 25, stops_scheduled=30, stops_observable=30),  # well above — included
+            _run(
+                "T1", "proximity", 9, stops_scheduled=30, stops_observable=30
+            ),  # 9 < 10 — excluded
+            _run(
+                "T2", "proximity", 10, stops_scheduled=30, stops_observable=30
+            ),  # at threshold — included
+            _run(
+                "T3", "proximity", 25, stops_scheduled=30, stops_observable=30
+            ),  # well above — included
             # TU stops_observable = 29, floor(29/3) = 9, max(2, 9) = 9 → threshold=9 for TU rows.
             _run("T4", "trip_update", 9, stops_scheduled=30, stops_observable=29),  # included
         ]
@@ -1905,7 +1917,13 @@ def _seed_run_with_stop_events(db_session, *, with_partial_events=True):
     db_session.add(trip)
 
     stops = [
-        Stop(stop_id=f"DEV_STOP_{i}", stop_name=f"Stop {i}", stop_lat=38.9, stop_lon=-77.0, is_current=True)
+        Stop(
+            stop_id=f"DEV_STOP_{i}",
+            stop_name=f"Stop {i}",
+            stop_lat=38.9,
+            stop_lon=-77.0,
+            is_current=True,
+        )
         for i in range(1, 5)
     ]
     db_session.add_all(stops)

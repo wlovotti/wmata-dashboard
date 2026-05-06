@@ -10,11 +10,9 @@ Tests all REST API endpoints with various scenarios:
 Run with: pytest -m api
 """
 
-from datetime import datetime
-
 import pytest
 
-from src.models import RouteMetricsDaily, Shape, Trip
+from src.models import Shape, Trip
 
 
 @pytest.mark.api

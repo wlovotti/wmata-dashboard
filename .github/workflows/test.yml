@@ -41,12 +41,12 @@ jobs:
 
     - name: Lint with ruff
       run: |
-        uv run ruff check src/ scripts/ api/ pipelines/
+        uv run ruff check src/ scripts/ api/ pipelines/ tests/
         echo "✓ Ruff linting passed"
 
     - name: Check code formatting
       run: |
-        uv run ruff format --check src/ scripts/ api/ pipelines/
+        uv run ruff format --check src/ scripts/ api/ pipelines/ tests/
         echo "✓ Code formatting check passed"
 
     - name: Test imports

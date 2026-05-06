@@ -33,7 +33,10 @@ class TestClassifyRouteFrequency:
 
     def test_limited_frequency(self):
         """P90 above 30 → limited."""
-        assert classify_route_frequency([20.0, 30.0, 35.0, 40.0, 45.0], "C43") == FREQUENCY_CLASS_LIMITED
+        assert (
+            classify_route_frequency([20.0, 30.0, 35.0, 40.0, 45.0], "C43")
+            == FREQUENCY_CLASS_LIMITED
+        )
 
     def test_p90_absorbs_single_hour_artifact(self):
         """A lone 700-min hour shouldn't drag a frequent route to limited.
