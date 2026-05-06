@@ -122,6 +122,20 @@ def aggregate_run_rows(
         sched = sched_index.get(trip_id, {})
         sched_first_seq = sched.get("first_seq")
         sched_last_seq = sched.get("last_seq")
+        stops_scheduled_count = sched.get("count")
+        # stops_observable: per-source count of stops the source can
+        # structurally see. trip_update can never see the origin (the GTFS-RT
+        # TU feed only publishes upcoming stops, so the origin row is gone
+        # by the first snapshot we receive — see Run docstring and NOTES-31
+        # closure PR). Proximity sees the origin when it sees the trip at
+        # all, so its observable count stays at stops_scheduled. Null when
+        # stops_scheduled is null (trip has no GTFS match).
+        if stops_scheduled_count is None:
+            stops_observable = None
+        elif source == "trip_update":
+            stops_observable = max(0, stops_scheduled_count - 1)
+        else:
+            stops_observable = stops_scheduled_count
         origin_dev_sec: int | None = None
         destination_dev_sec: int | None = None
         for e in group:
@@ -146,7 +160,8 @@ def aggregate_run_rows(
                 "direction_id": direction_id,
                 "source": source,
                 "vehicle_id": vehicle_id,
-                "stops_scheduled": sched.get("count"),
+                "stops_scheduled": stops_scheduled_count,
+                "stops_observable": stops_observable,
                 "sched_first_seq": sched_first_seq,
                 "sched_last_seq": sched_last_seq,
                 "sched_first_arrival_ts": sched_first,
@@ -233,6 +248,7 @@ def aggregate_runs_for_route_date(
                 "direction_id",
                 "vehicle_id",
                 "stops_scheduled",
+                "stops_observable",
                 "sched_first_seq",
                 "sched_last_seq",
                 "sched_first_arrival_ts",

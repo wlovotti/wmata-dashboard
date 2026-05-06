@@ -545,8 +545,9 @@ class Run(Base):
     No materialized `is_complete` flag — each downstream metric applies its
     own filter at query time. Useful per-row filters:
       - RUN_EXISTED: stops_observed >= 3
-      - RUN_DECENT_COVERAGE: stops_observed * 1.0 / stops_scheduled >= 0.7
+      - RUN_DECENT_COVERAGE: stops_observed * 1.0 / stops_observable >= 0.7
                              AND (max_gap_sec IS NULL OR max_gap_sec < 300)
+        (`stops_observable` rather than `stops_scheduled` — see column doc.)
 
     A literal "both endpoints observed in this row" filter is intentionally
     NOT defined — the data won't support it as a per-source predicate (see
@@ -609,6 +610,14 @@ class Run(Base):
 
     # Schedule context (snapshotted from the underlying stop_events)
     stops_scheduled = Column(Integer)  # count from current GTFS stop_times for this trip
+    # stops_observable is the count of stops the source can structurally see
+    # for this trip — equal to stops_scheduled for proximity, and
+    # stops_scheduled - 1 for trip_update (the GTFS-RT TripUpdates feed only
+    # publishes upcoming stops, so the origin row is never present in any
+    # snapshot we observe — see "Source asymmetry" below). Use this as the
+    # honest denominator for completeness checks; using stops_scheduled
+    # bakes in a guaranteed 1-stop miss on every TU run.
+    stops_observable = Column(Integer)
     sched_first_seq = Column(Integer)  # min(stop_sequence) in current GTFS for this trip
     sched_last_seq = Column(Integer)  # max(stop_sequence) in current GTFS for this trip
     sched_first_arrival_ts = Column(DateTime)

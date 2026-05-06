@@ -36,6 +36,14 @@ missing buses, not late ones.
     if they ran. The dropped set is route-concentrated as of 2026-05-03;
     re-run `scripts/probe_dropped_tu_trips.py` periodically against
     multi-day windows to see whether the bias shifts.
+
+The flat `stops_observed >= 3` threshold is structurally unreachable on
+short routes whose GTFS trips have ≤3 stops (NOTES-30, A90 the only
+currently-affected route). NOTES-31's `stops_observable` column is now
+populated on every run so a follow-up can replace the constant with a
+trip-length-aware filter such as `stops_observed >= max(2,
+stops_observable // 3)` without needing to change the column or the
+write path. Left as-is here to keep this PR's scope tight.
 """
 
 from __future__ import annotations
