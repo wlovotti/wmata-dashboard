@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wmata-dashboard.gtfs-reload</string>
+
+    <!--
+        Run scripts/run_gtfs_reload.py once a week, Sunday at 04:00
+        local time. WMATA revises GTFS roughly quarterly, so weekly
+        is plenty — the point is keeping the schedule fresh, not
+        catching minute-by-minute changes. Real-time operational
+        deltas (added trips, suspended routes) ride TripUpdates and
+        VehiclePositions, not static GTFS.
+
+        04:00 Sunday is deliberately offset from the daily-batch's
+        03:00 fire so the two jobs do not contend for DB / network /
+        WMATA API budget. launchd uses the system's local timezone
+        here — no UTC conversion needed.
+
+        Weekday: 0 means Sunday in launchd's calendar. (1 is Monday.)
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!--
+        RunAtLoad=false: don't fire on `launchctl load`. The reload
+        downloads the WMATA feed and rewrites versioned GTFS tables
+        in a transaction; an accidental fire-on-install would be
+        surprising. Validate end-to-end with `launchctl start
+        com.wmata-dashboard.gtfs-reload` after install.
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard</string>
+
+    <!--
+        Absolute path to uv is required because launchd jobs do not
+        inherit the shell PATH. `uv run` activates the project venv,
+        which means sys.executable inside run_gtfs_reload.py is the
+        venv Python — that's how the wrapper's subprocess call to
+        reload_gtfs_complete.py works under launchd.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>scripts/run_gtfs_reload.py</string>
+    </array>
+
+    <!--
+        launchd's stdout/stderr capture is the wrapper's outermost
+        safety net. The wrapper itself writes a structured per-run
+        log at logs/gtfs_reload_<YYYY-MM-DD>.log; these two files
+        catch any failure too early to reach that file (e.g., uv
+        not found, working directory missing).
+    -->
+    <key>StandardOutPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/launchd_gtfs_reload.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/launchd_gtfs_reload.err.log</string>
+</dict>
+</plist>

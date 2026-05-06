@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-05 (PR closing NOTES-21 — archive + retention for trip_update_snapshots).
+Last edited 2026-05-05 (PR closing NOTES-23 — weekly GTFS reload via launchd).
 
 ---
 
@@ -38,14 +38,6 @@ sequencing still matters.
 
 ### Independent of the redesign
 
-- **NOTES-23 Schedule the GTFS reload.** Now that
-  `reload_gtfs_complete.py` is transactional and FK-safe (PR #48),
-  put it on a daily/weekly cron / GitHub Action with alerting on
-  failure. Daily is overkill (WMATA revises GTFS roughly quarterly;
-  added trips and suspended routes ride TripUpdates /
-  VehiclePositions, not static GTFS), weekly probably right.
-  Operational risk is silent staleness — that's how this got 6
-  months stale before.
 - **NOTES-24 Surface GTFS snapshot freshness in the dashboard.**
   Show the newest `gtfs_snapshots.snapshot_date` somewhere visible
   (footer on RouteList?) so a stale schedule is observable instead
@@ -97,36 +89,6 @@ WMATA's published scorecard for now. Future option: expose a stricter
 for non-frequent routes (frequent routes get EWT instead — see `src/ewt.py`).
 The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
-
----
-
-## NOTES-23. Schedule the GTFS reload
-
-**Severity: medium — operational hygiene. The reload now succeeds
-reliably (PR #48); the next failure mode is forgetting to run it.**
-
-A daily or weekly GitHub Action / cron invoking
-`reload_gtfs_complete.py`, with alerting on failure. Weekly is
-probably right: WMATA revises GTFS roughly quarterly, and real-time
-operational changes (added trips, suspended routes) land in
-TripUpdates / VehiclePositions, not static GTFS — so daily buys
-nothing.
-
-The established pattern in this repo for local scheduled jobs is
-launchd (see `scripts/launchd/com.wmata-dashboard.daily-batch.plist`,
-landed for NOTES-28). Reusing that for the GTFS reload keeps the
-"one place to look for scheduled work" property.
-
-The failure mode to alert on is the script raising and rolling
-back. The DB stays consistent (the transactional contract from
-PR #48 guarantees that), but the schedule slowly goes stale, and
-without alerting that's invisible — exactly how this got 6 months
-stale before the script fix.
-
-### Dependencies
-
-- Builds on the script reliability landed in PR #48.
-- Independent of NOTES-14 through NOTES-21.
 
 ---
 
