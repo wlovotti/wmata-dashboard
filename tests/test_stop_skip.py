@@ -29,11 +29,22 @@ def _make_run(
     stops_observed: int,
     stops_skipped: int,
     stops_scheduled: int,
+    stops_observable: int | None = None,
     route_id: str = ROUTE,
     service_date: str = SERVICE_DATE_STR,
     direction_id: int = 0,
 ) -> Run:
-    """Build one Run row with sensible defaults for the fields the metric ignores."""
+    """Build one Run row with sensible defaults for the fields the metric ignores.
+
+    `stops_observable` defaults to the per-source structural ceiling
+    `aggregate_runs.py` writes in production: `stops_scheduled - 1` for TU
+    rows (origin is unobservable), `stops_scheduled` for proximity rows.
+    Callers can override to model edge cases.
+    """
+    if stops_observable is None:
+        stops_observable = (
+            max(0, stops_scheduled - 1) if source == "trip_update" else stops_scheduled
+        )
     return Run(
         service_date=service_date,
         trip_id=trip_id,
@@ -43,6 +54,7 @@ def _make_run(
         stops_observed=stops_observed,
         stops_skipped=stops_skipped,
         stops_scheduled=stops_scheduled,
+        stops_observable=stops_observable,
     )
 
 
@@ -85,11 +97,13 @@ class TestComputeStopSkipRate:
             "service_date": SERVICE_DATE_STR,
             "n_runs": 0,
             "stops_skipped": 0,
-            "stops_scheduled": 0,
+            "stops_observable": 0,
             "skip_rate": None,
         }
 
     def test_single_qualifying_run(self, db_session):
+        # TU run: stops_scheduled=60, helper sets stops_observable=59
+        # (origin unobservable in TU feed). Denominator sums stops_observable.
         db_session.add(
             _make_run("T1", "trip_update", stops_observed=50, stops_skipped=8, stops_scheduled=60)
         )
@@ -97,8 +111,8 @@ class TestComputeStopSkipRate:
         result = compute_stop_skip_rate(db_session, ROUTE, SERVICE_DATE)
         assert result["n_runs"] == 1
         assert result["stops_skipped"] == 8
-        assert result["stops_scheduled"] == 60
-        assert result["skip_rate"] == round(8 / 60, 4)
+        assert result["stops_observable"] == 59
+        assert result["skip_rate"] == round(8 / 59, 4)
 
     def test_proximity_runs_excluded(self, db_session):
         # Proximity row with bogus skip count — must not contribute.
@@ -124,7 +138,7 @@ class TestComputeStopSkipRate:
         result = compute_stop_skip_rate(db_session, ROUTE, SERVICE_DATE)
         assert result["n_runs"] == 1
         assert result["stops_skipped"] == 8
-        assert result["stops_scheduled"] == 60
+        assert result["stops_observable"] == 59
 
     def test_run_existed_filter_excludes_thin_runs(self, db_session):
         # A barely-observed TU run — drops out of the denominator so its
@@ -150,8 +164,8 @@ class TestComputeStopSkipRate:
         db_session.commit()
         result = compute_stop_skip_rate(db_session, ROUTE, SERVICE_DATE)
         assert result["n_runs"] == 1
-        assert result["stops_scheduled"] == 60
-        assert result["skip_rate"] == round(8 / 60, 4)
+        assert result["stops_observable"] == 59
+        assert result["skip_rate"] == round(8 / 59, 4)
 
     def test_multiple_qualifying_runs_sum(self, db_session):
         db_session.add_all(
@@ -168,8 +182,64 @@ class TestComputeStopSkipRate:
         result = compute_stop_skip_rate(db_session, ROUTE, SERVICE_DATE)
         assert result["n_runs"] == 2
         assert result["stops_skipped"] == 10
-        assert result["stops_scheduled"] == 120
-        assert result["skip_rate"] == round(10 / 120, 4)
+        # Two TU runs, each with stops_observable=59 (60 - 1 for unobservable origin).
+        assert result["stops_observable"] == 118
+        assert result["skip_rate"] == round(10 / 118, 4)
+
+    def test_denominator_uses_stops_observable_not_stops_scheduled(self, db_session):
+        # Direct assertion of the NOTES-32 fix: the denominator must sum
+        # `stops_observable` (the per-source structural ceiling), not
+        # `stops_scheduled`. A TU run with stops_scheduled=10 has
+        # stops_observable=9 because the origin row is structurally absent
+        # from the TripUpdates feed (NOTES-31). Including it inflates the
+        # denominator by 1 per qualifying TU run and biases skip rate down.
+        db_session.add(
+            _make_run(
+                "T_TU",
+                "trip_update",
+                stops_observed=9,
+                stops_skipped=1,
+                stops_scheduled=10,
+                stops_observable=9,
+            )
+        )
+        db_session.commit()
+        result = compute_stop_skip_rate(db_session, ROUTE, SERVICE_DATE)
+        # 1/9 (observable), not 1/10 (scheduled).
+        assert result["stops_observable"] == 9
+        assert result["skip_rate"] == round(1 / 9, 4)
+
+    def test_per_source_asymmetry_only_tu_observable_in_denominator(self, db_session):
+        # Per-source asymmetry: TU has stops_observable=9 (origin
+        # unobservable), proximity has stops_observable=10 (origin
+        # observable). Even though both rows are physically present, the
+        # source restriction filters proximity out, so the denominator is
+        # 9, not 19, and definitely not 20 (the old `stops_scheduled` sum).
+        db_session.add_all(
+            [
+                _make_run(
+                    "T1",
+                    "trip_update",
+                    stops_observed=9,
+                    stops_skipped=1,
+                    stops_scheduled=10,
+                    stops_observable=9,
+                ),
+                _make_run(
+                    "T1",
+                    "proximity",
+                    stops_observed=10,
+                    stops_skipped=0,
+                    stops_scheduled=10,
+                    stops_observable=10,
+                ),
+            ]
+        )
+        db_session.commit()
+        result = compute_stop_skip_rate(db_session, ROUTE, SERVICE_DATE)
+        assert result["n_runs"] == 1  # only the TU row counts
+        assert result["stops_observable"] == 9
+        assert result["skip_rate"] == round(1 / 9, 4)
 
     def test_other_routes_and_dates_ignored(self, db_session):
         db_session.add_all(
@@ -228,8 +298,10 @@ class TestComputeStopSkipRateForRoutes:
         db_session.commit()
         results = compute_stop_skip_rate_for_routes(db_session, SERVICE_DATE)
         assert [r["route_id"] for r in results] == ["R_A", "R_B"]
-        assert results[0]["skip_rate"] == round(4 / 60, 4)
-        assert results[1]["skip_rate"] == round(10 / 50, 4)
+        # TU `stops_observable = stops_scheduled - 1` per the helper default,
+        # mirroring `aggregate_runs.py` production behavior (origin unobservable).
+        assert results[0]["skip_rate"] == round(4 / 59, 4)
+        assert results[1]["skip_rate"] == round(10 / 49, 4)
 
     def test_default_skips_proximity_only_routes(self, db_session):
         # R_PROX_ONLY has a proximity run but no TU run — shouldn't surface
