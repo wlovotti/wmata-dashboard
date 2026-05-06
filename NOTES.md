@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-05 (PR closing NOTES-27 — coverage_ratio surfaced for EWT).
+Last edited 2026-05-05 (PR closing NOTES-5 — per-run deviation chart).
 
 ---
 
@@ -26,8 +26,6 @@ sequencing still matters.
 
 - **NOTES-18 Update grading rubric.** Currently OTP-only; should
   incorporate service-delivered and EWT now that both have shipped.
-- **NOTES-5 Per-run deviation chart.** Now a thin API + frontend wrapper
-  over `runs` (PR #45) and `stop_events` (PRs #42, #43, #44).
 
 ### P5 — Cleanup
 
@@ -71,45 +69,6 @@ sequencing still matters.
   live PostGIS query for service-delivered, or lazy derivation on API
   cache miss. Falls back to scheduled batch if both fail at scorecard
   scale.
-
----
-
-## NOTES-5. Add per-run schedule-deviation chart to the dashboard
-
-**Severity: low (enhancement). Now unblocked: the `runs` table (PR #45)
-plus the stop_events foundation (PRs #42, #43, #44) supply everything
-the chart needs. Remaining work is API + frontend.**
-
-### Idea
-
-Line chart of schedule deviation (y-axis, seconds, +late / -early) vs.
-stop_sequence (x-axis) for a single bus run. Shows how a bus drifts
-across its trip — late starts that recover, early holds, accumulating
-drift, segments where the bus loses time. The daily-batch metric can't
-support this view; the per-run table can.
-
-### Prototype
-
-Section 4 of `analysis/run_quality.ipynb` builds the chart for one run
-on D80 / 2025-10-20. The shape (orange line + green on-time band, axhline
-at 0) is what the eventual UI version should resemble.
-
-### Remaining work
-
-1. API endpoint to expose one run's stop deviations:
-   `/api/runs/{run_id}/deviations` returning `[{stop_sequence, stop_id,
-   stop_name, scheduled, actual, deviation_sec}]`. Reads `stop_events`
-   directly for the per-stop list; uses `runs` for the run summary.
-2. Frontend route — could live on `RouteDetail` as a "recent runs" list
-   that links into a per-run drill-down page.
-
-### Open product questions
-
-- Default selection: today's runs? last completed run? worst-deviation run?
-- Should the chart show a single run, or overlay multiple runs of the
-  same trip across days to make patterns visible?
-- Tooltip needs to show the actual stop name and timestamps, not just
-  numbers — useful for spotting where buses always lose time.
 
 ---
 
@@ -334,6 +293,9 @@ becomes attractive for the all-routes scorecard too.
 - Resolves the operational hazard that produced NOTES-26.
 - Independent of NOTES-23 (GTFS reload scheduling) — different
   staleness domains.
-- Closing this affects whatever consumer NOTES-5 reads from: if `runs`,
-  the lazy path applies; if `stop_events` directly, both paths apply.
+- The per-run deviation endpoints (PR #59) read both `runs` (for the row
+  list and run summary) and `stop_events` directly (for the per-stop
+  deviation chart). Lazy/live derivation will need to cover both —
+  populating `runs` alone leaves the chart blank unless `stop_events`
+  are present too.
 

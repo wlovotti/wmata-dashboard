@@ -14,8 +14,10 @@ from api.aggregations import (
     get_all_routes_scorecard,
     get_route_detail_metrics,
     get_route_period_drilldown,
+    get_route_recent_runs,
     get_route_time_period_summary,
     get_route_trend_data,
+    get_run_deviations,
 )
 from src.database import get_session
 from src.models import VehiclePosition
@@ -278,6 +280,68 @@ async def get_route_shapes(route_id: str):
                 )
 
         return {"route_id": route_id, "shapes": shapes_data}
+    finally:
+        db.close()
+
+
+@app.get("/api/routes/{route_id}/recent-runs")
+async def get_route_recent_runs_endpoint(route_id: str, limit: int = 25):
+    """
+    Recent runs for a route — populates the RouteDetail "Recent runs" list.
+
+    Returns up to `limit` runs from the latest service_date that has runs for
+    this route (today if available, otherwise the most recent date with any
+    runs). Each row carries the run-summary fields needed for the list view
+    plus the headsign and start/end times in Eastern HH:MM. The chart is
+    fetched on-demand from `/api/runs/{run_id}/deviations` when a row is
+    clicked.
+
+    Args:
+        route_id: Route identifier (e.g., 'C51')
+        limit: Max number of runs to return (default: 25, capped here too)
+
+    Returns:
+        Recent-runs envelope with the chosen service_date and the run list.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+
+    db = get_session()
+    try:
+        result = get_route_recent_runs(db, route_id, limit=limit)
+        if isinstance(result, dict) and result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    finally:
+        db.close()
+
+
+@app.get("/api/runs/{run_id}/deviations")
+async def get_run_deviations_endpoint(run_id: int):
+    """
+    Per-stop schedule deviations for one run — feeds the per-run drift chart.
+
+    The list is one row per scheduled stop on the run's trip ordered by
+    stop_sequence; rows for stops without an observed `stop_event` carry null
+    `actual` / `deviation_sec` so the chart renders gaps cleanly. Times are
+    serialized as ISO8601 strings already converted to Eastern (the storage
+    convention is naive UTC; conversion happens at the API boundary).
+
+    Args:
+        run_id: Internal `runs.id` (autoincrement int from the runs table)
+
+    Returns:
+        Run summary plus a `deviations` list with stop_sequence, stop_id,
+        stop_name, scheduled, actual, and deviation_sec per stop.
+    """
+    db = get_session()
+    try:
+        result = get_run_deviations(db, run_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        return result
     finally:
         db.close()
 
