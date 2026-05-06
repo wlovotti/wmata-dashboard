@@ -552,6 +552,32 @@ main {
   font-size: 0.75rem;
 }
 
+/* "Data thin" badge: shown next to EWT/bunching when observed-to-scheduled
+   headway coverage falls below 50%. Signals the trip_update derivation
+   missed enough arrivals that the metric is unreliable — the EWT clamp at 0
+   would otherwise hide the gap silently. */
+.data-thin-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 0.25rem;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+
+.data-thin-note {
+  font-size: 0.7rem;
+  margin-top: 0.25rem;
+  color: #92400e;
+  font-style: italic;
+}
+
 .detail-info {
   background: white;
   border-radius: 0.75rem;

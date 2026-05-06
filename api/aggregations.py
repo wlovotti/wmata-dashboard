@@ -226,6 +226,7 @@ def _live_metric_fields(metrics: dict | None) -> dict:
             "otp_all_pct": None,
             "ewt_seconds": None,
             "ewt_n_observed": None,
+            "ewt_coverage_ratio": None,
             "bunching_rate": None,
             "bunching_count": None,
             "bunching_total_headways": None,
@@ -243,6 +244,11 @@ def _live_metric_fields(metrics: dict | None) -> dict:
         "otp_all_pct": (otp.get("all_timepoints") or {}).get("on_time_pct"),
         "ewt_seconds": ewt.get("ewt_seconds"),
         "ewt_n_observed": ewt.get("n_observed_headways"),
+        # Observed-to-scheduled headway coverage for the EWT pool. Below ~0.5
+        # the trip_update derivation is missing arrivals badly enough that AWT
+        # is biased low — the frontend renders a "data thin" badge so the EWT
+        # clamp at 0 doesn't masquerade as a healthy metric.
+        "ewt_coverage_ratio": ewt.get("coverage_ratio"),
         "bunching_rate": bun.get("bunching_rate"),
         "bunching_count": bun.get("bunching_count"),
         "bunching_total_headways": bun.get("total_headways"),
@@ -537,6 +543,7 @@ def get_route_period_drilldown(db: Session, route_id: str) -> dict:
                 "swt_seconds": sanitize_float(r["swt_seconds"]),
                 "n_observed_headways": r["n_observed_headways"],
                 "n_scheduled_headways": r["n_scheduled_headways"],
+                "coverage_ratio": sanitize_float(r["coverage_ratio"]),
                 "frequent_cell_hours": r["frequent_cell_hours"],
             }
             for r in ewt_rows
