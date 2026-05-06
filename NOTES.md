@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-33 — CI Postgres lane + schema-drift check landed).
+Last edited 2026-05-06 (closed NOTES-30 — proportional service_delivered threshold for short routes; opened NOTES-34).
 
 ---
 
@@ -54,18 +54,29 @@ sequencing still matters.
   (Column defaults), pipelines, scripts, API, and tests. The naive-UTC
   storage convention complicates the migration — needs a small helper
   rather than a blind sed.
-- **NOTES-30 service_delivered always 0% on short routes.** A90 reports
-  0/127 delivered on every service date despite 239 runs and 88% OTP —
-  the `stops_observed >= 3` filter in `compute_service_delivered` is
-  structurally unreachable on a route whose GTFS trips have ≤3 stops.
-  Currently only A90 is affected, but any future short express hits the
-  same bug.
 - **NOTES-32 stop_skip denominator should be `stops_observable`.** The
   TU rate uses `SUM(stops_scheduled)` as denominator; since TU can never
   observe (or SKIP) the origin, this overcounts the denominator by ~1
   per run and biases skip rate down. Now that `stops_observable` lands
   on every Run row (via the NOTES-31 closing PR), `compute_stop_skip_rate`
   should switch to `SUM(stops_observable)` for ratio-honest accounting.
+- **NOTES-34 service_delivered ceiling on 2-stop routes (TU structural
+  exclusion).** Side effect of the NOTES-30 closing PR (proportional
+  threshold). The new threshold is `max(2, stops_observable // 3)`; on a
+  2-stop route, TU rows have `stops_observable = 1` and can never reach
+  2, so TU never counts toward delivered. Proximity rows
+  (`stops_observable = 2`) cover the gap when they observe both stops,
+  but A90 weekday on 2026-05-05 came out at 61/127 delivered (48%)
+  despite 88% OTP — the residual gap is partly proximity rows that only
+  saw one stop and partly TU runs for trips with no proximity coverage.
+  Acceptable trade-off for closing the 0%-everywhere bug, but documents
+  a known ceiling on short-route delivered ratios. A more permissive
+  short-route rule — e.g. accept `stops_observed >= 1` when
+  `stops_observable <= 2`, or treat any observation at all as
+  delivered once `stops_observable` is small enough — would lift the
+  ceiling at the cost of admitting more single-ping ghost runs. Not
+  urgent; revisit if a second short express route appears and the
+  ~50% ceiling becomes a problem.
 ---
 
 ## NOTES-18. Grading rubric refresh
@@ -204,63 +215,6 @@ naive UTC.
 - Independent of every other open NOTES item.
 - Pairs naturally with NOTES-25 (lint scope) — fixing tests/ first
   surfaces any test usages that the broader CI doesn't currently catch.
-
----
-
-## NOTES-30. service_delivered always 0% on short routes
-
-**Severity: medium — silently wrong public-facing metric.**
-
-A90 (Pentagon–Mark Center, express) shows `service_delivered_ratio = 0.0`
-(0 of 127 trips delivered) on every service date, even though the
-collector observes the route normally — 239 runs, 122 distinct trip_ids,
-4,520 positions, 88.1% OTP, EWT 86.59s on 2026-05-05 alone. The buses
-clearly ran. `compute_service_delivered` says they didn't.
-
-### Root cause
-
-`src/service_delivered.py` filters the numerator by
-`Run.stops_observed >= 3`, inheriting the "RUN_EXISTED" threshold from
-the Run model docstring. A90 GTFS trips have 2 or 3 scheduled stops —
-endpoints plus at most one intermediate timepoint. Observed stop counts
-on 2026-05-05 distribute as 146 runs at 1, 93 runs at 2, and 0 at ≥3.
-The threshold is structurally unreachable.
-
-For routes whose longest trip has fewer than 3 stops, the filter is
-mathematically guaranteed false. For routes with 3-stop trips, observation
-rarely hits all three since stop-event derivation depends on collector
-cadence vs. inter-stop spacing. The constant was tuned for typical
-30-50-stop urban routes.
-
-A90 is the only WMATA route currently affected (verified on 2026-05-05
-across all routes with runs that day). The bug is structural, though:
-any future short express (A91/A92/A93/A94 if reactivated, shuttle
-patterns) will exhibit the same.
-
-### Possible fixes (decide before implementing)
-
-1. **Threshold proportional to trip length**, e.g.
-   `stops_observed >= max(2, ceil(stops_scheduled / 3))`. Preserves
-   spurious-run rejection on long routes while admitting valid short
-   ones. `Run.stops_scheduled` is already populated per-row.
-2. **Fixed lower bound at 2.** Simpler; risks more false positives on
-   routes where 1-stop "ghost" runs are common.
-3. **Replace the existence rule** — e.g. require any matching
-   `vehicle_positions` row paired with at least one `stop_event`. More
-   robust but a larger refactor.
-
-Probably (1): local to `service_delivered.py`, doesn't change RUN_EXISTED
-semantics elsewhere, and `ceil(n/3)` is a defensible heuristic.
-
-### Dependencies
-
-- Independent of every other open NOTES item.
-- Blast radius is limited to `service_delivered`. OTP / EWT / bunching
-  do not use `stops_observed >= 3`.
-- `stops_observable` is now persisted on every Run row (NOTES-31 closing
-  PR — see git log for `feat(runs): per-source stops_observable`). The
-  threshold here can be expressed against it (e.g. `stops_observed >=
-  max(2, stops_observable // 3)`) without further schema work.
 
 ---
 
