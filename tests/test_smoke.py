@@ -2070,3 +2070,60 @@ def test_route_recent_runs_endpoint_404_for_unknown_route(client):
     """Unknown route returns 404."""
     response = client.get("/api/routes/NOPE/recent-runs")
     assert response.status_code == 404
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_returns_nulls_when_empty(client):
+    """
+    Empty `gtfs_snapshots` returns the shape with all-null fields.
+
+    The endpoint is purely observational — it must not 500 on a fresh DB
+    that has not yet been loaded.
+    """
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["snapshot_date"] is None
+    assert body["created_at"] is None
+    assert body["feed_version"] is None
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_returns_newest_snapshot(client, db_session):
+    """
+    With multiple snapshot rows present, the newest by `snapshot_date` wins.
+
+    Defensive `ORDER BY snapshot_date DESC LIMIT 1` is the contract — there
+    should be exactly one current snapshot after a normal reload, but the
+    endpoint must not depend on that invariant.
+    """
+    from src.models import GTFSSnapshot
+
+    older = GTFSSnapshot(
+        snapshot_date=datetime(2026, 4, 1, 10, 0, 0),
+        feed_version="2026-04-01",
+        routes_count=300,
+        stops_count=10000,
+        trips_count=20000,
+        created_at=datetime(2026, 4, 1, 10, 0, 0),
+    )
+    newer = GTFSSnapshot(
+        snapshot_date=datetime(2026, 5, 1, 10, 0, 0),
+        feed_version="2026-05-01",
+        routes_count=305,
+        stops_count=10050,
+        trips_count=20100,
+        created_at=datetime(2026, 5, 1, 10, 0, 0),
+    )
+    db_session.add_all([older, newer])
+    db_session.commit()
+
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["feed_version"] == "2026-05-01"
+    assert body["snapshot_date"].startswith("2026-05-01")
+    assert body["created_at"].startswith("2026-05-01")
+    assert body["routes_count"] == 305
+    assert body["stops_count"] == 10050
+    assert body["trips_count"] == 20100

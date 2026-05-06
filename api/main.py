@@ -20,7 +20,7 @@ from api.aggregations import (
     get_run_deviations,
 )
 from src.database import get_session
-from src.models import VehiclePosition
+from src.models import GTFSSnapshot, VehiclePosition
 
 # Create FastAPI app
 app = FastAPI(
@@ -106,6 +106,51 @@ async def health_check():
         }
 
     return health_status
+
+
+@app.get("/api/gtfs/freshness")
+async def get_gtfs_freshness():
+    """
+    Return metadata for the most recent GTFS snapshot.
+
+    Thin observability endpoint so the dashboard can surface a "schedule
+    current as of …" indicator and a stale schedule is visible instead of
+    silent. Returns the newest row from `gtfs_snapshots` (by `snapshot_date`,
+    falling back to `created_at` for tie-breaks). When the table is empty
+    (fresh DB, no reload yet) every field is null.
+
+    Returns:
+        Dict with `snapshot_date`, `created_at`, `feed_version`, and the
+        per-table counts at load time. Datetimes are ISO8601 strings (naive
+        UTC, matching storage convention); the frontend converts to Eastern
+        for display.
+    """
+    db = get_session()
+    try:
+        snapshot = (
+            db.query(GTFSSnapshot)
+            .order_by(GTFSSnapshot.snapshot_date.desc(), GTFSSnapshot.created_at.desc())
+            .first()
+        )
+        if snapshot is None:
+            return {
+                "snapshot_date": None,
+                "created_at": None,
+                "feed_version": None,
+                "routes_count": None,
+                "stops_count": None,
+                "trips_count": None,
+            }
+        return {
+            "snapshot_date": snapshot.snapshot_date.isoformat() if snapshot.snapshot_date else None,
+            "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+            "feed_version": snapshot.feed_version,
+            "routes_count": snapshot.routes_count,
+            "stops_count": snapshot.stops_count,
+            "trips_count": snapshot.trips_count,
+        }
+    finally:
+        db.close()
 
 
 @app.get("/api/routes")

@@ -8,6 +8,36 @@ import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 // so the background fetch is cheap when warm.
 let _cachedRoutes = null
 let _cachedLastUpdated = null
+let _cachedGtfsFreshness = null
+
+// Format a naive-UTC ISO timestamp as a service date in Eastern. The
+// backend stores datetimes as naive UTC (see CLAUDE.md); appending 'Z'
+// makes the Date constructor treat the string as UTC instead of local.
+function formatSnapshotDate(isoString) {
+  if (!isoString) return null
+  const d = new Date(isoString.endsWith('Z') ? isoString : `${isoString}Z`)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleDateString('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+function formatLoadedAt(isoString) {
+  if (!isoString) return null
+  const d = new Date(isoString.endsWith('Z') ? isoString : `${isoString}Z`)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleString('en-US', {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  })
+}
 
 function RouteList() {
   const navigate = useNavigate()
@@ -18,6 +48,7 @@ function RouteList() {
   const [sortConfig, setSortConfig] = useState({ key: 'route_name', direction: 'asc' })
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(_cachedLastUpdated)
+  const [gtfsFreshness, setGtfsFreshness] = useState(_cachedGtfsFreshness)
 
   const fetchRoutes = () => {
     return fetch('/api/routes')
@@ -40,8 +71,24 @@ function RouteList() {
       })
   }
 
+  // Pure observability — failures are silent; the footer just doesn't render.
+  const fetchGtfsFreshness = () => {
+    return fetch('/api/gtfs/freshness')
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (data) {
+          setGtfsFreshness(data)
+          _cachedGtfsFreshness = data
+        }
+      })
+      .catch(() => {
+        // Swallow — this is informational; don't surface to the user.
+      })
+  }
+
   useEffect(() => {
     fetchRoutes().finally(() => setLoading(false))
+    fetchGtfsFreshness()
   }, [])
 
   const handleRefresh = () => {
@@ -280,6 +327,23 @@ function RouteList() {
           </tbody>
         </table>
       </div>
+
+      {gtfsFreshness && gtfsFreshness.snapshot_date && (
+        <footer className="gtfs-freshness-footer">
+          {(() => {
+            const snapshot = formatSnapshotDate(gtfsFreshness.snapshot_date)
+            const loaded = formatLoadedAt(gtfsFreshness.created_at)
+            if (!snapshot) return null
+            return (
+              <span>
+                GTFS schedule current as of {snapshot}
+                {loaded && ` (loaded ${loaded})`}
+                {gtfsFreshness.feed_version && ` · feed ${gtfsFreshness.feed_version}`}
+              </span>
+            )
+          })()}
+        </footer>
+      )}
     </main>
   )
 }

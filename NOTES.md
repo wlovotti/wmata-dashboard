@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-25 — `tests/` added to lint scope across CI workflow and CLAUDE.md command).
+Last edited 2026-05-06 (closed NOTES-24 — GTFS snapshot freshness surfaced in dashboard footer via `/api/gtfs/freshness`).
 
 ---
 
@@ -38,10 +38,6 @@ sequencing still matters.
 
 ### Independent of the redesign
 
-- **NOTES-24 Surface GTFS snapshot freshness in the dashboard.**
-  Show the newest `gtfs_snapshots.snapshot_date` somewhere visible
-  (footer on RouteList?) so a stale schedule is observable instead
-  of silent.
 - **NOTES-29 Replace `datetime.utcnow()` with timezone-aware UTC.**
   Deprecated in Python 3.12; emits a DeprecationWarning on every call
   (visible in the GTFS reload log). ~50 call sites across `src/models.py`
@@ -105,23 +101,6 @@ WMATA's published scorecard for now. Future option: expose a stricter
 for non-frequent routes (frequent routes get EWT instead — see `src/ewt.py`).
 The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
-
----
-
-## NOTES-24. Surface GTFS snapshot freshness in the dashboard
-
-**Severity: low — observability.**
-
-Display the most recent `gtfs_snapshots.snapshot_date` somewhere
-visible in the UI (footer on RouteList?) so a stale schedule is
-observable instead of silent. Useful even after NOTES-23 schedules
-the reload — gives a "last refreshed" sanity check to anyone
-viewing the dashboard, and is the first place to look when metrics
-start looking off. Pure read; thin API addition.
-
-### Dependencies
-
-- Independent of NOTES-14 through NOTES-21 and NOTES-23.
 
 ---
 
