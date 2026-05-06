@@ -137,7 +137,7 @@ def run_pipeline(
     service_date: date_type,
     log_handle,
 ) -> tuple[int, float]:
-    """Run a single pipeline module via `uv run python -m ...` for one service date.
+    """Run a single pipeline module via `python -m ...` for one service date.
 
     Uses `--all-routes` (the wrapper's design contract is "cover everything")
     and `--date YYYY-MM-DD`. Pipeline stdout/stderr is appended to
@@ -147,11 +147,15 @@ def run_pipeline(
     already CLI scripts and the user's manual workflow is `uv run python
     pipelines/...`. Wrapping them as a library would be a bigger change
     out of scope for this orchestration PR.
+
+    Invokes `sys.executable` directly rather than `uv run python` because the
+    outer entry (the plist or a manual `uv run python pipelines/run_daily_batch.py`)
+    has already activated the venv — `sys.executable` points at the venv's
+    Python. Re-resolving via `uv` per subprocess would also fail under launchd,
+    which strips PATH down to a minimal set that doesn't include Homebrew.
     """
     cmd = [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         module,
         "--all-routes",
