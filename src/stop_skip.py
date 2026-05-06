@@ -1,11 +1,12 @@
 """
 Stop-skip rate over the runs / stop_events foundation.
 
-Per (route, service_date): `stops_skipped / stops_scheduled` over TU runs that
-actually existed (the RUN_EXISTED filter, `stops_observed >= 3`). Direct from
-`stop_events.schedule_relationship = 'SKIPPED'` rows materialized by the
-trip_update derivation pipeline (PR #43) — not derivable from positions at
-all, the unique value-add of the TripUpdates feed.
+Per (route, service_date): `stops_skipped / stops_observable` over TU runs
+that actually existed (the RUN_EXISTED filter, `stops_observed >= 3`).
+Direct from `stop_events.schedule_relationship = 'SKIPPED'` rows
+materialized by the trip_update derivation pipeline (PR #43) — not
+derivable from positions at all, the unique value-add of the TripUpdates
+feed.
 
 --- Source restriction (load-bearing) ---
 SKIPPED is a TripUpdates-only signal. Proximity-derived runs always carry
@@ -25,6 +26,19 @@ runs with `stops_observed >= 3` (the same RUN_EXISTED filter PR #47 uses);
 without it, a fully-cancelled trip with `stops_skipped = 0` and
 `stops_scheduled = 60` adds 60 zeros to the denominator and dilutes the
 rate.
+
+--- `stops_observable`, not `stops_scheduled`, as the denominator ---
+The TripUpdates feed structurally cannot publish the origin's
+StopTimeUpdate (the GTFS-RT TU feed only carries upcoming stops; by the
+first snapshot we receive, the trip is already past the origin — see
+NOTES-31 closure PR #67 and the `Run.stops_observable` column doc). So
+the origin can never appear with `schedule_relationship = 'SKIPPED'` in
+the TU feed either — it's mathematically guaranteed to be a non-skipped
+contribution to the denominator. Summing `stops_scheduled` inflates the
+denominator by exactly 1 per qualifying TU run and pulls the rate down
+by a fixed factor; summing `stops_observable` (= `stops_scheduled - 1`
+for TU rows) gives ratio-honest accounting against the stops the source
+could actually have observed-or-skipped.
 
 --- Per-stop breakdown ---
 The per-route rollup uses `runs` directly. Per-stop ranking ("worst-skipped
@@ -59,18 +73,20 @@ def compute_stop_skip_rate(
 ) -> dict:
     """Compute stop-skip rate for one (route, service_date).
 
-    Returns `{route_id, service_date, n_runs, stops_skipped, stops_scheduled,
-    skip_rate}`. `skip_rate` is `None` when `stops_scheduled == 0` (no TU
-    runs with at least RUN_EXISTED_MIN_STOPS observed stops) so callers can
-    distinguish "no data" from a real zero.
+    Returns `{route_id, service_date, n_runs, stops_skipped, stops_observable,
+    skip_rate}`. `skip_rate` is `None` when `stops_observable == 0` (no TU
+    runs with at least RUN_EXISTED_MIN_STOPS observed stops, or only runs
+    whose trips have no GTFS schedule match) so callers can distinguish
+    "no data" from a real zero. See module docstring for why the denominator
+    sums `stops_observable` rather than `stops_scheduled`.
     """
     service_date_str = service_date.isoformat()
 
-    n_runs, skipped, scheduled = (
+    n_runs, skipped, observable = (
         db.query(
             func.count(Run.id),
             func.coalesce(func.sum(Run.stops_skipped), 0),
-            func.coalesce(func.sum(Run.stops_scheduled), 0),
+            func.coalesce(func.sum(Run.stops_observable), 0),
         )
         .filter(
             Run.route_id == route_id,
@@ -81,14 +97,14 @@ def compute_stop_skip_rate(
         .one()
     )
 
-    skip_rate = round(skipped / scheduled, 4) if scheduled else None
+    skip_rate = round(skipped / observable, 4) if observable else None
 
     return {
         "route_id": route_id,
         "service_date": service_date_str,
         "n_runs": int(n_runs),
         "stops_skipped": int(skipped),
-        "stops_scheduled": int(scheduled),
+        "stops_observable": int(observable),
         "skip_rate": skip_rate,
     }
 

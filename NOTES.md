@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-30 — proportional service_delivered threshold for short routes; opened NOTES-34).
+Last edited 2026-05-06 (closed NOTES-32 — `compute_stop_skip_rate` uses `stops_observable` as denominator).
 
 ---
 
@@ -54,12 +54,6 @@ sequencing still matters.
   (Column defaults), pipelines, scripts, API, and tests. The naive-UTC
   storage convention complicates the migration — needs a small helper
   rather than a blind sed.
-- **NOTES-32 stop_skip denominator should be `stops_observable`.** The
-  TU rate uses `SUM(stops_scheduled)` as denominator; since TU can never
-  observe (or SKIP) the origin, this overcounts the denominator by ~1
-  per run and biases skip rate down. Now that `stops_observable` lands
-  on every Run row (via the NOTES-31 closing PR), `compute_stop_skip_rate`
-  should switch to `SUM(stops_observable)` for ratio-honest accounting.
 - **NOTES-34 service_delivered ceiling on 2-stop routes (TU structural
   exclusion).** Side effect of the NOTES-30 closing PR (proportional
   threshold). The new threshold is `max(2, stops_observable // 3)`; on a
@@ -216,32 +210,3 @@ naive UTC.
 - Pairs naturally with NOTES-25 (lint scope) — fixing tests/ first
   surfaces any test usages that the broader CI doesn't currently catch.
 
----
-
-## NOTES-32. `compute_stop_skip_rate` denominator should use `stops_observable`
-
-**Severity: low — biases skip rate downward by ~1/N per run.**
-
-`src/stop_skip.py` computes the denominator as `SUM(stops_scheduled)`
-across qualifying TU runs. Since TripUpdates structurally cannot publish
-the origin's StopTimeUpdate (NOTES-31 closing PR), the origin can never
-appear with `schedule_relationship = 'SKIPPED'` either — so it's
-mathematically guaranteed to be a non-skipped contribution to the
-denominator. Including it inflates the denominator by exactly 1 per
-qualifying TU run and pulls the rate down by a fixed factor.
-
-### Fix
-
-Switch the SUM to `Run.stops_observable` in `compute_stop_skip_rate`.
-The `stops_observable` field now lands on every Run row (see git log for
-the NOTES-31 closing PR). No schema change. Update the result key /
-docstring to reflect the change in denominator semantics.
-
-The per-stop breakdown (`compute_per_stop_skip_rate`) reads `stop_events`
-directly and is unaffected — it already grouped by `(direction_id,
-stop_id)` and never summed `stops_scheduled`.
-
-### Dependencies
-
-- Independent of every other open NOTES item.
-- Blast radius is one function and its smoke tests in `tests/test_stop_skip.py`.
