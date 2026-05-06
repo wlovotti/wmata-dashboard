@@ -126,11 +126,24 @@ function RouteDetail() {
             {routeData.ewt_seconds != null && (
               <span style={{ fontSize: '1.5rem' }}> sec</span>
             )}
+            {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
+              <span
+                className="data-thin-badge"
+                title={`Only ${Math.round(routeData.ewt_coverage_ratio * 100)}% of scheduled headways were observed`}
+              >
+                Thin
+              </span>
+            )}
           </div>
           <div className="stat-label">Excess Wait Time</div>
           {routeData.ewt_seconds == null && (
             <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
               (frequent service only)
+            </div>
+          )}
+          {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
+            <div className="data-thin-note">
+              Trip-update coverage {Math.round(routeData.ewt_coverage_ratio * 100)}% — metric unreliable
             </div>
           )}
         </div>
@@ -139,6 +152,14 @@ function RouteDetail() {
             {routeData.bunching_rate != null
               ? `${(routeData.bunching_rate * 100).toFixed(1)}%`
               : 'N/A'}
+            {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
+              <span
+                className="data-thin-badge"
+                title={`Only ${Math.round(routeData.ewt_coverage_ratio * 100)}% of scheduled headways were observed`}
+              >
+                Thin
+              </span>
+            )}
           </div>
           <div className="stat-label">Bunching Rate</div>
           {routeData.bunching_total_headways != null && routeData.bunching_total_headways > 0 && (

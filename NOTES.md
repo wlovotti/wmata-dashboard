@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-05 (PR closing NOTES-26 with NOTES-27/-28 follow-ups).
+Last edited 2026-05-05 (PR closing NOTES-27 — coverage_ratio surfaced for EWT).
 
 ---
 
@@ -26,10 +26,6 @@ sequencing still matters.
 
 - **NOTES-18 Update grading rubric.** Currently OTP-only; should
   incorporate service-delivered and EWT now that both have shipped.
-- **NOTES-27 Investigate observation-coverage gaps in trip_update
-  derivation.** EWT was clamped at 0 in the API (was occasionally
-  negative due to thin observed headways). Surface coverage_ratio in
-  the UI so thin-data periods are visibly flagged.
 - **NOTES-5 Per-run deviation chart.** Now a thin API + frontend wrapper
   over `runs` (PR #45) and `stop_events` (PRs #42, #43, #44).
 
@@ -273,55 +269,6 @@ imports), all auto-fixable.
 ### Dependencies
 
 - Independent of every other open NOTES item.
-
----
-
-## NOTES-27. Negative EWT root cause — observation coverage gaps
-
-**Severity: low — the surfaced metric is now clamped at 0 (PR closing
-NOTES-17), but the underlying observation gap that caused it is
-unresolved.**
-
-EWT (`src/ewt.py`) was producing negative values in some periods —
-e.g., C21 PM Peak on 2026-05-03 showed AWT=308s, SWT=360s, EWT=−52s
-with only 244 observed headways out of 2100 scheduled (11.6%). When
-the trip_update derivation misses arrivals, the observed headways we
-*do* capture are biased toward steady ones (the long gaps don't get
-paired up because one endpoint of the pair is missing), so AWT comes
-out artificially low and EWT goes negative.
-
-A trip-level dimension of the same gap surfaced during the NOTES-26
-investigation: ~38% of scheduled trips that show up in upstream feeds
-(`vehicle_positions` or `trip_update_snapshots`) don't survive
-derivation into a run with `stops_observed >= 3`. Probed 2026-05-05 on
-D80 / 2026-05-03 — 261 of 270 GTFS-scheduled Sunday trips appear in
-either feed (96.7%), but only 158 (58.5%) reached the delivered
-threshold. So the ~50% delivered ratio left after closing NOTES-26 is
-part-real, part-derivation-coverage; the headline service-delivered
-metric understates true delivery until this is closed.
-
-The clamp is a UI fix, not a data fix. The underlying issue is that
-the trip_update derivation pipeline (`pipelines/derive_stop_events_*`)
-is missing arrivals during certain periods on certain routes. Worth
-investigating:
-
-1. **Per-period coverage histogram**: for every (route, date, period),
-   plot `n_observed_headways / n_scheduled_headways`. Routes/periods
-   below ~50% coverage should be flagged in the UI as "thin data" so
-   the EWT clamp's silent floor doesn't mask the gap.
-2. **Cross-check with proximity derivation**: PR #44's proximity
-   derivation has different blind spots than trip_update. If a period
-   shows 11% TU coverage but 80% proximity coverage, the issue is
-   trip_update-specific (and the bunching/EWT pipelines could
-   optionally fall back to proximity for that period).
-3. **Surface coverage in the API/UI**: add a `coverage_ratio` field
-   alongside EWT/bunching so the frontend can show "data thin" badges
-   on periods where the metric is unreliable.
-
-### Dependencies
-
-- Independent. Could be tackled alongside the per-run deviation chart
-  (NOTES-5) since both probe the trip_update derivation's coverage.
 
 ---
 

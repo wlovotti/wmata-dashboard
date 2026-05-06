@@ -11,24 +11,40 @@ import {
 } from 'recharts'
 
 const EWT_BAR_COLOR = '#002F6C'
+const EWT_BAR_COLOR_THIN = '#94a3b8' // de-saturated for low-coverage periods
 const BUNCHING_BAR_COLOR = '#C8102E'
+
+// Below this observed/scheduled-headway ratio, EWT (and bunching, which
+// shares the trip_update observation source) is unreliable — surfaced as a
+// "data thin" badge so the EWT clamp at 0 doesn't silently mask the gap.
+const COVERAGE_THIN_THRESHOLD = 0.5
 
 function shortPeriodLabel(label) {
   const idx = label.indexOf(' (')
   return idx === -1 ? label : label.slice(0, idx)
 }
 
+function isThin(coverageRatio) {
+  return coverageRatio != null && coverageRatio < COVERAGE_THIN_THRESHOLD
+}
+
 function ewtTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const row = payload[0].payload
+  const thin = isThin(row.coverage_ratio)
   return (
     <div className="chart-tooltip">
-      <div className="chart-tooltip-title">{row.time_period}</div>
+      <div className="chart-tooltip-title">
+        {row.time_period}
+        {thin && <span className="data-thin-badge">Thin</span>}
+      </div>
       <div>EWT: {row.ewt_seconds != null ? `${row.ewt_seconds.toFixed(0)} sec` : 'N/A'}</div>
       <div>AWT: {row.awt_seconds != null ? `${row.awt_seconds.toFixed(0)} sec` : 'N/A'}</div>
       <div>SWT: {row.swt_seconds != null ? `${row.swt_seconds.toFixed(0)} sec` : 'N/A'}</div>
       <div className="chart-tooltip-meta">
         {row.n_observed_headways} observed / {row.n_scheduled_headways} scheduled headways
+        {row.coverage_ratio != null
+          && ` (${Math.round(row.coverage_ratio * 100)}% coverage)`}
       </div>
     </div>
   )
@@ -37,15 +53,21 @@ function ewtTooltip({ active, payload }) {
 function bunchingTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const row = payload[0].payload
+  const thin = isThin(row.coverage_ratio)
   return (
     <div className="chart-tooltip">
-      <div className="chart-tooltip-title">{row.time_period}</div>
+      <div className="chart-tooltip-title">
+        {row.time_period}
+        {thin && <span className="data-thin-badge">Thin</span>}
+      </div>
       <div>
         Bunching:{' '}
         {row.bunching_rate != null ? `${(row.bunching_rate * 100).toFixed(1)}%` : 'N/A'}
       </div>
       <div className="chart-tooltip-meta">
         {row.bunching_count} of {row.total_headways} headway pairs
+        {row.coverage_ratio != null
+          && ` (${Math.round(row.coverage_ratio * 100)}% EWT coverage)`}
       </div>
     </div>
   )
@@ -102,9 +124,22 @@ function PeriodDrilldown({ routeId }) {
   const ewtRows = (data.ewt || [])
     .filter((r) => r.frequent_cell_hours > 0)
     .map((r) => ({ ...r, _label: shortPeriodLabel(r.time_period) }))
+  // EWT coverage_ratio is the observed-vs-scheduled-headways gauge; bunching
+  // shares the same observation source so the same threshold applies. Thread
+  // it onto bunching rows by time_period so the tooltip and bar shading
+  // reflect it consistently.
+  const ewtCoverageByPeriod = Object.fromEntries(
+    (data.ewt || []).map((r) => [r.time_period, r.coverage_ratio]),
+  )
   const bunchingRows = (data.bunching || [])
     .filter((r) => r.total_headways > 0)
-    .map((r) => ({ ...r, _label: shortPeriodLabel(r.time_period) }))
+    .map((r) => ({
+      ...r,
+      _label: shortPeriodLabel(r.time_period),
+      coverage_ratio: ewtCoverageByPeriod[r.time_period] ?? null,
+    }))
+  const anyThin = ewtRows.some((r) => isThin(r.coverage_ratio))
+    || bunchingRows.some((r) => isThin(r.coverage_ratio))
 
   return (
     <div className="chart-container">
@@ -129,12 +164,15 @@ function PeriodDrilldown({ routeId }) {
                 <YAxis tick={{ fontSize: 12 }} />
                 <Tooltip content={ewtTooltip} />
                 <Bar dataKey="ewt_seconds" fill={EWT_BAR_COLOR}>
-                  {ewtRows.map((row) => (
-                    <Cell
-                      key={row.time_period}
-                      fill={row.ewt_seconds == null ? '#cbd5e1' : EWT_BAR_COLOR}
-                    />
-                  ))}
+                  {ewtRows.map((row) => {
+                    let fill = EWT_BAR_COLOR
+                    if (row.ewt_seconds == null) {
+                      fill = '#cbd5e1'
+                    } else if (isThin(row.coverage_ratio)) {
+                      fill = EWT_BAR_COLOR_THIN
+                    }
+                    return <Cell key={row.time_period} fill={fill} />
+                  })}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -163,6 +201,13 @@ function PeriodDrilldown({ routeId }) {
           )}
         </div>
       </div>
+      {anyThin && (
+        <p className="data-thin-note">
+          <span className="data-thin-badge">Thin</span> periods had under 50%
+          observed-vs-scheduled headway coverage — the trip-update derivation
+          missed enough arrivals that the metric is unreliable.
+        </p>
+      )}
     </div>
   )
 }

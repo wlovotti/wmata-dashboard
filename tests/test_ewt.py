@@ -446,6 +446,95 @@ class TestComputeEwtForRouteDate:
         assert am["swt_seconds"] == pytest.approx(300.0)
 
 
+class TestCoverageRatio:
+    """`coverage_ratio` is the observed-to-scheduled-headway gauge surfaced
+    alongside EWT so the frontend can flag thin-data periods where the
+    trip-update derivation missed enough arrivals to make AWT unreliable."""
+
+    def _seed_frequent_cell_at_7am(self, db_session):
+        """Identical setup to TestComputeEwtForRouteDate's helper of the same name."""
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S1")
+        # Four scheduled arrivals at S1 in hour 7 → three 600s headways.
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00", "07:30:00"]):
+            trip_id = f"T{i + 1}"
+            _seed_trip(db_session, trip_id, ROUTE)
+            _seed_stop_time(db_session, trip_id, "S1", t)
+
+    def test_full_coverage_is_one(self, db_session):
+        """Three observed headways out of three scheduled → coverage_ratio = 1.0."""
+        self._seed_frequent_cell_at_7am(db_session)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"T{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 11, minute, 0),
+            )
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["coverage_ratio"] == pytest.approx(1.0)
+
+    def test_partial_coverage_below_threshold(self, db_session):
+        """One observed headway of three scheduled → coverage_ratio = 1/3."""
+        self._seed_frequent_cell_at_7am(db_session)
+        # Only two arrivals → one observed headway.
+        _seed_stop_event(
+            db_session,
+            trip_id="T1",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 0, 0),
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="T2",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 10, 0),
+        )
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["coverage_ratio"] == pytest.approx(1.0 / 3.0)
+        # Sanity: this is what the UI threshold (<0.5) would flag.
+        assert am["coverage_ratio"] < 0.5
+
+    def test_no_observed_is_zero(self, db_session):
+        """Schedule present, no observed → coverage_ratio = 0.0 (not None)."""
+        self._seed_frequent_cell_at_7am(db_session)
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["coverage_ratio"] == 0.0
+
+    def test_no_schedule_is_none(self, db_session):
+        """No frequent cell-hours in a period → coverage_ratio = None (undefined)."""
+        _seed_route(db_session)
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        for r in rows:
+            assert r["coverage_ratio"] is None
+
+    def test_clamped_at_one(self, db_session):
+        """ADDED real-time-only trips can push observed > scheduled; clamp at 1.0."""
+        self._seed_frequent_cell_at_7am(db_session)
+        # Six observed arrivals → five observed headways vs three scheduled.
+        for i, minute in enumerate([0, 5, 10, 15, 20, 25]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"X{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 11, minute, 0),
+            )
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["coverage_ratio"] == 1.0
+        # Raw counts unchanged — the clamp only affects the published ratio.
+        assert am["n_observed_headways"] == 5
+        assert am["n_scheduled_headways"] == 3
+
+
 class TestComputeEwtForRoutes:
     """Batch helper enumerates routes from stop_events on the date."""
 

@@ -311,8 +311,9 @@ def compute_ewt_for_route_date(
         awt = compute_awt(obs)
         swt = compute_awt(sched)
         # Clamp at 0: EWT is rider-felt excess wait. Sparse observation coverage
-        # (NOTES-27) can drive AWT below SWT — a measurement artifact, not a
-        # real "service ran better than scheduled" signal. AWT/SWT remain raw.
+        # can drive AWT below SWT — a measurement artifact, not a real "service
+        # ran better than scheduled" signal. AWT/SWT remain raw. The companion
+        # `coverage_ratio` field is what the UI uses to flag the underlying gap.
         ewt = max(0.0, awt - swt) if (awt is not None and swt is not None) else None
         rows.append(
             {
@@ -325,6 +326,7 @@ def compute_ewt_for_route_date(
                 "ewt_seconds": round(ewt, 2) if ewt is not None else None,
                 "n_observed_headways": len(obs),
                 "n_scheduled_headways": len(sched),
+                "coverage_ratio": _coverage_ratio(len(obs), len(sched)),
                 "frequent_cell_hours": freq_cell_count.get(label, 0),
             }
         )
@@ -358,6 +360,24 @@ def compute_ewt_for_routes(
     return out
 
 
+def _coverage_ratio(n_observed: int, n_scheduled: int) -> float | None:
+    """Observed-to-scheduled headway coverage for an EWT pool.
+
+    Returns `n_observed / n_scheduled` clamped into `[0, 1]`, or `None` when
+    `n_scheduled == 0` (no frequent cell-hours, so coverage is undefined).
+    The clamp is defensive — observed can briefly exceed scheduled when ADDED
+    real-time-only trips slot between scheduled buses, and we don't want a
+    `> 1` value confusing the "thin data" UI threshold.
+
+    Used by the frontend to flag periods where the EWT clamp at 0
+    (NOTES-17) is masking sparse trip_update derivation rather than reflecting
+    on-time service. Below ~0.5 the metric is unreliable.
+    """
+    if n_scheduled <= 0:
+        return None
+    return min(1.0, max(0.0, n_observed / n_scheduled))
+
+
 def _ewt_headline_from_pools(
     route_id: str,
     service_date_str: str,
@@ -383,6 +403,7 @@ def _ewt_headline_from_pools(
         "ewt_seconds": round(ewt, 2) if ewt is not None else None,
         "n_observed_headways": len(obs_pool),
         "n_scheduled_headways": len(sched_pool),
+        "coverage_ratio": _coverage_ratio(len(obs_pool), len(sched_pool)),
         "frequent_cell_hours": freq_cells,
     }
 

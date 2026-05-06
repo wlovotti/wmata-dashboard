@@ -252,11 +252,27 @@ function RouteList() {
                   {route.ewt_seconds != null
                     ? `${Math.round(route.ewt_seconds)}s`
                     : '—'}
+                  {route.ewt_coverage_ratio != null && route.ewt_coverage_ratio < 0.5 && (
+                    <span
+                      className="data-thin-badge"
+                      title={`Only ${Math.round(route.ewt_coverage_ratio * 100)}% of scheduled headways were observed — metric unreliable`}
+                    >
+                      Thin
+                    </span>
+                  )}
                 </td>
                 <td className="metric">
                   {route.bunching_rate != null
                     ? `${(route.bunching_rate * 100).toFixed(1)}%`
                     : '—'}
+                  {route.ewt_coverage_ratio != null && route.ewt_coverage_ratio < 0.5 && (
+                    <span
+                      className="data-thin-badge"
+                      title={`Only ${Math.round(route.ewt_coverage_ratio * 100)}% of scheduled headways were observed — metric unreliable`}
+                    >
+                      Thin
+                    </span>
+                  )}
                 </td>
               </tr>
               ))
