@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from src.database import get_session, init_db
 from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
-from src.timezones import utcnow_naive
+from src.timezones import from_epoch_naive_utc, utcnow_naive
 
 # Load environment variables from .env file
 load_dotenv()
@@ -490,7 +490,7 @@ class WMATADataCollector:
             feed.ParseFromString(response.content)
 
             snapshot_ts = (
-                datetime.utcfromtimestamp(feed.header.timestamp)
+                from_epoch_naive_utc(feed.header.timestamp)
                 if feed.header.timestamp
                 else utcnow_naive()
             )
@@ -510,11 +510,11 @@ class WMATADataCollector:
 
                     predicted_arrival_ts = None
                     if stu.HasField("arrival") and stu.arrival.HasField("time"):
-                        predicted_arrival_ts = datetime.utcfromtimestamp(stu.arrival.time)
+                        predicted_arrival_ts = from_epoch_naive_utc(stu.arrival.time)
 
                     predicted_departure_ts = None
                     if stu.HasField("departure") and stu.departure.HasField("time"):
-                        predicted_departure_ts = datetime.utcfromtimestamp(stu.departure.time)
+                        predicted_departure_ts = from_epoch_naive_utc(stu.departure.time)
 
                     if stu.HasField("schedule_relationship"):
                         schedule_relationship = stu.ScheduleRelationship.Name(
@@ -598,7 +598,7 @@ class WMATADataCollector:
                 # Additional data
                 occupancy_status=vehicle_data.get("occupancy_status"),
                 # Timestamps — naive UTC (see src/timezones.py for convention)
-                timestamp=datetime.utcfromtimestamp(vehicle_data["timestamp"])
+                timestamp=from_epoch_naive_utc(vehicle_data["timestamp"])
                 if vehicle_data["timestamp"]
                 else utcnow_naive(),
             )

@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-29 — replaced `datetime.utcnow()` with `utcnow_naive()` helper across ~50 call sites; opened NOTES-35 for the related `datetime.utcfromtimestamp` deprecation in `src/wmata_collector.py`).
+Last edited 2026-05-06 (closed NOTES-35 — replaced `datetime.utcfromtimestamp()` in `src/wmata_collector.py` with new `from_epoch_naive_utc()` helper, completing the Python 3.12 datetime deprecation sweep started in NOTES-29).
 
 ---
 
@@ -55,18 +55,7 @@ sequencing still matters.
   ceiling at the cost of admitting more single-ping ghost runs. Not
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
-- **NOTES-35 Replace `datetime.utcfromtimestamp()` calls in
-  `src/wmata_collector.py`.** Surfaced while closing NOTES-29: the
-  collector parses GTFS-RT epoch timestamps with
-  `datetime.utcfromtimestamp(...)`, which is deprecated alongside
-  `datetime.utcnow()` in Python 3.12. Four call sites
-  (`src/wmata_collector.py:493`, `:513`, `:517`, `:601`). Fix is
-  `datetime.fromtimestamp(ts, UTC).replace(tzinfo=None)` to preserve the
-  naive-UTC storage convention; trivially batchable into a future
-  collector PR. Not in scope for NOTES-29 because the storage shape
-  question is the same but the fix shape is different — there's an
-  epoch-timestamp argument to thread through, so a one-arg helper
-  wouldn't compose.
+
 ---
 
 ## NOTES-18. Grading rubric refresh

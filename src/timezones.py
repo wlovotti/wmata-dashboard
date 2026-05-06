@@ -43,6 +43,20 @@ def utcnow_naive():
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def from_epoch_naive_utc(ts):
+    """Convert a POSIX epoch timestamp to a naive UTC datetime (matches DB storage convention).
+
+    Replaces the deprecated ``datetime.utcfromtimestamp(ts)`` (Python 3.12+).
+    Same approach as ``utcnow_naive()``: build a tz-aware datetime in UTC,
+    then strip tzinfo to match the naive-UTC storage convention used by
+    every ``DateTime`` column in the database. Used by the GTFS-RT
+    collector (``src/wmata_collector.py``) when parsing epoch-second
+    timestamps from feed headers and stop_time_update arrival/departure
+    fields.
+    """
+    return datetime.fromtimestamp(ts, UTC).replace(tzinfo=None)
+
+
 def eastern_midnight_as_utc(date):
     """Convert midnight on the given Eastern-zone date to a naive UTC datetime.
 
