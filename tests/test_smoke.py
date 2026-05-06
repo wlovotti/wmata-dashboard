@@ -1388,8 +1388,14 @@ def test_compute_service_delivered_dedups_per_source(db_session):
 
 
 @pytest.mark.smoke
-def test_compute_service_delivered_filters_below_three_stops(db_session):
-    """Runs with stops_observed < 3 don't count as delivered (RUN_EXISTED filter)."""
+def test_compute_service_delivered_filters_ghost_runs_below_floor(db_session):
+    """Runs with stops_observed < 2 are excluded as ghost runs (NOTES-30 floor).
+
+    The proportional threshold is `max(2, stops_observable // 3)`; for routes
+    with stops_observable < 9 the floor of 2 always wins, so a 1-stop run
+    fails the existence check while a 2-stop run passes (assuming the route
+    is short enough that 2 is the threshold).
+    """
     from datetime import date
 
     from src.service_delivered import compute_service_delivered
@@ -1400,9 +1406,10 @@ def test_compute_service_delivered_filters_below_three_stops(db_session):
             _gtfs_trip("T1"),
             _gtfs_trip("T2"),
             _gtfs_trip("T3"),
-            _run("T1", "proximity", 2),  # below threshold — excluded
-            _run("T2", "proximity", 3),  # exactly threshold — included
-            _run("T3", "trip_update", 0),  # zero — excluded
+            # Short-route (3-stop) trips: threshold = max(2, 3//3) = 2
+            _run("T1", "proximity", 1, stops_scheduled=3, stops_observable=3),  # below floor — excluded
+            _run("T2", "proximity", 2, stops_scheduled=3, stops_observable=3),  # at floor — included
+            _run("T3", "trip_update", 0, stops_scheduled=3, stops_observable=2),  # zero — excluded
         ]
     )
     db_session.commit()
@@ -1410,6 +1417,103 @@ def test_compute_service_delivered_filters_below_three_stops(db_session):
     out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
     assert out["delivered_trips"] == 1
     assert out["ratio"] == round(1 / 3, 4)
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_short_route_two_stops(db_session):
+    """A90-style 2-stop route: stops_observable=2, threshold=2, both observed → delivered.
+
+    Closes NOTES-30. Before the fix, the flat `stops_observed >= 3` filter
+    was structurally unreachable on routes whose GTFS trips have ≤3 stops
+    (the longest A90 trip is 2 stops), so service_delivered_ratio was
+    always 0.0 despite the buses obviously running. The proportional
+    threshold `max(2, stops_observable // 3)` admits these runs.
+    """
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("T1"),
+            _gtfs_trip("T2"),
+            _gtfs_trip("T3"),
+            _gtfs_trip("T4"),
+            # 2-stop route: stops_observable=2 for proximity, =1 for TU.
+            # Threshold = max(2, n//3) = 2, so only proximity rows can possibly qualify.
+            _run("T1", "proximity", 2, stops_scheduled=2, stops_observable=2),  # delivered
+            _run("T2", "proximity", 2, stops_scheduled=2, stops_observable=2),  # delivered
+            _run("T3", "proximity", 1, stops_scheduled=2, stops_observable=2),  # 1 stop — excluded
+            _run("T4", "trip_update", 1, stops_scheduled=2, stops_observable=1),  # TU can't reach 2 — excluded
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["delivered_trips"] == 2  # T1, T2
+    assert out["scheduled_trips"] == 4
+    assert out["ratio"] == 0.5
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_long_route_proportional_threshold(db_session):
+    """30-stop route: threshold = floor(30/3) = 10; runs below 10 excluded."""
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("T1"),
+            _gtfs_trip("T2"),
+            _gtfs_trip("T3"),
+            _gtfs_trip("T4"),
+            # 30-stop route: proximity stops_observable=30 → threshold=10.
+            _run("T1", "proximity", 9, stops_scheduled=30, stops_observable=30),  # 9 < 10 — excluded
+            _run("T2", "proximity", 10, stops_scheduled=30, stops_observable=30),  # at threshold — included
+            _run("T3", "proximity", 25, stops_scheduled=30, stops_observable=30),  # well above — included
+            # TU stops_observable = 29, floor(29/3) = 9, max(2, 9) = 9 → threshold=9 for TU rows.
+            _run("T4", "trip_update", 9, stops_scheduled=30, stops_observable=29),  # included
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["delivered_trips"] == 3  # T2, T3, T4
+    assert out["scheduled_trips"] == 4
+    assert out["ratio"] == 0.75
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_trip_update_observable_offset(db_session):
+    """TU rows have stops_observable = stops_scheduled - 1 (origin unobservable).
+
+    A 9-scheduled-stop trip has TU stops_observable=8, so threshold = max(2,
+    8//3) = 2 — but since 8 < 9, the floor-at-2 branch wins. Verifies the
+    CASE inflection point at stops_observable = 9.
+    """
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("T1"),
+            _gtfs_trip("T2"),
+            # stops_observable=8 → threshold=2 (floor wins since 8 < 9)
+            _run("T1", "trip_update", 2, stops_scheduled=9, stops_observable=8),  # included
+            # stops_observable=9 → threshold=3 (proportional kicks in)
+            _run("T2", "trip_update", 2, stops_scheduled=10, stops_observable=9),  # excluded: 2 < 3
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    assert out["delivered_trips"] == 1  # T1 only
+    assert out["scheduled_trips"] == 2
 
 
 @pytest.mark.smoke
