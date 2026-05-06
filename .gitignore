@@ -39,6 +39,7 @@ analysis/*.csv
 # Test / runtime artifacts
 .coverage
 logs/
+archive/
 
 # IDE
 .vscode/

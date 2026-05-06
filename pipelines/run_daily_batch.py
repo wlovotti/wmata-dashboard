@@ -86,6 +86,18 @@ PIPELINES: list[dict] = [
     },
 ]
 
+# Housekeeping pipelines that aren't date-scoped — they operate on the global
+# table (or other shared state) rather than a per-(route, date) subset. Run
+# ONCE per batch invocation, after all per-date pipelines have completed.
+# Failures here log but don't block the run — these are housekeeping, not
+# the metrics critical path.
+HOUSEKEEPING_PIPELINES: list[dict] = [
+    {
+        "name": "archive_trip_update_snapshots",
+        "module": "pipelines.archive_trip_update_snapshots",
+    },
+]
+
 
 def determine_target_dates(lookback_days: int = 7) -> list[date_type]:
     """Return the service dates this batch should process.
@@ -130,6 +142,33 @@ def list_active_route_ids() -> list[str]:
         return [r[0] for r in rows]
     finally:
         db.close()
+
+
+def run_housekeeping_pipeline(
+    module: str,
+    log_handle,
+) -> tuple[int, float]:
+    """Run a single non-date-scoped housekeeping pipeline.
+
+    Same subprocess pattern as `run_pipeline`, minus `--all-routes`/`--date`
+    args — housekeeping pipelines like `archive_trip_update_snapshots`
+    operate on the global table, not a per-(route, date) subset.
+    """
+    cmd = [sys.executable, "-m", module]
+    log_handle.write(f"\n$ {' '.join(cmd)}\n")
+    log_handle.flush()
+    start = time.time()
+    proc = subprocess.run(
+        cmd,
+        cwd=str(REPO_ROOT),
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    elapsed = time.time() - start
+    log_handle.write(f"[exit {proc.returncode}, {elapsed:.1f}s]\n")
+    log_handle.flush()
+    return proc.returncode, elapsed
 
 
 def run_pipeline(
@@ -232,6 +271,29 @@ def run_batch(
                     f"OK   {pipeline['name']} for {service_date.isoformat()}: {elapsed:.1f}s\n"
                 )
             log_handle.flush()
+
+    # Housekeeping runs ONCE per batch, after all per-date pipelines. Failures
+    # log but do not increment the metrics-critical failure count; the caller
+    # surfaces housekeeping outcomes through the same exit code so launchd
+    # still notices, but a metrics-redesign pipeline failure is the priority
+    # signal.
+    for hk in HOUSEKEEPING_PIPELINES:
+        log_handle.write(f"\n=== housekeeping: {hk['name']} ===\n")
+        log_handle.flush()
+        if dry_run:
+            log_handle.write(f"DRY-RUN would run {hk['module']}\n")
+            continue
+        rc, elapsed = run_housekeeping_pipeline(hk["module"], log_handle)
+        if rc != 0:
+            # Soft-failure: log it, count it (so the wrapper exits non-zero),
+            # but don't let it block anything (no downstream depends on it).
+            failure_count += 1
+            log_handle.write(
+                f"FAIL housekeeping {hk['name']}: exit {rc} after {elapsed:.1f}s (non-blocking)\n"
+            )
+        else:
+            log_handle.write(f"OK   housekeeping {hk['name']}: {elapsed:.1f}s\n")
+        log_handle.flush()
 
     return failure_count
 
