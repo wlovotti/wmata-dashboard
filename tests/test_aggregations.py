@@ -10,8 +10,6 @@ Tests the business logic in api/aggregations.py including:
 Run with: pytest tests/test_aggregations.py
 """
 
-from datetime import datetime
-
 from api.aggregations import (
     calculate_performance_grade,
     get_all_routes_scorecard,
@@ -19,6 +17,7 @@ from api.aggregations import (
     get_route_trend_data,
     sanitize_float,
 )
+from src.timezones import utcnow_naive
 
 
 class TestSanitizeFloat:
@@ -129,7 +128,7 @@ class TestGetAllRoutesScorecard:
             avg_headway_minutes=10.0,
             avg_speed_mph=20.0,
             total_observations=200,
-            computed_at=datetime.utcnow(),
+            computed_at=utcnow_naive(),
         )
         db_session.add(summary)
         db_session.commit()
@@ -171,7 +170,7 @@ class TestGetAllRoutesScorecard:
                 avg_headway_minutes=10.0,
                 avg_speed_mph=20.0,
                 total_observations=100,
-                computed_at=datetime.utcnow(),
+                computed_at=utcnow_naive(),
             )
             db_session.add(summary)
         db_session.commit()

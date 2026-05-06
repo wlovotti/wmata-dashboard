@@ -15,7 +15,6 @@ import io
 import os
 import sys
 import zipfile
-from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -35,6 +34,7 @@ from src.models import (
     TimepointTime,
     Trip,
 )
+from src.timezones import utcnow_naive
 
 load_dotenv()
 
@@ -101,7 +101,7 @@ def load_gtfs_data(db):
         print("-" * 70)
 
         # Create new GTFSSnapshot record
-        now = datetime.utcnow()
+        now = utcnow_naive()
         feed_version = (
             gtfs_data["feed_info"][0].get("feed_version") if gtfs_data.get("feed_info") else None
         )

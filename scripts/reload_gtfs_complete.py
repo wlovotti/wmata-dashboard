@@ -20,7 +20,6 @@ import io
 import os
 import sys
 import zipfile
-from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -44,6 +43,7 @@ from src.models import (
     Trip,
 )
 from src.service_profile import compute_route_service_profile
+from src.timezones import utcnow_naive
 
 load_dotenv()
 
@@ -112,7 +112,7 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
 
     Returns the snapshot_id of the newly created GTFSSnapshot row.
     """
-    now = datetime.utcnow()
+    now = utcnow_naive()
 
     print("\nCreating new GTFS snapshot...")
     print("-" * 70)

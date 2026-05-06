@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from sqlalchemy import (
     Boolean,
     Column,
@@ -13,6 +11,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+
+from src.timezones import utcnow_naive
 
 Base = declarative_base()
 
@@ -31,7 +31,7 @@ class Agency(Base):
     agency_phone = Column(String)
     agency_fare_url = Column(String)
     agency_email = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Relationships
     routes = relationship("Route", back_populates="agency")
@@ -58,11 +58,11 @@ class Calendar(Base):
     snapshot_id = Column(
         Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
     )
-    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_from = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Composite index for efficient queries on current calendars
     __table_args__ = (Index("idx_calendar_current", "service_id", "is_current"),)
@@ -82,11 +82,11 @@ class CalendarDate(Base):
     snapshot_id = Column(
         Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
     )
-    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_from = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Composite indexes for efficient queries
     __table_args__ = (
@@ -109,7 +109,7 @@ class FeedInfo(Base):
     feed_version = Column(String)
     feed_contact_email = Column(String)
     feed_contact_url = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
 
 class GTFSSnapshot(Base):
@@ -135,7 +135,7 @@ class GTFSSnapshot(Base):
     calendar_entries = Column(Integer)  # Number of calendar entries
     calendar_exceptions = Column(Integer)  # Number of calendar_dates entries
     notes = Column(String)  # Optional notes about this snapshot
-    created_at = Column(DateTime, default=datetime.utcnow)  # When we created this record
+    created_at = Column(DateTime, default=utcnow_naive)  # When we created this record
 
 
 class Timepoint(Base):
@@ -152,7 +152,7 @@ class Timepoint(Base):
     stop_lon = Column(Float, nullable=False)
     zone_id = Column(String)
     stop_url = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
 
 class TimepointTime(Base):
@@ -171,7 +171,7 @@ class TimepointTime(Base):
     drop_off_type = Column(Integer)
     shape_dist_traveled = Column(Float)
     timepoint = Column(Integer)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Composite index for efficient queries
     __table_args__ = (Index("idx_timepoint_trip_sequence", "trip_id", "stop_sequence"),)
@@ -197,13 +197,13 @@ class Route(Base):
     snapshot_id = Column(
         Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
     )
-    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_from = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(
         Boolean, nullable=False, default=True, index=True
     )  # Fast lookup for current
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Composite index for efficient queries on current routes
     __table_args__ = (Index("idx_route_current", "route_id", "is_current"),)
@@ -233,11 +233,11 @@ class Stop(Base):
     snapshot_id = Column(
         Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
     )
-    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_from = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Composite index for efficient queries on current stops
     __table_args__ = (Index("idx_stop_current", "stop_id", "is_current"),)
@@ -266,11 +266,11 @@ class Trip(Base):
     snapshot_id = Column(
         Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
     )
-    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_from = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Composite index for efficient queries on current trips
     __table_args__ = (Index("idx_trip_current", "trip_id", "is_current"),)
@@ -304,11 +304,11 @@ class StopTime(Base):
     snapshot_id = Column(
         Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
     )
-    valid_from = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    valid_from = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
     valid_to = Column(DateTime, nullable=True, index=True)  # NULL = currently active
     is_current = Column(Boolean, nullable=False, default=True, index=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Note: Relationships removed due to versioning complexity
     # Query using explicit filters with is_current=True
@@ -338,7 +338,7 @@ class Shape(Base):
     shape_pt_lon = Column(Float, nullable=False)
     shape_pt_sequence = Column(Integer, nullable=False)
     shape_dist_traveled = Column(Float)  # Optional: cumulative distance in GTFS
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     # Composite index for efficient queries by shape and sequence
     __table_args__ = (Index("idx_shape_sequence", "shape_id", "shape_pt_sequence"),)
@@ -377,7 +377,7 @@ class VehiclePosition(Base):
 
     # Timestamps
     timestamp = Column(DateTime, nullable=False, index=True)
-    collected_at = Column(DateTime, default=datetime.utcnow, index=True)
+    collected_at = Column(DateTime, default=utcnow_naive, index=True)
 
     # Note: Relationships removed due to versioning complexity
     # Query using explicit filters on route_id/trip_id with is_current=True
@@ -427,7 +427,7 @@ class TripUpdateSnapshot(Base):
         String
     )  # 'SCHEDULED' | 'SKIPPED' | 'NO_DATA' | 'UNSCHEDULED' | 'UNSET'
 
-    collected_at = Column(DateTime, default=datetime.utcnow, index=True)
+    collected_at = Column(DateTime, default=utcnow_naive, index=True)
 
     # Indexes target the two main access patterns:
     #   - per-pair time series: WHERE trip_id=? AND stop_id=? ORDER BY snapshot_ts
@@ -501,7 +501,7 @@ class StopEvent(Base):
         String, nullable=False, default="SCHEDULED"
     )  # 'SCHEDULED' | 'SKIPPED' | 'NO_DATA' | 'ADDED'
     match_distance_m = Column(Float)  # proximity source only — diagnostic for matcher quality
-    derived_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    derived_at = Column(DateTime, nullable=False, default=utcnow_naive)
 
     __table_args__ = (
         UniqueConstraint(
@@ -642,7 +642,7 @@ class Run(Base):
     origin_dev_sec = Column(Integer)
     destination_dev_sec = Column(Integer)
 
-    derived_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    derived_at = Column(DateTime, nullable=False, default=utcnow_naive)
 
     __table_args__ = (
         UniqueConstraint(
@@ -690,7 +690,7 @@ class RouteServiceProfile(Base):
     snapshot_id = Column(
         Integer, ForeignKey("gtfs_snapshots.snapshot_id"), nullable=True, index=True
     )
-    computed_at = Column(DateTime, default=datetime.utcnow)
+    computed_at = Column(DateTime, default=utcnow_naive)
 
     __table_args__ = (
         Index(
@@ -740,7 +740,7 @@ class RouteMetricsDaily(Base):
     unique_trips = Column(Integer)
 
     # Metadata
-    computed_at = Column(DateTime, default=datetime.utcnow)
+    computed_at = Column(DateTime, default=utcnow_naive)
 
     # Composite index for efficient queries
     __table_args__ = (Index("idx_route_date", "route_id", "date", unique=True),)
@@ -784,7 +784,7 @@ class RouteMetricsSummary(Base):
     last_position_timestamp = Column(DateTime)  # Most recent position timestamp
 
     # Metadata
-    computed_at = Column(DateTime, default=datetime.utcnow)
+    computed_at = Column(DateTime, default=utcnow_naive)
 
 
 class RouteHeadwayMetrics(Base):
@@ -824,7 +824,7 @@ class RouteHeadwayMetrics(Base):
     total_headways = Column(Integer, nullable=False, default=0)
     bunching_rate = Column(Float)
 
-    computed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
 
     __table_args__ = (
         UniqueConstraint("route_id", "date", "time_period", name="uq_route_headway_metrics_key"),

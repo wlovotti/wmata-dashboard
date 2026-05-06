@@ -56,6 +56,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from src.database import get_engine
+from src.timezones import utcnow_naive
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARCHIVE_DIR = REPO_ROOT / "archive" / "trip_update_snapshots"
@@ -85,7 +86,7 @@ def compute_cutoff(retention_days: int) -> datetime:
     Naive UTC matches the project-wide datetime convention (see CLAUDE.md);
     every `DateTime` column in the DB is naive UTC.
     """
-    return datetime.utcnow() - timedelta(days=retention_days)
+    return utcnow_naive() - timedelta(days=retention_days)
 
 
 def count_rows_before(engine, cutoff: datetime) -> int:

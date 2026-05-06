@@ -6,7 +6,7 @@ Tests database model creation, relationships, and constraints.
 Run with: pytest tests/test_models.py
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +20,7 @@ from src.models import (
     Trip,
     VehiclePosition,
 )
+from src.timezones import utcnow_naive
 
 
 def test_route_creation(db_session):
@@ -100,7 +101,7 @@ def test_stop_time_relationships(db_session, sample_route, sample_stop):
 
 def test_vehicle_position_creation(db_session, sample_route, sample_trip):
     """Test creating VehiclePosition with all fields"""
-    timestamp = datetime.utcnow()
+    timestamp = utcnow_naive()
     position = VehiclePosition(
         vehicle_id="BUS_123",
         route_id=sample_route.route_id,
@@ -130,7 +131,7 @@ def test_route_metrics_summary_creation(db_session, sample_route):
         avg_headway_minutes=12.0,
         avg_speed_mph=18.5,
         total_observations=200,
-        computed_at=datetime.utcnow(),
+        computed_at=utcnow_naive(),
     )
     db_session.add(summary)
     db_session.commit()
@@ -144,7 +145,7 @@ def test_route_metrics_summary_creation(db_session, sample_route):
 
 def test_route_metrics_daily_creation(db_session, sample_route):
     """Test creating RouteMetricsDaily"""
-    yesterday = (datetime.utcnow() - timedelta(days=1)).date()
+    yesterday = (utcnow_naive() - timedelta(days=1)).date()
     daily = RouteMetricsDaily(
         route_id=sample_route.route_id,
         date=yesterday.isoformat(),
@@ -152,7 +153,7 @@ def test_route_metrics_daily_creation(db_session, sample_route):
         avg_headway_minutes=11.5,
         avg_speed_mph=19.0,
         total_arrivals=50,
-        computed_at=datetime.utcnow(),
+        computed_at=utcnow_naive(),
     )
     db_session.add(daily)
     db_session.commit()
@@ -189,7 +190,7 @@ def test_route_metrics_unique_constraint(db_session, sample_route):
         RouteMetricsSummary(
             route_id=route_id,
             otp_percentage=85.0,
-            computed_at=datetime.utcnow(),
+            computed_at=utcnow_naive(),
         )
     )
     db_session.flush()
@@ -201,7 +202,7 @@ def test_route_metrics_unique_constraint(db_session, sample_route):
         RouteMetricsSummary(
             route_id=route_id,
             otp_percentage=90.0,
-            computed_at=datetime.utcnow(),
+            computed_at=utcnow_naive(),
         )
     )
     with pytest.raises(IntegrityError):

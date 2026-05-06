@@ -48,6 +48,7 @@ from src.service_profile import (
     classify_route_frequency,
     compute_route_frequency_classes,
 )
+from src.timezones import utcnow_naive
 
 # Per-service-date cache of the new live-computed scorecard metrics. The
 # scheduled stop_times fetch (~1.7s) dominates cost; observed stop_events are
@@ -585,7 +586,7 @@ def get_route_time_period_summary(db: Session, route_id: str, days: int = 7) -> 
     Returns:
         Performance metrics grouped by time period
     """
-    end_time = datetime.utcnow()
+    end_time = utcnow_naive()
     start_time = end_time - timedelta(days=days)
 
     # Use existing time period OTP function

@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-24 — GTFS snapshot freshness surfaced in dashboard footer via `/api/gtfs/freshness`).
+Last edited 2026-05-06 (closed NOTES-29 — replaced `datetime.utcnow()` with `utcnow_naive()` helper across ~50 call sites; opened NOTES-35 for the related `datetime.utcfromtimestamp` deprecation in `src/wmata_collector.py`).
 
 ---
 
@@ -38,12 +38,6 @@ sequencing still matters.
 
 ### Independent of the redesign
 
-- **NOTES-29 Replace `datetime.utcnow()` with timezone-aware UTC.**
-  Deprecated in Python 3.12; emits a DeprecationWarning on every call
-  (visible in the GTFS reload log). ~50 call sites across `src/models.py`
-  (Column defaults), pipelines, scripts, API, and tests. The naive-UTC
-  storage convention complicates the migration — needs a small helper
-  rather than a blind sed.
 - **NOTES-34 service_delivered ceiling on 2-stop routes (TU structural
   exclusion).** Side effect of the NOTES-30 closing PR (proportional
   threshold). The new threshold is `max(2, stops_observable // 3)`; on a
@@ -61,6 +55,18 @@ sequencing still matters.
   ceiling at the cost of admitting more single-ping ghost runs. Not
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
+- **NOTES-35 Replace `datetime.utcfromtimestamp()` calls in
+  `src/wmata_collector.py`.** Surfaced while closing NOTES-29: the
+  collector parses GTFS-RT epoch timestamps with
+  `datetime.utcfromtimestamp(...)`, which is deprecated alongside
+  `datetime.utcnow()` in Python 3.12. Four call sites
+  (`src/wmata_collector.py:493`, `:513`, `:517`, `:601`). Fix is
+  `datetime.fromtimestamp(ts, UTC).replace(tzinfo=None)` to preserve the
+  naive-UTC storage convention; trivially batchable into a future
+  collector PR. Not in scope for NOTES-29 because the storage shape
+  question is the same but the fix shape is different — there's an
+  epoch-timestamp argument to thread through, so a one-arg helper
+  wouldn't compose.
 ---
 
 ## NOTES-18. Grading rubric refresh
@@ -103,55 +109,4 @@ The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
 
 ---
-
-## NOTES-29. Replace `datetime.utcnow()` with timezone-aware UTC
-
-**Severity: low — tooling hygiene. Deprecated since Python 3.12; not yet
-scheduled for removal but emits a DeprecationWarning on every call.**
-
-### Where it lives
-
-Surfaced visibly in the GTFS reload log (`scripts/reload_gtfs_complete.py:115`),
-but the issue is broader. Repo-wide grep on 2026-05-05:
-
-| File group | Approx. count |
-|---|---|
-| `src/models.py` (Column defaults) | ~25 |
-| `pipelines/*.py` (`derived_at`, `computed_at`, retention cutoffs) | ~7 |
-| `tests/*.py` (fixtures + test data) | ~12 |
-| `scripts/*.py` | ~3 |
-| `api/*.py` | ~3 |
-| `src/wmata_collector.py` | ~2 |
-
-~50 call sites total.
-
-### Why it's not a blind sed
-
-The repo convention (CLAUDE.md): "Datetime storage is naive UTC. Every
-`DateTime` column in the DB holds UTC." `datetime.now(UTC)` returns a
-**timezone-aware** datetime. Substituting it directly into
-`Column(default=datetime.now)` would change the storage shape — SQLAlchemy
-would either reject it (if the column doesn't accept tz-aware) or accept
-it as tz-aware, breaking the convention everywhere downstream code expects
-naive UTC.
-
-### Implementation
-
-1. Add a small helper in `src/timezones.py` (already the canonical
-   datetime module):
-   ```python
-   def utcnow_naive() -> datetime:
-       """Return current UTC time as a naive datetime (matches DB storage convention)."""
-       return datetime.now(UTC).replace(tzinfo=None)
-   ```
-2. Replace every `datetime.utcnow()` and `datetime.utcnow` (the bare
-   reference used in `Column(default=...)`) with `utcnow_naive` /
-   `utcnow_naive()`. Most are mechanical; the SQLAlchemy `default=`
-   calls take a callable, so pass `utcnow_naive` not `utcnow_naive()`.
-3. Run `uv run pytest` and the lint suite — the migration shouldn't
-   change behavior, only suppress the deprecation warning.
-
-### Dependencies
-
-- Independent of every other open NOTES item.
 

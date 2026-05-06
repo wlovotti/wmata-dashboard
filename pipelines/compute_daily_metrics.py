@@ -42,7 +42,7 @@ from src.models import (
     Trip,
     VehiclePosition,
 )
-from src.timezones import eastern_day_bounds_utc, eastern_today, to_eastern_sql
+from src.timezones import eastern_day_bounds_utc, eastern_today, to_eastern_sql, utcnow_naive
 
 # Load environment variables
 load_dotenv()
@@ -485,7 +485,7 @@ def compute_metrics_batch(
                 else None,
                 "headway_cv": convert_numpy_types(headway.get("cv")) if headway else None,
                 "avg_speed_mph": convert_numpy_types(speed.get("avg_speed_mph")) if speed else None,
-                "computed_at": datetime.utcnow(),
+                "computed_at": utcnow_naive(),
             }
 
             # Save to database
@@ -688,7 +688,7 @@ def get_last_data_collection_date(db) -> datetime:
         return last_position
     else:
         # Fallback to current time if no data exists
-        return datetime.utcnow()
+        return utcnow_naive()
 
 
 def compute_summary_metrics(db, days: int = 7):
@@ -823,7 +823,7 @@ def compute_summary_metrics(db, days: int = 7):
             summary.last_position_timestamp = (
                 position_stats.last_position_timestamp if position_stats else None
             )
-            summary.computed_at = datetime.utcnow()
+            summary.computed_at = utcnow_naive()
         else:
             # Create new
             summary = RouteMetricsSummary(

@@ -42,7 +42,7 @@ from pipelines.stop_events_common import (
 )
 from src.database import get_session
 from src.models import Route, Stop, StopEvent, StopTime, Trip, VehiclePosition
-from src.timezones import eastern_today
+from src.timezones import eastern_today, utcnow_naive
 
 PROXIMITY_THRESHOLD_M = 50.0
 EARTH_RADIUS_M = 6_371_000
@@ -196,7 +196,7 @@ def derive_proximity_stop_events(
             }
 
     rows = []
-    derived_at = datetime.utcnow()
+    derived_at = utcnow_naive()
     service_date_str = service_date.isoformat()
     for entry in earliest.values():
         deviation_sec = None

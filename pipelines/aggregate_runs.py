@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from src.database import get_session
 from src.models import Route, Run, StopEvent, StopTime
-from src.timezones import eastern_today
+from src.timezones import eastern_today, utcnow_naive
 
 
 def aggregate_run_rows(
@@ -235,7 +235,7 @@ def aggregate_runs_for_route_date(
     ):
         sched_index[tid] = {"count": n, "first_seq": mn, "last_seq": mx}
 
-    derived_at = datetime.utcnow()
+    derived_at = utcnow_naive()
     rows = aggregate_run_rows(events, sched_index, service_date_str, derived_at)
 
     rows_written = 0
