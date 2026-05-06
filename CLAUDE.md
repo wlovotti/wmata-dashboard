@@ -85,7 +85,7 @@ uv run python scripts/continuous_collector.py             # 60 s collector
 uv run python pipelines/compute_daily_metrics.py --recalculate              # batch (last 7 days)
 uv run python pipelines/compute_daily_metrics.py --route C51 --date 2025-10-21 --recalculate   # backfill one route/day
 uv run pytest -m smoke                                    # fast tests
-uv run ruff check src/ scripts/ api/ pipelines/           # lint (CI requires)
+uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
 ```
 
 ## Working agreements

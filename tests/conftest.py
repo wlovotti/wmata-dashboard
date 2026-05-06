@@ -8,8 +8,8 @@ Provides fixtures for:
 - Environment variable mocking
 """
 
+from collections.abc import Generator
 from datetime import datetime, timedelta
-from typing import Generator
 
 import pytest
 from fastapi.testclient import TestClient

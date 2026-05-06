@@ -11,7 +11,15 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.models import Route, RouteMetricsDaily, RouteMetricsSummary, Stop, StopTime, Trip, VehiclePosition
+from src.models import (
+    Route,
+    RouteMetricsDaily,
+    RouteMetricsSummary,
+    Stop,
+    StopTime,
+    Trip,
+    VehiclePosition,
+)
 
 
 def test_route_creation(db_session):
@@ -127,7 +135,9 @@ def test_route_metrics_summary_creation(db_session, sample_route):
     db_session.add(summary)
     db_session.commit()
 
-    queried = db_session.query(RouteMetricsSummary).filter_by(route_id=sample_route.route_id).first()
+    queried = (
+        db_session.query(RouteMetricsSummary).filter_by(route_id=sample_route.route_id).first()
+    )
     assert queried.otp_percentage == 85.5
     assert queried.avg_headway_minutes == 12.0
 
@@ -161,9 +171,11 @@ def test_query_multiple_routes(db_session, sample_routes):
 
 def test_query_vehicle_positions_by_route(db_session, sample_route, sample_vehicle_positions):
     """Test filtering vehicle positions by route"""
-    positions = db_session.query(VehiclePosition).filter(
-        VehiclePosition.route_id == sample_route.route_id
-    ).all()
+    positions = (
+        db_session.query(VehiclePosition)
+        .filter(VehiclePosition.route_id == sample_route.route_id)
+        .all()
+    )
 
     assert len(positions) == 5
     assert all(p.route_id == sample_route.route_id for p in positions)

@@ -10,10 +10,7 @@ Tests the business logic in api/aggregations.py including:
 Run with: pytest tests/test_aggregations.py
 """
 
-import math
-from datetime import datetime, timedelta
-
-import pytest
+from datetime import datetime
 
 from api.aggregations import (
     calculate_performance_grade,
@@ -291,9 +288,7 @@ class TestGetRouteTrendData:
 class TestGradeConsistency:
     """Tests for grade calculation consistency"""
 
-    def test_grade_matches_scorecard(
-        self, db_session, sample_route, sample_route_metrics_summary
-    ):
+    def test_grade_matches_scorecard(self, db_session, sample_route, sample_route_metrics_summary):
         """Test that grade is consistent between scorecard and detail views"""
         scorecard = get_all_routes_scorecard(db_session, days=7)
         detail = get_route_detail_metrics(db_session, "TEST1", days=7)

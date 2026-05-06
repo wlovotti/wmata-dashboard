@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-32 — `compute_stop_skip_rate` uses `stops_observable` as denominator).
+Last edited 2026-05-06 (closed NOTES-25 — `tests/` added to lint scope across CI workflow and CLAUDE.md command).
 
 ---
 
@@ -42,12 +42,6 @@ sequencing still matters.
   Show the newest `gtfs_snapshots.snapshot_date` somewhere visible
   (footer on RouteList?) so a stale schedule is observable instead
   of silent.
-- **NOTES-25 Add `tests/` to the lint scope.** CI lints
-  `src/ scripts/ api/ pipelines/` only — `tests/` is omitted from
-  the path list (not from `[tool.ruff]` config), so test code drifts.
-  Small one-off: `ruff check tests/ --fix` clears the existing
-  violations, then add `tests/` to both lint args in
-  `.github/workflows/test.yml` and the CLAUDE.md command.
 - **NOTES-29 Replace `datetime.utcnow()` with timezone-aware UTC.**
   Deprecated in Python 3.12; emits a DeprecationWarning on every call
   (visible in the GTFS reload log). ~50 call sites across `src/models.py`
@@ -131,32 +125,6 @@ start looking off. Pure read; thin API addition.
 
 ---
 
-## NOTES-25. Add `tests/` to the lint scope
-
-**Severity: low — tooling hygiene.**
-
-`.github/workflows/test.yml` and the CLAUDE.md commands lint
-`src/ scripts/ api/ pipelines/` only. The `tests/` directory is
-omitted from the path list — not from `[tool.ruff]` in
-`pyproject.toml`, which has no per-directory exclusion — so test
-code drifts. Probed 2026-05-04: 7 pre-existing violations
-(unused imports, deprecated `typing.Generator`, unsorted
-imports), all auto-fixable.
-
-### Implementation
-
-1. `uv run ruff check tests/ --fix && uv run ruff format tests/`
-   to clear existing violations.
-2. Add `tests/` to both lint args in `.github/workflows/test.yml`
-   (the `ruff check` step and the `ruff format --check` step).
-3. Update the CLAUDE.md `ruff check` command to include `tests/`.
-
-### Dependencies
-
-- Independent of every other open NOTES item.
-
----
-
 ## NOTES-29. Replace `datetime.utcnow()` with timezone-aware UTC
 
 **Severity: low — tooling hygiene. Deprecated since Python 3.12; not yet
@@ -207,6 +175,4 @@ naive UTC.
 ### Dependencies
 
 - Independent of every other open NOTES item.
-- Pairs naturally with NOTES-25 (lint scope) — fixing tests/ first
-  surfaces any test usages that the broader CI doesn't currently catch.
 
