@@ -276,41 +276,62 @@ def test_parse_trip_start_date_round_trip():
     assert parse_trip_start_date("20260230") is None  # invalid date
 
 
+# Column order for `_last_snapshots_per_stop` tuples — must match the
+# `db.query(...)` projection in `derive_trip_update_stop_events`.
+def _tu_tuple(
+    trip_id,
+    stop_id,
+    stop_sequence,
+    vehicle_id,
+    snapshot_ts,
+    predicted_arrival_ts,
+    predicted_departure_ts=None,
+    schedule_relationship="SCHEDULED",
+):
+    """Build a snapshot tuple in the column order `_last_snapshots_per_stop` consumes."""
+    return (
+        trip_id,
+        stop_id,
+        stop_sequence,
+        vehicle_id,
+        snapshot_ts,
+        predicted_arrival_ts,
+        predicted_departure_ts,
+        schedule_relationship,
+    )
+
+
 @pytest.mark.smoke
 def test_last_snapshots_per_stop_picks_final_state_and_last_prediction():
     """Final state = absolute-last snapshot; observed = last snapshot with non-null pred_arr."""
     from pipelines.derive_stop_events_trip_updates import _last_snapshots_per_stop
-    from src.models import TripUpdateSnapshot
 
     # One (trip, stop_seq): three snapshots. Last has null pred_arr (bus passed,
     # WMATA cleared the prediction). Middle has the most recent non-null pred_arr.
     snaps = [
-        TripUpdateSnapshot(
+        _tu_tuple(
             trip_id="T1",
             stop_id="S5",
             stop_sequence=5,
+            vehicle_id="V1",
             snapshot_ts=datetime(2026, 5, 3, 14, 30, 0),
             predicted_arrival_ts=datetime(2026, 5, 3, 14, 35, 0),
-            schedule_relationship="SCHEDULED",
-            vehicle_id="V1",
         ),
-        TripUpdateSnapshot(
+        _tu_tuple(
             trip_id="T1",
             stop_id="S5",
             stop_sequence=5,
+            vehicle_id="V1",
             snapshot_ts=datetime(2026, 5, 3, 14, 33, 0),
             predicted_arrival_ts=datetime(2026, 5, 3, 14, 34, 30),
-            schedule_relationship="SCHEDULED",
-            vehicle_id="V1",
         ),
-        TripUpdateSnapshot(
+        _tu_tuple(
             trip_id="T1",
             stop_id="S5",
             stop_sequence=5,
+            vehicle_id="V1",
             snapshot_ts=datetime(2026, 5, 3, 14, 35, 30),
             predicted_arrival_ts=None,
-            schedule_relationship="SCHEDULED",
-            vehicle_id="V1",
         ),
     ]
     out = _last_snapshots_per_stop(snaps)
@@ -324,26 +345,25 @@ def test_last_snapshots_per_stop_picks_final_state_and_last_prediction():
 def test_last_snapshots_per_stop_marks_skipped():
     """A SKIPPED final state propagates regardless of earlier SCHEDULED snapshots."""
     from pipelines.derive_stop_events_trip_updates import _last_snapshots_per_stop
-    from src.models import TripUpdateSnapshot
 
     snaps = [
-        TripUpdateSnapshot(
+        _tu_tuple(
             trip_id="T2",
             stop_id="S3",
             stop_sequence=3,
+            vehicle_id=None,
             snapshot_ts=datetime(2026, 5, 3, 14, 0, 0),
             predicted_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
             schedule_relationship="SCHEDULED",
-            vehicle_id=None,
         ),
-        TripUpdateSnapshot(
+        _tu_tuple(
             trip_id="T2",
             stop_id="S3",
             stop_sequence=3,
+            vehicle_id=None,
             snapshot_ts=datetime(2026, 5, 3, 14, 4, 30),
             predicted_arrival_ts=None,
             schedule_relationship="SKIPPED",
-            vehicle_id=None,
         ),
     ]
     out = _last_snapshots_per_stop(snaps)
@@ -354,16 +374,15 @@ def test_last_snapshots_per_stop_marks_skipped():
 def test_last_snapshots_per_stop_skips_null_sequence():
     """Snapshots without stop_sequence (rare WMATA quirk) are dropped from output."""
     from pipelines.derive_stop_events_trip_updates import _last_snapshots_per_stop
-    from src.models import TripUpdateSnapshot
 
     snaps = [
-        TripUpdateSnapshot(
+        _tu_tuple(
             trip_id="T3",
             stop_id="S1",
             stop_sequence=None,
+            vehicle_id=None,
             snapshot_ts=datetime(2026, 5, 3, 14, 0, 0),
             predicted_arrival_ts=datetime(2026, 5, 3, 14, 5, 0),
-            schedule_relationship="SCHEDULED",
         ),
     ]
     assert _last_snapshots_per_stop(snaps) == {}

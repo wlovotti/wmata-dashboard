@@ -39,6 +39,7 @@ from datetime import date as date_type
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -79,7 +80,7 @@ def _eastern_window_utc(service_date: date_type) -> tuple[datetime, datetime]:
 
 
 def _last_snapshots_per_stop(
-    snapshots: list[TripUpdateSnapshot],
+    snapshots,
 ) -> dict[tuple[str, int], dict]:
     """Reduce raw snapshots to one final-state record per (trip_id, stop_sequence).
 
@@ -90,38 +91,53 @@ def _last_snapshots_per_stop(
         prediction is the inferred observed arrival. WMATA sometimes nullifies
         the prediction after the bus passes, so the absolute-last row may be
         useless; the last-with-prediction row is what we want as the time.
+
+    Accepts an iterable of tuples in the column order specified by the caller's
+    `db.query(...)` projection (see `derive_trip_update_stop_events`). Operating
+    on lightweight tuples instead of hydrated ORM rows avoids ~2 s of
+    SQLAlchemy attribute-population overhead per ~400k snapshots on a busy
+    route.
     """
     by_key: dict[tuple[str, int], dict] = {}
-    for s in snapshots:
-        if s.stop_sequence is None:
+    for (
+        trip_id,
+        stop_id,
+        stop_sequence,
+        vehicle_id,
+        snapshot_ts,
+        predicted_arrival_ts,
+        predicted_departure_ts,
+        schedule_relationship,
+    ) in snapshots:
+        if stop_sequence is None:
             continue
-        key = (s.trip_id, s.stop_sequence)
+        key = (trip_id, stop_sequence)
         entry = by_key.get(key)
         if entry is None:
             entry = {
-                "stop_id": s.stop_id,
-                "vehicle_id": s.vehicle_id,
-                "final_snapshot_ts": s.snapshot_ts,
-                "final_schedule_relationship": s.schedule_relationship,
+                "stop_id": stop_id,
+                "vehicle_id": vehicle_id,
+                "final_snapshot_ts": snapshot_ts,
+                "final_schedule_relationship": schedule_relationship,
                 "last_pred_snapshot_ts": None,
                 "last_predicted_arrival_ts": None,
                 "last_predicted_departure_ts": None,
             }
             by_key[key] = entry
 
-        if s.snapshot_ts > entry["final_snapshot_ts"]:
-            entry["final_snapshot_ts"] = s.snapshot_ts
-            entry["final_schedule_relationship"] = s.schedule_relationship
+        if snapshot_ts > entry["final_snapshot_ts"]:
+            entry["final_snapshot_ts"] = snapshot_ts
+            entry["final_schedule_relationship"] = schedule_relationship
             # vehicle_id can come and go across snapshots; prefer the latest non-null.
-            if s.vehicle_id:
-                entry["vehicle_id"] = s.vehicle_id
+            if vehicle_id:
+                entry["vehicle_id"] = vehicle_id
 
-        if s.predicted_arrival_ts is not None and (
-            entry["last_pred_snapshot_ts"] is None or s.snapshot_ts > entry["last_pred_snapshot_ts"]
+        if predicted_arrival_ts is not None and (
+            entry["last_pred_snapshot_ts"] is None or snapshot_ts > entry["last_pred_snapshot_ts"]
         ):
-            entry["last_pred_snapshot_ts"] = s.snapshot_ts
-            entry["last_predicted_arrival_ts"] = s.predicted_arrival_ts
-            entry["last_predicted_departure_ts"] = s.predicted_departure_ts
+            entry["last_pred_snapshot_ts"] = snapshot_ts
+            entry["last_predicted_arrival_ts"] = predicted_arrival_ts
+            entry["last_predicted_departure_ts"] = predicted_departure_ts
 
     return by_key
 
@@ -180,8 +196,28 @@ def derive_trip_update_stop_events(
         return _empty_result(route_id, service_date_str, start_ts, "No stop_times for active trips")
 
     window_start, window_end = _eastern_window_utc(service_date)
+    # On busy routes (~200+ active trips) the planner's default
+    # random_page_cost=4.0 makes it prefer scanning the snapshot_ts index over
+    # 54M rows rather than 200 nested-loop probes against
+    # `idx_tu_trip_snap`. Local SSD doesn't justify cost=4.0; setting cost=1.1
+    # for this transaction nudges it onto the (trip_id, snapshot_ts) index. SET
+    # LOCAL is connection-scoped and reverts on commit.
+    db.execute(text("SET LOCAL random_page_cost = 1.1"))
+
+    # Tuple projection (no ORM hydration) — at ~400k+ rows on a busy route the
+    # full-object materialization adds ~2 s on its own. The column order here
+    # is consumed positionally by `_last_snapshots_per_stop`.
     snapshots = (
-        db.query(TripUpdateSnapshot)
+        db.query(
+            TripUpdateSnapshot.trip_id,
+            TripUpdateSnapshot.stop_id,
+            TripUpdateSnapshot.stop_sequence,
+            TripUpdateSnapshot.vehicle_id,
+            TripUpdateSnapshot.snapshot_ts,
+            TripUpdateSnapshot.predicted_arrival_ts,
+            TripUpdateSnapshot.predicted_departure_ts,
+            TripUpdateSnapshot.schedule_relationship,
+        )
         .filter(
             TripUpdateSnapshot.trip_id.in_(active_trip_ids),
             TripUpdateSnapshot.snapshot_ts.between(window_start, window_end),
