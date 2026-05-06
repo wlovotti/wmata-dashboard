@@ -30,6 +30,19 @@ def eastern_today():
     return datetime.now(EASTERN).date()
 
 
+def utcnow_naive():
+    """Return current UTC time as a naive datetime (matches DB storage convention).
+
+    Replaces the deprecated ``datetime.utcnow()`` (Python 3.12+) without
+    changing storage semantics — every DateTime column in the database
+    holds naive UTC, so we strip the tzinfo after constructing the
+    tz-aware now-in-UTC. Pass the bare callable (``utcnow_naive``) — not
+    the call expression — to SQLAlchemy ``Column(default=...)`` so the
+    default is evaluated per-row, not once at class-definition time.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 def eastern_midnight_as_utc(date):
     """Convert midnight on the given Eastern-zone date to a naive UTC datetime.
 

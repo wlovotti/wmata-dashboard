@@ -23,6 +23,7 @@ from sqlalchemy import func
 
 from src.database import get_session
 from src.models import TripUpdateSnapshot, VehiclePosition
+from src.timezones import utcnow_naive
 
 load_dotenv()
 
@@ -122,7 +123,7 @@ def main() -> int:
     print()
 
     # Trip update snapshots
-    now_utc = datetime.utcnow()
+    now_utc = utcnow_naive()
     tu_total = db.query(TripUpdateSnapshot).count()
     tu_24h = (
         db.query(TripUpdateSnapshot)

@@ -51,7 +51,7 @@ from pipelines.stop_events_common import (
 )
 from src.database import get_session
 from src.models import Route, StopEvent, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
-from src.timezones import eastern_today
+from src.timezones import eastern_today, utcnow_naive
 
 # Window around the target service_date to scan for snapshots, in Eastern hours.
 # Service hours run roughly 04:00 → 02:00 next day; one extra hour each side
@@ -232,7 +232,7 @@ def derive_trip_update_stop_events(
     final_state = _last_snapshots_per_stop(snapshots)
 
     rows = []
-    derived_at = datetime.utcnow()
+    derived_at = utcnow_naive()
     skipped_count = 0
     no_prediction_count = 0
     for (trip_id, stop_sequence), entry in final_state.items():

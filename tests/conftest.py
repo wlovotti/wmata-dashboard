@@ -9,7 +9,7 @@ Provides fixtures for:
 """
 
 from collections.abc import Generator
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,6 +28,7 @@ from src.models import (
     Trip,
     VehiclePosition,
 )
+from src.timezones import utcnow_naive
 
 
 @pytest.fixture(scope="session")
@@ -165,7 +166,7 @@ def sample_trip(db_session, sample_route) -> Trip:
 @pytest.fixture
 def sample_vehicle_positions(db_session, sample_route, sample_trip) -> list[VehiclePosition]:
     """Create and return multiple sample VehiclePositions"""
-    base_time = datetime.utcnow() - timedelta(hours=1)
+    base_time = utcnow_naive() - timedelta(hours=1)
     positions = []
 
     for i in range(5):
@@ -206,8 +207,8 @@ def sample_route_metrics_summary(db_session, sample_route) -> RouteMetricsSummar
         total_positions_7d=1050,
         unique_vehicles_7d=8,
         unique_trips_7d=42,
-        last_data_timestamp=datetime.utcnow(),
-        computed_at=datetime.utcnow(),
+        last_data_timestamp=utcnow_naive(),
+        computed_at=utcnow_naive(),
     )
     db_session.add(summary)
     db_session.commit()
@@ -220,7 +221,7 @@ def sample_route_metrics_daily(db_session, sample_route) -> RouteMetricsDaily:
     """Create and return a sample RouteMetricsDaily"""
     daily = RouteMetricsDaily(
         route_id=sample_route.route_id,
-        date=(datetime.utcnow() - timedelta(days=1)).date().isoformat(),
+        date=(utcnow_naive() - timedelta(days=1)).date().isoformat(),
         otp_percentage=78.2,
         early_percentage=12.5,
         late_percentage=9.3,
@@ -228,7 +229,7 @@ def sample_route_metrics_daily(db_session, sample_route) -> RouteMetricsDaily:
         headway_std_dev_minutes=2.9,
         avg_speed_mph=19.2,
         total_arrivals=8,
-        computed_at=datetime.utcnow(),
+        computed_at=utcnow_naive(),
     )
     db_session.add(daily)
     db_session.commit()

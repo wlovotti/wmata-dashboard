@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from src.bunching import compute_bunching_for_route_date
 from src.database import get_session
 from src.models import Route, RouteHeadwayMetrics
-from src.timezones import eastern_today
+from src.timezones import eastern_today, utcnow_naive
 
 
 def materialize_bunching_for_route_date(
@@ -42,7 +42,7 @@ def materialize_bunching_for_route_date(
     start_ts = time.time()
     rows = compute_bunching_for_route_date(db, route_id, service_date)
 
-    computed_at = datetime.utcnow()
+    computed_at = utcnow_naive()
     insert_rows = [
         {
             "route_id": r["route_id"],

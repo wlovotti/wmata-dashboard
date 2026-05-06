@@ -5,7 +5,7 @@ This API serves pre-computed transit performance metrics for the web dashboard.
 Endpoints provide route-level OTP, headway, and speed data.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +21,7 @@ from api.aggregations import (
 )
 from src.database import get_session
 from src.models import GTFSSnapshot, VehiclePosition
+from src.timezones import utcnow_naive
 
 # Create FastAPI app
 app = FastAPI(
@@ -60,7 +61,7 @@ async def health_check():
     """
     health_status = {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utcnow_naive().isoformat(),
         "service": "wmata-dashboard-api",
         "version": "1.0.0",
         "checks": {},
@@ -78,7 +79,7 @@ async def health_check():
             }
 
             # Check for recent data collection (last 5 minutes)
-            five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
+            five_minutes_ago = utcnow_naive() - timedelta(minutes=5)
             recent_data_count = (
                 db.query(VehiclePosition)
                 .filter(VehiclePosition.timestamp >= five_minutes_ago)

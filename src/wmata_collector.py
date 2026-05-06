@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from src.database import get_session, init_db
 from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
+from src.timezones import utcnow_naive
 
 # Load environment variables from .env file
 load_dotenv()
@@ -491,7 +492,7 @@ class WMATADataCollector:
             snapshot_ts = (
                 datetime.utcfromtimestamp(feed.header.timestamp)
                 if feed.header.timestamp
-                else datetime.utcnow()
+                else utcnow_naive()
             )
 
             rows = []
@@ -599,7 +600,7 @@ class WMATADataCollector:
                 # Timestamps — naive UTC (see src/timezones.py for convention)
                 timestamp=datetime.utcfromtimestamp(vehicle_data["timestamp"])
                 if vehicle_data["timestamp"]
-                else datetime.utcnow(),
+                else utcnow_naive(),
             )
             self.db.add(vehicle_pos)
             saved_count += 1
