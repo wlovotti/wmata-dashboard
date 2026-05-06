@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-05 (PR closing NOTES-17 with the period drilldown).
+Last edited 2026-05-05 (PR closing NOTES-26 with NOTES-27/-28 follow-ups).
 
 ---
 
@@ -24,10 +24,6 @@ sequencing still matters.
 
 ### P4 — Surface to API + UI
 
-- **NOTES-26 Investigate widespread 0% service-delivered.** 78% of
-  routes show 0 delivered on the latest service date despite non-zero
-  scheduled. Likely trip_id matching mismatch, possibly Sunday-only
-  artifact. Blocks NOTES-18 weighting decisions until fixed.
 - **NOTES-18 Update grading rubric.** Currently OTP-only; should
   incorporate service-delivered and EWT now that both have shipped.
 - **NOTES-27 Investigate observation-coverage gaps in trip_update
@@ -72,6 +68,13 @@ sequencing still matters.
   Small one-off: `ruff check tests/ --fix` clears the existing
   violations, then add `tests/` to both lint args in
   `.github/workflows/test.yml` and the CLAUDE.md command.
+- **NOTES-28 Replace daily metrics batch with lazy/live derivation.**
+  The redesign pipelines (`derive_stop_events*.py`, `aggregate_runs.py`,
+  `compute_bunching.py`) have no orchestrator — NOTES-26 was a direct
+  consequence. Before scheduling them, test cheaper alternatives:
+  live PostGIS query for service-delivered, or lazy derivation on API
+  cache miss. Falls back to scheduled batch if both fail at scorecard
+  scale.
 
 ---
 
@@ -273,51 +276,6 @@ imports), all auto-fixable.
 
 ---
 
-## NOTES-26. Investigate widespread 0% service-delivered
-
-**Severity: medium — most rider-felt failure mode and the metric is
-suspect.**
-
-On the latest service date (2026-05-03, Sunday), 98 of 126 routes show
-`service_delivered_ratio == 0` with non-zero `scheduled_trips`. Only 6
-routes show non-zero delivered. The compute path
-(`src/service_delivered.py`) requires `Run.trip_id IN scheduled_trip_ids`
-— so any mismatch between real-time `trip_id` strings and the GTFS
-`Trip.trip_id` strings would zero out delivered. Sunday is also a thin
-collection day, but the bias is too extreme to be solely that.
-
-### Hypotheses to probe
-
-1. **trip_id format drift**: WMATA's TripUpdate feed may emit `trip_id`
-   values that don't exactly match the static GTFS strings (suffixes,
-   prefixes, version codes). Spot-check `Run.trip_id` vs `Trip.trip_id`
-   on a route with 0 delivered (e.g., C83) — if the formats differ, the
-   IN filter is the bug.
-2. **Sunday-only artifact**: re-run the metric for the most recent
-   weekday and saturday and compare distributions. If weekdays look
-   normal, this is observation thinness on Sundays, not a code bug.
-3. **Calendar / service_id matching**: `_scheduled_trip_ids_query`
-   filters `Calendar.<day_type> == 1` — confirm Sunday service_ids
-   resolve to actual trips for the routes showing 0%.
-4. **Holiday awareness**: `compute_service_delivered` notes a known
-   limitation around `calendar_dates` exceptions (federal holidays
-   running Sunday service on a weekday). Worth re-checking whether
-   2026-05-03 has any exception entries.
-
-### Why this matters
-
-Service-delivered is the headline rider-felt metric. If 78% of routes
-look like total failures every Sunday (and possibly other days), the
-scorecard is misleading and grade weighting (NOTES-18) can't proceed
-until this is trustworthy.
-
-### Dependencies
-
-- Blocks NOTES-18 (grading rubric refresh) for any weighting that
-  includes service-delivered until the metric is verified trustworthy.
-
----
-
 ## NOTES-27. Negative EWT root cause — observation coverage gaps
 
 **Severity: low — the surfaced metric is now clamped at 0 (PR closing
@@ -331,6 +289,16 @@ the trip_update derivation misses arrivals, the observed headways we
 *do* capture are biased toward steady ones (the long gaps don't get
 paired up because one endpoint of the pair is missing), so AWT comes
 out artificially low and EWT goes negative.
+
+A trip-level dimension of the same gap surfaced during the NOTES-26
+investigation: ~38% of scheduled trips that show up in upstream feeds
+(`vehicle_positions` or `trip_update_snapshots`) don't survive
+derivation into a run with `stops_observed >= 3`. Probed 2026-05-05 on
+D80 / 2026-05-03 — 261 of 270 GTFS-scheduled Sunday trips appear in
+either feed (96.7%), but only 158 (58.5%) reached the delivered
+threshold. So the ~50% delivered ratio left after closing NOTES-26 is
+part-real, part-derivation-coverage; the headline service-delivered
+metric understates true delivery until this is closed.
 
 The clamp is a UI fix, not a data fix. The underlying issue is that
 the trip_update derivation pipeline (`pipelines/derive_stop_events_*`)
@@ -354,4 +322,71 @@ investigating:
 
 - Independent. Could be tackled alongside the per-run deviation chart
   (NOTES-5) since both probe the trip_update derivation's coverage.
+
+---
+
+## NOTES-28. Replace daily metrics batch with lazy/live derivation
+
+**Severity: medium — architectural. Closes the class of bug NOTES-26
+exposed.**
+
+### Background
+
+The metrics-redesign pipelines (`pipelines/derive_stop_events.py`,
+`pipelines/derive_stop_events_trip_updates.py`,
+`pipelines/aggregate_runs.py`, `pipelines/compute_bunching.py`) are
+manual CLIs with no orchestrator. NOTES-26 was a direct consequence —
+only 6 routes had been aggregated for 2026-05-03, and the headline
+service-delivered metric showed 0% for the rest. Without a structural
+fix this recurs on every new service date.
+
+The reflexive answer is "schedule them" — daily cron / GitHub Action
+running all four pipelines for yesterday's service date. That works
+but is cumbersome, and the live data is right there. Worth
+investigating cheaper alternatives first.
+
+### Options
+
+1. **Live PostGIS query for service-delivered.** Service-delivered for
+   one (route, date) reduces to: count distinct `trip_id`s in
+   `vehicle_positions` where the position lands within 50 m of ≥3 of
+   the trip's scheduled stops. With a GiST index on `stops.geom` and
+   the existing `(trip_id, timestamp)` index on positions this should
+   be sub-second per route. No `stop_events` / `runs` needed for this
+   metric specifically. Failure mode: the all-routes scorecard
+   (~104 routes) may still need pre-aggregation.
+
+2. **Lazy derivation on API cache miss.** Endpoint asks for
+   `runs[route, date]`; if rows exist, use them; if not, run
+   `derive_stop_events*` + `aggregate_runs` inline for that single
+   (route, date) and persist the rows. First request after midnight
+   pays the cost; subsequent reads are free. No cron, no orchestrator
+   — the `runs` table is the cache.
+
+3. **Streaming derivation in the collector.** First-detection-within-50 m
+   is incremental-friendly: each 60 s tick, derive stop_events for
+   newly-arrived positions. Eliminates batch entirely. Larger
+   structural change in the hot collection path; deferred unless 1
+   and 2 both fail.
+
+4. **Postgres materialized view + cron REFRESH.** Strictly simpler
+   than the Python pipeline but still batch — solves "cumbersome to
+   run" only trivially. Skip.
+
+### What to test first
+
+Time `derive_stop_events.py --route C21 --date today` and
+`derive_stop_events_trip_updates.py --route C21 --date today`
+end-to-end. `aggregate_runs.py` is already known to be 0.05–0.2 s per
+route. If the two derivation steps add up to under ~2 s for one route,
+option 2 (lazy on cache miss) is realistic. If under ~500 ms, option 1
+becomes attractive for the all-routes scorecard too.
+
+### Dependencies
+
+- Resolves the operational hazard that produced NOTES-26.
+- Independent of NOTES-23 (GTFS reload scheduling) — different
+  staleness domains.
+- Closing this affects whatever consumer NOTES-5 reads from: if `runs`,
+  the lazy path applies; if `stop_events` directly, both paths apply.
 
