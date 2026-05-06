@@ -10,6 +10,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: wmata
+          POSTGRES_PASSWORD: wmata
+          POSTGRES_DB: wmata_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
     - uses: actions/checkout@v3
 
@@ -49,6 +64,22 @@ jobs:
         test -d pipelines && echo "✓ pipelines/ directory exists"
         test -d tests && echo "✓ tests/ directory exists"
         test -f src/__init__.py && echo "✓ src/__init__.py exists"
+
+    - name: Verify schema (Postgres lane)
+      env:
+        DATABASE_URL: "postgresql://wmata:wmata@localhost:5432/wmata_test"
+      run: |
+        # Create tables from the SQLAlchemy models. We invoke init_db()
+        # directly rather than scripts/init_database.py because the latter
+        # also downloads ~40MB of GTFS data from the live WMATA API, which
+        # we don't need (and shouldn't burn API budget on) for a schema
+        # check.
+        uv run python -c "from src.database import init_db; init_db()"
+        echo "✓ Schema created"
+        uv run python scripts/migrate_all.py
+        echo "✓ Migrations applied"
+        uv run python scripts/check_schema_drift.py
+        echo "✓ Schema drift check passed"
 
     - name: Run smoke tests
       env:

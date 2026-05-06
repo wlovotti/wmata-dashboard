@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (added NOTES-33 — CI Postgres lane + schema-drift check, surfaced by post-merge 500 on PR #67).
+Last edited 2026-05-06 (closed NOTES-33 — CI Postgres lane + schema-drift check landed).
 
 ---
 
@@ -66,15 +66,6 @@ sequencing still matters.
   per run and biases skip rate down. Now that `stops_observable` lands
   on every Run row (via the NOTES-31 closing PR), `compute_stop_skip_rate`
   should switch to `SUM(stops_observable)` for ratio-honest accounting.
-- **NOTES-33 CI Postgres + schema-drift check.** Tests use SQLite
-  in-memory rebuilt from `Base.metadata` each run, so model and test DB
-  are tautologically aligned. Live Postgres only sees new columns when
-  `scripts/migrate_*.py` is run by hand — nothing in the merge process
-  does that. PR #67 shipped green and produced an immediate 500 on the
-  Recent Runs table because the migration hadn't run; the same gap
-  would also pass a PR that adds a model column with no migration at
-  all. Add a Postgres service to CI + a drift check.
-
 ---
 
 ## NOTES-18. Grading rubric refresh
@@ -300,93 +291,3 @@ stop_id)` and never summed `stops_scheduled`.
 
 - Independent of every other open NOTES item.
 - Blast radius is one function and its smoke tests in `tests/test_stop_skip.py`.
-
----
-
-## NOTES-33. CI Postgres lane + schema-drift check
-
-**Severity: medium — schema drift between SQLAlchemy models and live
-Postgres can ship to main with green CI today. PR #67 (closes NOTES-31)
-demonstrated the gap: it added `stops_observable` to the `Run` model
-and shipped `scripts/migrate_runs_stops_observable.py` to ALTER the
-runs table, CI passed, merge happened, and the Recent Runs API
-endpoint immediately 500'd because the migration hadn't been run
-against the live Postgres.**
-
-### Why CI doesn't catch it today
-
-`tests/conftest.py` builds an in-memory SQLite DB from
-`Base.metadata.create_all()` each test run. The schema is whatever the
-SQLAlchemy models currently say it is — model and test DB are
-tautologically aligned, so a missing migration is invisible. The live
-Postgres, in contrast, only acquires new columns when someone manually
-runs `scripts/migrate_*.py`. There's no automated bridge.
-
-This also fails open on the *worse* version of the bug — a PR that
-adds a column to the model and ships **no** migration script at all.
-Both flavors merge green today.
-
-### Implementation
-
-1. **Postgres service in `.github/workflows/test.yml`** (~10 lines,
-   GitHub Actions native `services:` block):
-   ```yaml
-   services:
-     postgres:
-       image: postgres:15
-       env:
-         POSTGRES_USER: wmata
-         POSTGRES_PASSWORD: wmata
-         POSTGRES_DB: wmata_test
-       ports: ["5432:5432"]
-       options: >-
-         --health-cmd pg_isready --health-interval 10s
-         --health-timeout 5s --health-retries 5
-   ```
-
-2. **`scripts/migrate_all.py`** — auto-discovers `scripts/migrate_*.py`
-   alphabetically and invokes each `main()`. Existing migrations are
-   already idempotent (use `ADD COLUMN IF NOT EXISTS` and re-runnable
-   backfills). One file, ~20 lines. Avoids per-PR registration churn.
-
-3. **`scripts/check_schema_drift.py`** — for every table in
-   `Base.metadata.tables`, assert every model column name appears in
-   `inspect(engine).get_columns(table)`. Tolerate live extras (legacy
-   columns are fine); fail on model-side misses. ~30 lines.
-
-4. **New CI step** after install, with `DATABASE_URL` pointing at the
-   service container:
-   ```bash
-   uv run python scripts/init_database.py
-   uv run python scripts/migrate_all.py
-   uv run python scripts/check_schema_drift.py
-   ```
-
-### Trade-offs considered
-
-- **Auto-discovery vs per-PR migration registration.** Auto-discovery
-  picked because the project has only 2 migrations today and filename
-  ordering is currently safe. Per-PR registration would be slightly
-  more rigorous (CI rejects an unregistered migration) but adds
-  per-PR maintenance. Revisit if a future migration needs strict
-  ordering against another.
-- **Don't replace the SQLite test lane.** Keep the SQLite smoke lane
-  for speed; this adds a Postgres lane *alongside*, not instead. The
-  Postgres lane runs only the schema check — full test-suite migration
-  is a separate, larger ask (see "future" below).
-
-### Future (not in this NOTES item)
-
-Once the Postgres lane exists, retargeting some smoke tests at it
-would catch SQLite-vs-Postgres divergence — e.g., the unpadded GTFS
-time strings / `LPAD` requirement called out in CLAUDE.md is a real
-Postgres-specific concern that the SQLite suite cannot exercise. File
-separately if/when it becomes a priority.
-
-### Dependencies
-
-- Independent of every other open NOTES item.
-- Higher priority among independent items because the gap re-occurs
-  every PR that touches the schema, and the failure mode is a
-  post-merge production 500.
-
