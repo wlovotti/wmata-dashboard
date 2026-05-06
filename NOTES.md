@@ -293,9 +293,9 @@ becomes attractive for the all-routes scorecard too.
 - Resolves the operational hazard that produced NOTES-26.
 - Independent of NOTES-23 (GTFS reload scheduling) — different
   staleness domains.
-- The per-run deviation endpoints (added in the NOTES-5 closing PR) read
-  both `runs` (for the row list and run summary) and `stop_events`
-  directly (for the per-stop deviation chart). Lazy/live derivation will
-  need to cover both — populating `runs` alone leaves the chart blank
-  unless `stop_events` are present too.
+- The per-run deviation endpoints (PR #59) read both `runs` (for the row
+  list and run summary) and `stop_events` directly (for the per-stop
+  deviation chart). Lazy/live derivation will need to cover both —
+  populating `runs` alone leaves the chart blank unless `stop_events`
+  are present too.
 
