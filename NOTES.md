@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-35 — replaced `datetime.utcfromtimestamp()` in `src/wmata_collector.py` with new `from_epoch_naive_utc()` helper, completing the Python 3.12 datetime deprecation sweep started in NOTES-29).
+Last edited 2026-05-06 (added NOTES-36 through NOTES-47 — operations-manager redesign: trend, diagnosis, decision support, operator-side proxies; public-facing surface deferred).
 
 ---
 
@@ -21,6 +21,62 @@ few seconds for 93% of events. The `runs` aggregation over `stop_events`
 landed in PR #45, and the OTP origin/destination split (`src/otp_metrics.py`)
 landed in PR #46. Downstream metrics build on that foundation —
 sequencing still matters.
+
+### Operations-manager redesign
+
+The dashboard today is observational and route-anchored. For an ops
+GM trying to maximize performance under a fixed budget, the gaps are:
+no trend / period-over-period framing (so "are we improving?" is
+unanswered); no Pareto / contribution view (so attention isn't
+directed); no drill-down to the *where* (stop) or *what* (block,
+vehicle); and existing dead-code metrics that should be wired
+through. The 12 items below close those gaps. Public/rider-facing
+surface deferred; operator/dispatcher attribution out of scope
+without internal WMATA feeds (vehicle_id and block_id used as
+proxies instead).
+
+**Trend & comparison (the "are we improving?" question)**
+
+- **NOTES-36 System trend strip on home page.** 30-day sparklines
+  for system OTP / service-delivered / EWT / bunching with deltas vs
+  the prior 30 days.
+- **NOTES-37 Route trend on RouteDetail.** Wire the existing
+  `/api/routes/{route_id}/trend` endpoint into the UI; add 7-vs-prior-7
+  deltas to the KPI cards.
+- **NOTES-38 Period-over-period deltas on every KPI.** Augment the
+  scorecard payload with deltas; add up/down/flat indicators
+  throughout.
+- **NOTES-47 Per-route targets / commitments config.** Configurable
+  per-route targets so trend cards can show "vs target," not only
+  "vs prior period."
+
+**Diagnosis & Pareto (the "what's dragging us down?" question)**
+
+- **NOTES-39 "Biggest contributors" view on RouteList.** Rank by
+  impact-weighted contribution to system miss, not by raw worst
+  percentage.
+- **NOTES-40 Stop-level diagnostic endpoint + UI.** Per-stop OTP,
+  EWT, skip rate along the route's stop sequence — surfaces *where*
+  trips slip.
+- **NOTES-41 Day-type / time-period filter on RouteDetail.**
+  Surface the day-type dimension that already exists in compute.
+- **NOTES-42 Bunching cause decomposition.** Split bunching rate
+  into leader-late vs trailer-early vs both — targets dispatch fixes
+  vs running-time fixes.
+
+**Decision support & operator-side proxies**
+
+- **NOTES-43 Surface excess trip time.** Wire the existing-but-unused
+  `src/excess_trip_time.py` into the daily pipeline + UI; distinguishes
+  "running late" from "schedule too tight."
+- **NOTES-44 Marginal-bus EWT model.** Per (route, period) ranking
+  of where adding one trip would most reduce EWT.
+- **NOTES-45 Block-level cascade view.** Surface `block_id` and
+  visualize a vehicle's chained trips — identifies cascade lateness vs
+  incidental misses.
+- **NOTES-46 Vehicle performance leaderboard.** Aggregate per-`vehicle_id`
+  median deviation / p95 / trip count over 30 days as a maintenance/age
+  proxy (not an operator-blame view).
 
 ### P4 — Surface to API + UI
 
@@ -96,6 +152,195 @@ WMATA's published scorecard for now. Future option: expose a stricter
 for non-frequent routes (frequent routes get EWT instead — see `src/ewt.py`).
 The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
+
+---
+
+## NOTES-36. System trend strip on the home page
+
+**Severity: low.**
+
+Top-of-page module on `frontend/src/components/RouteList.jsx` showing
+the last 30 days of system OTP, service-delivered, EWT, and bunching as
+four sparklines. Each sparkline carries a delta vs the prior 30-day
+window so a GM lands on the home page knowing whether the system is
+improving or degrading.
+
+Source: a small system-level daily roll-up across `route_metrics_daily`
+plus daily-aggregated EWT and bunching from `stop_events`. The roll-up
+can either materialize as a new table or be a cached query on
+`api/aggregations.py`. Cache for 60s like the existing scorecard.
+
+---
+
+## NOTES-37. Route trend on RouteDetail
+
+**Severity: low.**
+
+`/api/routes/{route_id}/trend` already returns a 30-day series of OTP,
+early%, late%, headway, and speed but is not consumed by the frontend.
+Wire it into `frontend/src/components/RouteDetail.jsx`: render OTP and
+service-delivered as 30-day lines next to the existing KPI cards, and
+add a 7-day-vs-prior-7-day delta to each card. Pure frontend work
+unless service-delivered isn't yet in the trend payload — extend the
+endpoint if so.
+
+---
+
+## NOTES-38. Period-over-period deltas on every KPI
+
+**Severity: low.**
+
+Augment the scorecard payload from `/api/routes` (built in
+`api/aggregations.py`) so every metric carries a 7-day-vs-prior-7-day
+delta. Render up/down/flat indicators on the `RouteList` table and the
+`RouteDetail` KPI cards. Pairs naturally with NOTES-37; can ship in
+one PR if scope stays tight. Pay attention to thin-data cases — if
+either window is below the EWT coverage threshold, the delta should
+suppress rather than show a misleading number.
+
+---
+
+## NOTES-39. "Biggest contributors" view on RouteList
+
+**Severity: low.**
+
+Add a sort/group mode on `RouteList` that ranks routes by absolute
+*contribution* to system underperformance rather than raw percentage.
+Approximate contribution as `(target_or_baseline − actual) ×
+scheduled_trips` for whichever metric is selected. The intent is to
+direct a GM toward routes where moving the needle moves the system —
+not toward tiny low-volume routes that happen to score worst.
+Scheduled-trip count is the only volume proxy available; ridership is
+not in the data.
+
+---
+
+## NOTES-40. Stop-level diagnostic endpoint and UI
+
+**Severity: low.**
+
+The `stop_events` table has all the data needed for per-stop OTP, EWT,
+skip rate, and median deviation, but no API endpoint exposes it. Add
+`GET /api/routes/{route_id}/stops` returning per-(direction_id,
+stop_id) metrics over a configurable window. Group strictly by
+`(route_id, direction_id, stop_id)` per the CLAUDE.md rule —
+otherwise termini and shared bays double-count and the metrics look
+~2x too tight.
+
+UI: render as a strip chart along the route's stop sequence on
+`RouteDetail` — a horizontal heatmap from origin to destination,
+colored by metric value. This is the answer to "where on the route do
+trips slip?" and likely the single most actionable diagnostic the
+dashboard can add.
+
+---
+
+## NOTES-41. Day-type / time-period filter on RouteDetail
+
+**Severity: low.**
+
+Day-type (weekday / Saturday / Sunday) and time-of-day period are
+already preserved in computation (`src/ewt.py`, `src/bunching.py`,
+`src/service_profile.py`) but the user can't slice by them. Add a
+filter on `RouteDetail` that re-slices all KPIs and the trend — e.g.
+"weekday AM peak" vs "Saturday evening." Mostly a frontend filter +
+endpoint param; the underlying queries already group by these
+dimensions.
+
+---
+
+## NOTES-42. Bunching cause decomposition
+
+**Severity: low.**
+
+`src/bunching.py` flags pairs where the observed headway is below the
+threshold but doesn't tell us *why*. For each bunched pair, compare
+both runs' deviations against schedule: if the leader is late and the
+trailer is on-time, it's a recovery failure (running-time problem); if
+the leader is on-time and the trailer is early, it's a dispatch
+failure (departure-discipline problem); if both are off, it's
+compounding. Add the breakdown to the bunching API surface and render
+it on `PeriodDrilldown` as a stacked bar. Lets a GM target the right
+intervention.
+
+---
+
+## NOTES-43. Surface excess trip time
+
+**Severity: low.**
+
+`src/excess_trip_time.py` computes the metric but isn't called from
+`pipelines/compute_daily_metrics.py` and isn't exposed on any API
+endpoint — dead code today. Wire it into the daily pipeline, persist
+to the appropriate metrics table, and surface on `RouteDetail`. Pair
+with median scheduled trip time so a GM can see "trips ran 12% over
+the schedule" — distinguishes "running late" from "schedule is too
+tight" when looking at OTP misses.
+
+---
+
+## NOTES-44. Marginal-bus EWT model
+
+**Severity: low (modeling).**
+
+Per (route, period), estimate the EWT reduction from adding one
+scheduled trip. Closed-form approximation: SWT scales as half the
+scheduled headway, so adding a trip in a period with N existing trips
+reduces SWT by roughly `period_minutes / (2N(N+1))`; AWT impact
+depends on how the new trip lands relative to existing variance.
+Render as a ranked "where would the next bus help most" list — the
+direct answer to "where should my next dollar go?"
+
+Most ambitious item in this set. Document modeling assumptions
+visibly in the UI; the absolute number is less reliable than the
+relative ranking.
+
+---
+
+## NOTES-45. Block-level cascade view
+
+**Severity: low.**
+
+A `block_id` chains a vehicle's consecutive trips during a service
+day — when one trip falls behind, the next trip on the same block
+inherits the lateness. Today `block_id` lives on `Trip` but never
+reaches the API. Expose it; add a "block timeline" view (either on
+`RouteDetail` or a new `/blocks/:id` route) that strings together all
+trips in a block and shows deviation propagation. Identifies
+cascade-driven misses (one root cause, four bad trips) vs incidental
+ones (four independent misses).
+
+---
+
+## NOTES-46. Vehicle performance leaderboard
+
+**Severity: low.**
+
+Aggregate per-`vehicle_id` median deviation, p95 deviation, and trip
+count over the last 30 days. Render as a sortable table. Frame
+explicitly as a maintenance / vehicle-age proxy — operators rotate
+across vehicles and we have no operator IDs in the public feeds, so
+this is *not* an operator-performance view. A persistent
+underperformer is more likely an aging vehicle, a garage-assignment
+quirk, or a maintenance backlog signal. Suppress vehicles with low
+trip counts (e.g. <20) to avoid small-sample noise dominating the
+ranking.
+
+---
+
+## NOTES-47. Per-route targets / commitments config
+
+**Severity: low.**
+
+To answer "vs target" rather than only "vs prior period," the system
+needs a place to store per-route (and per-system) targets for OTP,
+service-delivered, EWT, and bunching. Keep it simple: one number per
+(route, metric); null means "use system default"; system default is a
+single config row. Storage can be yaml in the repo or a small
+`route_targets` table. Surface targets on the trend cards (NOTES-36,
+NOTES-37) and on the contributors view (NOTES-39, where contribution
+is computed against target). Targets can stay editable by the
+operator, but a sensible starting set should be checked in.
 
 ---
 
