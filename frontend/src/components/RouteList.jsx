@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
+import SystemTrend from './SystemTrend'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -143,6 +144,7 @@ function RouteList() {
   if (loading) {
     return (
       <main>
+        <SystemTrend />
         <div className="stats-summary">
           <div className="stat-card skeleton">
             <div className="skeleton-line skeleton-stat-value"></div>
@@ -183,6 +185,8 @@ function RouteList() {
           </div>
         </div>
       )}
+
+      <SystemTrend />
 
       <div className="stats-summary">
         <div className="stat-card">

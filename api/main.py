@@ -18,6 +18,7 @@ from api.aggregations import (
     get_route_time_period_summary,
     get_route_trend_data,
     get_run_deviations,
+    get_system_trend_data,
 )
 from src.database import get_session
 from src.models import GTFSSnapshot, VehiclePosition
@@ -236,6 +237,41 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         return result
+    finally:
+        db.close()
+
+
+@app.get("/api/system/trend")
+async def get_system_trend(metric: str = "otp", days: int = 30):
+    """
+    System-level trend rollup for the home-page trend strip (NOTES-36).
+
+    Returns 30 days (or `days`) of one system metric — OTP / service-delivered
+    / EWT / bunching — plus a `prior_window_value` summarizing the immediately
+    prior `days` window so the frontend can render a 30-vs-prior-30 delta.
+
+    Args:
+        metric: One of `otp`, `service_delivered`, `ewt`, `bunching`
+        days: Length of the visible window in days (default: 30, capped at 90
+            to bound the EWT/bunching cold-cache cost)
+
+    Returns:
+        Dict with `metric`, `days`, `trend_data` (list of `{date, <metric_key>}`),
+        and `prior_window_value` (float or null).
+    """
+    valid_metrics = ["otp", "service_delivered", "ewt", "bunching"]
+    if metric not in valid_metrics:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid metric. Must be one of: {', '.join(valid_metrics)}"
+        )
+    if days < 1:
+        days = 1
+    if days > 90:
+        days = 90
+
+    db = get_session()
+    try:
+        return get_system_trend_data(db, metric=metric, days=days)
     finally:
         db.close()
 

@@ -221,5 +221,5 @@ function RouteTrend({ otpSeries, sdSeries, otpDelta, sdDelta, loading, error }) 
   )
 }
 
-export { computeWindowDelta, DeltaIndicator }
+export { computeWindowDelta, DeltaIndicator, Sparkline }
 export default RouteTrend

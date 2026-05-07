@@ -10,14 +10,17 @@ Tests the business logic in api/aggregations.py including:
 Run with: pytest tests/test_aggregations.py
 """
 
+from datetime import timedelta
+
 from api.aggregations import (
     calculate_performance_grade,
     get_all_routes_scorecard,
     get_route_detail_metrics,
     get_route_trend_data,
+    get_system_trend_data,
     sanitize_float,
 )
-from src.timezones import utcnow_naive
+from src.timezones import eastern_today, utcnow_naive
 
 
 class TestSanitizeFloat:
@@ -316,6 +319,183 @@ class TestGetRouteTrendData:
         assert result["days"] == 30
         assert len(result["trend_data"]) == 31
         assert all(row["service_delivered_ratio"] is None for row in result["trend_data"])
+
+
+class TestGetSystemTrendData:
+    """Tests for get_system_trend_data — NOTES-36 home-page system trend strip."""
+
+    @staticmethod
+    def _clear_cache():
+        """Drop the module-level system-trend cache between tests.
+
+        The cache is keyed by (metric, days, today_iso); tests share that
+        cache via the imported function so an empty-DB result computed in
+        one test would mask data inserted in another. Clear before each
+        test so each call hits the live DB session.
+        """
+        from api import aggregations as agg
+
+        agg._system_trend_cache.clear()
+
+    def test_system_trend_otp_no_data(self, db_session):
+        """Empty DB returns the right envelope shape with all-null values.
+
+        With no rows in `route_metrics_daily`, every visible service date
+        carries `otp_percentage: null` and `prior_window_value` is null
+        too — the frontend then suppresses the delta indicator entirely.
+        """
+        self._clear_cache()
+        result = get_system_trend_data(db_session, metric="otp", days=30)
+
+        assert result["metric"] == "otp"
+        assert result["days"] == 30
+        assert "trend_data" in result
+        # Inclusive endpoints: 30 days span = 31 visible days, matching
+        # the per-route trend convention.
+        assert len(result["trend_data"]) == 31
+        assert all(row["otp_percentage"] is None for row in result["trend_data"])
+        assert result["prior_window_value"] is None
+
+    def test_system_trend_otp_reads_materialized_history(self, db_session, sample_routes):
+        """Historical OTP rows come from the materialized `system_metrics_daily`.
+
+        The hybrid serve path reads every historical date (anything strictly
+        before today's Eastern service date) from the materialized table.
+        Seeding one row should surface in the visible window with the exact
+        value that was written.
+        """
+        self._clear_cache()
+        from src.models import SystemMetricsDaily
+
+        target_date = eastern_today() - timedelta(days=5)
+        db_session.add(
+            SystemMetricsDaily(
+                service_date=target_date.isoformat(),
+                otp_percentage=86.4,
+                service_delivered_ratio=0.91,
+                ewt_seconds=120.0,
+                bunching_rate=0.07,
+            )
+        )
+        db_session.commit()
+
+        result = get_system_trend_data(db_session, metric="otp", days=30)
+
+        # Find the row for the target date.
+        row = next(r for r in result["trend_data"] if r["date"] == target_date.isoformat())
+        assert row["otp_percentage"] == 86.4
+        # Other historical days have no row, so they should still be null.
+        other_days = [
+            r
+            for r in result["trend_data"]
+            if r["date"] != target_date.isoformat() and r["date"] != eastern_today().isoformat()
+        ]
+        assert all(r["otp_percentage"] is None for r in other_days)
+
+    def test_system_trend_otp_prior_window(self, db_session, sample_route):
+        """Prior-window scalar is the mean of materialized prior-window values.
+
+        Place a single row in the prior window only — its OTP becomes the
+        prior_window_value and the visible window is all-null. The delta on
+        the frontend would then be (no-data → suppressed) but the API still
+        reports the prior value cleanly.
+        """
+        self._clear_cache()
+        from src.models import SystemMetricsDaily
+
+        # Land in prior window: 35 days ago is comfortably before the 30-day
+        # current window's start (which is `today - 30`).
+        prior_date = eastern_today() - timedelta(days=35)
+        db_session.add(
+            SystemMetricsDaily(
+                service_date=prior_date.isoformat(),
+                otp_percentage=72.0,
+            )
+        )
+        db_session.commit()
+
+        result = get_system_trend_data(db_session, metric="otp", days=30)
+
+        # Only one prior-window day has data, so the prior mean is just its value.
+        assert result["prior_window_value"] == 72.0
+        # Visible historical window remains empty (today is live-computed and
+        # has no data either, so it's also null).
+        assert all(row["otp_percentage"] is None for row in result["trend_data"])
+
+    def test_system_trend_service_delivered_envelope(self, db_session):
+        """Service-delivered system trend returns the right envelope shape.
+
+        With no Run / GTFS fixtures, every day's scheduled is 0 and the
+        ratio is null — but the envelope must still emit one row per
+        visible service date so the frontend axis stays consistent.
+        """
+        self._clear_cache()
+        result = get_system_trend_data(db_session, metric="service_delivered", days=30)
+
+        assert result["metric"] == "service_delivered"
+        assert len(result["trend_data"]) == 31
+        assert all(row["service_delivered_ratio"] is None for row in result["trend_data"])
+        assert result["prior_window_value"] is None
+
+    def test_system_trend_ewt_envelope(self, db_session):
+        """EWT system trend returns the right envelope shape on empty DB.
+
+        With no GTFS schedule and no stop_events, every day's pooled
+        observed/scheduled lists are empty so EWT is null. Endpoint must
+        still emit a complete 31-day visible window.
+        """
+        self._clear_cache()
+        result = get_system_trend_data(db_session, metric="ewt", days=30)
+
+        assert result["metric"] == "ewt"
+        assert len(result["trend_data"]) == 31
+        assert all(row["ewt_seconds"] is None for row in result["trend_data"])
+        assert result["prior_window_value"] is None
+
+    def test_system_trend_bunching_envelope(self, db_session):
+        """Bunching system trend returns the right envelope shape on empty DB."""
+        self._clear_cache()
+        result = get_system_trend_data(db_session, metric="bunching", days=30)
+
+        assert result["metric"] == "bunching"
+        assert len(result["trend_data"]) == 31
+        assert all(row["bunching_rate"] is None for row in result["trend_data"])
+        assert result["prior_window_value"] is None
+
+    def test_system_trend_invalid_metric_raises(self, db_session):
+        """Unknown metric is a programming error and surfaces ValueError.
+
+        The API layer rejects unknown metrics with HTTP 400 before reaching
+        the data function — this test pins the underlying contract.
+        """
+        self._clear_cache()
+        import pytest
+
+        with pytest.raises(ValueError):
+            get_system_trend_data(db_session, metric="not_a_metric", days=30)
+
+    def test_system_trend_custom_days(self, db_session):
+        """`days` parameter shapes the visible window; envelope length follows."""
+        self._clear_cache()
+        result = get_system_trend_data(db_session, metric="otp", days=14)
+
+        assert result["days"] == 14
+        # Inclusive endpoints: 14 days span = 15 visible days.
+        assert len(result["trend_data"]) == 15
+
+    def test_system_trend_caching(self, db_session, sample_route):
+        """Repeated calls within the TTL return the cached payload.
+
+        Verifies the cache plumbing: a second call for the same
+        (metric, days, today) returns an object equal to the first
+        without re-querying. Side effect probe: the second call's
+        result is the *same dict instance* the first call produced
+        (cache stores the reference, not a copy).
+        """
+        self._clear_cache()
+        first = get_system_trend_data(db_session, metric="otp", days=30)
+        second = get_system_trend_data(db_session, metric="otp", days=30)
+        assert first is second
 
 
 class TestGradeConsistency:

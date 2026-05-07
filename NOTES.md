@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-37 — route trend wired into RouteDetail with 7-vs-prior-7 deltas; trend endpoint extended to serve service_delivered).
+Last edited 2026-05-06 (closed NOTES-36 and NOTES-48 — system trend strip on home page with 30-vs-prior-30 deltas across OTP, service-delivered, EWT, and bunching, served from the materialized `system_metrics_daily` table for sub-second cold-cache latency).
 
 ---
 
@@ -37,9 +37,6 @@ proxies instead).
 
 **Trend & comparison (the "are we improving?" question)**
 
-- **NOTES-36 System trend strip on home page.** 30-day sparklines
-  for system OTP / service-delivered / EWT / bunching with deltas vs
-  the prior 30 days.
 - **NOTES-38 Period-over-period deltas on every KPI.** Augment the
   scorecard payload with deltas; add up/down/flat indicators
   throughout.
@@ -149,23 +146,6 @@ WMATA's published scorecard for now. Future option: expose a stricter
 for non-frequent routes (frequent routes get EWT instead — see `src/ewt.py`).
 The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
-
----
-
-## NOTES-36. System trend strip on the home page
-
-**Severity: low.**
-
-Top-of-page module on `frontend/src/components/RouteList.jsx` showing
-the last 30 days of system OTP, service-delivered, EWT, and bunching as
-four sparklines. Each sparkline carries a delta vs the prior 30-day
-window so a GM lands on the home page knowing whether the system is
-improving or degrading.
-
-Source: a small system-level daily roll-up across `route_metrics_daily`
-plus daily-aggregated EWT and bunching from `stop_events`. The roll-up
-can either materialize as a new table or be a cached query on
-`api/aggregations.py`. Cache for 60s like the existing scorecard.
 
 ---
 
@@ -324,7 +304,7 @@ service-delivered, EWT, and bunching. Keep it simple: one number per
 (route, metric); null means "use system default"; system default is a
 single config row. Storage can be yaml in the repo or a small
 `route_targets` table. Surface targets on the system trend cards
-(NOTES-36) and the per-route trend cards (PR #77, RouteDetail), and on
+(PR #78, RouteList) and the per-route trend cards (PR #77, RouteDetail), and on
 the contributors view (NOTES-39, where contribution is computed
 against target). Targets can stay editable by the operator, but a
 sensible starting set should be checked in.
