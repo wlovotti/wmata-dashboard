@@ -45,6 +45,7 @@ from src.models import (
     Stop,
     StopEvent,
     StopTime,
+    SystemMetricsDaily,
     Trip,
 )
 from src.otp_metrics import compute_otp_split, compute_otp_split_for_routes
@@ -584,7 +585,8 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
 
 
 # ---------------------------------------------------------------------------
-# System trend (NOTES-36): rollup across all routes for the home-page strip.
+# System trend (NOTES-36, materialized in NOTES-48): rollup across all
+# routes for the home-page strip.
 #
 # The trend payload covers a 60-day span (current `days` + the immediately
 # prior `days` window) so a 30-vs-prior-30 delta can be computed entirely
@@ -593,17 +595,15 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
 # date in the visible window, plus a small companion field) and avoids
 # double-counting concerns on the frontend.
 #
-# Why a cached query instead of a materialized table: the spec
-# (NOTES-36) leaves either path open and explicitly says "Cache for 60s
-# like the existing scorecard." OTP and service-delivered come from
-# `route_metrics_daily` plus a per-day live `service_delivered` compute,
-# both cheap. EWT and bunching are the expensive piece — 60 days of
-# whole-system pooled headways is a real compute (~30s on cold cache for
-# a typical day). The `_SYSTEM_TREND_TTL_SEC` cache absorbs that cost
-# after the first request; if cold-start latency starts to bite, the
-# clean upgrade path is to materialize a `system_metrics_daily` table
-# populated by `pipelines/compute_daily_metrics.py` (tracked as a future
-# NOTES item if the latency proves painful).
+# Hybrid serve path: history (every date strictly before today's Eastern
+# service date) is served from the materialized `system_metrics_daily`
+# table populated by `pipelines/compute_daily_metrics.py`. Today is
+# computed live via `compute_system_metrics_for_date` because the daily
+# pipeline runs once and won't have written today's row yet — keeps the
+# strip current without paying the 60-day cold-cache cost the original
+# fully-live path incurred. The `_SYSTEM_TREND_TTL_SEC` cache now mostly
+# absorbs today's single-day compute on rapid refreshes; the historical
+# read is sub-50ms either way.
 # ---------------------------------------------------------------------------
 
 _SYSTEM_TREND_TTL_SEC = 60.0
@@ -810,25 +810,6 @@ def _system_ewt_and_bunching_for_date(
     return ewt_seconds, bunching_rate
 
 
-def _system_ewt_bunching_series(
-    db: Session, dates: list[date_type]
-) -> tuple[dict[str, float | None], dict[str, float | None]]:
-    """Compute EWT and bunching system rollups across many dates in one pass.
-
-    Memoizes the schedule fetch per day_type so a 60-day window only pays the
-    ~1.7s schedule cost three times (weekday/sat/sun) regardless of how many
-    days fall in each bucket. Returns two dicts keyed by ISO date.
-    """
-    sched_by_day_type: dict[str, dict] = {}
-    ewt_by_date: dict[str, float | None] = {}
-    bun_by_date: dict[str, float | None] = {}
-    for d in dates:
-        ewt_value, bun_value = _system_ewt_and_bunching_for_date(db, d, sched_by_day_type)
-        ewt_by_date[d.isoformat()] = ewt_value
-        bun_by_date[d.isoformat()] = bun_value
-    return ewt_by_date, bun_by_date
-
-
 def _mean_skip_null(values: list[float | None]) -> float | None:
     """Mean of a list, skipping null entries. Returns None if no valid entries."""
     valid = [v for v in values if v is not None]
@@ -837,8 +818,48 @@ def _mean_skip_null(values: list[float | None]) -> float | None:
     return sum(valid) / len(valid)
 
 
+_METRIC_TO_COLUMN: dict[str, str] = {
+    "otp": "otp_percentage",
+    "service_delivered": "service_delivered_ratio",
+    "ewt": "ewt_seconds",
+    "bunching": "bunching_rate",
+}
+
+
+def _read_system_metrics_history(
+    db: Session, dates: list[date_type], metric_key: str
+) -> dict[str, float | None]:
+    """Read the materialized `system_metrics_daily` rows for `dates`.
+
+    Returns a dict keyed by ISO date string; every requested date appears
+    in the dict, even if the row doesn't exist (value is `None`). Tests
+    that don't seed the table will get all-null history, which is exactly
+    the right behavior for the empty-DB envelope assertions.
+    """
+    if not dates:
+        return {}
+    start_iso = min(dates).isoformat()
+    end_iso = max(dates).isoformat()
+    rows = (
+        db.query(SystemMetricsDaily)
+        .filter(
+            SystemMetricsDaily.service_date >= start_iso,
+            SystemMetricsDaily.service_date <= end_iso,
+        )
+        .all()
+    )
+    by_date: dict[str, float | None] = {row.service_date: getattr(row, metric_key) for row in rows}
+    return {d.isoformat(): by_date.get(d.isoformat()) for d in dates}
+
+
 def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
     """Compute a system-trend payload for one metric over `days + prior days`.
+
+    Hybrid path: prior dates and visible-but-not-today dates come from the
+    materialized `system_metrics_daily` table; today's row is computed
+    live via `compute_system_metrics_for_date` since the daily pipeline
+    has not yet written it. Falls back to `None` for any date without a
+    materialized row, matching the empty-DB envelope tests rely on.
 
     Returns `{metric, days, trend_data, prior_window_value}` where
     `trend_data` is one row per service date in the *current* window (days+1
@@ -847,9 +868,17 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
     (skipping null days). The 30-vs-prior-30 delta is then
     `mean(trend_data) - prior_window_value` on the frontend.
     """
+    # Local import: src.system_metrics imports back into api.aggregations
+    # for the per-date helpers, so a top-level import would cycle.
+    from src.system_metrics import compute_system_metrics_for_date
     from src.timezones import eastern_today
 
-    end_date = eastern_today()
+    if metric not in _METRIC_TO_COLUMN:
+        raise ValueError(f"Unsupported system-trend metric: {metric}")
+    response_key = _METRIC_TO_COLUMN[metric]
+
+    today = eastern_today()
+    end_date = today
     start_current = end_date - timedelta(days=days)
     # Prior window is the `days` days immediately before the current window
     # — exclusive of the current window's start so the two don't overlap.
@@ -862,31 +891,25 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
     prior_dates = [
         start_prior + timedelta(days=i) for i in range((end_prior - start_prior).days + 1)
     ]
-    all_dates = prior_dates + current_dates
 
-    if metric == "otp":
-        series = _system_otp_series(db, all_dates)
-        response_key = "otp_percentage"
-    elif metric == "service_delivered":
-        series = _system_service_delivered_series(db, all_dates)
-        # Stored as 0..1 ratio in the payload — the frontend multiplies by 100
-        # to render as percentage points, matching the per-route trend.
-        response_key = "service_delivered_ratio"
-    elif metric == "ewt":
-        ewt_series, _ = _system_ewt_bunching_series(db, all_dates)
-        series = ewt_series
-        response_key = "ewt_seconds"
-    elif metric == "bunching":
-        _, bun_series = _system_ewt_bunching_series(db, all_dates)
-        series = bun_series
-        response_key = "bunching_rate"
-    else:
-        raise ValueError(f"Unsupported system-trend metric: {metric}")
+    # Read every materialized row in one query. Today's row will usually be
+    # absent (overwritten below by the live compute) but reading it is
+    # cheap and lets the table act as a backstop if the live compute fails.
+    history = _read_system_metrics_history(db, prior_dates + current_dates, response_key)
+
+    # Compute today live — single-date cost, ~1-2s rather than 60×.
+    try:
+        today_metrics = compute_system_metrics_for_date(db, today)
+        history[today.isoformat()] = today_metrics.get(response_key)
+    except Exception:
+        # Live compute failure should not blow up the endpoint; fall back
+        # to whatever the table currently holds for today (likely None).
+        pass
 
     trend_data = [
-        {"date": d.isoformat(), response_key: series.get(d.isoformat())} for d in current_dates
+        {"date": d.isoformat(), response_key: history.get(d.isoformat())} for d in current_dates
     ]
-    prior_window_value = _mean_skip_null([series.get(d.isoformat()) for d in prior_dates])
+    prior_window_value = _mean_skip_null([history.get(d.isoformat()) for d in prior_dates])
 
     return {
         "metric": metric,

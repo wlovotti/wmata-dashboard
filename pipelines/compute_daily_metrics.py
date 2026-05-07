@@ -39,9 +39,11 @@ from src.models import (
     RouteMetricsSummary,
     Stop,
     StopTime,
+    SystemMetricsDaily,
     Trip,
     VehiclePosition,
 )
+from src.system_metrics import compute_system_metrics_for_date
 from src.timezones import eastern_day_bounds_utc, eastern_today, to_eastern_sql, utcnow_naive
 
 # Load environment variables
@@ -650,6 +652,13 @@ def compute_daily_metrics(
                 f"Date {date.isoformat()} complete: {computed_count} computed, {skipped_count} skipped"
             )
 
+            # Materialize the system-wide rollup for this date (NOTES-48).
+            # Runs after per-route rollups so OTP/service-delivered series
+            # functions can read the freshly-written `route_metrics_daily`
+            # rows for the day.
+            print(f"\nComputing system_metrics_daily for {date.isoformat()}...")
+            upsert_system_metrics_for_date(db, date)
+
         print("\n" + "=" * 70)
         print("Daily metrics computation complete!")
         print(f"  Computed: {total_computed} route-days")
@@ -689,6 +698,65 @@ def get_last_data_collection_date(db) -> datetime:
     else:
         # Fallback to current time if no data exists
         return utcnow_naive()
+
+
+def upsert_system_metrics_for_date(db, date: datetime.date) -> dict | None:
+    """Compute and upsert one row of `system_metrics_daily` for `date`.
+
+    Called from the daily-metrics pipeline after the per-route rollups for
+    `date` are committed. Re-runs against the same `date` overwrite the
+    prior row in place — `service_date` is the primary key, so the upsert
+    is conflict-free as long as we delete-then-insert under one commit.
+
+    Returns the computed metrics dict (or None on any unexpected failure;
+    pipeline-level errors should not block the per-route rollups already
+    written for the date).
+
+    Args:
+        db: Database session.
+        date: Eastern service date to compute and store.
+
+    Returns:
+        The metrics dict written, or None if computation raised.
+    """
+    try:
+        metrics = compute_system_metrics_for_date(db, date)
+    except Exception as exc:
+        print(f"  ✗ System metrics compute failed for {date.isoformat()}: {exc}")
+        return None
+
+    service_date_iso = date.isoformat()
+    existing = (
+        db.query(SystemMetricsDaily)
+        .filter(SystemMetricsDaily.service_date == service_date_iso)
+        .first()
+    )
+    if existing:
+        existing.otp_percentage = metrics["otp_percentage"]
+        existing.service_delivered_ratio = metrics["service_delivered_ratio"]
+        existing.ewt_seconds = metrics["ewt_seconds"]
+        existing.bunching_rate = metrics["bunching_rate"]
+        existing.computed_at = utcnow_naive()
+    else:
+        row = SystemMetricsDaily(
+            service_date=service_date_iso,
+            otp_percentage=metrics["otp_percentage"],
+            service_delivered_ratio=metrics["service_delivered_ratio"],
+            ewt_seconds=metrics["ewt_seconds"],
+            bunching_rate=metrics["bunching_rate"],
+            computed_at=utcnow_naive(),
+        )
+        db.add(row)
+    db.commit()
+
+    print(
+        f"  ✓ System metrics for {service_date_iso}: "
+        f"OTP={metrics['otp_percentage']}, "
+        f"SD={metrics['service_delivered_ratio']}, "
+        f"EWT={metrics['ewt_seconds']}, "
+        f"BUN={metrics['bunching_rate']}"
+    )
+    return metrics
 
 
 def compute_summary_metrics(db, days: int = 7):

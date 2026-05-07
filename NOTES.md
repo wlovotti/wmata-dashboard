@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-36 — system trend strip on home page with 30-vs-prior-30 deltas across OTP, service-delivered, EWT, and bunching).
+Last edited 2026-05-06 (closed NOTES-36 and NOTES-48 — system trend strip on home page with 30-vs-prior-30 deltas across OTP, service-delivered, EWT, and bunching, served from the materialized `system_metrics_daily` table for sub-second cold-cache latency).
 
 ---
 
@@ -71,11 +71,6 @@ proxies instead).
 - **NOTES-46 Vehicle performance leaderboard.** Aggregate per-`vehicle_id`
   median deviation / p95 / trip count over 30 days as a maintenance/age
   proxy (not an operator-blame view).
-- **NOTES-48 Materialize system_metrics_daily.** Side effect of the
-  NOTES-36 closing PR. The system trend endpoint computes 60 days of
-  EWT and bunching live (cached 60s); cold-cache is ~30s. Once cold-
-  start latency starts to bite, persist the per-day system rollup
-  in a `system_metrics_daily` table populated by the daily pipeline.
 
 ### P4 — Surface to API + UI
 
@@ -313,32 +308,6 @@ single config row. Storage can be yaml in the repo or a small
 the contributors view (NOTES-39, where contribution is computed
 against target). Targets can stay editable by the operator, but a
 sensible starting set should be checked in.
-
----
-
-## NOTES-48. Materialize `system_metrics_daily`
-
-**Severity: low (latency optimization, deferred).**
-
-Side effect of the NOTES-36 closing PR (system trend strip). The
-`/api/system/trend` endpoint computes the EWT and bunching system
-rollup live across a 60-day window (visible 30 + prior 30) per
-request, cached 60s. Cold-cache cost is ~30s on a typical day —
-acceptable for a low-traffic single-process dev deployment, but a
-real concern if the dashboard ever sees burst traffic across the
-60s gap or if the prior window grows.
-
-The clean upgrade path: persist a `system_metrics_daily` table
-keyed by `service_date` with columns for system OTP / service-
-delivered / EWT / bunching, populated by the existing
-`pipelines/compute_daily_metrics.py` after the per-route rollup
-completes. The endpoint then becomes a trivial SELECT plus the
-prior-window mean — same shape, two-orders-of-magnitude faster.
-
-OTP and service-delivered are already cheap (single SQL query +
-small per-day live compute) and don't need this; the materialization
-is purely about EWT and bunching. Defer until cold-start latency
-becomes user-visible.
 
 ---
 

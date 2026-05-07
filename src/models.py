@@ -787,6 +787,37 @@ class RouteMetricsSummary(Base):
     computed_at = Column(DateTime, default=utcnow_naive)
 
 
+class SystemMetricsDaily(Base):
+    """
+    Pre-computed daily system-wide rollup metrics for the home-page trend
+    strip (NOTES-36, materialized in NOTES-48).
+
+    One row per service_date holding the system-level OTP, service-delivered
+    ratio, EWT, and bunching rate. Populated by
+    `pipelines/compute_daily_metrics.py` after per-route rollups complete.
+
+    Why this table exists: the live system-trend rollup over a 60-day window
+    (visible 30 + prior 30) costs ~30s on cold cache because EWT and bunching
+    require pooling every observed/scheduled cell-hour across every route per
+    day. Materializing the rollup turns the trend endpoint into a SELECT plus
+    a single-day live compute for "today" — sub-50ms warm, sub-second cold.
+
+    `service_date` is the primary key, matching the string format used by
+    `route_metrics_daily.date` (`YYYY-MM-DD`, Eastern operational day).
+    """
+
+    __tablename__ = "system_metrics_daily"
+
+    service_date = Column(String, primary_key=True)  # YYYY-MM-DD, Eastern service day
+
+    otp_percentage = Column(Float)
+    service_delivered_ratio = Column(Float)
+    ewt_seconds = Column(Float)
+    bunching_rate = Column(Float)
+
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+
 class RouteHeadwayMetrics(Base):
     """
     Per-(route, service_date, time_period) bunching rate, materialized from

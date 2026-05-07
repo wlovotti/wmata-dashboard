@@ -356,33 +356,25 @@ class TestGetSystemTrendData:
         assert all(row["otp_percentage"] is None for row in result["trend_data"])
         assert result["prior_window_value"] is None
 
-    def test_system_trend_otp_weighted_by_arrivals(self, db_session, sample_routes):
-        """OTP rollup is weighted by per-route `total_arrivals`, not equal-weighted.
+    def test_system_trend_otp_reads_materialized_history(self, db_session, sample_routes):
+        """Historical OTP rows come from the materialized `system_metrics_daily`.
 
-        Two routes on the same day with very different sample volumes — the
-        high-volume route's OTP should dominate the system value, not get
-        averaged 50/50 with the low-volume one.
+        The hybrid serve path reads every historical date (anything strictly
+        before today's Eastern service date) from the materialized table.
+        Seeding one row should surface in the visible window with the exact
+        value that was written.
         """
         self._clear_cache()
-        from src.models import RouteMetricsDaily
+        from src.models import SystemMetricsDaily
 
         target_date = eastern_today() - timedelta(days=5)
-        # TEST1: 90% OTP, 1000 arrivals. TEST2: 50% OTP, 100 arrivals.
-        # Equal-weighted = 70%; rider-weighted = (0.9*1000+0.5*100) / 1100 ≈ 86.4%.
         db_session.add(
-            RouteMetricsDaily(
-                route_id="TEST1",
-                date=target_date.isoformat(),
-                otp_percentage=90.0,
-                total_arrivals=1000,
-            )
-        )
-        db_session.add(
-            RouteMetricsDaily(
-                route_id="TEST2",
-                date=target_date.isoformat(),
-                otp_percentage=50.0,
-                total_arrivals=100,
+            SystemMetricsDaily(
+                service_date=target_date.isoformat(),
+                otp_percentage=86.4,
+                service_delivered_ratio=0.91,
+                ewt_seconds=120.0,
+                bunching_rate=0.07,
             )
         )
         db_session.commit()
@@ -391,15 +383,17 @@ class TestGetSystemTrendData:
 
         # Find the row for the target date.
         row = next(r for r in result["trend_data"] if r["date"] == target_date.isoformat())
-        assert row["otp_percentage"] is not None
-        # Rider-weighted ~86.36% — verify weighting is rider-proportional, not equal.
-        assert 86.0 < row["otp_percentage"] < 87.0
-        # Other days have no data, so they should still be null in the envelope.
-        other_days = [r for r in result["trend_data"] if r["date"] != target_date.isoformat()]
+        assert row["otp_percentage"] == 86.4
+        # Other historical days have no row, so they should still be null.
+        other_days = [
+            r
+            for r in result["trend_data"]
+            if r["date"] != target_date.isoformat() and r["date"] != eastern_today().isoformat()
+        ]
         assert all(r["otp_percentage"] is None for r in other_days)
 
     def test_system_trend_otp_prior_window(self, db_session, sample_route):
-        """Prior-window scalar is the mean of values in the prior 30-day window.
+        """Prior-window scalar is the mean of materialized prior-window values.
 
         Place a single row in the prior window only — its OTP becomes the
         prior_window_value and the visible window is all-null. The delta on
@@ -407,17 +401,15 @@ class TestGetSystemTrendData:
         reports the prior value cleanly.
         """
         self._clear_cache()
-        from src.models import RouteMetricsDaily
+        from src.models import SystemMetricsDaily
 
         # Land in prior window: 35 days ago is comfortably before the 30-day
         # current window's start (which is `today - 30`).
         prior_date = eastern_today() - timedelta(days=35)
         db_session.add(
-            RouteMetricsDaily(
-                route_id="TEST1",
-                date=prior_date.isoformat(),
+            SystemMetricsDaily(
+                service_date=prior_date.isoformat(),
                 otp_percentage=72.0,
-                total_arrivals=200,
             )
         )
         db_session.commit()
@@ -426,7 +418,8 @@ class TestGetSystemTrendData:
 
         # Only one prior-window day has data, so the prior mean is just its value.
         assert result["prior_window_value"] == 72.0
-        # Visible window remains empty.
+        # Visible historical window remains empty (today is live-computed and
+        # has no data either, so it's also null).
         assert all(row["otp_percentage"] is None for row in result["trend_data"])
 
     def test_system_trend_service_delivered_envelope(self, db_session):
