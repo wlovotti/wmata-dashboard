@@ -7,6 +7,8 @@ optimized for fast API responses and dashboard visualization.
 
 import math
 import time
+from collections import defaultdict
+from datetime import date as date_type
 from datetime import datetime, timedelta
 from threading import Lock
 
@@ -17,12 +19,18 @@ from src.analytics import (
     calculate_time_period_otp,
 )
 from src.bunching import (
+    BUNCHING_ABSOLUTE_FLOOR_SEC,
+    BUNCHING_RATIO,
+    MAX_OBSERVED_HEADWAY_SEC,
     compute_bunching_for_route_date,
     compute_bunching_headline_for_route,
     compute_bunching_headline_for_routes,
 )
 from src.ewt import (
     _day_type_for,
+    _eastern_hour,
+    _is_cell_hour_frequent,
+    compute_awt,
     compute_ewt_for_route_date,
     compute_ewt_headline_for_route,
     compute_ewt_headline_for_routes,
@@ -573,6 +581,358 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
         current = current + timedelta(days=1)
 
     return {"route_id": route_id, "metric": metric, "days": days, "trend_data": trend_data}
+
+
+# ---------------------------------------------------------------------------
+# System trend (NOTES-36): rollup across all routes for the home-page strip.
+#
+# The trend payload covers a 60-day span (current `days` + the immediately
+# prior `days` window) so a 30-vs-prior-30 delta can be computed entirely
+# server-side. Returning `prior_window_value` as a single per-metric scalar
+# keeps the wire shape parallel to the per-route trend (one row per service
+# date in the visible window, plus a small companion field) and avoids
+# double-counting concerns on the frontend.
+#
+# Why a cached query instead of a materialized table: the spec
+# (NOTES-36) leaves either path open and explicitly says "Cache for 60s
+# like the existing scorecard." OTP and service-delivered come from
+# `route_metrics_daily` plus a per-day live `service_delivered` compute,
+# both cheap. EWT and bunching are the expensive piece — 60 days of
+# whole-system pooled headways is a real compute (~30s on cold cache for
+# a typical day). The `_SYSTEM_TREND_TTL_SEC` cache absorbs that cost
+# after the first request; if cold-start latency starts to bite, the
+# clean upgrade path is to materialize a `system_metrics_daily` table
+# populated by `pipelines/compute_daily_metrics.py` (tracked as a future
+# NOTES item if the latency proves painful).
+# ---------------------------------------------------------------------------
+
+_SYSTEM_TREND_TTL_SEC = 60.0
+_system_trend_cache: dict[tuple[str, int, str], tuple[float, dict]] = {}
+_system_trend_lock = Lock()
+
+
+def _weighted_mean(pairs: list[tuple[float | None, float | None]]) -> float | None:
+    """Weighted mean over `(value, weight)` pairs, skipping null entries.
+
+    Used to roll per-route OTP into a system-level OTP for one service date,
+    weighted by `total_arrivals` (sample volume per route). Returns `None`
+    if all weights are zero / null — the day has no signal.
+    """
+    num = 0.0
+    den = 0.0
+    for value, weight in pairs:
+        if value is None or weight is None:
+            continue
+        w = float(weight)
+        if w <= 0:
+            continue
+        num += float(value) * w
+        den += w
+    if den <= 0:
+        return None
+    return num / den
+
+
+def _system_otp_series(db: Session, dates: list[date_type]) -> dict[str, float | None]:
+    """System-level OTP per service_date, weighted by per-route `total_arrivals`.
+
+    Pulls every `route_metrics_daily` row in the date range in one query,
+    then for each date computes the rider-weighted average OTP across
+    routes that have a non-null OTP and a positive `total_arrivals`.
+    Days with no rows return `None` so the frontend can plot a gap.
+    """
+    if not dates:
+        return {}
+    start_iso = min(dates).isoformat()
+    end_iso = max(dates).isoformat()
+    rows = (
+        db.query(
+            RouteMetricsDaily.date,
+            RouteMetricsDaily.otp_percentage,
+            RouteMetricsDaily.total_arrivals,
+        )
+        .filter(
+            RouteMetricsDaily.date >= start_iso,
+            RouteMetricsDaily.date <= end_iso,
+        )
+        .all()
+    )
+    by_date: dict[str, list[tuple[float | None, float | None]]] = defaultdict(list)
+    for date_str, otp, arrivals in rows:
+        by_date[date_str].append((otp, arrivals))
+    return {d.isoformat(): _weighted_mean(by_date.get(d.isoformat(), [])) for d in dates}
+
+
+def _system_service_delivered_series(
+    db: Session, dates: list[date_type]
+) -> dict[str, float | None]:
+    """System-level service-delivered per service_date.
+
+    Aggregated as `sum(delivered_trips) / sum(scheduled_trips)` across every
+    route on the date — the natural rider/trip-weighted aggregate. Equivalent
+    to "what fraction of all scheduled trips on the system were delivered."
+    Days with zero scheduled trips return `None` (no signal). Computed live
+    per-day via `compute_service_delivered_for_routes`; days iterate the
+    full route set so this is the heavier of the two from-table metrics.
+    """
+    out: dict[str, float | None] = {}
+    for d in dates:
+        rows = compute_service_delivered_for_routes(db, d)
+        scheduled = 0
+        delivered = 0
+        for r in rows:
+            sched = r.get("scheduled_trips") or 0
+            deliv = r.get("delivered_trips") or 0
+            scheduled += sched
+            delivered += deliv
+        out[d.isoformat()] = (delivered / scheduled) if scheduled > 0 else None
+    return out
+
+
+def _system_ewt_and_bunching_for_date(
+    db: Session,
+    service_date: date_type,
+    sched_by_day_type: dict[str, dict],
+) -> tuple[float | None, float | None]:
+    """Pooled EWT and bunching across all routes for one service date.
+
+    EWT is computed over the union of every route's frequent (direction,
+    stop, hour) cell-hours — pooling all observed and scheduled headways into
+    a single rider-weighted AWT/SWT pair. Mathematically equivalent to "EWT
+    across the whole system at every cell where service is actually frequent
+    on this date." Average-of-route-EWTs is wrong (averaging AWTs is wrong);
+    pooling is the only correct cross-route aggregation.
+
+    Bunching uses the same pool of routes' (direction, stop, hour) cells;
+    `bunched / total` is naturally pair-weighted, so the per-route headline
+    formula extends directly to the system-level union.
+
+    `sched_by_day_type` is a memoized fetch of per-route schedule data per
+    day_type so the schedule cost is amortized across many days in the
+    window. Returns `(ewt_seconds, bunching_rate)` — either may be `None`
+    when the underlying pool is empty or when the date has no observed
+    stop_events.
+    """
+    service_date_str = service_date.isoformat()
+    day_type = _day_type_for(service_date)
+    if day_type not in sched_by_day_type:
+        sched_by_day_type[day_type] = fetch_scheduled_cell_hours_for_routes(db, day_type)
+    sched_by_route = sched_by_day_type[day_type]
+
+    obs_q = (
+        db.query(
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+            StopEvent.schedule_relationship,
+        )
+        .filter(
+            StopEvent.service_date == service_date_str,
+            StopEvent.source == "trip_update",
+            StopEvent.observed_arrival_ts.isnot(None),
+        )
+        .order_by(
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+        )
+    )
+
+    # Two parallel observed pools per (route, direction, stop, hour):
+    #   - ewt: every observed pair (matches src/ewt.py)
+    #   - bun: only schedule_relationship='SCHEDULED' (matches src/bunching.py)
+    obs_ewt: dict[tuple[str, int, str, int], list[float]] = defaultdict(list)
+    obs_bun: dict[tuple[str, int, str, int], list[float]] = defaultdict(list)
+
+    prev_key_ewt: tuple[str, int, str] | None = None
+    prev_ts_ewt: datetime | None = None
+    prev_key_bun: tuple[str, int, str] | None = None
+    prev_ts_bun: datetime | None = None
+
+    for route_id, direction_id, stop_id, ts, sched_rel in obs_q.all():
+        key = (route_id, direction_id, stop_id)
+        # EWT pool: no schedule_relationship filter.
+        if prev_key_ewt == key and prev_ts_ewt is not None:
+            delta = (ts - prev_ts_ewt).total_seconds()
+            if delta > 0:
+                obs_ewt[(route_id, direction_id, stop_id, _eastern_hour(prev_ts_ewt))].append(delta)
+        prev_key_ewt = key
+        prev_ts_ewt = ts
+        # Bunching pool: SCHEDULED only — keeps its own consecutive-arrival walk so
+        # an ADDED row between two SCHEDULED rows doesn't fabricate a phantom pair.
+        if sched_rel == "SCHEDULED":
+            if prev_key_bun == key and prev_ts_bun is not None:
+                delta_b = (ts - prev_ts_bun).total_seconds()
+                if delta_b > 0:
+                    obs_bun[(route_id, direction_id, stop_id, _eastern_hour(prev_ts_bun))].append(
+                        delta_b
+                    )
+            prev_key_bun = key
+            prev_ts_bun = ts
+
+    # System-level EWT: pool every frequent cell-hour across every route.
+    obs_pool: list[float] = []
+    sched_pool: list[float] = []
+    for route_id, sched_cells in sched_by_route.items():
+        for cell_hour, sched_headways in sched_cells.items():
+            if not _is_cell_hour_frequent(sched_headways):
+                continue
+            sched_pool.extend(sched_headways)
+            obs_key = (route_id, *cell_hour)
+            obs_pool.extend(obs_ewt.get(obs_key, []))
+    awt = compute_awt(obs_pool)
+    swt = compute_awt(sched_pool)
+    if awt is not None and swt is not None:
+        ewt_seconds: float | None = max(0.0, awt - swt)
+    else:
+        ewt_seconds = None
+
+    # System-level bunching: pool every cell-hour with a defined threshold.
+    bunched = 0
+    total = 0
+    for route_id, sched_cells in sched_by_route.items():
+        for cell_hour, sched_headways in sched_cells.items():
+            if not sched_headways:
+                continue
+            mean_sched = sum(sched_headways) / len(sched_headways)
+            threshold = max(BUNCHING_RATIO * mean_sched, BUNCHING_ABSOLUTE_FLOOR_SEC)
+            obs_key = (route_id, *cell_hour)
+            for headway in obs_bun.get(obs_key, []):
+                if headway > MAX_OBSERVED_HEADWAY_SEC:
+                    continue
+                total += 1
+                if headway < threshold:
+                    bunched += 1
+    bunching_rate = (bunched / total) if total > 0 else None
+
+    return ewt_seconds, bunching_rate
+
+
+def _system_ewt_bunching_series(
+    db: Session, dates: list[date_type]
+) -> tuple[dict[str, float | None], dict[str, float | None]]:
+    """Compute EWT and bunching system rollups across many dates in one pass.
+
+    Memoizes the schedule fetch per day_type so a 60-day window only pays the
+    ~1.7s schedule cost three times (weekday/sat/sun) regardless of how many
+    days fall in each bucket. Returns two dicts keyed by ISO date.
+    """
+    sched_by_day_type: dict[str, dict] = {}
+    ewt_by_date: dict[str, float | None] = {}
+    bun_by_date: dict[str, float | None] = {}
+    for d in dates:
+        ewt_value, bun_value = _system_ewt_and_bunching_for_date(db, d, sched_by_day_type)
+        ewt_by_date[d.isoformat()] = ewt_value
+        bun_by_date[d.isoformat()] = bun_value
+    return ewt_by_date, bun_by_date
+
+
+def _mean_skip_null(values: list[float | None]) -> float | None:
+    """Mean of a list, skipping null entries. Returns None if no valid entries."""
+    valid = [v for v in values if v is not None]
+    if not valid:
+        return None
+    return sum(valid) / len(valid)
+
+
+def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
+    """Compute a system-trend payload for one metric over `days + prior days`.
+
+    Returns `{metric, days, trend_data, prior_window_value}` where
+    `trend_data` is one row per service date in the *current* window (days+1
+    inclusive points; `value: null` for days with no data) and
+    `prior_window_value` is the simple mean of the prior-window values
+    (skipping null days). The 30-vs-prior-30 delta is then
+    `mean(trend_data) - prior_window_value` on the frontend.
+    """
+    from src.timezones import eastern_today
+
+    end_date = eastern_today()
+    start_current = end_date - timedelta(days=days)
+    # Prior window is the `days` days immediately before the current window
+    # — exclusive of the current window's start so the two don't overlap.
+    end_prior = start_current - timedelta(days=1)
+    start_prior = end_prior - timedelta(days=days - 1)
+
+    current_dates = [
+        start_current + timedelta(days=i) for i in range((end_date - start_current).days + 1)
+    ]
+    prior_dates = [
+        start_prior + timedelta(days=i) for i in range((end_prior - start_prior).days + 1)
+    ]
+    all_dates = prior_dates + current_dates
+
+    if metric == "otp":
+        series = _system_otp_series(db, all_dates)
+        response_key = "otp_percentage"
+    elif metric == "service_delivered":
+        series = _system_service_delivered_series(db, all_dates)
+        # Stored as 0..1 ratio in the payload — the frontend multiplies by 100
+        # to render as percentage points, matching the per-route trend.
+        response_key = "service_delivered_ratio"
+    elif metric == "ewt":
+        ewt_series, _ = _system_ewt_bunching_series(db, all_dates)
+        series = ewt_series
+        response_key = "ewt_seconds"
+    elif metric == "bunching":
+        _, bun_series = _system_ewt_bunching_series(db, all_dates)
+        series = bun_series
+        response_key = "bunching_rate"
+    else:
+        raise ValueError(f"Unsupported system-trend metric: {metric}")
+
+    trend_data = [
+        {"date": d.isoformat(), response_key: series.get(d.isoformat())} for d in current_dates
+    ]
+    prior_window_value = _mean_skip_null([series.get(d.isoformat()) for d in prior_dates])
+
+    return {
+        "metric": metric,
+        "days": days,
+        "trend_data": trend_data,
+        "prior_window_value": prior_window_value,
+    }
+
+
+def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> dict:
+    """System-level trend rollup for the home-page trend strip (NOTES-36).
+
+    Returns 30 days (or `days`) of system-level values for one of OTP /
+    service-delivered / EWT / bunching, plus a single `prior_window_value`
+    summarizing the immediately prior `days` window so the frontend can
+    render a 30-vs-prior-30 delta without fetching twice.
+
+    Cached per `(metric, days, today)` for `_SYSTEM_TREND_TTL_SEC` (60s) so
+    the home page doesn't pay the full rollup cost on every poll. The cache
+    key includes today's Eastern date so the cache rolls naturally at the
+    service-day boundary.
+
+    Args:
+        db: Database session
+        metric: One of `otp`, `service_delivered`, `ewt`, `bunching`
+        days: Length of the visible window in days (default: 30)
+
+    Returns:
+        Dict with `metric`, `days`, `trend_data` (list of `{date, <metric_key>}`),
+        and `prior_window_value` (float or null).
+    """
+    from src.timezones import eastern_today
+
+    cache_key = (metric, days, eastern_today().isoformat())
+    with _system_trend_lock:
+        cached = _system_trend_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _SYSTEM_TREND_TTL_SEC:
+                return value
+
+    result = _system_trend_uncached(db, metric, days)
+
+    with _system_trend_lock:
+        _system_trend_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def get_route_period_drilldown(db: Session, route_id: str) -> dict:
