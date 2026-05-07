@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (added NOTES-36 through NOTES-47 — operations-manager redesign: trend, diagnosis, decision support, operator-side proxies; public-facing surface deferred).
+Last edited 2026-05-06 (closed NOTES-37 — route trend wired into RouteDetail with 7-vs-prior-7 deltas; trend endpoint extended to serve service_delivered).
 
 ---
 
@@ -40,9 +40,6 @@ proxies instead).
 - **NOTES-36 System trend strip on home page.** 30-day sparklines
   for system OTP / service-delivered / EWT / bunching with deltas vs
   the prior 30 days.
-- **NOTES-37 Route trend on RouteDetail.** Wire the existing
-  `/api/routes/{route_id}/trend` endpoint into the UI; add 7-vs-prior-7
-  deltas to the KPI cards.
 - **NOTES-38 Period-over-period deltas on every KPI.** Augment the
   scorecard payload with deltas; add up/down/flat indicators
   throughout.
@@ -172,20 +169,6 @@ can either materialize as a new table or be a cached query on
 
 ---
 
-## NOTES-37. Route trend on RouteDetail
-
-**Severity: low.**
-
-`/api/routes/{route_id}/trend` already returns a 30-day series of OTP,
-early%, late%, headway, and speed but is not consumed by the frontend.
-Wire it into `frontend/src/components/RouteDetail.jsx`: render OTP and
-service-delivered as 30-day lines next to the existing KPI cards, and
-add a 7-day-vs-prior-7-day delta to each card. Pure frontend work
-unless service-delivered isn't yet in the trend payload — extend the
-endpoint if so.
-
----
-
 ## NOTES-38. Period-over-period deltas on every KPI
 
 **Severity: low.**
@@ -193,10 +176,13 @@ endpoint if so.
 Augment the scorecard payload from `/api/routes` (built in
 `api/aggregations.py`) so every metric carries a 7-day-vs-prior-7-day
 delta. Render up/down/flat indicators on the `RouteList` table and the
-`RouteDetail` KPI cards. Pairs naturally with NOTES-37; can ship in
-one PR if scope stays tight. Pay attention to thin-data cases — if
-either window is below the EWT coverage threshold, the delta should
-suppress rather than show a misleading number.
+`RouteDetail` KPI cards. The RouteDetail OTP / service-delivered cards
+already carry deltas client-side from the 30-day trend payload (PR #77);
+this item generalizes the pattern to every KPI on every surface, with
+the delta computed server-side so RouteList can show them too. Pay
+attention to thin-data cases — if either window is below the EWT
+coverage threshold, the delta should suppress rather than show a
+misleading number.
 
 ---
 
@@ -337,10 +323,11 @@ needs a place to store per-route (and per-system) targets for OTP,
 service-delivered, EWT, and bunching. Keep it simple: one number per
 (route, metric); null means "use system default"; system default is a
 single config row. Storage can be yaml in the repo or a small
-`route_targets` table. Surface targets on the trend cards (NOTES-36,
-NOTES-37) and on the contributors view (NOTES-39, where contribution
-is computed against target). Targets can stay editable by the
-operator, but a sensible starting set should be checked in.
+`route_targets` table. Surface targets on the system trend cards
+(NOTES-36) and the per-route trend cards (PR #77, RouteDetail), and on
+the contributors view (NOTES-39, where contribution is computed
+against target). Targets can stay editable by the operator, but a
+sensible starting set should be checked in.
 
 ---
 

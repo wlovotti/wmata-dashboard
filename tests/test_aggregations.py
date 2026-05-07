@@ -235,19 +235,29 @@ class TestGetRouteTrendData:
     """Tests for get_route_trend_data function"""
 
     def test_trend_data_otp(self, db_session, sample_route, sample_route_metrics_daily):
-        """Test trend data for OTP metric"""
+        """Test trend data for OTP metric.
+
+        The fixture inserts one daily row at `today - 1`. The endpoint
+        emits `days + 1` rows (inclusive endpoints), with the fixture
+        row carrying its real OTP and every other day carrying null.
+        """
         result = get_route_trend_data(db_session, "TEST1", metric="otp", days=30)
 
         assert result["route_id"] == "TEST1"
         assert result["metric"] == "otp"
         assert result["days"] == 30
         assert "trend_data" in result
-        assert len(result["trend_data"]) > 0
+        assert len(result["trend_data"]) == 31
 
         # Verify structure of trend data
         trend_point = result["trend_data"][0]
         assert "date" in trend_point
         assert "otp_percentage" in trend_point
+
+        # Exactly one real value (the fixture row); the rest are null.
+        real_values = [row for row in result["trend_data"] if row["otp_percentage"] is not None]
+        assert len(real_values) == 1
+        assert real_values[0]["otp_percentage"] == 78.2
 
     def test_trend_data_all_metrics(self, db_session, sample_route, sample_route_metrics_daily):
         """Test trend data for all supported metrics"""
@@ -271,17 +281,41 @@ class TestGetRouteTrendData:
                 assert expected_field in trend_point
 
     def test_trend_data_no_data(self, db_session, sample_route):
-        """Test trend data when no daily metrics exist"""
+        """Test trend data when no daily metrics exist.
+
+        With no rows in `route_metrics_daily`, every service date in the
+        window is emitted with `otp_percentage: null` so the frontend can
+        distinguish "no data" from a real zero. The series length matches
+        the requested window (`days + 1` for the inclusive endpoints).
+        """
         result = get_route_trend_data(db_session, "TEST1", metric="otp", days=30)
 
         assert result["route_id"] == "TEST1"
-        assert result["trend_data"] == []
+        assert len(result["trend_data"]) == 31
+        assert all(row["otp_percentage"] is None for row in result["trend_data"])
 
     def test_trend_data_custom_days(self, db_session, sample_route, sample_route_metrics_daily):
         """Test trend data with custom days parameter"""
         result = get_route_trend_data(db_session, "TEST1", metric="otp", days=60)
 
         assert result["days"] == 60
+
+    def test_trend_data_service_delivered_empty(self, db_session, sample_route):
+        """Test service_delivered trend metric returns the expected shape.
+
+        With no runs / GTFS schedule fixtures, every day has scheduled_trips=0
+        and ratio=None — but the endpoint still emits one row per service
+        date in the window with `service_delivered_ratio: null` so the
+        frontend axis stays consistent. The response envelope should be
+        well-formed with the right metric label.
+        """
+        result = get_route_trend_data(db_session, "TEST1", metric="service_delivered", days=30)
+
+        assert result["route_id"] == "TEST1"
+        assert result["metric"] == "service_delivered"
+        assert result["days"] == 30
+        assert len(result["trend_data"]) == 31
+        assert all(row["service_delivered_ratio"] is None for row in result["trend_data"])
 
 
 class TestGradeConsistency:

@@ -449,15 +449,22 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
 
 def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: int = 30) -> dict:
     """
-    Get time-series trend data for a specific route metric
+    Get time-series trend data for a specific route metric.
 
-    Computes daily values for OTP, headway, speed, or other metrics over the specified time period.
-    Used for trend charts on the route detail page.
+    Computes daily values for OTP, headway, speed, or service-delivered over the
+    specified time period. Used for trend charts on the route detail page.
+
+    `service_delivered` is computed live per service_date from `runs` + GTFS via
+    `compute_service_delivered` (NOTES-37). It is not stored in
+    `route_metrics_daily`, so the trend loop pays one pair of count queries per
+    day in the window; acceptable on a per-route detail page (not iterated over
+    a route list).
 
     Args:
         db: Database session
         route_id: Route identifier (e.g., 'C51')
-        metric: Metric to analyze ('otp', 'early', 'late', 'headway', 'headway_std_dev', 'speed')
+        metric: Metric to analyze ('otp', 'early', 'late', 'headway',
+            'headway_std_dev', 'speed', 'service_delivered')
         days: Number of days to analyze (default: 30)
 
     Returns:
@@ -471,6 +478,58 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     end_date = eastern_today()
     start_date = end_date - timedelta(days=days)
 
+    # service_delivered isn't materialized in RouteMetricsDaily; compute per-day
+    # from runs + GTFS. Same Eastern service-date window as the daily-table path.
+    #
+    # Emit one row per service date in the window; days with no observations
+    # carry `service_delivered_ratio: null` so the frontend can distinguish
+    # "no data" from "ran zero trips" and skip the point in both the
+    # sparkline and the 7-vs-prior-7-day delta. The discriminator is
+    # `Run` existence — if no runs exist for the route on that date, we
+    # have no observations regardless of what the schedule says. If runs
+    # exist but `delivered_trips == 0`, that's a real 0% (every trip was
+    # too thin to count as delivered).
+    if metric == "service_delivered":
+        trend_data = []
+        current = start_date
+        while current <= end_date:
+            sd = compute_service_delivered(db, route_id, current)
+            ratio = sd.get("ratio")
+            scheduled = sd.get("scheduled_trips") or 0
+            delivered = sd.get("delivered_trips") or 0
+            # No-data discriminator: if the schedule says 0 trips, ratio is
+            # already None (route doesn't run that day_type). If scheduled > 0
+            # but we observed nothing at all, treat as no data — otherwise
+            # phantom 0% points dominate the chart and the delta. Cheap
+            # existence check (LIMIT 1 effectively).
+            if ratio is not None and delivered == 0:
+                has_runs = (
+                    db.query(Run.id)
+                    .filter(
+                        Run.route_id == route_id,
+                        Run.service_date == current.isoformat(),
+                    )
+                    .first()
+                    is not None
+                )
+                if not has_runs:
+                    ratio = None
+            trend_data.append(
+                {
+                    "date": current.isoformat(),
+                    "service_delivered_ratio": ratio,
+                    "scheduled_trips": scheduled,
+                    "delivered_trips": delivered,
+                }
+            )
+            current = current + timedelta(days=1)
+        return {
+            "route_id": route_id,
+            "metric": metric,
+            "days": days,
+            "trend_data": trend_data,
+        }
+
     # Get daily metrics from database
     daily_metrics = (
         db.query(RouteMetricsDaily)
@@ -482,14 +541,6 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
         .order_by(RouteMetricsDaily.date)
         .all()
     )
-
-    if not daily_metrics:
-        return {
-            "route_id": route_id,
-            "metric": metric,
-            "days": days,
-            "trend_data": [],
-        }
 
     # Map metric name to field and response key
     metric_config = {
@@ -505,12 +556,21 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     field_name = config["field"]
     response_key = config["key"]
 
-    # Build time series data
+    # Emit one row per service date in the window. Days with no row in
+    # `route_metrics_daily` (or with a null value) carry `<key>: null` so
+    # the frontend can distinguish "no data" from a real zero and skip
+    # those points in both the sparkline and the 7-vs-prior-7-day delta.
+    # Without this, sparse early days in production data look like a cliff
+    # to zero and break every comparison.
+    by_date = {m.date: m for m in daily_metrics}
     trend_data = []
-    for day_metric in daily_metrics:
-        value = getattr(day_metric, field_name, None)
-        if value is not None:
-            trend_data.append({"date": day_metric.date, response_key: value})
+    current = start_date
+    while current <= end_date:
+        date_str = current.isoformat()
+        day_metric = by_date.get(date_str)
+        value = getattr(day_metric, field_name, None) if day_metric else None
+        trend_data.append({"date": date_str, response_key: value})
+        current = current + timedelta(days=1)
 
     return {"route_id": route_id, "metric": metric, "days": days, "trend_data": trend_data}
 
