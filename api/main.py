@@ -211,7 +211,8 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
     Args:
         route_id: Route identifier (e.g., 'C51')
         metric: Metric to analyze ('otp', 'early', 'late', 'headway',
-            'headway_std_dev', 'speed', 'service_delivered')
+            'headway_std_dev', 'speed', 'service_delivered',
+            'excess_trip_time')
         days: Number of days to analyze (default: 30)
 
     Returns:
@@ -225,6 +226,7 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
         "headway_std_dev",
         "speed",
         "service_delivered",
+        "excess_trip_time",
     ]
     if metric not in valid_metrics:
         raise HTTPException(

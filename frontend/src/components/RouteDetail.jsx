@@ -15,11 +15,13 @@ function RouteDetail() {
 
   // Trend data is fetched here (rather than inside RouteTrend) so the same
   // 30-day series can drive both the sparkline block and the per-KPI-card
-  // 7-vs-prior-7-day deltas above. Two fetches: OTP comes from
-  // route_metrics_daily, service_delivered is computed live per service date
-  // (NOTES-37 / endpoint extension).
+  // 7-vs-prior-7-day deltas above. Three fetches: OTP and excess_trip_time
+  // come from route_metrics_daily, service_delivered is computed live per
+  // service date (NOTES-37 / endpoint extension). NOTES-43 added the
+  // excess_trip_time trend.
   const [otpTrend, setOtpTrend] = useState(null)
   const [sdTrend, setSdTrend] = useState(null)
+  const [excessTrend, setExcessTrend] = useState(null)
   const [trendLoading, setTrendLoading] = useState(true)
   const [trendError, setTrendError] = useState(null)
 
@@ -47,11 +49,15 @@ function RouteDetail() {
       fetch(`/api/routes/${routeId}/trend?metric=service_delivered&days=30`).then(
         (res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)),
       ),
+      fetch(`/api/routes/${routeId}/trend?metric=excess_trip_time&days=30`).then(
+        (res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)),
+      ),
     ])
-      .then(([otp, sd]) => {
+      .then(([otp, sd, excess]) => {
         if (cancelled) return
         setOtpTrend(otp)
         setSdTrend(sd)
+        setExcessTrend(excess)
         setTrendLoading(false)
       })
       .catch((err) => {
@@ -97,8 +103,24 @@ function RouteDetail() {
         .filter((row) => row.value != null),
     [sdTrend],
   )
+  // Excess trip time: % of trips with actual end-to-end duration above 110%
+  // of scheduled. Already a percentage in the payload; just pass through.
+  const excessSeries = useMemo(
+    () =>
+      (excessTrend?.trend_data || [])
+        .map((row) => ({
+          date: row.date,
+          value: row.excess_trip_time_pct,
+        }))
+        .filter((row) => row.value != null),
+    [excessTrend],
+  )
   const otpDelta = useMemo(() => computeWindowDelta(otpSeries), [otpSeries])
   const sdDelta = useMemo(() => computeWindowDelta(sdSeries), [sdSeries])
+  const excessDelta = useMemo(
+    () => computeWindowDelta(excessSeries),
+    [excessSeries],
+  )
 
   if (loading) {
     return (
@@ -143,6 +165,32 @@ function RouteDetail() {
     || routeData.service_delivered_ratio != null
     || routeData.ewt_seconds != null
     || routeData.bunching_rate != null
+    || routeData.excess_trip_time_pct != null
+
+  // Subline for the excess-trip-time card: "median trip ran X min,
+  // schedule Y min" so a GM can see whether the running-over-110% rate
+  // reflects 30% over schedule on a long route or 1% over on a short
+  // one. Both come from the freshest daily row inside the 7-day window
+  // (NOTES-43, _excess_trip_time_fields in api/aggregations.py).
+  const excessActualMin =
+    routeData.excess_trip_time_median_actual_sec != null
+      ? Math.round(routeData.excess_trip_time_median_actual_sec / 60)
+      : null
+  const excessSchedMin =
+    routeData.excess_trip_time_median_scheduled_sec != null
+      ? Math.round(routeData.excess_trip_time_median_scheduled_sec / 60)
+      : null
+  const excessOverSchedPct =
+    routeData.excess_trip_time_median_actual_sec != null &&
+    routeData.excess_trip_time_median_scheduled_sec != null &&
+    routeData.excess_trip_time_median_scheduled_sec > 0
+      ? Math.round(
+          ((routeData.excess_trip_time_median_actual_sec -
+            routeData.excess_trip_time_median_scheduled_sec) /
+            routeData.excess_trip_time_median_scheduled_sec) *
+            100,
+        )
+      : null
 
   return (
     <main>
@@ -262,14 +310,42 @@ function RouteDetail() {
             </div>
           )}
         </div>
+        <div className="stat-card">
+          <div className="stat-value">
+            {routeData.excess_trip_time_pct != null
+              ? `${Math.round(routeData.excess_trip_time_pct)}%`
+              : 'N/A'}
+            {excessDelta && (
+              <DeltaIndicator
+                delta={excessDelta.delta}
+                format={(d) => `${d.toFixed(1)} pp`}
+                title={`7-day mean ${excessDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${excessDelta.priorMean.toFixed(1)}%`}
+              />
+            )}
+          </div>
+          <div className="stat-label">Trips &gt; 110% of Schedule</div>
+          {excessActualMin != null && excessSchedMin != null && (
+            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+              median trip {excessActualMin} min, schedule {excessSchedMin} min
+              {excessOverSchedPct != null && ` (${excessOverSchedPct >= 0 ? '+' : ''}${excessOverSchedPct}%)`}
+            </div>
+          )}
+          {routeData.excess_trip_time_pct == null && (
+            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+              (no qualifying trips)
+            </div>
+          )}
+        </div>
       </div>
 
       {hasMetrics && (
         <RouteTrend
           otpSeries={otpSeries}
           sdSeries={sdSeries}
+          excessSeries={excessSeries}
           otpDelta={otpDelta}
           sdDelta={sdDelta}
+          excessDelta={excessDelta}
           loading={trendLoading}
           error={trendError}
         />

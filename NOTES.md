@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-36 and NOTES-48 — system trend strip on home page with 30-vs-prior-30 deltas across OTP, service-delivered, EWT, and bunching, served from the materialized `system_metrics_daily` table for sub-second cold-cache latency).
+Last edited 2026-05-07 (closed NOTES-43 — wired `src/excess_trip_time.py` into the daily pipeline, added four columns to `route_metrics_daily`, surfaced a "Trips > 110% of Schedule" KPI card with a median-actual / median-scheduled subline on RouteDetail, and added the metric as a selectable trend sparkline).
 
 ---
 
@@ -60,9 +60,6 @@ proxies instead).
 
 **Decision support & operator-side proxies**
 
-- **NOTES-43 Surface excess trip time.** Wire the existing-but-unused
-  `src/excess_trip_time.py` into the daily pipeline + UI; distinguishes
-  "running late" from "schedule too tight."
 - **NOTES-44 Marginal-bus EWT model.** Per (route, period) ranking
   of where adding one trip would most reduce EWT.
 - **NOTES-45 Block-level cascade view.** Surface `block_id` and
@@ -228,20 +225,6 @@ failure (departure-discipline problem); if both are off, it's
 compounding. Add the breakdown to the bunching API surface and render
 it on `PeriodDrilldown` as a stacked bar. Lets a GM target the right
 intervention.
-
----
-
-## NOTES-43. Surface excess trip time
-
-**Severity: low.**
-
-`src/excess_trip_time.py` computes the metric but isn't called from
-`pipelines/compute_daily_metrics.py` and isn't exposed on any API
-endpoint — dead code today. Wire it into the daily pipeline, persist
-to the appropriate metrics table, and surface on `RouteDetail`. Pair
-with median scheduled trip time so a GM can see "trips ran 12% over
-the schedule" — distinguishes "running late" from "schedule is too
-tight" when looking at OTP misses.
 
 ---
 
