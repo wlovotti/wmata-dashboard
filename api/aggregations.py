@@ -480,21 +480,48 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
 
     # service_delivered isn't materialized in RouteMetricsDaily; compute per-day
     # from runs + GTFS. Same Eastern service-date window as the daily-table path.
+    #
+    # Emit one row per service date in the window; days with no observations
+    # carry `service_delivered_ratio: null` so the frontend can distinguish
+    # "no data" from "ran zero trips" and skip the point in both the
+    # sparkline and the 7-vs-prior-7-day delta. The discriminator is
+    # `Run` existence — if no runs exist for the route on that date, we
+    # have no observations regardless of what the schedule says. If runs
+    # exist but `delivered_trips == 0`, that's a real 0% (every trip was
+    # too thin to count as delivered).
     if metric == "service_delivered":
         trend_data = []
         current = start_date
         while current <= end_date:
             sd = compute_service_delivered(db, route_id, current)
             ratio = sd.get("ratio")
-            if ratio is not None:
-                trend_data.append(
-                    {
-                        "date": current.isoformat(),
-                        "service_delivered_ratio": ratio,
-                        "scheduled_trips": sd.get("scheduled_trips"),
-                        "delivered_trips": sd.get("delivered_trips"),
-                    }
+            scheduled = sd.get("scheduled_trips") or 0
+            delivered = sd.get("delivered_trips") or 0
+            # No-data discriminator: if the schedule says 0 trips, ratio is
+            # already None (route doesn't run that day_type). If scheduled > 0
+            # but we observed nothing at all, treat as no data — otherwise
+            # phantom 0% points dominate the chart and the delta. Cheap
+            # existence check (LIMIT 1 effectively).
+            if ratio is not None and delivered == 0:
+                has_runs = (
+                    db.query(Run.id)
+                    .filter(
+                        Run.route_id == route_id,
+                        Run.service_date == current.isoformat(),
+                    )
+                    .first()
+                    is not None
                 )
+                if not has_runs:
+                    ratio = None
+            trend_data.append(
+                {
+                    "date": current.isoformat(),
+                    "service_delivered_ratio": ratio,
+                    "scheduled_trips": scheduled,
+                    "delivered_trips": delivered,
+                }
+            )
             current = current + timedelta(days=1)
         return {
             "route_id": route_id,
@@ -515,14 +542,6 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
         .all()
     )
 
-    if not daily_metrics:
-        return {
-            "route_id": route_id,
-            "metric": metric,
-            "days": days,
-            "trend_data": [],
-        }
-
     # Map metric name to field and response key
     metric_config = {
         "otp": {"field": "otp_percentage", "key": "otp_percentage"},
@@ -537,12 +556,21 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     field_name = config["field"]
     response_key = config["key"]
 
-    # Build time series data
+    # Emit one row per service date in the window. Days with no row in
+    # `route_metrics_daily` (or with a null value) carry `<key>: null` so
+    # the frontend can distinguish "no data" from a real zero and skip
+    # those points in both the sparkline and the 7-vs-prior-7-day delta.
+    # Without this, sparse early days in production data look like a cliff
+    # to zero and break every comparison.
+    by_date = {m.date: m for m in daily_metrics}
     trend_data = []
-    for day_metric in daily_metrics:
-        value = getattr(day_metric, field_name, None)
-        if value is not None:
-            trend_data.append({"date": day_metric.date, response_key: value})
+    current = start_date
+    while current <= end_date:
+        date_str = current.isoformat()
+        day_metric = by_date.get(date_str)
+        value = getattr(day_metric, field_name, None) if day_metric else None
+        trend_data.append({"date": date_str, response_key: value})
+        current = current + timedelta(days=1)
 
     return {"route_id": route_id, "metric": metric, "days": days, "trend_data": trend_data}
 

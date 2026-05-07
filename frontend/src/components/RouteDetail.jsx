@@ -67,12 +67,21 @@ function RouteDetail() {
   // Memoized {date, value} series + deltas. Service-delivered is stored as a
   // 0..1 ratio in the payload but rendered as percentage points on the card,
   // so multiply by 100 here once.
+  //
+  // The trend endpoint now emits one row per service date in the window
+  // with `value: null` for days with no data (so the API caller can
+  // distinguish "no observations" from a real zero). Drop those nulls
+  // here so the sparkline only plots real points and `computeWindowDelta`
+  // sees only valid data — its <3-valid-days suppression rule then
+  // actually kicks in for thin-data routes.
   const otpSeries = useMemo(
     () =>
-      (otpTrend?.trend_data || []).map((row) => ({
-        date: row.date,
-        value: row.otp_percentage,
-      })),
+      (otpTrend?.trend_data || [])
+        .map((row) => ({
+          date: row.date,
+          value: row.otp_percentage,
+        }))
+        .filter((row) => row.value != null),
     [otpTrend],
   )
   const sdSeries = useMemo(

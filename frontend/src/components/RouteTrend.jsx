@@ -86,12 +86,18 @@ function DeltaIndicator({ delta, format, flatThreshold = 0.5, title }) {
 /**
  * Mini 30-day sparkline rendered with recharts.
  *
- * `data` is an array of `{ date, value }` rows. Strips axes / grid / legend
- * for a compact card-friendly presentation; tooltip on hover gives the date
- * + value.
+ * `data` is an array of `{ date, value }` rows. Rows with `value == null`
+ * are dropped defensively (the trend endpoint emits null for days with
+ * no observations); without this a sparse early window plots a cliff
+ * to zero. Strips axes / grid / legend for a compact card-friendly
+ * presentation; tooltip on hover gives the date + value.
+ *
+ * If only one valid point survives, recharts won't draw a line — fall
+ * back to a single dot so the user still sees the measurement.
  */
 function Sparkline({ data, color, valueFormat, height = 60 }) {
-  if (!data || data.length === 0) {
+  const valid = (data || []).filter((row) => row.value != null)
+  if (valid.length === 0) {
     return (
       <div
         className="sparkline-empty"
@@ -110,7 +116,7 @@ function Sparkline({ data, color, valueFormat, height = 60 }) {
   }
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={data} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+      <LineChart data={valid} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
         <XAxis dataKey="date" hide />
         <YAxis hide domain={['dataMin', 'dataMax']} />
         <Tooltip
@@ -124,7 +130,8 @@ function Sparkline({ data, color, valueFormat, height = 60 }) {
           dataKey="value"
           stroke={color}
           strokeWidth={1.75}
-          dot={false}
+          dot={valid.length === 1}
+          connectNulls={false}
           isAnimationActive={false}
         />
       </LineChart>
