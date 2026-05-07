@@ -12,7 +12,7 @@ from datetime import date as date_type
 from datetime import datetime, timedelta
 from threading import Lock
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from src.analytics import (
@@ -48,6 +48,7 @@ from src.models import (
     SystemMetricsDaily,
     Trip,
 )
+from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
 from src.otp_metrics import compute_otp_split, compute_otp_split_for_routes
 from src.service_delivered import (
     compute_service_delivered,
@@ -611,56 +612,57 @@ _system_trend_cache: dict[tuple[str, int, str], tuple[float, dict]] = {}
 _system_trend_lock = Lock()
 
 
-def _weighted_mean(pairs: list[tuple[float | None, float | None]]) -> float | None:
-    """Weighted mean over `(value, weight)` pairs, skipping null entries.
-
-    Used to roll per-route OTP into a system-level OTP for one service date,
-    weighted by `total_arrivals` (sample volume per route). Returns `None`
-    if all weights are zero / null — the day has no signal.
-    """
-    num = 0.0
-    den = 0.0
-    for value, weight in pairs:
-        if value is None or weight is None:
-            continue
-        w = float(weight)
-        if w <= 0:
-            continue
-        num += float(value) * w
-        den += w
-    if den <= 0:
-        return None
-    return num / den
-
-
 def _system_otp_series(db: Session, dates: list[date_type]) -> dict[str, float | None]:
-    """System-level OTP per service_date, weighted by per-route `total_arrivals`.
+    """System-level OTP per service_date, derived directly from `stop_events`.
 
-    Pulls every `route_metrics_daily` row in the date range in one query,
-    then for each date computes the rider-weighted average OTP across
-    routes that have a non-null OTP and a positive `total_arrivals`.
-    Days with no rows return `None` so the frontend can plot a gap.
+    Pools every proximity stop_event with a non-null `deviation_sec` across
+    all routes for each date and returns `on_time_count / total_count * 100`,
+    where on-time is `OTP_EARLY_SEC <= deviation_sec <= OTP_LATE_SEC` (the
+    WMATA -2/+7 window). Pooling is mathematically equivalent to weighting
+    each route's OTP by its observation count — the rider-weighted aggregate
+    the prior `route_metrics_daily`-backed implementation produced.
+
+    Source filter is `proximity` to match `compute_otp_split`'s
+    `all_timepoints` block (position-derived, every observed stop) and the
+    historical `RouteMetricsDaily.otp_percentage` semantics.
+
+    Days with zero qualifying stop_events return `None` so the frontend
+    plots a gap. Pivoting off `route_metrics_daily` decouples the system
+    trend from the legacy daily-batch pipeline (NOTES-19, partial).
     """
     if not dates:
         return {}
     start_iso = min(dates).isoformat()
     end_iso = max(dates).isoformat()
+    on_time_expr = case(
+        (
+            (StopEvent.deviation_sec >= OTP_EARLY_SEC) & (StopEvent.deviation_sec <= OTP_LATE_SEC),
+            1,
+        ),
+        else_=0,
+    )
     rows = (
         db.query(
-            RouteMetricsDaily.date,
-            RouteMetricsDaily.otp_percentage,
-            RouteMetricsDaily.total_arrivals,
+            StopEvent.service_date,
+            func.sum(on_time_expr).label("on_time"),
+            func.count(StopEvent.id).label("total"),
         )
         .filter(
-            RouteMetricsDaily.date >= start_iso,
-            RouteMetricsDaily.date <= end_iso,
+            StopEvent.service_date >= start_iso,
+            StopEvent.service_date <= end_iso,
+            StopEvent.source == "proximity",
+            StopEvent.deviation_sec.isnot(None),
         )
+        .group_by(StopEvent.service_date)
         .all()
     )
-    by_date: dict[str, list[tuple[float | None, float | None]]] = defaultdict(list)
-    for date_str, otp, arrivals in rows:
-        by_date[date_str].append((otp, arrivals))
-    return {d.isoformat(): _weighted_mean(by_date.get(d.isoformat(), [])) for d in dates}
+    by_date: dict[str, float | None] = {}
+    for date_str, on_time, total in rows:
+        if total and total > 0:
+            by_date[date_str] = (float(on_time) / float(total)) * 100.0
+        else:
+            by_date[date_str] = None
+    return {d.isoformat(): by_date.get(d.isoformat()) for d in dates}
 
 
 def _system_service_delivered_series(
@@ -671,12 +673,32 @@ def _system_service_delivered_series(
     Aggregated as `sum(delivered_trips) / sum(scheduled_trips)` across every
     route on the date — the natural rider/trip-weighted aggregate. Equivalent
     to "what fraction of all scheduled trips on the system were delivered."
-    Days with zero scheduled trips return `None` (no signal). Computed live
-    per-day via `compute_service_delivered_for_routes`; days iterate the
-    full route set so this is the heavier of the two from-table metrics.
+
+    Run existence is the discriminator (mirrors the per-route rule from
+    PR #77): if no `runs` rows exist on a date, return `None` rather than
+    `0.0`. Without Run data we can't observe delivery at all, and a literal
+    zero would falsely advertise "complete failure" on dates the collector
+    simply wasn't recording. Days with runs but zero scheduled trips also
+    return `None` (no signal). Computed live per-day via
+    `compute_service_delivered_for_routes`.
     """
+    if not dates:
+        return {}
+    date_strs = [d.isoformat() for d in dates]
+    dates_with_runs = {
+        s
+        for (s,) in db.query(Run.service_date)
+        .filter(Run.service_date.in_(date_strs))
+        .distinct()
+        .all()
+    }
+
     out: dict[str, float | None] = {}
     for d in dates:
+        d_iso = d.isoformat()
+        if d_iso not in dates_with_runs:
+            out[d_iso] = None
+            continue
         rows = compute_service_delivered_for_routes(db, d)
         scheduled = 0
         delivered = 0
@@ -685,7 +707,7 @@ def _system_service_delivered_series(
             deliv = r.get("delivered_trips") or 0
             scheduled += sched
             delivered += deliv
-        out[d.isoformat()] = (delivered / scheduled) if scheduled > 0 else None
+        out[d_iso] = (delivered / scheduled) if scheduled > 0 else None
     return out
 
 
