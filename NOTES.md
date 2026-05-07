@@ -309,7 +309,7 @@ service-delivered, EWT, and bunching. Keep it simple: one number per
 (route, metric); null means "use system default"; system default is a
 single config row. Storage can be yaml in the repo or a small
 `route_targets` table. Surface targets on the system trend cards
-(PR #PLACEHOLDER, RouteList) and the per-route trend cards (PR #77, RouteDetail), and on
+(PR #78, RouteList) and the per-route trend cards (PR #77, RouteDetail), and on
 the contributors view (NOTES-39, where contribution is computed
 against target). Targets can stay editable by the operator, but a
 sensible starting set should be checked in.
