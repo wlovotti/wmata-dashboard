@@ -449,15 +449,22 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
 
 def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: int = 30) -> dict:
     """
-    Get time-series trend data for a specific route metric
+    Get time-series trend data for a specific route metric.
 
-    Computes daily values for OTP, headway, speed, or other metrics over the specified time period.
-    Used for trend charts on the route detail page.
+    Computes daily values for OTP, headway, speed, or service-delivered over the
+    specified time period. Used for trend charts on the route detail page.
+
+    `service_delivered` is computed live per service_date from `runs` + GTFS via
+    `compute_service_delivered` (NOTES-37). It is not stored in
+    `route_metrics_daily`, so the trend loop pays one pair of count queries per
+    day in the window; acceptable on a per-route detail page (not iterated over
+    a route list).
 
     Args:
         db: Database session
         route_id: Route identifier (e.g., 'C51')
-        metric: Metric to analyze ('otp', 'early', 'late', 'headway', 'headway_std_dev', 'speed')
+        metric: Metric to analyze ('otp', 'early', 'late', 'headway',
+            'headway_std_dev', 'speed', 'service_delivered')
         days: Number of days to analyze (default: 30)
 
     Returns:
@@ -470,6 +477,31 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     # Calculate date range in Eastern (the WMATA service date)
     end_date = eastern_today()
     start_date = end_date - timedelta(days=days)
+
+    # service_delivered isn't materialized in RouteMetricsDaily; compute per-day
+    # from runs + GTFS. Same Eastern service-date window as the daily-table path.
+    if metric == "service_delivered":
+        trend_data = []
+        current = start_date
+        while current <= end_date:
+            sd = compute_service_delivered(db, route_id, current)
+            ratio = sd.get("ratio")
+            if ratio is not None:
+                trend_data.append(
+                    {
+                        "date": current.isoformat(),
+                        "service_delivered_ratio": ratio,
+                        "scheduled_trips": sd.get("scheduled_trips"),
+                        "delivered_trips": sd.get("delivered_trips"),
+                    }
+                )
+            current = current + timedelta(days=1)
+        return {
+            "route_id": route_id,
+            "metric": metric,
+            "days": days,
+            "trend_data": trend_data,
+        }
 
     # Get daily metrics from database
     daily_metrics = (

@@ -531,6 +531,48 @@ main {
   text-align: center;
 }
 
+/* 30-day route trend block (NOTES-37). Two-up sparkline grid that surfaces
+   OTP and service-delivered as compact mini-charts under the KPI cards.
+   Each card carries a 7-vs-prior-7-day delta indicator. */
+.route-trend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+}
+
+.route-trend-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.route-trend-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.route-trend-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.route-trend-meta {
+  margin-top: 0.4rem;
+  font-size: 0.7rem;
+  color: #64748b;
+}
+
+.trend-delta {
+  display: inline-block;
+  vertical-align: baseline;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
 .chart-tooltip {
   background: white;
   border: 1px solid #e2e8f0;

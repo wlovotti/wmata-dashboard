@@ -283,6 +283,20 @@ class TestGetRouteTrendData:
 
         assert result["days"] == 60
 
+    def test_trend_data_service_delivered_empty(self, db_session, sample_route):
+        """Test service_delivered trend metric returns the expected shape.
+
+        With no runs / GTFS schedule fixtures, every day has scheduled_trips=0
+        and ratio=None, so trend_data is empty — but the response envelope
+        should still be well-formed with the right metric label.
+        """
+        result = get_route_trend_data(db_session, "TEST1", metric="service_delivered", days=30)
+
+        assert result["route_id"] == "TEST1"
+        assert result["metric"] == "service_delivered"
+        assert result["days"] == 30
+        assert result["trend_data"] == []
+
 
 class TestGradeConsistency:
     """Tests for grade calculation consistency"""
