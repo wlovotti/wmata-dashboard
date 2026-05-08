@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-39 — added `GET /api/routes/contributors` and a "Biggest contributors" mode toggle on RouteList that ranks routes by `(baseline − route_value) × scheduled_trips` against the system-window baseline; updated NOTES-47's cross-reference to point to PR #80 since per-route targets will swap baseline for target).
+Last edited 2026-05-08 (deferred NOTES-38 — server-side period-over-period deltas need ≥14 days of stop_events/runs data before they're interpretable; closed PR #81 documents the implementation for re-use).
 
 ---
 
@@ -37,7 +37,7 @@ proxies instead).
 
 **Trend & comparison (the "are we improving?" question)**
 
-- **NOTES-38 Period-over-period deltas on every KPI.** Augment the
+- **NOTES-38 Period-over-period deltas on every KPI** *(deferred — needs ≥14 days of data; closed PR #81)*. Augment the
   scorecard payload with deltas; add up/down/flat indicators
   throughout.
 - **NOTES-47 Per-route targets / commitments config.** Configurable
@@ -145,7 +145,7 @@ change — could even be a query-parameter toggle on the API.
 
 ## NOTES-38. Period-over-period deltas on every KPI
 
-**Severity: low.**
+**Severity: low (deferred — needs ≥14 days of data).**
 
 Augment the scorecard payload from `/api/routes` (built in
 `api/aggregations.py`) so every metric carries a 7-day-vs-prior-7-day
@@ -157,6 +157,13 @@ the delta computed server-side so RouteList can show them too. Pay
 attention to thin-data cases — if either window is below the EWT
 coverage threshold, the delta should suppress rather than show a
 misleading number.
+
+**Deferred** (closed PR #81): the 7-vs-prior-7 windows require 14 days
+of stop_events / runs data before deltas survive thin-data suppression
+on most routes. Production data currently starts 2026-05-02; revisit
+once the collector has accumulated ≥14 days of continuous data so the
+feature is interpretable rather than "mostly suppressed." The closed
+PR's commits remain retrievable via `gh pr diff 81` for re-use.
 
 ---
 
