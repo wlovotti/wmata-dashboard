@@ -37,6 +37,7 @@ from src.ewt import (
     fetch_scheduled_cell_hours_for_routes,
 )
 from src.models import (
+    Calendar,
     Route,
     RouteMetricsDaily,
     RouteMetricsSummary,
@@ -1034,6 +1035,320 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 
     with _system_trend_lock:
         _system_trend_cache[cache_key] = (time.monotonic(), result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Biggest contributors view (NOTES-39): rank routes by absolute impact on
+# system underperformance, not by raw worst percentage.
+#
+# Contribution formula (from NOTES-39):
+#     contribution_score = (baseline - actual) * scheduled_trips
+# for higher-is-better metrics (OTP, service-delivered) — sign-flipped for
+# lower-is-better metrics (EWT, bunching) so a positive score always means
+# "this route is dragging the system down."
+#
+# Baseline is the system's window-mean from `system_metrics_daily`. Per-route
+# targets do not yet exist; NOTES-47 is the open item that adds them. When
+# they land, the same formula applies with `target` substituted for
+# `baseline` — this module does not need to change shape, only swap the
+# baseline source.
+#
+# `scheduled_trips_in_window` is computed from GTFS `trips` joined to
+# `calendar` for the route's day_type, then weighted by the count of days of
+# that day_type in the window. We deliberately do NOT use
+# `route_service_profile.scheduled_trips`: that field stores trunk-stop
+# arrivals at a single unidirectional stop, useful for headway/frequency
+# classification but ~half the actual trip count on bidirectional routes
+# (would inflate the volume proxy by ~2x). Same reasoning as
+# `src/service_delivered.py`.
+#
+# Snapshot semantics for `route_value`:
+#   - OTP: window-mean of `route_metrics_daily.otp_percentage` (cheap;
+#     materialized).
+#   - service_delivered / EWT / bunching: latest single-day value from the
+#     live cache (`get_live_metrics_for_today`). These metrics are not
+#     materialized per-route per-day, so a window mean would require N×
+#     per-day computes per route — too expensive for an interactive
+#     ranking endpoint. The single-day snapshot is the freshest reasonable
+#     signal; a full window-mean implementation would land alongside
+#     materializing those metrics in `route_metrics_daily`.
+#
+# `baseline_value` always uses the window-mean from `system_metrics_daily`
+# regardless of metric, since that table holds all four metrics per day. The
+# baseline is therefore a window value while the route value may be a
+# single-day snapshot for SD/EWT/bunching — we surface the anchor date in
+# the response so the frontend can disclose the asymmetry.
+# ---------------------------------------------------------------------------
+
+_CONTRIBUTORS_TTL_SEC = 60.0
+_contributors_cache: dict[tuple[str, int, str], tuple[float, dict]] = {}
+_contributors_lock = Lock()
+
+# `metric → (column-on-system-table, higher_is_better)`. The frontend uses
+# `metric` as the toggle value; the backend uses both fields here.
+_CONTRIBUTORS_METRIC_CONFIG: dict[str, tuple[str, bool]] = {
+    "otp": ("otp_percentage", True),
+    "service_delivered": ("service_delivered_ratio", True),
+    "ewt": ("ewt_seconds", False),
+    "bunching": ("bunching_rate", False),
+}
+
+
+def _system_baseline_for_window(
+    db: Session, metric_column: str, end_date: date_type, days: int
+) -> float | None:
+    """Mean of `system_metrics_daily.<metric_column>` over the past `days` days.
+
+    Skips null rows (days with no data) so a single empty day doesn't
+    poison the mean. Returns None when no rows in the window have a
+    non-null value (fresh DB, or the materialization pipeline hasn't run).
+    """
+    start_iso = (end_date - timedelta(days=days - 1)).isoformat()
+    end_iso = end_date.isoformat()
+    rows = (
+        db.query(getattr(SystemMetricsDaily, metric_column))
+        .filter(
+            SystemMetricsDaily.service_date >= start_iso,
+            SystemMetricsDaily.service_date <= end_iso,
+            getattr(SystemMetricsDaily, metric_column).isnot(None),
+        )
+        .all()
+    )
+    values = [row[0] for row in rows if row[0] is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _route_otp_window_mean(
+    db: Session, route_id: str, end_date: date_type, days: int
+) -> float | None:
+    """Mean of `route_metrics_daily.otp_percentage` for one route over the window.
+
+    Skips null entries. Returns None when no rows in the window have a
+    non-null OTP — the route either didn't run or the daily pipeline
+    didn't see enough data to score it.
+    """
+    start_iso = (end_date - timedelta(days=days - 1)).isoformat()
+    end_iso = end_date.isoformat()
+    rows = (
+        db.query(RouteMetricsDaily.otp_percentage)
+        .filter(
+            RouteMetricsDaily.route_id == route_id,
+            RouteMetricsDaily.date >= start_iso,
+            RouteMetricsDaily.date <= end_iso,
+            RouteMetricsDaily.otp_percentage.isnot(None),
+        )
+        .all()
+    )
+    values = [row[0] for row in rows if row[0] is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _scheduled_trips_per_day_type(db: Session) -> dict[tuple[str, str], int]:
+    """Distinct GTFS trip_ids per (route_id, day_type) on the current snapshot.
+
+    Returns a dict keyed by (route_id, day_type) where day_type is one of
+    `weekday` / `saturday` / `sunday`. Same semantics as
+    `src/service_delivered.py`: a representative weekday (`tuesday`) plus
+    Saturday and Sunday flags from `Calendar` are the membership filter,
+    so a trip running every weekday is counted once for `weekday`,
+    not five times. Counts both directions — a delivered round-trip is
+    two trips, and missing either direction is a delivery failure.
+
+    `is_current` filters apply to both `Trip` and `Calendar` so the count
+    matches the actual schedule the dashboard is reasoning about.
+    """
+    out: dict[tuple[str, str], int] = {}
+    day_type_field_pairs = [
+        ("weekday", Calendar.tuesday),
+        ("saturday", Calendar.saturday),
+        ("sunday", Calendar.sunday),
+    ]
+    for day_type, field in day_type_field_pairs:
+        rows = (
+            db.query(Trip.route_id, func.count(func.distinct(Trip.trip_id)))
+            .join(Calendar, Calendar.service_id == Trip.service_id)
+            .filter(Trip.is_current, Calendar.is_current, field == 1)
+            .group_by(Trip.route_id)
+            .all()
+        )
+        for route_id, count in rows:
+            out[(route_id, day_type)] = int(count or 0)
+    return out
+
+
+def _day_type_counts_in_window(end_date: date_type, days: int) -> dict[str, int]:
+    """Count how many days of each day_type fall in the past `days` days.
+
+    Inclusive of `end_date`. Returns counts keyed by `weekday` / `saturday` /
+    `sunday`. Used to weight per-day_type scheduled trips up to a window
+    total.
+    """
+    counts = {"weekday": 0, "saturday": 0, "sunday": 0}
+    start = end_date - timedelta(days=days - 1)
+    cur = start
+    while cur <= end_date:
+        wd = cur.weekday()
+        if wd == 5:
+            counts["saturday"] += 1
+        elif wd == 6:
+            counts["sunday"] += 1
+        else:
+            counts["weekday"] += 1
+        cur = cur + timedelta(days=1)
+    return counts
+
+
+def _scheduled_trips_in_window_by_route(
+    db: Session, end_date: date_type, days: int
+) -> dict[str, int]:
+    """Total scheduled trips per route over the past `days` days.
+
+    `per_day_type[route, dt] * day_type_counts[dt]`, summed across day_types.
+    Single GTFS+Calendar query per day_type (3 total), Python aggregation
+    across the window. Cheap relative to per-day live computes.
+    """
+    per_day_type = _scheduled_trips_per_day_type(db)
+    day_counts = _day_type_counts_in_window(end_date, days)
+    out: dict[str, int] = {}
+    for (route_id, day_type), trip_count in per_day_type.items():
+        out[route_id] = out.get(route_id, 0) + trip_count * day_counts.get(day_type, 0)
+    return out
+
+
+def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
+    """Compute the contributors payload for one metric / window.
+
+    Anchors `route_value` and `baseline_value` together so they're directly
+    comparable: OTP uses the window mean for both; service_delivered, EWT,
+    and bunching use the latest single-day value the live cache observed
+    (`_latest_service_date_with_stop_events`) for the route value, and the
+    same single date's row from `system_metrics_daily` for the baseline
+    when available — falling back to a window mean if today's row hasn't
+    been materialized.
+
+    Returns `{metric, days, anchor_date, baseline_value, contributors}`
+    where `contributors` is a list ranked by `contribution_score` desc
+    (most-dragging routes first). Routes without enough data to score
+    (route_value or baseline missing) are dropped, not listed.
+    """
+    if metric not in _CONTRIBUTORS_METRIC_CONFIG:
+        raise ValueError(f"Unsupported contributors metric: {metric}")
+    metric_column, higher_is_better = _CONTRIBUTORS_METRIC_CONFIG[metric]
+
+    from src.timezones import eastern_today
+
+    end_date = eastern_today()
+
+    # Baseline: window-mean over `days`. Used as the comparison target until
+    # NOTES-47 (per-route targets) lands.
+    baseline_value = _system_baseline_for_window(db, metric_column, end_date, days)
+
+    # Volume proxy: total scheduled trips per route over the window.
+    sched_trips_by_route = _scheduled_trips_in_window_by_route(db, end_date, days)
+
+    # Per-route metric values. OTP comes from the materialized daily table;
+    # the other three come from the live cache (latest service_date with
+    # stop_events). The live cache is a single-day snapshot — see module
+    # comment for the tradeoff.
+    routes = db.query(Route).filter(Route.is_current).all()
+    route_short_names = {r.route_id: r.route_short_name for r in routes}
+    route_long_names = {r.route_id: r.route_long_name for r in routes}
+
+    route_values: dict[str, float | None] = {}
+    if metric == "otp":
+        for r in routes:
+            route_values[r.route_id] = _route_otp_window_mean(db, r.route_id, end_date, days)
+    else:
+        # service_delivered / EWT / bunching: snapshot from live cache.
+        live = get_live_metrics_for_today(db)
+        for r in routes:
+            metrics_bundle = live.get(r.route_id)
+            fields = _live_metric_fields(metrics_bundle)
+            if metric == "service_delivered":
+                route_values[r.route_id] = fields.get("service_delivered_ratio")
+            elif metric == "ewt":
+                route_values[r.route_id] = fields.get("ewt_seconds")
+            elif metric == "bunching":
+                route_values[r.route_id] = fields.get("bunching_rate")
+
+    contributors: list[dict] = []
+    if baseline_value is not None:
+        for route_id, route_value in route_values.items():
+            if route_value is None:
+                continue
+            scheduled_trips = sched_trips_by_route.get(route_id, 0)
+            if scheduled_trips <= 0:
+                # No GTFS schedule for the window → no volume to weight by.
+                # Drop rather than list with a 0 score; surfacing it would
+                # rank it dead-last for every metric and add visual noise.
+                continue
+            gap = baseline_value - route_value
+            # Sign convention: positive `contribution_score` = "dragging the
+            # system down." For higher-is-better metrics, that's when route
+            # is below baseline (gap > 0). For lower-is-better metrics,
+            # that's when route is above baseline (gap < 0), so we flip.
+            score = gap * scheduled_trips if higher_is_better else (-gap) * scheduled_trips
+            contributors.append(
+                {
+                    "route_id": route_id,
+                    "route_short_name": route_short_names.get(route_id),
+                    "route_long_name": route_long_names.get(route_id),
+                    "metric": metric,
+                    "baseline_value": baseline_value,
+                    "route_value": route_value,
+                    "scheduled_trips": scheduled_trips,
+                    "contribution_score": score,
+                }
+            )
+
+    # Sort by contribution_score desc — biggest draggers first. Negative
+    # scores (route is *better* than baseline) sort below zero-volume drops.
+    contributors.sort(key=lambda c: c["contribution_score"], reverse=True)
+
+    return {
+        "metric": metric,
+        "days": days,
+        "baseline_value": baseline_value,
+        "higher_is_better": higher_is_better,
+        "contributors": contributors,
+    }
+
+
+def get_route_contributors(db: Session, metric: str = "otp", days: int = 30) -> dict:
+    """Cached-by-(metric, days, today) wrapper for the contributors view.
+
+    See module comment above for the contribution formula and baseline
+    semantics. Cache key includes today's Eastern date so the cache rolls
+    naturally at the service-day boundary.
+
+    Args:
+        db: Database session.
+        metric: One of `otp`, `service_delivered`, `ewt`, `bunching`.
+        days: Length of the window in days (default: 30).
+
+    Returns:
+        Dict with `metric`, `days`, `baseline_value`, `higher_is_better`,
+        and `contributors` (list ranked by `contribution_score` desc).
+    """
+    from src.timezones import eastern_today
+
+    cache_key = (metric, days, eastern_today().isoformat())
+    with _contributors_lock:
+        cached = _contributors_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _CONTRIBUTORS_TTL_SEC:
+                return value
+
+    result = _contributors_uncached(db, metric, days)
+
+    with _contributors_lock:
+        _contributors_cache[cache_key] = (time.monotonic(), result)
     return result
 
 

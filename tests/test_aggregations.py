@@ -510,3 +510,276 @@ class TestGradeConsistency:
         detail_grade = detail["grade"]
 
         assert scorecard_grade == detail_grade == "B"  # 75.5% OTP = B grade
+
+
+class TestGetRouteContributors:
+    """Tests for get_route_contributors — NOTES-39 biggest-contributors view.
+
+    Covers the contribution_score formula, sign convention for higher- vs
+    lower-is-better metrics, baseline sourcing from `system_metrics_daily`,
+    and the scheduled-trips volume proxy.
+    """
+
+    @staticmethod
+    def _clear_cache():
+        """Drop the module-level contributors cache between tests."""
+        from api import aggregations as agg
+
+        agg._contributors_cache.clear()
+
+    def _seed_system_baseline(self, db_session, otp=80.0, days_back=5):
+        """Seed N days of `system_metrics_daily` rows ending `days_back` ago.
+
+        Uniform value per row so the window mean equals the value, making
+        the contribution arithmetic in the assertion path obvious.
+        """
+        from src.models import SystemMetricsDaily
+
+        rows = []
+        for i in range(7):
+            d = eastern_today() - timedelta(days=days_back + i)
+            rows.append(
+                SystemMetricsDaily(
+                    service_date=d.isoformat(),
+                    otp_percentage=otp,
+                    service_delivered_ratio=0.9,
+                    ewt_seconds=120.0,
+                    bunching_rate=0.05,
+                )
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+
+    def _seed_route_otp(self, db_session, route_id, otp_value, n_days=5):
+        """Seed N days of `route_metrics_daily.otp_percentage` for one route."""
+        from src.models import RouteMetricsDaily
+
+        rows = []
+        for i in range(n_days):
+            d = eastern_today() - timedelta(days=i + 1)
+            rows.append(
+                RouteMetricsDaily(
+                    route_id=route_id,
+                    date=d.isoformat(),
+                    otp_percentage=otp_value,
+                )
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+
+    def _seed_gtfs_trips(self, db_session, route_id, trip_count, day_type="weekday"):
+        """Seed GTFS Trip + Calendar rows so the route has scheduled trips.
+
+        Creates one Calendar service active for the requested day_type plus
+        `trip_count` Trip rows under that service. The contributors path
+        computes scheduled-trips per day_type by `COUNT(DISTINCT trip_id)`,
+        so seeding `trip_count` distinct trip_ids gives a known volume.
+        """
+        from src.models import Calendar, Trip
+
+        service_id = f"SVC_{route_id}"
+        cal = Calendar(
+            service_id=service_id,
+            monday=0,
+            tuesday=1 if day_type == "weekday" else 0,
+            wednesday=0,
+            thursday=0,
+            friday=0,
+            saturday=1 if day_type == "saturday" else 0,
+            sunday=1 if day_type == "sunday" else 0,
+            start_date="20260101",
+            end_date="20271231",
+            is_current=True,
+        )
+        db_session.add(cal)
+        for i in range(trip_count):
+            db_session.add(
+                Trip(
+                    trip_id=f"TRIP_{route_id}_{i}",
+                    route_id=route_id,
+                    service_id=service_id,
+                    direction_id=i % 2,
+                    is_current=True,
+                )
+            )
+        db_session.commit()
+
+    def test_contributors_empty_db(self, db_session):
+        """Empty DB returns the envelope shape with null baseline.
+
+        With no `system_metrics_daily` rows, baseline is null and the
+        contributors list is empty (we can't rank without a comparison
+        target).
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+
+        assert result["metric"] == "otp"
+        assert result["days"] == 30
+        assert result["baseline_value"] is None
+        assert result["higher_is_better"] is True
+        assert result["contributors"] == []
+
+    def test_contributors_otp_higher_is_better_sign(self, db_session, sample_routes):
+        """OTP: route below baseline → positive contribution_score.
+
+        TEST1: 60% OTP, system baseline 80%, 10 scheduled trips/window.
+        contribution_score = (80 - 60) * 10 = 200 (positive — drag).
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        self._seed_route_otp(db_session, "TEST1", 60.0)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+
+        assert result["baseline_value"] == 80.0
+        assert result["higher_is_better"] is True
+        # TEST1 should be the only scoreable contributor.
+        ours = next((c for c in result["contributors"] if c["route_id"] == "TEST1"), None)
+        assert ours is not None
+        assert ours["route_value"] == 60.0
+        assert ours["scheduled_trips"] > 0
+        # Score = (80 - 60) * scheduled_trips. Positive sign — dragging system.
+        assert ours["contribution_score"] > 0
+        assert ours["contribution_score"] == (80.0 - 60.0) * ours["scheduled_trips"]
+
+    def test_contributors_otp_route_above_baseline_negative_score(self, db_session, sample_routes):
+        """OTP: route above baseline → negative contribution_score.
+
+        TEST1: 95% OTP, system baseline 80%. Score is negative because the
+        route is *helping* the system; sort order pushes it to the bottom.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        self._seed_route_otp(db_session, "TEST1", 95.0)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        ours = next((c for c in result["contributors"] if c["route_id"] == "TEST1"), None)
+        assert ours is not None
+        assert ours["route_value"] == 95.0
+        # Score = (80 - 95) * scheduled_trips → negative.
+        assert ours["contribution_score"] < 0
+
+    def test_contributors_lower_is_better_sign_flipped(self, db_session, sample_routes):
+        """EWT (lower-is-better): route above baseline → positive score.
+
+        Contribution magnitude is sign-flipped for lower-is-better metrics
+        so positive always means "dragging the system down." For EWT:
+        baseline 120s, route 240s → (baseline - route) is -120, sign-flip
+        gives +120. Score = +120 * scheduled_trips (positive).
+
+        EWT/bunching `route_value` comes from the live cache, not
+        materialized history — without seeded stop_events the live cache
+        returns nothing for the route. We assert the *envelope* and the
+        sign convention via the metric's `higher_is_better` flag instead;
+        the formula proof for OTP above carries via the same code path.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session)
+        result = get_route_contributors(db_session, metric="ewt", days=30)
+
+        assert result["metric"] == "ewt"
+        assert result["higher_is_better"] is False
+        # Baseline window mean = 120.0 from the seed.
+        assert result["baseline_value"] == 120.0
+
+    def test_contributors_baseline_window_mean(self, db_session, sample_routes):
+        """Baseline is the simple mean of non-null values in the window.
+
+        Three rows: 70, 80, 90 → mean 80.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+        from src.models import SystemMetricsDaily
+
+        for i, otp in enumerate([70.0, 80.0, 90.0]):
+            d = eastern_today() - timedelta(days=i + 1)
+            db_session.add(SystemMetricsDaily(service_date=d.isoformat(), otp_percentage=otp))
+        db_session.commit()
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        assert result["baseline_value"] == 80.0
+
+    def test_contributors_drops_routes_with_no_volume(self, db_session, sample_routes):
+        """Route with 0 scheduled trips in window is dropped, not zero-scored.
+
+        Without GTFS Trip rows, `scheduled_trips_in_window` is 0, which
+        would give every route a zero score and bury real signal under
+        ties. We drop them instead.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        self._seed_route_otp(db_session, "TEST1", 60.0)
+        # Note: no _seed_gtfs_trips — route has no schedule.
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        assert all(c["route_id"] != "TEST1" for c in result["contributors"])
+
+    def test_contributors_drops_routes_with_no_route_value(self, db_session, sample_routes):
+        """Route without a window OTP value is dropped (can't score it).
+
+        TEST1 has GTFS schedule but no `route_metrics_daily` rows in the
+        window. With baseline available but no route value, contribution
+        is undefined — drop rather than fabricate.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        assert all(c["route_id"] != "TEST1" for c in result["contributors"])
+
+    def test_contributors_sort_order(self, db_session, sample_routes):
+        """Routes are returned sorted by contribution_score desc.
+
+        TEST1 at 50% (gap=30), TEST2 at 70% (gap=10), both with the same
+        volume. TEST1 must rank ahead of TEST2.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        self._seed_route_otp(db_session, "TEST1", 50.0)
+        self._seed_route_otp(db_session, "TEST2", 70.0)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+        self._seed_gtfs_trips(db_session, "TEST2", trip_count=10, day_type="weekday")
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        ours = [c for c in result["contributors"] if c["route_id"] in ("TEST1", "TEST2")]
+        assert len(ours) == 2
+        assert ours[0]["route_id"] == "TEST1"
+        assert ours[0]["contribution_score"] > ours[1]["contribution_score"]
+
+    def test_contributors_invalid_metric_raises(self, db_session):
+        """Unsupported metric name surfaces a ValueError from the helper."""
+        self._clear_cache()
+        import pytest
+
+        from api.aggregations import get_route_contributors
+
+        with pytest.raises(ValueError):
+            get_route_contributors(db_session, metric="not_a_metric", days=30)
+
+    def test_contributors_caching(self, db_session, sample_routes):
+        """Repeated calls within the TTL return the cached payload."""
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        first = get_route_contributors(db_session, metric="otp", days=30)
+        second = get_route_contributors(db_session, metric="otp", days=30)
+        assert first is second
