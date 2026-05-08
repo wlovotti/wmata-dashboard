@@ -24,6 +24,7 @@ from src.ewt import (
     compute_awt,
     compute_ewt_for_route_date,
     compute_ewt_for_routes,
+    compute_ewt_headline_for_route,
 )
 from src.models import Calendar, Route, Stop, StopEvent, StopTime, Trip
 
@@ -569,3 +570,115 @@ class TestComputeEwtForRoutes:
         # Even an unknown route gets evaluated (and emits empty placeholders).
         assert {r["route_id"] for r in rows} == {"R_NONE"}
         assert len(rows) == len(EWT_TIME_PERIODS)
+
+
+class TestComputeEwtHeadlineForRoutePeriodFilter:
+    """`period_key` (NOTES-41) restricts the headline to one Eastern-hour bucket.
+
+    Verifies the filter excludes non-matching cell-hours from the EWT pool —
+    required for the RouteDetail filter to actually re-slice the headline.
+    """
+
+    def _seed_two_frequent_cells_at_7am_and_3pm(self, db_session) -> None:
+        """One frequent cell at S_AM dir 0 in hour 7, another at S_PM dir 0 in hour 15.
+
+        Different stops are used so the consecutive-headway computation
+        (per-cell, then bucket-by-earlier-arrival's-hour) doesn't bridge the
+        two cells via a phantom 7:30→15:00 mid-day gap that would dominate
+        the cell mean and disqualify the 7am cell from the frequent gate.
+        Mirrors what real GTFS data looks like: stops with morning service
+        and a separate set of stops with afternoon service.
+        """
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S_AM")
+        _seed_stop(db_session, "S_PM")
+        # Hour 7 cell at S_AM (7:00, 7:10, 7:20, 7:30) — three 600s headways.
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00", "07:30:00"]):
+            trip_id = f"TA{i + 1}"
+            _seed_trip(db_session, trip_id, ROUTE)
+            _seed_stop_time(db_session, trip_id, "S_AM", t, stop_sequence=1)
+        # Hour 15 cell at S_PM (15:00, 15:10, 15:20, 15:30) — three 600s headways.
+        for i, t in enumerate(["15:00:00", "15:10:00", "15:20:00", "15:30:00"]):
+            trip_id = f"TP{i + 1}"
+            _seed_trip(db_session, trip_id, ROUTE)
+            _seed_stop_time(db_session, trip_id, "S_PM", t, stop_sequence=1)
+
+    def test_no_filter_pools_both_periods(self, db_session):
+        """`period_key='all'` keeps both cell-hours in the pool."""
+        self._seed_two_frequent_cells_at_7am_and_3pm(db_session)
+        # Observed at 7:00, 7:10, 7:20, 7:30 EDT (= 11:00, 11:10, 11:20, 11:30 UTC)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"TA{i + 1}",
+                route_id=ROUTE,
+                stop_id="S_AM",
+                observed_arrival_ts=datetime(2026, 4, 14, 11, minute, 0),
+            )
+        # Observed at 15:00, 15:10, 15:20, 15:30 EDT (= 19:00, 19:10, 19:20, 19:30 UTC)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"TP{i + 1}",
+                route_id=ROUTE,
+                stop_id="S_PM",
+                observed_arrival_ts=datetime(2026, 4, 14, 19, minute, 0),
+            )
+
+        result = compute_ewt_headline_for_route(db_session, ROUTE, SERVICE_DATE, period_key="all")
+        # Two frequent cell-hours, three observed headways each → 6 total.
+        assert result["frequent_cell_hours"] == 2
+        assert result["n_observed_headways"] == 6
+        assert result["n_scheduled_headways"] == 6
+
+    def test_am_peak_filter_excludes_pm_cell(self, db_session):
+        """`period_key='am_peak'` keeps only the 7am cell — half the pool."""
+        self._seed_two_frequent_cells_at_7am_and_3pm(db_session)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"TA{i + 1}",
+                route_id=ROUTE,
+                stop_id="S_AM",
+                observed_arrival_ts=datetime(2026, 4, 14, 11, minute, 0),
+            )
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"TP{i + 1}",
+                route_id=ROUTE,
+                stop_id="S_PM",
+                observed_arrival_ts=datetime(2026, 4, 14, 19, minute, 0),
+            )
+
+        result = compute_ewt_headline_for_route(
+            db_session, ROUTE, SERVICE_DATE, period_key="am_peak"
+        )
+        # Only the 7am cell-hour qualifies — three headways from each side.
+        assert result["frequent_cell_hours"] == 1
+        assert result["n_observed_headways"] == 3
+        assert result["n_scheduled_headways"] == 3
+
+    def test_late_filter_wraps_midnight(self, db_session):
+        """`late` (22-6) wraps midnight; a 5am cell qualifies, a 7am one does not."""
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S_LATE")
+        _seed_stop(db_session, "S_MORN")
+        # 5am-ish frequent cell at its own stop — wraps into "Late" via
+        # the start-hour-or-end-hour rule (5 < 6).
+        for i, t in enumerate(["05:00:00", "05:10:00", "05:20:00", "05:30:00"]):
+            trip_id = f"TL{i + 1}"
+            _seed_trip(db_session, trip_id, ROUTE)
+            _seed_stop_time(db_session, trip_id, "S_LATE", t, stop_sequence=1)
+        # 7am frequent cell at a separate stop (outside Late).
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00", "07:30:00"]):
+            trip_id = f"TM{i + 1}"
+            _seed_trip(db_session, trip_id, ROUTE)
+            _seed_stop_time(db_session, trip_id, "S_MORN", t, stop_sequence=1)
+
+        result = compute_ewt_headline_for_route(db_session, ROUTE, SERVICE_DATE, period_key="late")
+        # Only the 5am cell qualifies → 1 frequent cell-hour, 3 scheduled headways.
+        assert result["frequent_cell_hours"] == 1
+        assert result["n_scheduled_headways"] == 3

@@ -86,6 +86,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from src.models import Calendar, StopEvent, StopTime, Trip
+from src.time_periods import is_hour_in_period
 
 EASTERN = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
@@ -412,6 +413,7 @@ def compute_ewt_headline_for_route(
     db: Session,
     route_id: str,
     service_date: date_type,
+    period_key: str = "all",
 ) -> dict:
     """Single-route EWT collapsed to one rider-weighted number for the day.
 
@@ -420,6 +422,13 @@ def compute_ewt_headline_for_route(
     Mathematically equivalent to "EWT across the whole day for this route at
     every cell where service is actually frequent" — non-frequent cell-hours
     drop out by the same gating used in the per-period variant.
+
+    `period_key` (NOTES-41) restricts which Eastern hours feed the pool —
+    e.g. `am_peak` keeps only cell-hours with hour in [6, 10). `late`
+    wraps midnight so 22..23 and 0..5 both qualify. Default `all` keeps
+    every hour. Note this filters the cell-hour bucket, NOT the originating
+    arrival time inside it — but `_eastern_hour` already buckets each
+    headway by the earlier arrival's clock hour, so it's the same thing.
 
     Returns the same dict shape as one period row from `compute_ewt_for_route_date`,
     minus the `time_period` key.
@@ -435,6 +444,9 @@ def compute_ewt_headline_for_route(
     freq_cells = 0
     for cell_hour, sched_headways in sched_by_cell_hour.items():
         if not _is_cell_hour_frequent(sched_headways):
+            continue
+        _direction, _stop, hour = cell_hour
+        if not is_hour_in_period(hour, period_key):
             continue
         sched_pool.extend(sched_headways)
         obs_pool.extend(obs_by_cell_hour.get(cell_hour, []))

@@ -6,12 +6,39 @@ import RecentRuns from './RecentRuns'
 import RouteTrend, { computeWindowDelta, DeltaIndicator } from './RouteTrend'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 
+// Day-type / time-period filter options (NOTES-41). Keys must match the API's
+// accepted values (src/time_periods.py: VALID_DAY_TYPES / VALID_PERIOD_KEYS).
+const DAY_TYPE_OPTIONS = [
+  { key: 'all', label: 'All days' },
+  { key: 'weekday', label: 'Weekday' },
+  { key: 'saturday', label: 'Saturday' },
+  { key: 'sunday', label: 'Sunday' },
+]
+const PERIOD_OPTIONS = [
+  { key: 'all', label: 'All hours' },
+  { key: 'am_peak', label: 'AM Peak (6-10am)' },
+  { key: 'midday', label: 'Midday (10am-3pm)' },
+  { key: 'pm_peak', label: 'PM Peak (3-7pm)' },
+  { key: 'evening', label: 'Evening (7-10pm)' },
+  { key: 'late', label: 'Late (10pm-6am)' },
+]
+
+function _labelFor(options, key) {
+  return options.find((o) => o.key === key)?.label || key
+}
+
 function RouteDetail() {
   const { routeId } = useParams()
   const navigate = useNavigate()
   const [routeData, setRouteData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+
+  // Filter state (NOTES-41). Refetch the scorecard + trend whenever either
+  // changes. Defaults to no filter so the URL-less (`/routes/:routeId`)
+  // initial load preserves the unfiltered cached path.
+  const [dayType, setDayType] = useState('all')
+  const [period, setPeriod] = useState('all')
 
   // Trend data is fetched here (rather than inside RouteTrend) so the same
   // 30-day series can drive both the sparkline block and the per-KPI-card
@@ -26,7 +53,12 @@ function RouteDetail() {
   const [trendError, setTrendError] = useState(null)
 
   useEffect(() => {
-    fetch(`/api/routes/${routeId}`)
+    const params = new URLSearchParams()
+    if (dayType !== 'all') params.set('day_type', dayType)
+    if (period !== 'all') params.set('period', period)
+    const qs = params.toString()
+    const url = `/api/routes/${routeId}${qs ? `?${qs}` : ''}`
+    fetch(url)
       .then(res => res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`))
       .then(data => {
         setRouteData(data)
@@ -36,20 +68,28 @@ function RouteDetail() {
         setError(err.message || err)
         setLoading(false)
       })
-  }, [routeId])
+  }, [routeId, dayType, period])
 
   useEffect(() => {
     let cancelled = false
     setTrendLoading(true)
     setTrendError(null)
+    // Build filter querystring fragment shared across the three trend fetches.
+    // Period is honored only for the OTP trend (the others are trip-level
+    // / daily aggregates that don't decompose by hour); pass it on every
+    // call anyway — the API silently ignores it for non-otp metrics.
+    const filterParams = []
+    if (dayType !== 'all') filterParams.push(`day_type=${encodeURIComponent(dayType)}`)
+    if (period !== 'all') filterParams.push(`period=${encodeURIComponent(period)}`)
+    const filterQs = filterParams.length ? `&${filterParams.join('&')}` : ''
     Promise.all([
-      fetch(`/api/routes/${routeId}/trend?metric=otp&days=30`).then((res) =>
+      fetch(`/api/routes/${routeId}/trend?metric=otp&days=30${filterQs}`).then((res) =>
         res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`),
       ),
-      fetch(`/api/routes/${routeId}/trend?metric=service_delivered&days=30`).then(
+      fetch(`/api/routes/${routeId}/trend?metric=service_delivered&days=30${filterQs}`).then(
         (res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)),
       ),
-      fetch(`/api/routes/${routeId}/trend?metric=excess_trip_time&days=30`).then(
+      fetch(`/api/routes/${routeId}/trend?metric=excess_trip_time&days=30${filterQs}`).then(
         (res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)),
       ),
     ])
@@ -68,7 +108,7 @@ function RouteDetail() {
     return () => {
       cancelled = true
     }
-  }, [routeId])
+  }, [routeId, dayType, period])
 
   // Memoized {date, value} series + deltas. Service-delivered is stored as a
   // 0..1 ratio in the payload but rendered as percentage points on the card,
@@ -192,6 +232,18 @@ function RouteDetail() {
         )
       : null
 
+  // Active-filter chip (NOTES-41) — only shown when at least one filter is
+  // non-default. Keeps the unfiltered view chrome-free.
+  const filterActive = dayType !== 'all' || period !== 'all'
+  const filterChipText = filterActive
+    ? `Filter: ${[
+        dayType !== 'all' ? _labelFor(DAY_TYPE_OPTIONS, dayType) : null,
+        period !== 'all' ? _labelFor(PERIOD_OPTIONS, period) : null,
+      ]
+        .filter(Boolean)
+        .join(' / ')}`
+    : null
+
   return (
     <main>
       <div className="route-detail-header">
@@ -208,8 +260,85 @@ function RouteDetail() {
               {routeData.route_name}
             </span>
             {routeData.route_long_name}
+            {filterChipText && (
+              <span
+                className="filter-chip"
+                style={{
+                  marginLeft: '0.75rem',
+                  padding: '0.2rem 0.55rem',
+                  fontSize: '0.75rem',
+                  borderRadius: '999px',
+                  background: 'rgba(0, 100, 200, 0.15)',
+                  color: '#0a4a8c',
+                  fontWeight: 500,
+                  verticalAlign: 'middle',
+                }}
+                title="Active KPI filter — clear to see all data"
+              >
+                {filterChipText}
+              </span>
+            )}
           </h1>
         </div>
+      </div>
+
+      <div
+        className="route-filter-bar"
+        style={{
+          display: 'flex',
+          gap: '0.75rem',
+          alignItems: 'center',
+          margin: '0.5rem 0 1rem',
+          fontSize: '0.875rem',
+        }}
+      >
+        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <span style={{ opacity: 0.8 }}>Day:</span>
+          <select
+            value={dayType}
+            onChange={(e) => setDayType(e.target.value)}
+            aria-label="Day-type filter"
+          >
+            {DAY_TYPE_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <span style={{ opacity: 0.8 }}>Time:</span>
+          <select
+            value={period}
+            onChange={(e) => setPeriod(e.target.value)}
+            aria-label="Time-period filter"
+          >
+            {PERIOD_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {filterActive && (
+          <button
+            type="button"
+            onClick={() => {
+              setDayType('all')
+              setPeriod('all')
+            }}
+            style={{
+              padding: '0.2rem 0.55rem',
+              fontSize: '0.75rem',
+              border: '1px solid rgba(0,0,0,0.15)',
+              background: 'transparent',
+              cursor: 'pointer',
+              borderRadius: '4px',
+            }}
+          >
+            Clear filter
+          </button>
+        )}
       </div>
 
       <div className="stats-summary">

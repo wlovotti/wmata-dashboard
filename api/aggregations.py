@@ -59,6 +59,11 @@ from src.service_profile import (
     classify_route_frequency,
     compute_route_frequency_classes,
 )
+from src.time_periods import (
+    ALL_DAY_TYPES,
+    ALL_HOURS,
+    is_hour_in_period,
+)
 from src.timezones import utcnow_naive
 
 # Per-service-date cache of the new live-computed scorecard metrics. The
@@ -84,6 +89,38 @@ def _latest_service_date_with_stop_events(db: Session):
     if not row:
         return None
     return datetime.strptime(row, "%Y-%m-%d").date()
+
+
+def _latest_service_date_for_day_type(db: Session, day_type_filter: str):
+    """Return the latest service_date with stop_events matching `day_type_filter`.
+
+    `day_type_filter` is one of `all` / `weekday` / `saturday` / `sunday`.
+    `all` falls through to `_latest_service_date_with_stop_events`. Otherwise
+    we scan distinct service_dates desc and return the first whose day_type
+    matches. Returns None when no matching date has stop_events. Used by
+    the RouteDetail filter (NOTES-41) so the headline picks a date the
+    user's day-type filter would actually contribute to — anchoring on
+    today's literal date but filtering live can produce empty cards.
+    """
+    if day_type_filter == ALL_DAY_TYPES:
+        return _latest_service_date_with_stop_events(db)
+
+    # Distinct dates with stop_events, newest-first. Scan in Python to filter
+    # by day_type — the date count is small (≤ a few months in production)
+    # so this is cheap; the alternative (a Calendar join) trips the SQLite
+    # parity rule and isn't load-bearing for performance here.
+    date_strs = [
+        s
+        for (s,) in db.query(StopEvent.service_date)
+        .distinct()
+        .order_by(StopEvent.service_date.desc())
+        .all()
+    ]
+    for s in date_strs:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+        if _day_type_for(d) == day_type_filter:
+            return d
+    return None
 
 
 def sanitize_float(value):
@@ -161,22 +198,39 @@ def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]
     }
 
 
-def _compute_single_route_live_metrics(db: Session, route_id: str, service_date) -> dict:
+def _compute_single_route_live_metrics(
+    db: Session,
+    route_id: str,
+    service_date,
+    period_key: str = ALL_HOURS,
+) -> dict:
     """Single-route equivalent of `_compute_live_metrics_uncached` for one route.
 
     Used on RouteDetail when the all-routes scorecard cache is cold — computing
     one route directly (~150ms) is much faster than triggering the full ~3s
     scorecard build just to pluck a single entry.
+
+    `period_key` (NOTES-41) restricts EWT / bunching / OTP to the given
+    Eastern-hour bucket. Service-delivered is trip-level, not stop-level,
+    so the `period_key` doesn't change its value — the trip either ran or
+    it didn't, regardless of which hour the rider would have been waiting.
     """
     return {
         "service_delivered": compute_service_delivered(db, route_id, service_date),
-        "otp_split": compute_otp_split(db, route_id, service_date),
-        "ewt": compute_ewt_headline_for_route(db, route_id, service_date),
-        "bunching": compute_bunching_headline_for_route(db, route_id, service_date),
+        "otp_split": compute_otp_split(db, route_id, service_date, period_key=period_key),
+        "ewt": compute_ewt_headline_for_route(db, route_id, service_date, period_key=period_key),
+        "bunching": compute_bunching_headline_for_route(
+            db, route_id, service_date, period_key=period_key
+        ),
     }
 
 
-def get_live_metrics_for_route_today(db: Session, route_id: str) -> dict | None:
+def get_live_metrics_for_route_today(
+    db: Session,
+    route_id: str,
+    day_type_filter: str = ALL_DAY_TYPES,
+    period_key: str = ALL_HOURS,
+) -> dict | None:
     """Latest derived service_date's live metrics for one route, cached when warm.
 
     On a warm cache (any /api/routes call within the TTL), returns the cached
@@ -184,21 +238,38 @@ def get_live_metrics_for_route_today(db: Session, route_id: str) -> dict | None:
     directly without warming the full scorecard cache — RouteDetail shouldn't
     pay the all-routes price.
 
-    Returns `None` if there are no stop_events at all (DB freshly initialized).
+    `day_type_filter` (NOTES-41) anchors on the latest service_date matching
+    the day_type — so picking "Saturday" on a Tuesday surfaces last
+    Saturday's metrics, not Tuesday's. `period_key` restricts the live
+    compute to the given Eastern-hour bucket. When either filter is set,
+    the cross-route cache is bypassed (it stores unfiltered values keyed
+    only by service_date). Single-route compute at ~150ms keeps the
+    filter interactive without a full cache rebuild per filter combo.
+
+    Returns `None` if no stop_events exist for the requested day_type
+    (DB freshly initialized, or the filter has no matching date yet).
     """
-    service_date = _latest_service_date_with_stop_events(db)
+    if day_type_filter == ALL_DAY_TYPES and period_key == ALL_HOURS:
+        # Unfiltered fast path — preserves the existing cache behavior.
+        service_date = _latest_service_date_with_stop_events(db)
+        if service_date is None:
+            return None
+        cache_key = service_date.isoformat()
+
+        with _live_metrics_lock:
+            cached = _live_metrics_cache.get(cache_key)
+        if cached is not None and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC:
+            return cached[1].get(route_id) or _compute_single_route_live_metrics(
+                db, route_id, service_date
+            )
+        return _compute_single_route_live_metrics(db, route_id, service_date)
+
+    # Filtered path — anchor on the day_type's latest matching date and skip
+    # the cross-route cache (which holds unfiltered values).
+    service_date = _latest_service_date_for_day_type(db, day_type_filter)
     if service_date is None:
         return None
-    cache_key = service_date.isoformat()
-
-    with _live_metrics_lock:
-        cached = _live_metrics_cache.get(cache_key)
-    if cached is not None and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC:
-        return cached[1].get(route_id) or _compute_single_route_live_metrics(
-            db, route_id, service_date
-        )
-
-    return _compute_single_route_live_metrics(db, route_id, service_date)
+    return _compute_single_route_live_metrics(db, route_id, service_date, period_key=period_key)
 
 
 def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
@@ -411,20 +482,42 @@ def _excess_trip_time_fields(db: Session, route_id: str, days: int = 7) -> dict:
     }
 
 
-def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
+def get_route_detail_metrics(
+    db: Session,
+    route_id: str,
+    days: int = 7,
+    day_type_filter: str = ALL_DAY_TYPES,
+    period_key: str = ALL_HOURS,
+) -> dict:
     """
     Get detailed performance metrics for a specific route
 
     Returns current metrics and metadata for display on route detail page header.
     Uses pre-computed summary metrics for fast response.
 
+    `day_type_filter` and `period_key` (NOTES-41) re-slice the live metrics
+    (OTP split, EWT, bunching) by day-of-week and time-of-day. Service-
+    delivered is trip-level so the period filter has no effect on its value;
+    the day_type filter anchors all live metrics on the latest matching
+    service_date. Excess-trip-time and the legacy summary fields
+    (avg_headway_minutes, avg_speed_mph, etc.) come from `route_metrics_daily`
+    / `route_metrics_summary` which aren't grouped by hour and are not
+    re-sliced by `period_key`. The day_type filter does NOT restrict the
+    legacy fields either — they remain a window mean over the legacy
+    pipeline's grouping.
+
     Args:
         db: Database session
         route_id: Route identifier (e.g., 'C51')
         days: Number of days to analyze (default: 7)
+        day_type_filter: One of `all` / `weekday` / `saturday` / `sunday`
+        period_key: One of `all` / `am_peak` / `midday` / `pm_peak` /
+            `evening` / `late`
 
     Returns:
-        Dictionary with detailed route metrics
+        Dictionary with detailed route metrics; includes the active
+        filter values so the frontend can render the chip without a
+        round-trip to its own state.
     """
     # Get route info (current version only)
     route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
@@ -435,9 +528,19 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
     summary = db.query(RouteMetricsSummary).filter(RouteMetricsSummary.route_id == route_id).first()
 
     # Live metrics for today (single-route compute on cache miss).
-    live_fields = _live_metric_fields(get_live_metrics_for_route_today(db, route_id))
+    live_fields = _live_metric_fields(
+        get_live_metrics_for_route_today(
+            db, route_id, day_type_filter=day_type_filter, period_key=period_key
+        )
+    )
 
     # Excess trip time (NOTES-43): freshest non-null value within the window.
+    # Trip-level metric — period filter doesn't decompose into it (the trip
+    # spans hours), so we leave the lookup unfiltered. The day_type filter
+    # is also not threaded through here for the same reason it's not in
+    # the legacy summary fields: `route_metrics_daily.excess_trip_time_pct`
+    # is per-day, and the freshest-non-null lookup over a 7-day window
+    # already collapses across day_types.
     excess_fields = _excess_trip_time_fields(db, route_id, days=days)
 
     # Frequency class — single-route lookup against route_service_profile.
@@ -460,6 +563,8 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "route_name": route.route_short_name,
             "route_long_name": route.route_long_name,
             "time_period_days": days,
+            "day_type_filter": day_type_filter,
+            "period_key": period_key,
             "date_range_start": summary.date_start if hasattr(summary, "date_start") else None,
             "date_range_end": summary.date_end if hasattr(summary, "date_end") else None,
             "otp_percentage": sanitize_float(summary.otp_percentage),
@@ -488,6 +593,8 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
             "route_name": route.route_short_name,
             "route_long_name": route.route_long_name,
             "time_period_days": days,
+            "day_type_filter": day_type_filter,
+            "period_key": period_key,
             "otp_percentage": None,
             "early_percentage": None,
             "late_percentage": None,
@@ -507,7 +614,79 @@ def get_route_detail_metrics(db: Session, route_id: str, days: int = 7) -> dict:
         }
 
 
-def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: int = 30) -> dict:
+def _compute_otp_per_day_with_filters(
+    db: Session,
+    route_id: str,
+    start_date: date_type,
+    end_date: date_type,
+    period_key: str,
+) -> dict[str, float | None]:
+    """Per-service-date OTP for one route, computed live from stop_events.
+
+    Used by the trend endpoint when `period_key` restricts to a specific
+    Eastern-hour bucket — `route_metrics_daily.otp_percentage` is a daily
+    aggregate that doesn't decompose by hour, so we read `stop_events`
+    directly and apply the hour filter in Python (to keep test parity
+    with SQLite, which can't EXTRACT(HOUR FROM ... AT TIME ZONE ...)).
+
+    Mirrors `compute_otp_split`'s `all_timepoints` semantics: source =
+    proximity (matches the legacy daily-batch `otp_percentage` rule the
+    trend has historically reported), bucketed by Eastern hour of
+    `observed_arrival_ts`. Returns `{date_str: percentage_or_None}` for
+    every date in the window — `None` when no qualifying stops exist on
+    that date.
+    """
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    rows = (
+        db.query(
+            StopEvent.service_date,
+            StopEvent.deviation_sec,
+            StopEvent.observed_arrival_ts,
+        )
+        .filter(
+            StopEvent.route_id == route_id,
+            StopEvent.service_date >= start_iso,
+            StopEvent.service_date <= end_iso,
+            StopEvent.source == "proximity",
+            StopEvent.deviation_sec.isnot(None),
+        )
+        .all()
+    )
+
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # [on_time, total]
+    for service_date, dev, ts in rows:
+        if ts is None:
+            continue
+        # Reuse the OTP eastern-hour helper: same naive-UTC → Eastern
+        # convention used elsewhere, DST-aware via zoneinfo.
+        from src.otp_metrics import _eastern_hour as _otp_eastern_hour
+
+        h = _otp_eastern_hour(ts)
+        if h is None or not is_hour_in_period(h, period_key):
+            continue
+        counts[service_date][1] += 1
+        if OTP_EARLY_SEC <= dev <= OTP_LATE_SEC:
+            counts[service_date][0] += 1
+
+    out: dict[str, float | None] = {}
+    current = start_date
+    while current <= end_date:
+        d_iso = current.isoformat()
+        on_time, total = counts.get(d_iso, [0, 0])
+        out[d_iso] = (on_time / total * 100.0) if total > 0 else None
+        current = current + timedelta(days=1)
+    return out
+
+
+def get_route_trend_data(
+    db: Session,
+    route_id: str,
+    metric: str = "otp",
+    days: int = 30,
+    day_type_filter: str = ALL_DAY_TYPES,
+    period_key: str = ALL_HOURS,
+) -> dict:
     """
     Get time-series trend data for a specific route metric.
 
@@ -520,6 +699,18 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     day in the window; acceptable on a per-route detail page (not iterated over
     a route list).
 
+    `day_type_filter` (NOTES-41) drops dates whose day-of-week doesn't match
+    (weekday / saturday / sunday); the row's value is set to `None` so the
+    sparkline draws gaps cleanly rather than collapsing the time axis.
+    `period_key` is meaningful only for the `otp` metric — when set, OTP is
+    re-computed per-day from `stop_events` with the hour filter applied
+    (the `route_metrics_daily` cache stores a daily aggregate that doesn't
+    decompose by hour). For non-otp metrics, `period_key` is ignored:
+    excess_trip_time and service_delivered are trip-level (the trip
+    spans hours), and headway / speed legacy fields aren't grouped by
+    hour. Document mismatch the frontend chip with a "filter applies to
+    OTP only" note when both are set on a non-otp metric.
+
     Args:
         db: Database session
         route_id: Route identifier (e.g., 'C51')
@@ -527,6 +718,10 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
             'headway_std_dev', 'speed', 'service_delivered',
             'excess_trip_time')
         days: Number of days to analyze (default: 30)
+        day_type_filter: One of `all` / `weekday` / `saturday` / `sunday`
+        period_key: One of `all` / `am_peak` / `midday` / `pm_peak` /
+            `evening` / `late`. Only `otp` recomputes by hour; other
+            metrics ignore it.
 
     Returns:
         Time-series data for the specified metric
@@ -538,6 +733,12 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     # Calculate date range in Eastern (the WMATA service date)
     end_date = eastern_today()
     start_date = end_date - timedelta(days=days)
+
+    def _matches_day_type(d: date_type) -> bool:
+        """True iff `d` matches the active day_type filter (or filter is `all`)."""
+        if day_type_filter == ALL_DAY_TYPES:
+            return True
+        return _day_type_for(d) == day_type_filter
 
     # service_delivered isn't materialized in RouteMetricsDaily; compute per-day
     # from runs + GTFS. Same Eastern service-date window as the daily-table path.
@@ -554,6 +755,19 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
         trend_data = []
         current = start_date
         while current <= end_date:
+            # Day-type filter: skip dates that don't match (emit null so the
+            # sparkline draws a gap rather than a phantom 0%).
+            if not _matches_day_type(current):
+                trend_data.append(
+                    {
+                        "date": current.isoformat(),
+                        "service_delivered_ratio": None,
+                        "scheduled_trips": 0,
+                        "delivered_trips": 0,
+                    }
+                )
+                current = current + timedelta(days=1)
+                continue
             sd = compute_service_delivered(db, route_id, current)
             ratio = sd.get("ratio")
             scheduled = sd.get("scheduled_trips") or 0
@@ -588,6 +802,35 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
             "route_id": route_id,
             "metric": metric,
             "days": days,
+            "day_type_filter": day_type_filter,
+            "period_key": period_key,
+            "trend_data": trend_data,
+        }
+
+    # OTP with a period filter: route_metrics_daily stores a daily aggregate
+    # without an hour breakdown, so the period-restricted series has to come
+    # from `stop_events`. day_type filter applies on top.
+    if metric == "otp" and period_key != ALL_HOURS:
+        otp_by_date = _compute_otp_per_day_with_filters(
+            db, route_id, start_date, end_date, period_key
+        )
+        trend_data = []
+        current = start_date
+        while current <= end_date:
+            d_iso = current.isoformat()
+            value: float | None
+            if not _matches_day_type(current):
+                value = None
+            else:
+                value = otp_by_date.get(d_iso)
+            trend_data.append({"date": d_iso, "otp_percentage": value})
+            current = current + timedelta(days=1)
+        return {
+            "route_id": route_id,
+            "metric": metric,
+            "days": days,
+            "day_type_filter": day_type_filter,
+            "period_key": period_key,
             "trend_data": trend_data,
         }
 
@@ -635,12 +878,25 @@ def get_route_trend_data(db: Session, route_id: str, metric: str = "otp", days: 
     current = start_date
     while current <= end_date:
         date_str = current.isoformat()
+        if not _matches_day_type(current):
+            # Day-type filter active and this date doesn't match — emit a
+            # null gap so the sparkline doesn't compress disjoint windows.
+            trend_data.append({"date": date_str, response_key: None})
+            current = current + timedelta(days=1)
+            continue
         day_metric = by_date.get(date_str)
         value = getattr(day_metric, field_name, None) if day_metric else None
         trend_data.append({"date": date_str, response_key: value})
         current = current + timedelta(days=1)
 
-    return {"route_id": route_id, "metric": metric, "days": days, "trend_data": trend_data}
+    return {
+        "route_id": route_id,
+        "metric": metric,
+        "days": days,
+        "day_type_filter": day_type_filter,
+        "period_key": period_key,
+        "trend_data": trend_data,
+    }
 
 
 # ---------------------------------------------------------------------------
