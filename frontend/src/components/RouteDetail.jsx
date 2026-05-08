@@ -212,131 +212,153 @@ function RouteDetail() {
         </div>
       </div>
 
-      <div className="stats-summary">
-        <div className="stat-card">
-          <div className="stat-value">
-            {routeData.otp_all_pct != null
-              ? `${Math.round(routeData.otp_all_pct)}%`
-              : 'N/A'}
-          </div>
-          <div className="stat-label">
-            On-Time Performance
-            {otpDelta && (
-              <DeltaIndicator
-                delta={otpDelta.delta}
-                format={(d) => `${d.toFixed(1)} pp`}
-                title={`7-day mean ${otpDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${otpDelta.priorMean.toFixed(1)}%`}
-              />
-            )}
-          </div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">
-            {routeData.service_delivered_ratio != null
-              ? `${Math.round(routeData.service_delivered_ratio * 100)}%`
-              : 'N/A'}
-          </div>
-          <div className="stat-label">
-            Service Delivered
-            {sdDelta && (
-              <DeltaIndicator
-                delta={sdDelta.delta}
-                format={(d) => `${d.toFixed(1)} pp`}
-                title={`7-day mean ${sdDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${sdDelta.priorMean.toFixed(1)}%`}
-              />
-            )}
-          </div>
-          {routeData.service_delivered_scheduled != null && (
-            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
-              ({routeData.service_delivered_delivered} of {routeData.service_delivered_scheduled} trips)
+      {/* Server-side period-over-period deltas (NOTES-38). The KPI cards
+          consume the `deltas` block from `/api/routes/{id}` so RouteList
+          and RouteDetail show the same numbers; the trend block above
+          keeps its own client-side deltas because they pair with the
+          sparkline (different render path, same window). */}
+      {(() => {
+        const renderServerDelta = (block, unitFormat, lowerIsBetter = false) => {
+          if (!block || !block.valid || block.value == null) return null
+          return (
+            <DeltaIndicator
+              delta={block.value}
+              format={unitFormat}
+              lowerIsBetter={lowerIsBetter}
+              title={`Last 7 days vs prior 7 days (${block.current_n}/${block.prior_n} valid days)`}
+            />
+          )
+        }
+        const deltas = routeData.deltas || {}
+        return (
+          <div className="stats-summary">
+            <div className="stat-card">
+              <div className="stat-value">
+                {routeData.otp_all_pct != null
+                  ? `${Math.round(routeData.otp_all_pct)}%`
+                  : 'N/A'}
+              </div>
+              <div className="stat-label">
+                On-Time Performance
+                {renderServerDelta(deltas.otp, (d) => `${d.toFixed(1)} pp`)}
+              </div>
             </div>
-          )}
-        </div>
-        <div className="stat-card">
-          <div className="stat-value" style={{ fontSize: '1.5rem' }}>
-            {routeData.otp_origin_pct != null
-              ? `${Math.round(routeData.otp_origin_pct)}% / ${Math.round(routeData.otp_destination_pct ?? 0)}%`
-              : 'N/A'}
+            <div className="stat-card">
+              <div className="stat-value">
+                {routeData.service_delivered_ratio != null
+                  ? `${Math.round(routeData.service_delivered_ratio * 100)}%`
+                  : 'N/A'}
+              </div>
+              <div className="stat-label">
+                Service Delivered
+                {renderServerDelta(
+                  deltas.service_delivered,
+                  (d) => `${(d * 100).toFixed(1)} pp`,
+                )}
+              </div>
+              {routeData.service_delivered_scheduled != null && (
+                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                  ({routeData.service_delivered_delivered} of {routeData.service_delivered_scheduled} trips)
+                </div>
+              )}
+            </div>
+            <div className="stat-card">
+              <div className="stat-value" style={{ fontSize: '1.5rem' }}>
+                {routeData.otp_origin_pct != null
+                  ? `${Math.round(routeData.otp_origin_pct)}% / ${Math.round(routeData.otp_destination_pct ?? 0)}%`
+                  : 'N/A'}
+              </div>
+              <div className="stat-label">OTP Origin / Destination</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">
+                {routeData.ewt_seconds != null
+                  ? `${Math.round(routeData.ewt_seconds)}`
+                  : 'N/A'}
+                {routeData.ewt_seconds != null && (
+                  <span style={{ fontSize: '1.5rem' }}> sec</span>
+                )}
+                {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
+                  <span
+                    className="data-thin-badge"
+                    title={`Only ${Math.round(routeData.ewt_coverage_ratio * 100)}% of scheduled headways were observed`}
+                  >
+                    Thin
+                  </span>
+                )}
+              </div>
+              <div className="stat-label">
+                Excess Wait Time
+                {renderServerDelta(deltas.ewt, (d) => `${Math.round(d)}s`, true)}
+              </div>
+              {routeData.ewt_seconds == null && (
+                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                  (frequent service only)
+                </div>
+              )}
+              {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
+                <div className="data-thin-note">
+                  Trip-update coverage {Math.round(routeData.ewt_coverage_ratio * 100)}% — metric unreliable
+                </div>
+              )}
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">
+                {routeData.bunching_rate != null
+                  ? `${(routeData.bunching_rate * 100).toFixed(1)}%`
+                  : 'N/A'}
+                {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
+                  <span
+                    className="data-thin-badge"
+                    title={`Only ${Math.round(routeData.ewt_coverage_ratio * 100)}% of scheduled headways were observed`}
+                  >
+                    Thin
+                  </span>
+                )}
+              </div>
+              <div className="stat-label">
+                Bunching Rate
+                {renderServerDelta(
+                  deltas.bunching,
+                  (d) => `${(d * 100).toFixed(1)} pp`,
+                  true,
+                )}
+              </div>
+              {routeData.bunching_total_headways != null && routeData.bunching_total_headways > 0 && (
+                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                  ({routeData.bunching_count} of {routeData.bunching_total_headways} pairs)
+                </div>
+              )}
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">
+                {routeData.excess_trip_time_pct != null
+                  ? `${Math.round(routeData.excess_trip_time_pct)}%`
+                  : 'N/A'}
+              </div>
+              <div className="stat-label">
+                % of Trips Running Long
+                {renderServerDelta(
+                  deltas.excess_trip_time_pct,
+                  (d) => `${d.toFixed(1)} pp`,
+                  true,
+                )}
+              </div>
+              {excessActualMin != null && excessSchedMin != null && (
+                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                  median trip {excessActualMin} min, schedule {excessSchedMin} min
+                  {excessOverSchedPct != null && ` (${excessOverSchedPct >= 0 ? '+' : ''}${excessOverSchedPct}%)`}
+                </div>
+              )}
+              {routeData.excess_trip_time_pct == null && (
+                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                  (no qualifying trips)
+                </div>
+              )}
+            </div>
           </div>
-          <div className="stat-label">OTP Origin / Destination</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">
-            {routeData.ewt_seconds != null
-              ? `${Math.round(routeData.ewt_seconds)}`
-              : 'N/A'}
-            {routeData.ewt_seconds != null && (
-              <span style={{ fontSize: '1.5rem' }}> sec</span>
-            )}
-            {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
-              <span
-                className="data-thin-badge"
-                title={`Only ${Math.round(routeData.ewt_coverage_ratio * 100)}% of scheduled headways were observed`}
-              >
-                Thin
-              </span>
-            )}
-          </div>
-          <div className="stat-label">Excess Wait Time</div>
-          {routeData.ewt_seconds == null && (
-            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
-              (frequent service only)
-            </div>
-          )}
-          {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
-            <div className="data-thin-note">
-              Trip-update coverage {Math.round(routeData.ewt_coverage_ratio * 100)}% — metric unreliable
-            </div>
-          )}
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">
-            {routeData.bunching_rate != null
-              ? `${(routeData.bunching_rate * 100).toFixed(1)}%`
-              : 'N/A'}
-            {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
-              <span
-                className="data-thin-badge"
-                title={`Only ${Math.round(routeData.ewt_coverage_ratio * 100)}% of scheduled headways were observed`}
-              >
-                Thin
-              </span>
-            )}
-          </div>
-          <div className="stat-label">Bunching Rate</div>
-          {routeData.bunching_total_headways != null && routeData.bunching_total_headways > 0 && (
-            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
-              ({routeData.bunching_count} of {routeData.bunching_total_headways} pairs)
-            </div>
-          )}
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">
-            {routeData.excess_trip_time_pct != null
-              ? `${Math.round(routeData.excess_trip_time_pct)}%`
-              : 'N/A'}
-            {excessDelta && (
-              <DeltaIndicator
-                delta={excessDelta.delta}
-                format={(d) => `${d.toFixed(1)} pp`}
-                title={`7-day mean ${excessDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${excessDelta.priorMean.toFixed(1)}%`}
-              />
-            )}
-          </div>
-          <div className="stat-label">% of Trips Running Long</div>
-          {excessActualMin != null && excessSchedMin != null && (
-            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
-              median trip {excessActualMin} min, schedule {excessSchedMin} min
-              {excessOverSchedPct != null && ` (${excessOverSchedPct >= 0 ? '+' : ''}${excessOverSchedPct}%)`}
-            </div>
-          )}
-          {routeData.excess_trip_time_pct == null && (
-            <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
-              (no qualifying trips)
-            </div>
-          )}
-        </div>
-      </div>
+        )
+      })()}
 
       {hasMetrics && (
         <RouteTrend

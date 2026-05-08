@@ -783,3 +783,273 @@ class TestGetRouteContributors:
         first = get_route_contributors(db_session, metric="otp", days=30)
         second = get_route_contributors(db_session, metric="otp", days=30)
         assert first is second
+
+
+class TestComputeRouteDeltas:
+    """Tests for `compute_route_deltas` (NOTES-38).
+
+    Heavy live computes (SD / EWT / bunching) are stubbed so tests stay
+    fast and assert the delta arithmetic + thin-data rules without
+    depending on a stop_events fixture.
+    """
+
+    @staticmethod
+    def _clear_cache():
+        """Drop module-level deltas cache between tests."""
+        from api import aggregations as agg
+
+        agg._deltas_cache.clear()
+
+    @staticmethod
+    def _stub_live_per_route_per_day(monkeypatch, sd=None, ewt=None, ewt_cells=None, bun=None):
+        """Replace the heavy live-pass with caller-provided per-route per-day dicts.
+
+        Each argument is `{route_id: {iso_date: value}}` (or None to default
+        to empty). Returning empty dicts for anything missing keeps the
+        thin-data assertions explicit per-test.
+        """
+        from api import aggregations as agg
+
+        def fake(_db, _dates):
+            return (sd or {}, ewt or {}, ewt_cells or {}, bun or {})
+
+        monkeypatch.setattr(agg, "_live_per_route_per_day", fake)
+
+    def _seed_route_otp_window(self, db_session, route_id, current_otp, prior_otp, n_each=7):
+        """Seed `n_each` days of OTP at `current_otp` then `n_each` days at `prior_otp`.
+
+        Current window is the past `n_each` days inclusive of today; prior
+        window is the `n_each` days immediately preceding. Dates are
+        sequential Eastern service dates.
+        """
+        from src.models import RouteMetricsDaily
+
+        rows = []
+        for i in range(n_each):
+            d = eastern_today() - timedelta(days=i)
+            rows.append(
+                RouteMetricsDaily(route_id=route_id, date=d.isoformat(), otp_percentage=current_otp)
+            )
+        for i in range(n_each):
+            d = eastern_today() - timedelta(days=n_each + i)
+            rows.append(
+                RouteMetricsDaily(route_id=route_id, date=d.isoformat(), otp_percentage=prior_otp)
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+
+    def _seed_route_excess_window(self, db_session, route_id, current_pct, prior_pct, n_each=7):
+        """Seed `n_each` days of excess_trip_time_pct in current and prior windows.
+
+        Mirrors `_seed_route_otp_window` but writes to a separate column.
+        Two rows per date (one for OTP at current, one for excess) would
+        collide, so excess seeding uses different dates from OTP seeding
+        unless both share a date — kept independent here to avoid coupling.
+        """
+        from src.models import RouteMetricsDaily
+
+        rows = []
+        for i in range(n_each):
+            d = eastern_today() - timedelta(days=i)
+            rows.append(
+                RouteMetricsDaily(
+                    route_id=route_id,
+                    date=d.isoformat(),
+                    excess_trip_time_pct=current_pct,
+                )
+            )
+        for i in range(n_each):
+            d = eastern_today() - timedelta(days=n_each + i)
+            rows.append(
+                RouteMetricsDaily(
+                    route_id=route_id,
+                    date=d.isoformat(),
+                    excess_trip_time_pct=prior_pct,
+                )
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+
+    def test_deltas_returns_all_five_metrics(self, db_session, sample_route, monkeypatch):
+        """The deltas dict carries one entry per scorecard metric."""
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        self._stub_live_per_route_per_day(monkeypatch)
+        deltas = compute_route_deltas(db_session, "TEST1")
+        assert set(deltas.keys()) == {
+            "otp",
+            "service_delivered",
+            "ewt",
+            "bunching",
+            "excess_trip_time_pct",
+        }
+        for metric_block in deltas.values():
+            assert set(metric_block.keys()) >= {"value", "valid", "current_n", "prior_n"}
+
+    def test_deltas_otp_sign_convention(self, db_session, sample_route, monkeypatch):
+        """`value = current - prior`, no flip for higher-is-better OTP.
+
+        Current 7 days at 80% OTP, prior 7 at 70%. Delta should be +10
+        (positive: current window's mean is higher than prior).
+        """
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        self._stub_live_per_route_per_day(monkeypatch)
+        self._seed_route_otp_window(db_session, "TEST1", current_otp=80.0, prior_otp=70.0)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        otp = deltas["otp"]
+        assert otp["valid"] is True
+        assert otp["value"] == 10.0
+        assert otp["current_n"] == 7
+        assert otp["prior_n"] == 7
+
+    def test_deltas_lower_is_better_metrics_keep_raw_sign(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """EWT / bunching deltas are NOT sign-flipped on the server.
+
+        Current EWT higher than prior (worse) should produce a positive
+        delta — the consumer interprets that direction is bad for EWT.
+        """
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        ewt = {"TEST1": {}}
+        cells = {"TEST1": {}}
+        bun = {"TEST1": {}}
+        for i in range(7):
+            d = (eastern_today() - timedelta(days=i)).isoformat()
+            ewt["TEST1"][d] = 150.0  # current window: worse (higher)
+            cells["TEST1"][d] = 5
+            bun["TEST1"][d] = 0.10
+        for i in range(7):
+            d = (eastern_today() - timedelta(days=7 + i)).isoformat()
+            ewt["TEST1"][d] = 90.0  # prior window: better (lower)
+            cells["TEST1"][d] = 5
+            bun["TEST1"][d] = 0.04
+
+        self._stub_live_per_route_per_day(monkeypatch, ewt=ewt, ewt_cells=cells, bun=bun)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        # EWT current 150 - prior 90 = +60, raw sign preserved.
+        assert deltas["ewt"]["valid"] is True
+        assert deltas["ewt"]["value"] == 60.0
+        # Bunching current 0.10 - prior 0.04 = +0.06.
+        assert deltas["bunching"]["valid"] is True
+        assert abs(deltas["bunching"]["value"] - 0.06) < 1e-9
+
+    def test_deltas_thin_data_suppresses_when_under_three_valid_days(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """Fewer than 3 valid days in either window → `valid=False`, `value=None`."""
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+        from src.models import RouteMetricsDaily
+
+        # Only 2 days of OTP in the current window, none in prior.
+        rows = []
+        for i in range(2):
+            d = eastern_today() - timedelta(days=i)
+            rows.append(
+                RouteMetricsDaily(route_id="TEST1", date=d.isoformat(), otp_percentage=82.0)
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+        self._stub_live_per_route_per_day(monkeypatch)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        assert deltas["otp"]["valid"] is False
+        assert deltas["otp"]["value"] is None
+        assert deltas["otp"]["current_n"] == 2
+        assert deltas["otp"]["prior_n"] == 0
+
+    def test_deltas_ewt_coverage_floor_suppresses_low_frequent_cells(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """EWT-specific coverage gate: < 7 frequent cell-hours per window suppresses.
+
+        Three valid days of EWT but only 1 frequent cell-hour per day in
+        each window — below the EWT_MIN_FREQUENT_CELL_HOURS=7 floor. The
+        delta should suppress even though the day-count rule passes.
+        """
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        ewt = {"TEST1": {}}
+        cells = {"TEST1": {}}
+        for i in range(7):
+            d = (eastern_today() - timedelta(days=i)).isoformat()
+            ewt["TEST1"][d] = 100.0
+            cells["TEST1"][d] = 1  # too sparse — sums to 7 only at the boundary
+        for i in range(7):
+            d = (eastern_today() - timedelta(days=7 + i)).isoformat()
+            ewt["TEST1"][d] = 80.0
+            cells["TEST1"][d] = 0  # no frequent service in prior window
+
+        self._stub_live_per_route_per_day(monkeypatch, ewt=ewt, ewt_cells=cells)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        # Prior window has 0 frequent cells across all days → suppressed.
+        assert deltas["ewt"]["valid"] is False
+        assert deltas["ewt"]["value"] is None
+        # Day counts are still surfaced for tooltip/debugging.
+        assert deltas["ewt"]["current_n"] == 7
+        assert deltas["ewt"]["prior_n"] == 7
+
+    def test_deltas_excess_trip_time_pct_uses_route_metrics_daily(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """excess_trip_time_pct is read directly from `route_metrics_daily`.
+
+        Per-route per-day values are seeded into the materialized table;
+        the live-pass stub returns nothing for excess. The delta still
+        computes correctly from the table.
+        """
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        self._stub_live_per_route_per_day(monkeypatch)
+        self._seed_route_excess_window(db_session, "TEST1", current_pct=20.0, prior_pct=15.0)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        ext = deltas["excess_trip_time_pct"]
+        assert ext["valid"] is True
+        assert ext["value"] == 5.0
+        assert ext["current_n"] == 7
+        assert ext["prior_n"] == 7
+
+    def test_deltas_unknown_route_returns_suppressed_block(self, db_session, monkeypatch):
+        """A route absent from every source returns a fully-suppressed shape."""
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        self._stub_live_per_route_per_day(monkeypatch)
+        deltas = compute_route_deltas(db_session, "DOES_NOT_EXIST")
+        for metric_block in deltas.values():
+            assert metric_block["valid"] is False
+            assert metric_block["value"] is None
+            assert metric_block["current_n"] == 0
+            assert metric_block["prior_n"] == 0
+
+    def test_scorecard_payload_includes_deltas_block(
+        self, db_session, sample_route, sample_route_metrics_summary, monkeypatch
+    ):
+        """`get_all_routes_scorecard` carries a `deltas` block per route."""
+        self._clear_cache()
+        from api.aggregations import get_all_routes_scorecard
+
+        self._stub_live_per_route_per_day(monkeypatch)
+        scorecard = get_all_routes_scorecard(db_session, days=7)
+
+        assert len(scorecard) == 1
+        deltas = scorecard[0]["deltas"]
+        assert set(deltas.keys()) == {
+            "otp",
+            "service_delivered",
+            "ewt",
+            "bunching",
+            "excess_trip_time_pct",
+        }

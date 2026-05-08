@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import SystemTrend from './SystemTrend'
+import { DeltaIndicator } from './RouteTrend'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -32,6 +33,26 @@ function formatContribMetricValue(metric, value) {
   if (metric === 'ewt') return `${Math.round(value)}s`
   if (metric === 'bunching') return `${(value * 100).toFixed(1)}%`
   return String(value)
+}
+
+// Render a server-side delta block (`{value, valid, current_n, prior_n}`)
+// inline next to a scorecard metric value. Returns null when the delta is
+// missing or `valid: false` so the user is never shown a misleading arrow
+// — same suppression contract as the trend block. `unitFormat` produces
+// the displayed delta string and depends on the metric's units (pp for
+// percentage metrics, sec for EWT raw seconds, scaled-pp for the 0..1
+// bunching ratio). `lowerIsBetter` flips color mapping for EWT/bunching
+// (raw sign is preserved on the wire; the consumer encodes "is up good?").
+function renderServerDelta(deltaBlock, unitFormat, lowerIsBetter = false) {
+  if (!deltaBlock || !deltaBlock.valid || deltaBlock.value == null) return null
+  return (
+    <DeltaIndicator
+      delta={deltaBlock.value}
+      format={unitFormat}
+      lowerIsBetter={lowerIsBetter}
+      title={`Last 7 days vs prior 7 days (${deltaBlock.current_n}/${deltaBlock.prior_n} valid days)`}
+    />
+  )
 }
 
 function formatContribScore(score) {
@@ -511,16 +532,30 @@ function RouteList() {
                   {route.otp_all_pct != null
                     ? `${Math.round(route.otp_all_pct)}%`
                     : '—'}
+                  {renderServerDelta(
+                    route.deltas?.otp,
+                    (d) => `${d.toFixed(1)} pp`,
+                  )}
                 </td>
                 <td className="metric">
                   {route.service_delivered_ratio != null
                     ? `${Math.round(route.service_delivered_ratio * 100)}%`
                     : '—'}
+                  {/* SD ratio is 0..1; the server delta is also 0..1 so scale to pp. */}
+                  {renderServerDelta(
+                    route.deltas?.service_delivered,
+                    (d) => `${(d * 100).toFixed(1)} pp`,
+                  )}
                 </td>
                 <td className="metric">
                   {route.ewt_seconds != null
                     ? `${Math.round(route.ewt_seconds)}s`
                     : '—'}
+                  {renderServerDelta(
+                    route.deltas?.ewt,
+                    (d) => `${Math.round(d)}s`,
+                    true,
+                  )}
                   {route.ewt_coverage_ratio != null && route.ewt_coverage_ratio < 0.5 && (
                     <span
                       className="data-thin-badge"
@@ -534,6 +569,11 @@ function RouteList() {
                   {route.bunching_rate != null
                     ? `${(route.bunching_rate * 100).toFixed(1)}%`
                     : '—'}
+                  {renderServerDelta(
+                    route.deltas?.bunching,
+                    (d) => `${(d * 100).toFixed(1)} pp`,
+                    true,
+                  )}
                   {route.ewt_coverage_ratio != null && route.ewt_coverage_ratio < 0.5 && (
                     <span
                       className="data-thin-badge"

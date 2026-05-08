@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-39 — added `GET /api/routes/contributors` and a "Biggest contributors" mode toggle on RouteList that ranks routes by `(baseline − route_value) × scheduled_trips` against the system-window baseline; updated NOTES-47's cross-reference to point to PR #80 since per-route targets will swap baseline for target).
+Last edited 2026-05-06 (closed NOTES-38 — server-side 7-day-vs-prior-7-day deltas on every scorecard metric in `/api/routes` and `/api/routes/{id}`, with the same `{value, valid, current_n, prior_n}` shape per metric; raw signs are preserved on the wire and the frontend `DeltaIndicator` flips colors via a `lowerIsBetter` flag for EWT/bunching/excess-trip-time; thin-data suppression is generic <3-valid-days plus an EWT-specific frequent-cell-hour floor; KPI cards on RouteDetail and the RouteList table now render arrows from the server payload, while the trend block keeps its own client-side deltas because they pair with the sparkline render).
 
 ---
 
@@ -37,9 +37,6 @@ proxies instead).
 
 **Trend & comparison (the "are we improving?" question)**
 
-- **NOTES-38 Period-over-period deltas on every KPI.** Augment the
-  scorecard payload with deltas; add up/down/flat indicators
-  throughout.
 - **NOTES-47 Per-route targets / commitments config.** Configurable
   per-route targets so trend cards can show "vs target," not only
   "vs prior period."
@@ -140,23 +137,6 @@ WMATA's published scorecard for now. Future option: expose a stricter
 for non-frequent routes (frequent routes get EWT instead — see `src/ewt.py`).
 The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
-
----
-
-## NOTES-38. Period-over-period deltas on every KPI
-
-**Severity: low.**
-
-Augment the scorecard payload from `/api/routes` (built in
-`api/aggregations.py`) so every metric carries a 7-day-vs-prior-7-day
-delta. Render up/down/flat indicators on the `RouteList` table and the
-`RouteDetail` KPI cards. The RouteDetail OTP / service-delivered cards
-already carry deltas client-side from the 30-day trend payload (PR #77);
-this item generalizes the pattern to every KPI on every surface, with
-the delta computed server-side so RouteList can show them too. Pay
-attention to thin-data cases — if either window is below the EWT
-coverage threshold, the delta should suppress rather than show a
-misleading number.
 
 ---
 
