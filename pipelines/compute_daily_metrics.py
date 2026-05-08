@@ -32,6 +32,7 @@ from src.analytics import (
     get_exception_service_dates,
 )
 from src.database import get_session
+from src.excess_trip_time import compute_excess_trip_time_for_routes
 from src.models import (
     CalendarDate,
     Route,
@@ -451,6 +452,21 @@ def compute_metrics_batch(
         f"      ✓ Speeds computed for {len(speed_results)} routes in {time.time() - speed_start:.2f}s"
     )
 
+    # Excess trip time (NOTES-43): one pass across `runs` for the date,
+    # computing median actual / median scheduled / pct_over_110 per route.
+    # Cheaper to do as a single batch (one Run query per date) than to call
+    # the per-route helper inside the save loop. Routes without runs come
+    # back with `n_trips == 0` and we skip writing the columns for them.
+    print("      [6.4b] Computing excess trip time for ALL routes...")
+    excess_start = time.time()
+    excess_results_list = compute_excess_trip_time_for_routes(
+        db, date, route_ids=list(routes_to_process.keys())
+    )
+    excess_results = {row["route_id"]: row for row in excess_results_list}
+    print(
+        f"      ✓ Excess trip time computed for {len(excess_results)} routes in {time.time() - excess_start:.2f}s"
+    )
+
     # Combine results and save to database
     print("      [6.5] Saving metrics to database...")
     save_start = time.time()
@@ -468,9 +484,14 @@ def compute_metrics_batch(
         otp = otp_results.get(route_id)
         headway = headway_results.get(route_id)
         speed = speed_results.get(route_id)
+        excess = excess_results.get(route_id)
 
         # Only save if we have at least OTP metrics
         if otp and otp.get("total_arrivals", 0) > 0:
+            # Excess-trip-time fields are nulled when no qualifying trips
+            # observed both literal endpoints — distinguishes "no signal"
+            # from a real zero so the UI can suppress the card / sparkline.
+            n_excess_trips = excess.get("n_trips", 0) if excess else 0
             metrics = {
                 "route_id": route_id,
                 "date": date.isoformat(),
@@ -487,6 +508,16 @@ def compute_metrics_batch(
                 else None,
                 "headway_cv": convert_numpy_types(headway.get("cv")) if headway else None,
                 "avg_speed_mph": convert_numpy_types(speed.get("avg_speed_mph")) if speed else None,
+                "excess_trip_time_pct": convert_numpy_types(excess.get("pct_over_110"))
+                if excess and n_excess_trips > 0
+                else None,
+                "median_actual_trip_time_sec": int(excess["median_actual_sec"])
+                if excess and n_excess_trips > 0 and excess.get("median_actual_sec") is not None
+                else None,
+                "median_scheduled_trip_time_sec": int(excess["median_scheduled_sec"])
+                if excess and n_excess_trips > 0 and excess.get("median_scheduled_sec") is not None
+                else None,
+                "excess_trip_time_n_trips": int(n_excess_trips) if excess else None,
                 "computed_at": utcnow_naive(),
             }
 

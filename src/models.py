@@ -734,6 +734,18 @@ class RouteMetricsDaily(Base):
     avg_speed_mph = Column(Float)
     median_speed_mph = Column(Float)
 
+    # Excess trip time (NOTES-43): end-to-end actual vs scheduled duration.
+    # `excess_trip_time_pct` is the share of qualifying trips on the day where
+    # actual duration > 110% of scheduled (`pct_over_110` from
+    # `src/excess_trip_time.py`). The two duration columns let the UI render a
+    # "median trip ran 18 min, schedule 16 min" subline. `excess_trip_time_n_trips`
+    # is the qualifying-trip count (trips that observed both literal endpoints
+    # via the proximity-origin / TU-destination rule).
+    excess_trip_time_pct = Column(Float)
+    median_actual_trip_time_sec = Column(Integer)
+    median_scheduled_trip_time_sec = Column(Integer)
+    excess_trip_time_n_trips = Column(Integer)
+
     # Data quality metrics
     total_arrivals = Column(Integer)
     unique_vehicles = Column(Integer)

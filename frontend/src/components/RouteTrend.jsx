@@ -9,6 +9,9 @@ import {
 
 const OTP_LINE_COLOR = '#002F6C'
 const SD_LINE_COLOR = '#0E8A6F'
+// Warm amber for excess-trip-time — distinct from OTP/SD without colliding
+// with the EWT thin-data warning red elsewhere on the page.
+const EXCESS_LINE_COLOR = '#B45309'
 
 // Below this many valid days in *either* the recent or prior window we
 // suppress the 7-vs-prior-7 delta. With only a day or two of data the delta
@@ -140,16 +143,26 @@ function Sparkline({ data, color, valueFormat, height = 60 }) {
 }
 
 /**
- * 30-day OTP and service-delivered trend block for a single route.
+ * 30-day OTP, service-delivered, and excess-trip-time trend block for a
+ * single route.
  *
  * Receives precomputed `{date, value}` series from RouteDetail (which fetches
  * the trend payload once and reuses it for the per-KPI-card deltas above).
  *
  * Closes NOTES-37: surfaces the existing trend payload that was unconsumed
  * by the UI. Service-delivered support was added to the trend endpoint in
- * the same PR.
+ * the same PR. NOTES-43 added the excess-trip-time series.
  */
-function RouteTrend({ otpSeries, sdSeries, otpDelta, sdDelta, loading, error }) {
+function RouteTrend({
+  otpSeries,
+  sdSeries,
+  excessSeries,
+  otpDelta,
+  sdDelta,
+  excessDelta,
+  loading,
+  error,
+}) {
   if (loading) {
     return (
       <div className="chart-container">
@@ -213,6 +226,28 @@ function RouteTrend({ otpSeries, sdSeries, otpDelta, sdDelta, loading, error }) 
             <div className="route-trend-meta">
               Last 7 days: {sdDelta.recentMean.toFixed(1)}% · Prior 7:{' '}
               {sdDelta.priorMean.toFixed(1)}%
+            </div>
+          )}
+        </div>
+        <div className="route-trend-card">
+          <div className="route-trend-header">
+            <span className="route-trend-label">% of Trips Running Long</span>
+            {excessDelta && (
+              <DeltaIndicator
+                delta={excessDelta.delta}
+                format={(d) => `${d.toFixed(1)} pp`}
+              />
+            )}
+          </div>
+          <Sparkline
+            data={excessSeries}
+            color={EXCESS_LINE_COLOR}
+            valueFormat={(v) => `${v.toFixed(1)}%`}
+          />
+          {excessDelta && (
+            <div className="route-trend-meta">
+              Last 7 days: {excessDelta.recentMean.toFixed(1)}% · Prior 7:{' '}
+              {excessDelta.priorMean.toFixed(1)}%
             </div>
           )}
         </div>
