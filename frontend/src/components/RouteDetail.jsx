@@ -323,7 +323,7 @@ function RouteDetail() {
               />
             )}
           </div>
-          <div className="stat-label">Trips &gt; 110% of Schedule</div>
+          <div className="stat-label">% of Trips Running Long</div>
           {excessActualMin != null && excessSchedMin != null && (
             <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
               median trip {excessActualMin} min, schedule {excessSchedMin} min

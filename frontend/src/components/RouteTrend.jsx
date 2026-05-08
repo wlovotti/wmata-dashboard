@@ -231,7 +231,7 @@ function RouteTrend({
         </div>
         <div className="route-trend-card">
           <div className="route-trend-header">
-            <span className="route-trend-label">Trips &gt; 110% of Schedule</span>
+            <span className="route-trend-label">% of Trips Running Long</span>
             {excessDelta && (
               <DeltaIndicator
                 delta={excessDelta.delta}
