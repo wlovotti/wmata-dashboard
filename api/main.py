@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.aggregations import (
     get_all_routes_scorecard,
+    get_route_contributors,
     get_route_detail_metrics,
     get_route_period_drilldown,
     get_route_recent_runs,
@@ -172,6 +173,53 @@ async def get_routes(days: int = 7):
     db = get_session()
     try:
         return get_all_routes_scorecard(db, days=days)
+    finally:
+        db.close()
+
+
+@app.get("/api/routes/contributors")
+async def get_routes_contributors(metric: str = "otp", days: int = 30):
+    """
+    Routes ranked by their contribution to system underperformance (NOTES-39).
+
+    For each route, contribution is `(baseline - route_value) * scheduled_trips`
+    for higher-is-better metrics (OTP, service-delivered) — sign-flipped for
+    lower-is-better metrics (EWT, bunching) so a positive score always means
+    "this route is dragging the system down." Baseline is the system's
+    window-mean from `system_metrics_daily` (no per-route targets exist yet;
+    NOTES-47 will swap `baseline` for `target` once they do). Scheduled-trip
+    count over the window is the only volume proxy in the data — ridership
+    is not available — so the score answers "where would moving the needle
+    move the system most?" rather than just "which route looks worst."
+
+    For OTP, `route_value` is the window mean from the materialized
+    `route_metrics_daily` table. For service-delivered, EWT, and bunching,
+    `route_value` is the latest single-day snapshot from the live-metrics
+    cache (those metrics aren't materialized per-route per-day; a window
+    mean would require N× per-day computes per route). The baseline is
+    always a window mean from `system_metrics_daily`.
+
+    Args:
+        metric: One of `otp`, `service_delivered`, `ewt`, `bunching`
+        days: Window length in days (default: 30, capped at 90)
+
+    Returns:
+        Dict with `metric`, `days`, `baseline_value`, `higher_is_better`,
+        and `contributors` (list ranked by `contribution_score` desc).
+    """
+    valid_metrics = ["otp", "service_delivered", "ewt", "bunching"]
+    if metric not in valid_metrics:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid metric. Must be one of: {', '.join(valid_metrics)}"
+        )
+    if days < 1:
+        days = 1
+    if days > 90:
+        days = 90
+
+    db = get_session()
+    try:
+        return get_route_contributors(db, metric=metric, days=days)
     finally:
         db.close()
 

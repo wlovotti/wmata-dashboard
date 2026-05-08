@@ -11,6 +11,38 @@ let _cachedRoutes = null
 let _cachedLastUpdated = null
 let _cachedGtfsFreshness = null
 
+// "Biggest contributors" view (NOTES-39): ranks routes by their absolute
+// contribution to system underperformance instead of raw worst percentage.
+// The contribution score is `(baseline - route_value) * scheduled_trips`
+// for higher-is-better metrics (OTP, service-delivered), sign-flipped for
+// lower-is-better metrics (EWT, bunching) so positive always means
+// "dragging the system down." Volume proxy is GTFS scheduled trips over
+// the window — ridership is not in the data.
+const CONTRIB_METRICS = [
+  { key: 'otp', label: 'On-Time %' },
+  { key: 'service_delivered', label: 'Service Delivered' },
+  { key: 'ewt', label: 'EWT' },
+  { key: 'bunching', label: 'Bunching' },
+]
+
+function formatContribMetricValue(metric, value) {
+  if (value == null) return '—'
+  if (metric === 'otp') return `${Math.round(value)}%`
+  if (metric === 'service_delivered') return `${Math.round(value * 100)}%`
+  if (metric === 'ewt') return `${Math.round(value)}s`
+  if (metric === 'bunching') return `${(value * 100).toFixed(1)}%`
+  return String(value)
+}
+
+function formatContribScore(score) {
+  if (score == null) return '—'
+  // The score's units depend on the metric (percent-points × trips,
+  // seconds × trips, etc.) so a raw rounded integer is the right level
+  // of precision; the rank order matters more than the absolute value.
+  const rounded = Math.round(score)
+  return rounded.toLocaleString('en-US')
+}
+
 // Format a naive-UTC ISO timestamp as a service date in Eastern. The
 // backend stores datetimes as naive UTC (see CLAUDE.md); appending 'Z'
 // makes the Date constructor treat the string as UTC instead of local.
@@ -50,6 +82,13 @@ function RouteList() {
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(_cachedLastUpdated)
   const [gtfsFreshness, setGtfsFreshness] = useState(_cachedGtfsFreshness)
+  // Mode toggle: 'default' (current scorecard) vs 'contributors' (NOTES-39).
+  // Pure additive — toggling away leaves the default view unchanged.
+  const [viewMode, setViewMode] = useState('default')
+  const [contribMetric, setContribMetric] = useState('otp')
+  const [contribData, setContribData] = useState(null)
+  const [contribLoading, setContribLoading] = useState(false)
+  const [contribError, setContribError] = useState(null)
 
   const fetchRoutes = () => {
     return fetch('/api/routes')
@@ -91,6 +130,29 @@ function RouteList() {
     fetchRoutes().finally(() => setLoading(false))
     fetchGtfsFreshness()
   }, [])
+
+  // Fetch contributors only while the contributors mode is selected, and
+  // refetch when the metric changes. Pure additive — never blocks the
+  // default view.
+  useEffect(() => {
+    if (viewMode !== 'contributors') return
+    setContribLoading(true)
+    setContribError(null)
+    fetch(`/api/routes/contributors?metric=${contribMetric}&days=30`)
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`)
+        }
+        return res.json()
+      })
+      .then(data => {
+        setContribData(data)
+      })
+      .catch(err => {
+        setContribError(err.message)
+      })
+      .finally(() => setContribLoading(false))
+  }, [viewMode, contribMetric])
 
   const handleRefresh = () => {
     setRefreshing(true)
@@ -214,6 +276,162 @@ function RouteList() {
       <div className="table-container">
         <h2>Route Performance Scorecard</h2>
 
+        <div className="mode-toggle" style={{ marginBottom: '1rem' }}>
+          <button
+            type="button"
+            onClick={() => setViewMode('default')}
+            className={viewMode === 'default' ? 'mode-active' : 'mode-inactive'}
+            style={{
+              marginRight: '0.5rem',
+              padding: '0.4rem 0.9rem',
+              fontWeight: viewMode === 'default' ? 'bold' : 'normal',
+            }}
+          >
+            Default
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('contributors')}
+            className={viewMode === 'contributors' ? 'mode-active' : 'mode-inactive'}
+            style={{
+              padding: '0.4rem 0.9rem',
+              fontWeight: viewMode === 'contributors' ? 'bold' : 'normal',
+            }}
+            title="Rank routes by contribution to system underperformance instead of raw worst percentage"
+          >
+            Biggest contributors
+          </button>
+        </div>
+
+        {viewMode === 'contributors' ? (
+          <div className="contributors-view">
+            <div className="filters" style={{ marginBottom: '0.75rem' }}>
+              <div>
+                <label htmlFor="contrib-metric" style={{ marginRight: '0.5rem' }}>
+                  Metric:
+                </label>
+                <select
+                  id="contrib-metric"
+                  value={contribMetric}
+                  onChange={e => setContribMetric(e.target.value)}
+                >
+                  {CONTRIB_METRICS.map(m => (
+                    <option key={m.key} value={m.key}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {contribData && contribData.baseline_value != null && (
+                <div className="results-count">
+                  System baseline (30d):{' '}
+                  <strong>
+                    {formatContribMetricValue(contribMetric, contribData.baseline_value)}
+                  </strong>
+                </div>
+              )}
+            </div>
+
+            {contribError && (
+              <div className="error-banner">
+                <div className="error-content">
+                  <strong>Error loading contributors:</strong> {contribError}
+                </div>
+              </div>
+            )}
+
+            {contribLoading ? (
+              <div className="loading-spinner">
+                <div className="spinner"></div>
+                <p>Loading contributors...</p>
+              </div>
+            ) : contribData == null ? null : contribData.baseline_value == null ? (
+              <p>
+                System baseline unavailable for this metric in the last 30 days — cannot rank
+                contributors yet. Once the daily metrics pipeline writes a row to{' '}
+                <code>system_metrics_daily</code> the table will populate.
+              </p>
+            ) : contribData.contributors.length === 0 ? (
+              <p>No routes have enough data to score contribution for this metric.</p>
+            ) : (
+              <table className="routes-table">
+                <thead>
+                  <tr>
+                    <th>Rank</th>
+                    <th>Route</th>
+                    <th>Name</th>
+                    <th>Route value</th>
+                    <th>Baseline</th>
+                    <th>Scheduled trips (30d)</th>
+                    <th>Contribution score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {contribData.contributors.map((c, idx) => {
+                    // Width of the score bar relative to the top contributor;
+                    // anchored on the largest absolute score so negative scores
+                    // (routes outperforming baseline) still get a visible bar.
+                    const maxAbs = Math.max(
+                      ...contribData.contributors.map(x => Math.abs(x.contribution_score || 0)),
+                      1
+                    )
+                    const barPct = (Math.abs(c.contribution_score || 0) / maxAbs) * 100
+                    const barColor = (c.contribution_score || 0) >= 0 ? '#d97706' : '#16a34a'
+                    return (
+                      <tr
+                        key={c.route_id}
+                        onClick={() => navigate(`/route/${c.route_id}`)}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        <td>{idx + 1}</td>
+                        <td className="route-id">
+                          <span
+                            className="route-badge"
+                            style={{ backgroundColor: badgeColor(null, true) }}
+                          >
+                            {c.route_short_name || c.route_id}
+                          </span>
+                        </td>
+                        <td className="route-name">{c.route_long_name || 'N/A'}</td>
+                        <td className="metric">
+                          {formatContribMetricValue(contribMetric, c.route_value)}
+                        </td>
+                        <td className="metric">
+                          {formatContribMetricValue(contribMetric, c.baseline_value)}
+                        </td>
+                        <td className="metric">{c.scheduled_trips.toLocaleString('en-US')}</td>
+                        <td className="metric">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <div
+                              style={{
+                                width: `${barPct}%`,
+                                minWidth: '2px',
+                                maxWidth: '120px',
+                                height: '10px',
+                                backgroundColor: barColor,
+                                borderRadius: '2px',
+                              }}
+                              title={`Contribution magnitude: ${formatContribScore(
+                                c.contribution_score
+                              )}`}
+                            />
+                            <span>{formatContribScore(c.contribution_score)}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+            <p style={{ marginTop: '1rem', fontSize: '0.85em', color: '#666' }}>
+              Contribution = (baseline − route value) × scheduled trips, sign-flipped for
+              lower-is-better metrics. Baseline is the system 30-day window mean; per-route
+              targets land with NOTES-47.
+            </p>
+          </div>
+        ) : (
+        <>
         <div className="filters">
           <div className="search-box">
             <input
@@ -330,6 +548,8 @@ function RouteList() {
             )}
           </tbody>
         </table>
+        </>
+        )}
       </div>
 
       {gtfsFreshness && gtfsFreshness.snapshot_date && (

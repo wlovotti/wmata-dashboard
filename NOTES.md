@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-07 (closed NOTES-43 — wired `src/excess_trip_time.py` into the daily pipeline, added four columns to `route_metrics_daily`, surfaced a "Trips > 110% of Schedule" KPI card with a median-actual / median-scheduled subline on RouteDetail, and added the metric as a selectable trend sparkline).
+Last edited 2026-05-06 (closed NOTES-39 — added `GET /api/routes/contributors` and a "Biggest contributors" mode toggle on RouteList that ranks routes by `(baseline − route_value) × scheduled_trips` against the system-window baseline; updated NOTES-47's cross-reference to point to PR #80 since per-route targets will swap baseline for target).
 
 ---
 
@@ -46,9 +46,6 @@ proxies instead).
 
 **Diagnosis & Pareto (the "what's dragging us down?" question)**
 
-- **NOTES-39 "Biggest contributors" view on RouteList.** Rank by
-  impact-weighted contribution to system miss, not by raw worst
-  percentage.
 - **NOTES-40 Stop-level diagnostic endpoint + UI.** Per-stop OTP,
   EWT, skip rate along the route's stop sequence — surfaces *where*
   trips slip.
@@ -163,21 +160,6 @@ misleading number.
 
 ---
 
-## NOTES-39. "Biggest contributors" view on RouteList
-
-**Severity: low.**
-
-Add a sort/group mode on `RouteList` that ranks routes by absolute
-*contribution* to system underperformance rather than raw percentage.
-Approximate contribution as `(target_or_baseline − actual) ×
-scheduled_trips` for whichever metric is selected. The intent is to
-direct a GM toward routes where moving the needle moves the system —
-not toward tiny low-volume routes that happen to score worst.
-Scheduled-trip count is the only volume proxy available; ridership is
-not in the data.
-
----
-
 ## NOTES-40. Stop-level diagnostic endpoint and UI
 
 **Severity: low.**
@@ -288,9 +270,10 @@ service-delivered, EWT, and bunching. Keep it simple: one number per
 single config row. Storage can be yaml in the repo or a small
 `route_targets` table. Surface targets on the system trend cards
 (PR #78, RouteList) and the per-route trend cards (PR #77, RouteDetail), and on
-the contributors view (NOTES-39, where contribution is computed
-against target). Targets can stay editable by the operator, but a
-sensible starting set should be checked in.
+the contributors view (PR #80, where contribution is computed
+against the system-window baseline today; swap to per-route target
+once this item lands). Targets can stay editable by the operator, but
+a sensible starting set should be checked in.
 
 ---
 
