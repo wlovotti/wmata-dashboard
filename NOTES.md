@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-09 (closed NOTES-41 — day-type / time-period filter on RouteDetail re-slices live KPIs and OTP trend by day-of-week and Eastern-hour bucket).
+Last edited 2026-05-09 (closed NOTES-40 — `/api/routes/{route_id}/stops` per-(direction_id, stop_id) diagnostic endpoint + StopDiagnostic strip-chart heatmap on RouteDetail; per CLAUDE.md grouping rule).
 
 ---
 
@@ -46,9 +46,6 @@ proxies instead).
 
 **Diagnosis & Pareto (the "what's dragging us down?" question)**
 
-- **NOTES-40 Stop-level diagnostic endpoint + UI.** Per-stop OTP,
-  EWT, skip rate along the route's stop sequence — surfaces *where*
-  trips slip.
 - **NOTES-42 Bunching cause decomposition.** Split bunching rate
   into leader-late vs trailer-early vs both — targets dispatch fixes
   vs running-time fixes.
@@ -162,26 +159,6 @@ on most routes. Production data currently starts 2026-05-02; revisit
 once the collector has accumulated ≥14 days of continuous data so the
 feature is interpretable rather than "mostly suppressed." The closed
 PR's commits remain retrievable via `gh pr diff 81` for re-use.
-
----
-
-## NOTES-40. Stop-level diagnostic endpoint and UI
-
-**Severity: low.**
-
-The `stop_events` table has all the data needed for per-stop OTP, EWT,
-skip rate, and median deviation, but no API endpoint exposes it. Add
-`GET /api/routes/{route_id}/stops` returning per-(direction_id,
-stop_id) metrics over a configurable window. Group strictly by
-`(route_id, direction_id, stop_id)` per the CLAUDE.md rule —
-otherwise termini and shared bays double-count and the metrics look
-~2x too tight.
-
-UI: render as a strip chart along the route's stop sequence on
-`RouteDetail` — a horizontal heatmap from origin to destination,
-colored by metric value. This is the answer to "where on the route do
-trips slip?" and likely the single most actionable diagnostic the
-dashboard can add.
 
 ---
 

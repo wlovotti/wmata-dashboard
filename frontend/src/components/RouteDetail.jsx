@@ -4,6 +4,7 @@ import RouteMap from './RouteMap'
 import PeriodDrilldown from './PeriodDrilldown'
 import RecentRuns from './RecentRuns'
 import RouteTrend, { computeWindowDelta, DeltaIndicator } from './RouteTrend'
+import StopDiagnostic from './StopDiagnostic'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 
 // Day-type / time-period filter options (NOTES-41). Keys must match the API's
@@ -478,6 +479,10 @@ function RouteDetail() {
           loading={trendLoading}
           error={trendError}
         />
+      )}
+
+      {hasMetrics && (
+        <StopDiagnostic routeId={routeId} dayType={dayType} period={period} />
       )}
 
       {hasMetrics && <PeriodDrilldown routeId={routeId} />}
