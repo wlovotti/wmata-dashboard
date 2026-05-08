@@ -86,6 +86,7 @@ from src.ewt import (
     fetch_scheduled_cell_hours_for_routes,
 )
 from src.models import StopEvent
+from src.time_periods import is_hour_in_period
 
 UTC = ZoneInfo("UTC")
 EASTERN = ZoneInfo("America/New_York")
@@ -269,6 +270,7 @@ def compute_bunching_headline_for_route(
     db: Session,
     route_id: str,
     service_date: date_type,
+    period_key: str = "all",
 ) -> dict:
     """Single-route bunching collapsed to one rate for the day.
 
@@ -276,6 +278,10 @@ def compute_bunching_headline_for_route(
     defined threshold; rate = bunched / total. Mathematically clean — the
     per-period variant just buckets the same counts and reports the ratio per
     bucket, so summing over all buckets is the natural daily aggregate.
+
+    `period_key` (NOTES-41) restricts which Eastern hours contribute — e.g.
+    `pm_peak` keeps only cell-hours in [15, 19). `late` (22-6) wraps
+    midnight via `is_hour_in_period`. Default `all` keeps every hour.
 
     Returns the same dict shape as one period row from `compute_bunching_for_route_date`,
     minus the `time_period` key.
@@ -291,6 +297,9 @@ def compute_bunching_headline_for_route(
     for cell_hour, observed in obs_by_cell_hour.items():
         threshold = _cell_hour_threshold_sec(sched_by_cell_hour.get(cell_hour, []))
         if threshold is None:
+            continue
+        _direction, _stop, hour = cell_hour
+        if not is_hour_in_period(hour, period_key):
             continue
         for headway in observed:
             if headway > MAX_OBSERVED_HEADWAY_SEC:

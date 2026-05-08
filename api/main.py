@@ -23,6 +23,12 @@ from api.aggregations import (
 )
 from src.database import get_session
 from src.models import GTFSSnapshot, VehiclePosition
+from src.time_periods import (
+    ALL_DAY_TYPES,
+    ALL_HOURS,
+    VALID_DAY_TYPES,
+    VALID_PERIOD_KEYS,
+)
 from src.timezones import utcnow_naive
 
 # Create FastAPI app
@@ -225,23 +231,57 @@ async def get_routes_contributors(metric: str = "otp", days: int = 30):
 
 
 @app.get("/api/routes/{route_id}")
-async def get_route(route_id: str, days: int = 7):
+async def get_route(
+    route_id: str,
+    days: int = 7,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+):
     """
     Get detailed metrics for a specific route
 
     Returns current performance metrics and metadata for a route.
     Used by the route detail page header.
 
+    `day_type` and `period` (NOTES-41) re-slice the live KPIs (OTP split,
+    EWT, bunching) by day-of-week and time-of-day Eastern hour. The legacy
+    summary fields (avg_headway_minutes, avg_speed_mph) and excess-trip-
+    time aren't grouped by hour and aren't filtered by `period`.
+    Service-delivered is trip-level so `period` doesn't change its value;
+    `day_type` does, by anchoring on the latest matching service_date.
+
     Args:
         route_id: Route identifier (e.g., 'C51')
         days: Number of days to analyze (default: 7)
+        day_type: One of `all` (default), `weekday`, `saturday`, `sunday`
+        period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
+            `evening`, `late`
 
     Returns:
-        Detailed route metrics including OTP, headway, speed, and trip counts
+        Detailed route metrics including OTP, headway, speed, and trip counts.
+        Echoes `day_type_filter` and `period_key` so the UI can render the
+        active-filter chip without holding extra state.
     """
+    if day_type not in VALID_DAY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid day_type. Must be one of: {', '.join(VALID_DAY_TYPES)}",
+        )
+    if period not in VALID_PERIOD_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(VALID_PERIOD_KEYS)}",
+        )
+
     db = get_session()
     try:
-        result = get_route_detail_metrics(db, route_id, days=days)
+        result = get_route_detail_metrics(
+            db,
+            route_id,
+            days=days,
+            day_type_filter=day_type,
+            period_key=period,
+        )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         return result
@@ -250,11 +290,24 @@ async def get_route(route_id: str, days: int = 7):
 
 
 @app.get("/api/routes/{route_id}/trend")
-async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
+async def get_route_trend(
+    route_id: str,
+    metric: str = "otp",
+    days: int = 30,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+):
     """
     Get time-series trend data for a specific route metric
 
     Returns daily values for a metric over time, used for trend charts.
+
+    `day_type` (NOTES-41) emits null on dates whose day-of-week doesn't
+    match (sparkline draws gaps cleanly rather than collapsing the time
+    axis). `period` is meaningful only for `metric=otp` — when set, OTP
+    is recomputed per-day from `stop_events` with the hour filter applied.
+    Other metrics (`service_delivered`, `excess_trip_time`, headway, speed)
+    are trip- or daily-aggregate level and ignore `period`.
 
     Args:
         route_id: Route identifier (e.g., 'C51')
@@ -262,6 +315,9 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
             'headway_std_dev', 'speed', 'service_delivered',
             'excess_trip_time')
         days: Number of days to analyze (default: 30)
+        day_type: One of `all` (default), `weekday`, `saturday`, `sunday`
+        period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
+            `evening`, `late`. Only applies to `metric=otp`.
 
     Returns:
         Time-series data with daily values for the specified metric
@@ -280,10 +336,27 @@ async def get_route_trend(route_id: str, metric: str = "otp", days: int = 30):
         raise HTTPException(
             status_code=400, detail=f"Invalid metric. Must be one of: {', '.join(valid_metrics)}"
         )
+    if day_type not in VALID_DAY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid day_type. Must be one of: {', '.join(VALID_DAY_TYPES)}",
+        )
+    if period not in VALID_PERIOD_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(VALID_PERIOD_KEYS)}",
+        )
 
     db = get_session()
     try:
-        result = get_route_trend_data(db, route_id, metric=metric, days=days)
+        result = get_route_trend_data(
+            db,
+            route_id,
+            metric=metric,
+            days=days,
+            day_type_filter=day_type,
+            period_key=period,
+        )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         return result

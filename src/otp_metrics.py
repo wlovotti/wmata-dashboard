@@ -29,11 +29,31 @@ deviation data.
 from __future__ import annotations
 
 from datetime import date as date_type
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
 from src.models import Run, StopEvent
 from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
+from src.time_periods import ALL_HOURS, is_hour_in_period
+
+UTC = ZoneInfo("UTC")
+EASTERN = ZoneInfo("America/New_York")
+
+
+def _eastern_hour(ts: datetime | None) -> int | None:
+    """Return the Eastern hour-of-day for a naive-UTC timestamp, or None.
+
+    Stop_event and Run timestamps are naive UTC by storage convention
+    (timezones.py). We re-attach UTC, convert to Eastern, take the hour.
+    `zoneinfo` handles DST correctly. Returns None if `ts` is None — the
+    caller decides whether a missing timestamp means "exclude" (when
+    filtering) or "include" (when no filter set).
+    """
+    if ts is None:
+        return None
+    return ts.replace(tzinfo=UTC).astimezone(EASTERN).hour
 
 
 def _bucket_deviation(dev_sec: int) -> str:
@@ -72,6 +92,7 @@ def compute_otp_split(
     db: Session,
     route_id: str,
     service_date: date_type,
+    period_key: str = ALL_HOURS,
 ) -> dict:
     """Compute origin / destination / all-timepoints OTP for one (route, date).
 
@@ -79,13 +100,24 @@ def compute_otp_split(
     have to know the source-asymmetry rules to interpret the numbers.
     All sub-blocks return `{"n": 0}` (no other keys) when no data exists,
     distinguishing absence from a real 0% on-time.
+
+    `period_key` (NOTES-41) restricts which observed timestamps contribute:
+      - origin: filter by Eastern hour of the run's `first_obs_ts`
+      - destination: filter by Eastern hour of the run's `last_obs_ts`
+      - all_timepoints: filter by Eastern hour of `stop_events.observed_arrival_ts`
+    Default `all` keeps every hour. Filtering happens in Python after the
+    fetch to keep test parity with SQLite (production Postgres could push
+    the predicate via `to_eastern_sql`, but the deviation lists are short
+    enough that the round-trip cost dominates either way).
     """
     service_date_str = service_date.isoformat()
+    no_filter = period_key == ALL_HOURS
 
     # Origin: proximity runs only (TU has 0% origin coverage by design).
-    origin_devs = [
-        d
-        for (d,) in db.query(Run.origin_dev_sec)
+    # Pull `first_obs_ts` alongside dev_sec so we can apply the period filter
+    # in Python; the database stores it for free, the cost is one extra column.
+    origin_rows = (
+        db.query(Run.origin_dev_sec, Run.first_obs_ts)
         .filter(
             Run.route_id == route_id,
             Run.service_date == service_date_str,
@@ -93,12 +125,20 @@ def compute_otp_split(
             Run.origin_dev_sec.isnot(None),
         )
         .all()
-    ]
+    )
+    if no_filter:
+        origin_devs = [d for d, _ts in origin_rows]
+    else:
+        origin_devs = [
+            d
+            for d, ts in origin_rows
+            if (h := _eastern_hour(ts)) is not None and is_hour_in_period(h, period_key)
+        ]
 
     # Destination: trip_update runs only (proximity has ~1% destination coverage).
-    destination_devs = [
-        d
-        for (d,) in db.query(Run.destination_dev_sec)
+    # Bucket by `last_obs_ts` — the run's destination observation timestamp.
+    destination_rows = (
+        db.query(Run.destination_dev_sec, Run.last_obs_ts)
         .filter(
             Run.route_id == route_id,
             Run.service_date == service_date_str,
@@ -106,13 +146,21 @@ def compute_otp_split(
             Run.destination_dev_sec.isnot(None),
         )
         .all()
-    ]
+    )
+    if no_filter:
+        destination_devs = [d for d, _ts in destination_rows]
+    else:
+        destination_devs = [
+            d
+            for d, ts in destination_rows
+            if (h := _eastern_hour(ts)) is not None and is_hour_in_period(h, period_key)
+        ]
 
     # All timepoints: proximity stop_events directly (matches existing
     # route_metrics_daily semantics — position-derived, every observed stop).
-    all_devs = [
-        d
-        for (d,) in db.query(StopEvent.deviation_sec)
+    # Bucket each stop event by its own `observed_arrival_ts`.
+    all_rows = (
+        db.query(StopEvent.deviation_sec, StopEvent.observed_arrival_ts)
         .filter(
             StopEvent.route_id == route_id,
             StopEvent.service_date == service_date_str,
@@ -120,7 +168,15 @@ def compute_otp_split(
             StopEvent.deviation_sec.isnot(None),
         )
         .all()
-    ]
+    )
+    if no_filter:
+        all_devs = [d for d, _ts in all_rows]
+    else:
+        all_devs = [
+            d
+            for d, ts in all_rows
+            if (h := _eastern_hour(ts)) is not None and is_hour_in_period(h, period_key)
+        ]
 
     return {
         "route_id": route_id,

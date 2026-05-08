@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-08 (deferred NOTES-38 — server-side period-over-period deltas need ≥14 days of stop_events/runs data before they're interpretable; closed PR #81 documents the implementation for re-use).
+Last edited 2026-05-09 (closed NOTES-41 — day-type / time-period filter on RouteDetail re-slices live KPIs and OTP trend by day-of-week and Eastern-hour bucket).
 
 ---
 
@@ -49,8 +49,6 @@ proxies instead).
 - **NOTES-40 Stop-level diagnostic endpoint + UI.** Per-stop OTP,
   EWT, skip rate along the route's stop sequence — surfaces *where*
   trips slip.
-- **NOTES-41 Day-type / time-period filter on RouteDetail.**
-  Surface the day-type dimension that already exists in compute.
 - **NOTES-42 Bunching cause decomposition.** Split bunching rate
   into leader-late vs trailer-early vs both — targets dispatch fixes
   vs running-time fixes.
@@ -184,20 +182,6 @@ UI: render as a strip chart along the route's stop sequence on
 colored by metric value. This is the answer to "where on the route do
 trips slip?" and likely the single most actionable diagnostic the
 dashboard can add.
-
----
-
-## NOTES-41. Day-type / time-period filter on RouteDetail
-
-**Severity: low.**
-
-Day-type (weekday / Saturday / Sunday) and time-of-day period are
-already preserved in computation (`src/ewt.py`, `src/bunching.py`,
-`src/service_profile.py`) but the user can't slice by them. Add a
-filter on `RouteDetail` that re-slices all KPIs and the trend — e.g.
-"weekday AM peak" vs "Saturday evening." Mostly a frontend filter +
-endpoint param; the underlying queries already group by these
-dimensions.
 
 ---
 
