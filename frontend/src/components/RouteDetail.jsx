@@ -485,7 +485,9 @@ function RouteDetail() {
         <StopDiagnostic routeId={routeId} dayType={dayType} period={period} />
       )}
 
-      {hasMetrics && <PeriodDrilldown routeId={routeId} />}
+      {hasMetrics && (
+        <PeriodDrilldown routeId={routeId} dayType={dayType} period={period} />
+      )}
 
       <RecentRuns routeId={routeId} />
 

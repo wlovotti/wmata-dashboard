@@ -17,12 +17,20 @@ import pytest
 from src.bunching import (
     BUNCHING_ABSOLUTE_FLOOR_SEC,
     BUNCHING_RATIO,
+    CAUSE_BOTH_OFF,
+    CAUSE_LEADER_LATE_ONLY,
+    CAUSE_NEITHER_OFF,
+    CAUSE_TRAILER_EARLY_ONLY,
+    CAUSE_UNKNOWN,
     _cell_hour_threshold_sec,
+    classify_bunched_pair,
+    compute_bunching_cause_breakdown,
     compute_bunching_for_route_date,
     compute_bunching_for_routes,
 )
 from src.ewt import EWT_TIME_PERIODS
 from src.models import Calendar, Route, Stop, StopEvent, StopTime, Trip
+from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
 
 ROUTE = "TEST1"
 SERVICE_DATE = date(2026, 4, 14)  # Tuesday, EDT
@@ -139,11 +147,18 @@ def _seed_stop_event(
     source: str = "trip_update",
     schedule_relationship: str = "SCHEDULED",
     stop_sequence: int = 1,
+    deviation_sec: int | None = None,
+    service_date: str = SERVICE_DATE_STR,
 ) -> None:
-    """Insert one StopEvent row. observed_arrival_ts is naive UTC."""
+    """Insert one StopEvent row. observed_arrival_ts is naive UTC.
+
+    `deviation_sec` is forwarded onto the row so cause-decomposition tests
+    (NOTES-42) can pin leader/trailer schedule deviations without computing
+    against a live schedule join.
+    """
     db_session.add(
         StopEvent(
-            service_date=SERVICE_DATE_STR,
+            service_date=service_date,
             trip_id=trip_id,
             route_id=route_id,
             direction_id=direction_id,
@@ -152,6 +167,7 @@ def _seed_stop_event(
             observed_arrival_ts=observed_arrival_ts,
             source=source,
             schedule_relationship=schedule_relationship,
+            deviation_sec=deviation_sec,
         )
     )
     db_session.commit()
@@ -377,3 +393,329 @@ class TestComputeBunchingForRoutes:
         for r in rows:
             assert r["route_id"] == "NOPE"
             assert r["total_headways"] == 0
+
+
+# ---------------------------------------------------------------------------
+# NOTES-42: bunching cause decomposition
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyBunchedPair:
+    """Pure function — exhaustive coverage at every category boundary."""
+
+    def test_both_within_window_is_neither_off(self):
+        """Inside the WMATA OTP window on both sides ⇒ neither_off."""
+        assert classify_bunched_pair(0, 0) == CAUSE_NEITHER_OFF
+        # At the late boundary exactly (not strictly greater) ⇒ not "late."
+        assert classify_bunched_pair(OTP_LATE_SEC, 0) == CAUSE_NEITHER_OFF
+        # At the early boundary exactly (not strictly less) ⇒ not "early."
+        assert classify_bunched_pair(0, OTP_EARLY_SEC) == CAUSE_NEITHER_OFF
+
+    def test_leader_late_only(self):
+        """Leader past +7min, trailer not below -2min ⇒ leader_late_only."""
+        assert classify_bunched_pair(OTP_LATE_SEC + 1, 0) == CAUSE_LEADER_LATE_ONLY
+        # Trailer is also late (positive dev) but still classified as leader-only.
+        assert classify_bunched_pair(900, 300) == CAUSE_LEADER_LATE_ONLY
+        # Trailer at the early boundary exactly ⇒ still not "early," so leader-only.
+        assert classify_bunched_pair(OTP_LATE_SEC + 1, OTP_EARLY_SEC) == CAUSE_LEADER_LATE_ONLY
+
+    def test_trailer_early_only(self):
+        """Leader within window, trailer below -2min ⇒ trailer_early_only."""
+        assert classify_bunched_pair(0, OTP_EARLY_SEC - 1) == CAUSE_TRAILER_EARLY_ONLY
+        # Leader at the late boundary exactly ⇒ still not "late."
+        assert classify_bunched_pair(OTP_LATE_SEC, OTP_EARLY_SEC - 1) == CAUSE_TRAILER_EARLY_ONLY
+        # Strongly negative leader (very early) doesn't change the classification —
+        # only "late" matters for the leader.
+        assert classify_bunched_pair(-300, -300) == CAUSE_TRAILER_EARLY_ONLY
+
+    def test_both_off(self):
+        """Leader past +7min AND trailer below -2min ⇒ both_off (compounding)."""
+        assert classify_bunched_pair(OTP_LATE_SEC + 1, OTP_EARLY_SEC - 1) == CAUSE_BOTH_OFF
+        assert classify_bunched_pair(900, -600) == CAUSE_BOTH_OFF
+
+    def test_unknown_when_either_dev_is_none(self):
+        """Null on either side ⇒ unknown — schedule didn't match."""
+        assert classify_bunched_pair(None, 0) == CAUSE_UNKNOWN
+        assert classify_bunched_pair(0, None) == CAUSE_UNKNOWN
+        assert classify_bunched_pair(None, None) == CAUSE_UNKNOWN
+        # Even when the other side would otherwise classify as off-window,
+        # null still wins.
+        assert classify_bunched_pair(None, OTP_EARLY_SEC - 1) == CAUSE_UNKNOWN
+        assert classify_bunched_pair(OTP_LATE_SEC + 1, None) == CAUSE_UNKNOWN
+
+
+class TestComputeBunchingCauseBreakdown:
+    """End-to-end: stop_events → bunched-pair detection → cause categories."""
+
+    def _setup_route(self, db_session):
+        """Seed route + Tuesday calendar + a stop, returning nothing.
+
+        Pins `eastern_today()` to SERVICE_DATE so the window is stable
+        regardless of clock drift around midnight.
+        """
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S1")
+        _seed_schedule_at_7am(db_session)
+
+    @pytest.fixture(autouse=True)
+    def _freeze_eastern_today(self, monkeypatch):
+        """Pin the window's end_date to SERVICE_DATE."""
+        import src.timezones as tz
+
+        monkeypatch.setattr(tz, "eastern_today", lambda: SERVICE_DATE)
+
+    def test_empty_route_zero_pairs(self, db_session):
+        """No stop_events ⇒ n_bunched_pairs=0, all categories zero."""
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        result = compute_bunching_cause_breakdown(db_session, ROUTE, days=7)
+        assert result["route_id"] == ROUTE
+        assert result["n_bunched_pairs"] == 0
+        assert result["breakdown"][CAUSE_LEADER_LATE_ONLY]["count"] == 0
+        # Pcts are all zero when there are no pairs.
+        for cat in result["breakdown"].values():
+            assert cat["pct"] == 0.0
+
+    def test_classifies_each_category(self, db_session):
+        """Seed one bunched pair per category and verify the counts.
+
+        Each pair is two consecutive stop_events at S1 60s apart (well
+        below the 150s threshold — schedule mean is 600s, ratio threshold
+        is 150s, floor 120s). Different (trip_id, leader_dev, trailer_dev)
+        combinations exercise the four populated categories.
+
+        All pairs land in the 11:xx UTC = 7am EDT hour (same hour the
+        schedule fixture covers via `_seed_schedule_at_7am`). Pairs are
+        spaced 5+ min apart so the gap between pair-N's trailer and
+        pair-(N+1)'s leader is above the 150s threshold and the gap
+        itself doesn't count as bunched.
+        """
+        self._setup_route(db_session)
+        # Pair 1 (11:00, 11:01 UTC): leader_late, trailer not early ⇒ leader_late_only.
+        _seed_stop_event(
+            db_session,
+            trip_id="LL_a",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 0, 0),
+            deviation_sec=OTP_LATE_SEC + 60,  # +480s, late
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="LL_b",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 1, 0),
+            deviation_sec=0,  # on time
+        )
+        # Pair 2 (11:10, 11:11 UTC): leader on time, trailer early ⇒ trailer_early_only.
+        # 11:01 → 11:10 is 540s — above the 150s threshold and below the
+        # 7200s service-break drop, so it's an observed-but-not-bunched pair.
+        _seed_stop_event(
+            db_session,
+            trip_id="TE_a",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 10, 0),
+            deviation_sec=0,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="TE_b",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 11, 0),
+            deviation_sec=OTP_EARLY_SEC - 60,  # -180s, early
+        )
+        # Pair 3 (11:20, 11:21 UTC): leader late AND trailer early ⇒ both_off.
+        _seed_stop_event(
+            db_session,
+            trip_id="BO_a",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 20, 0),
+            deviation_sec=OTP_LATE_SEC + 30,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="BO_b",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 21, 0),
+            deviation_sec=OTP_EARLY_SEC - 30,
+        )
+        # Pair 4 (11:30, 11:31 UTC): both within window ⇒ neither_off.
+        _seed_stop_event(
+            db_session,
+            trip_id="NO_a",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 30, 0),
+            deviation_sec=0,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="NO_b",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 31, 0),
+            deviation_sec=60,
+        )
+        # Pair 5 (11:40, 11:41 UTC): trailer dev null ⇒ unknown.
+        _seed_stop_event(
+            db_session,
+            trip_id="UN_a",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 40, 0),
+            deviation_sec=0,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="UN_b",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 41, 0),
+            deviation_sec=None,
+        )
+
+        result = compute_bunching_cause_breakdown(db_session, ROUTE, days=7)
+        assert result["n_bunched_pairs"] == 5
+        bd = result["breakdown"]
+        assert bd[CAUSE_LEADER_LATE_ONLY]["count"] == 1
+        assert bd[CAUSE_TRAILER_EARLY_ONLY]["count"] == 1
+        assert bd[CAUSE_BOTH_OFF]["count"] == 1
+        assert bd[CAUSE_NEITHER_OFF]["count"] == 1
+        assert bd[CAUSE_UNKNOWN]["count"] == 1
+        # Pcts sum to 1.0 across categories.
+        total_pct = sum(c["pct"] for c in bd.values())
+        assert total_pct == pytest.approx(1.0, abs=1e-3)
+        # Each is 1/5 = 0.2.
+        for c in bd.values():
+            assert c["pct"] == pytest.approx(0.2)
+
+    def test_period_filter_restricts_pairs(self, db_session):
+        """`period=am_peak` keeps only pairs in the 6-10 Eastern bucket."""
+        self._setup_route(db_session)
+        # AM peak pair (11:00 UTC = 7:00 EDT): leader_late_only.
+        _seed_stop_event(
+            db_session,
+            trip_id="AM_a",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 0, 0),
+            deviation_sec=OTP_LATE_SEC + 60,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="AM_b",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 1, 0),
+            deviation_sec=0,
+        )
+
+        unfiltered = compute_bunching_cause_breakdown(db_session, ROUTE, days=7)
+        assert unfiltered["n_bunched_pairs"] == 1
+        assert unfiltered["breakdown"][CAUSE_LEADER_LATE_ONLY]["count"] == 1
+
+        am_only = compute_bunching_cause_breakdown(db_session, ROUTE, days=7, period="am_peak")
+        assert am_only["n_bunched_pairs"] == 1
+        # `pm_peak` (15-19 EDT = 19-23 UTC) excludes the 7am pair entirely.
+        pm_only = compute_bunching_cause_breakdown(db_session, ROUTE, days=7, period="pm_peak")
+        assert pm_only["n_bunched_pairs"] == 0
+        for c in pm_only["breakdown"].values():
+            assert c["count"] == 0
+
+    def test_day_type_filter_restricts_pairs(self, db_session):
+        """`day_type=weekday` matches Tuesday SERVICE_DATE; saturday excludes."""
+        self._setup_route(db_session)
+        _seed_stop_event(
+            db_session,
+            trip_id="DT_a",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 0, 0),
+            deviation_sec=0,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="DT_b",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 1, 0),
+            deviation_sec=0,
+        )
+
+        weekday = compute_bunching_cause_breakdown(db_session, ROUTE, days=7, day_type="weekday")
+        assert weekday["n_bunched_pairs"] == 1
+
+        saturday = compute_bunching_cause_breakdown(db_session, ROUTE, days=7, day_type="saturday")
+        assert saturday["n_bunched_pairs"] == 0
+
+    def test_percentage_math_two_pairs(self, db_session):
+        """Two leader_late_only pairs, one neither_off ⇒ 2/3 vs 1/3 split."""
+        self._setup_route(db_session)
+        # Pair 1: leader_late_only.
+        _seed_stop_event(
+            db_session,
+            trip_id="A1",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 0, 0),
+            deviation_sec=OTP_LATE_SEC + 60,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="A2",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 1, 0),
+            deviation_sec=0,
+        )
+        # Pair 2 (11:15, 11:16): leader_late_only.
+        # 11:01 → 11:15 = 840s, above the 150s threshold so the gap-pair
+        # doesn't count.
+        _seed_stop_event(
+            db_session,
+            trip_id="B1",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 15, 0),
+            deviation_sec=OTP_LATE_SEC + 60,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="B2",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 16, 0),
+            deviation_sec=60,
+        )
+        # Pair 3 (11:30, 11:31): neither_off. Same hour bucket as the
+        # schedule fixture (11:xx UTC = 7am EDT).
+        _seed_stop_event(
+            db_session,
+            trip_id="C1",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 30, 0),
+            deviation_sec=60,
+        )
+        _seed_stop_event(
+            db_session,
+            trip_id="C2",
+            route_id=ROUTE,
+            stop_id="S1",
+            observed_arrival_ts=datetime(2026, 4, 14, 11, 31, 0),
+            deviation_sec=120,
+        )
+
+        result = compute_bunching_cause_breakdown(db_session, ROUTE, days=7)
+        assert result["n_bunched_pairs"] == 3
+        assert result["breakdown"][CAUSE_LEADER_LATE_ONLY]["count"] == 2
+        # pcts are rounded to 4 decimals in the implementation; loose tolerance.
+        assert result["breakdown"][CAUSE_LEADER_LATE_ONLY]["pct"] == pytest.approx(2 / 3, abs=1e-3)
+        assert result["breakdown"][CAUSE_NEITHER_OFF]["count"] == 1
+        assert result["breakdown"][CAUSE_NEITHER_OFF]["pct"] == pytest.approx(1 / 3, abs=1e-3)

@@ -73,7 +73,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date as date_type
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -86,7 +86,12 @@ from src.ewt import (
     fetch_scheduled_cell_hours_for_routes,
 )
 from src.models import StopEvent
-from src.time_periods import is_hour_in_period
+from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
+from src.time_periods import (
+    ALL_DAY_TYPES,
+    ALL_HOURS,
+    is_hour_in_period,
+)
 
 UTC = ZoneInfo("UTC")
 EASTERN = ZoneInfo("America/New_York")
@@ -401,3 +406,291 @@ def compute_bunching_headline_for_routes(
             route_id, service_date_str, day_type, bunched, total
         )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Bunching cause decomposition (NOTES-42)
+#
+# Classical bus-bunching theory (Wikipedia "Bus bunching"; Tandfonline 2024
+# review of bus-bunching control strategies) ascribes bunching to a feedback
+# loop: a late leader picks up extra passengers (extending dwell, making it
+# later) while the trailer encounters fewer passengers and runs early. That
+# maps two intervention points:
+#
+#   - leader-late ⇒ running-time problem (recovery / cycle-time fix)
+#   - trailer-early ⇒ dispatch-discipline problem (departure-control fix)
+#   - both off ⇒ compounding; both fixes apply
+#
+# The mapping is textbook. The presentation below — categorizing every
+# bunched pair into one of five buckets and reporting the percentage mix —
+# is internal dashboard innovation, not a TCRP-named or
+# transit-agency-published metric. Frame it accordingly in the UI: useful
+# diagnostic, not industry-standard.
+#
+# Threshold choice: the WMATA OTP window (-2/+7 min) from
+# `src/otp_constants.py`. Saved memory `project_otp_window.md` is the
+# project standard for "late" / "early" everywhere on the dashboard;
+# reusing it keeps the classification coherent with the rest of the
+# surface. A symmetric tighter threshold (e.g. ±2 min) would pull more
+# pairs into the "off" categories at the cost of inconsistency with OTP.
+# ---------------------------------------------------------------------------
+
+# Cause-category labels. These are the keys in the breakdown dict and the
+# return values from `classify_bunched_pair`.
+CAUSE_LEADER_LATE_ONLY = "leader_late_only"
+CAUSE_TRAILER_EARLY_ONLY = "trailer_early_only"
+CAUSE_BOTH_OFF = "both_off"
+CAUSE_NEITHER_OFF = "neither_off"
+CAUSE_UNKNOWN = "unknown"
+
+CAUSE_CATEGORIES: tuple[str, ...] = (
+    CAUSE_LEADER_LATE_ONLY,
+    CAUSE_TRAILER_EARLY_ONLY,
+    CAUSE_BOTH_OFF,
+    CAUSE_NEITHER_OFF,
+    CAUSE_UNKNOWN,
+)
+
+
+def classify_bunched_pair(
+    leader_dev_sec: int | float | None,
+    trailer_dev_sec: int | float | None,
+) -> str:
+    """Categorize one bunched pair by leader/trailer deviation against schedule.
+
+    "Late" means `dev > OTP_LATE_SEC` (+420s, more than 7 minutes behind
+    schedule per the WMATA OTP window). "Early" means `dev < OTP_EARLY_SEC`
+    (-120s, more than 2 minutes ahead of schedule). The thresholds come from
+    `src/otp_constants.py`, which is the project's single source of truth
+    for OTP boundaries (saved memory `project_otp_window.md`).
+
+    Returns one of:
+      - `leader_late_only`: leader late, trailer not early — recovery /
+        running-time problem; the leader fell behind, the trailer is on time
+        (or running late itself, just not early), and the gap closed because
+        the leader couldn't recover.
+      - `trailer_early_only`: leader not late, trailer early — dispatch /
+        departure-discipline problem; the leader is on time, the trailer
+        rolled out ahead of schedule and caught up.
+      - `both_off`: leader late AND trailer early — compounding; both
+        interventions apply.
+      - `neither_off`: leader on time AND trailer on time — both within
+        the WMATA OTP window but the trailer compressed running time
+        without crossing the early threshold. Documented but not
+        operationally featured; a tighter symmetric threshold would
+        re-bucket some of these pairs into the off categories.
+      - `unknown`: at least one side has a null deviation_sec — the
+        stop_event lacked a scheduled-time match (no GTFS row, post-midnight
+        anchor edge cases, or ADDED-trip residue not filtered upstream).
+
+    Pure function — no DB access, easy to test exhaustively.
+    """
+    if leader_dev_sec is None or trailer_dev_sec is None:
+        return CAUSE_UNKNOWN
+    leader_late = leader_dev_sec > OTP_LATE_SEC
+    trailer_early = trailer_dev_sec < OTP_EARLY_SEC
+    if leader_late and trailer_early:
+        return CAUSE_BOTH_OFF
+    if leader_late:
+        return CAUSE_LEADER_LATE_ONLY
+    if trailer_early:
+        return CAUSE_TRAILER_EARLY_ONLY
+    return CAUSE_NEITHER_OFF
+
+
+def _bunched_pairs_with_deviations(
+    db: Session,
+    route_id: str,
+    start_iso: str,
+    end_iso: str,
+) -> list[dict]:
+    """Yield one record per bunched (leader, trailer) pair across a date window.
+
+    Walks `stop_events` ordered by (service_date, direction_id, stop_id,
+    observed_arrival_ts) and emits a record for every consecutive pair
+    within the same (date, direction, stop_id) cell whose observed headway
+    falls below the cell-hour threshold. Each record carries:
+
+      - `service_date`: pair's service_date (used for day_type filter)
+      - `eastern_hour`: leader's Eastern hour (period filter / time-period
+        bucketing — matches the EWT/bunching attribution rule)
+      - `leader_dev_sec`, `trailer_dev_sec`: schedule deviations for cause
+        classification
+
+    Filters mirror `_scheduled_observed_headways_by_cell_hour`:
+    `source='trip_update'`, `schedule_relationship='SCHEDULED'`, and
+    `observed_arrival_ts IS NOT NULL`. Pairs with gap > 120 min are dropped
+    (service breaks).
+
+    The threshold is per-(direction, stop, hour) — same `_cell_hour_threshold_sec`
+    formula as `compute_bunching_for_route_date` — so a route's "bunching
+    rate" and its "cause breakdown" agree on which pairs are bunched.
+
+    Scheduled headways are pulled per-day_type (using `_day_type_for` on
+    each service_date). Caching the per-day_type schedule across the date
+    window avoids re-querying GTFS for every day.
+    """
+    rows = (
+        db.query(
+            StopEvent.service_date,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+            StopEvent.deviation_sec,
+        )
+        .filter(
+            StopEvent.route_id == route_id,
+            StopEvent.service_date >= start_iso,
+            StopEvent.service_date <= end_iso,
+            StopEvent.source == "trip_update",
+            StopEvent.schedule_relationship == "SCHEDULED",
+            StopEvent.observed_arrival_ts.isnot(None),
+        )
+        .order_by(
+            StopEvent.service_date,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+        )
+        .all()
+    )
+
+    # Cache the per-day_type scheduled cell-hour map so the repeated calls
+    # across a multi-day window don't re-query GTFS for every day. Day_types
+    # are at most three values (`weekday` / `saturday` / `sunday`).
+    sched_cache: dict[str, dict[CellHour, list[float]]] = {}
+
+    def _sched_for_date(service_date_str: str) -> dict[CellHour, list[float]]:
+        """Return cell-hour scheduled headways for the date's day_type, cached."""
+        try:
+            d = datetime.strptime(service_date_str, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return {}
+        day_type = _day_type_for(d)
+        cached = sched_cache.get(day_type)
+        if cached is None:
+            cached = _scheduled_headways_by_cell_hour(db, route_id, day_type)
+            sched_cache[day_type] = cached
+        return cached
+
+    out: list[dict] = []
+    prev_key: tuple[str, int, str] | None = None
+    prev_ts: datetime | None = None
+    prev_dev: int | None = None
+    for service_date, direction_id, stop_id, ts, dev in rows:
+        key = (service_date, direction_id, stop_id)
+        if prev_key == key and prev_ts is not None:
+            delta = (ts - prev_ts).total_seconds()
+            if 0 < delta <= MAX_OBSERVED_HEADWAY_SEC:
+                hour = _eastern_hour(prev_ts)
+                sched = _sched_for_date(service_date)
+                threshold = _cell_hour_threshold_sec(sched.get((direction_id, stop_id, hour), []))
+                if threshold is not None and delta < threshold:
+                    out.append(
+                        {
+                            "service_date": service_date,
+                            "eastern_hour": hour,
+                            "leader_dev_sec": prev_dev,
+                            "trailer_dev_sec": dev,
+                        }
+                    )
+        prev_key = key
+        prev_ts = ts
+        prev_dev = dev
+    return out
+
+
+def compute_bunching_cause_breakdown(
+    db: Session,
+    route_id: str,
+    days: int = 30,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+) -> dict:
+    """Decompose bunched pairs by likely cause over a route-window (NOTES-42).
+
+    For every bunched pair on the route in the past `days` days, classify
+    by leader/trailer schedule deviation:
+
+      - `leader_late_only`: running-time / recovery problem
+      - `trailer_early_only`: dispatch / departure-discipline problem
+      - `both_off`: compounding (both interventions apply)
+      - `neither_off`: both within the WMATA OTP window — the trailer
+        compressed running time without crossing the early threshold
+      - `unknown`: at least one side has no schedule match
+
+    The mechanism is textbook bus-bunching theory (late leaders pick up
+    more passengers, extending dwell; trailers run light and catch up).
+    The decomposition presented here is internal — not a
+    transit-agency-published metric. See module section comment.
+
+    Threshold: the WMATA OTP window (-2/+7 min) from
+    `src/otp_constants.py`. See `classify_bunched_pair` for boundaries.
+
+    Args:
+        db: SQLAlchemy session.
+        route_id: Route identifier (e.g., 'C51').
+        days: Window length in days (default 30, end-inclusive on
+            today's Eastern service date).
+        day_type: One of `all` / `weekday` / `saturday` / `sunday`.
+            Filters by `_day_type_for(service_date)`.
+        period: One of `all` / `am_peak` / `midday` / `pm_peak` /
+            `evening` / `late`. Filters by Eastern hour of the leader's
+            observed arrival (matches the EWT/bunching attribution rule).
+
+    Returns:
+        Dict with `route_id`, `days`, `day_type`, `period`,
+        `n_bunched_pairs`, and `breakdown` — a dict keyed by category
+        name with `{"count": int, "pct": float}` values. `pct` is the
+        share of bunched pairs in that category (sums to 1.0 across
+        all five categories when `n_bunched_pairs > 0`; empty dict
+        with zero counts otherwise).
+    """
+    from src.timezones import eastern_today
+
+    end_date = eastern_today()
+    start_date = end_date - timedelta(days=days)
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+
+    no_day_type_filter = day_type == ALL_DAY_TYPES
+    no_period_filter = period == ALL_HOURS
+
+    pairs = _bunched_pairs_with_deviations(db, route_id, start_iso, end_iso)
+
+    counts: dict[str, int] = dict.fromkeys(CAUSE_CATEGORIES, 0)
+    n_kept = 0
+    for p in pairs:
+        # day_type filter — apply against the pair's service_date.
+        if not no_day_type_filter:
+            try:
+                d = datetime.strptime(p["service_date"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
+            if _day_type_for(d) != day_type:
+                continue
+        # period filter — applied to the leader's Eastern hour, matching
+        # the EWT/bunching attribution rule (each headway belongs to the
+        # earlier arrival's hour bucket).
+        if not no_period_filter and not is_hour_in_period(p["eastern_hour"], period):
+            continue
+
+        category = classify_bunched_pair(p["leader_dev_sec"], p["trailer_dev_sec"])
+        counts[category] += 1
+        n_kept += 1
+
+    if n_kept > 0:
+        breakdown = {
+            c: {"count": counts[c], "pct": round(counts[c] / n_kept, 4)} for c in CAUSE_CATEGORIES
+        }
+    else:
+        breakdown = {c: {"count": 0, "pct": 0.0} for c in CAUSE_CATEGORIES}
+
+    return {
+        "route_id": route_id,
+        "days": days,
+        "day_type": day_type,
+        "period": period,
+        "n_bunched_pairs": n_kept,
+        "breakdown": breakdown,
+    }

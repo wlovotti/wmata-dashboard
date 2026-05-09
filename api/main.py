@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.aggregations import (
     get_all_routes_scorecard,
+    get_route_bunching_causes,
     get_route_contributors,
     get_route_detail_metrics,
     get_route_period_drilldown,
@@ -521,6 +522,80 @@ async def get_route_stop_diagnostics_endpoint(
             day_type=day_type,
             period=period,
             direction_id=direction_id,
+        )
+    finally:
+        db.close()
+
+
+@app.get("/api/routes/{route_id}/bunching-causes")
+async def get_route_bunching_causes_endpoint(
+    route_id: str,
+    days: int = 30,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+):
+    """
+    Bunching cause decomposition for one route over a window (NOTES-42).
+
+    For every bunched pair on the route, classify by leader/trailer schedule
+    deviation against the WMATA OTP window (-2/+7 min):
+
+    - `leader_late_only`: running-time / recovery problem (leader fell
+      behind, trailer wasn't early — gap closed because the leader
+      couldn't recover)
+    - `trailer_early_only`: dispatch / departure-discipline problem
+      (leader on schedule, trailer rolled out early and caught up)
+    - `both_off`: compounding (both interventions apply)
+    - `neither_off`: both within the OTP window — the trailer compressed
+      running time without crossing the early threshold; documented but
+      not operationally featured
+    - `unknown`: at least one side has no schedule match
+
+    The mechanism is textbook bus-bunching theory (late leaders pick up
+    more passengers, extending dwell; trailers run light and catch up;
+    Wikipedia "Bus bunching"; Tandfonline 2024 review of bunching control
+    strategies). The five-bucket decomposition surfaced here is internal
+    to this dashboard — useful diagnostic, not an industry-standard or
+    transit-agency-published metric.
+
+    `day_type` and `period` (NOTES-41) re-slice the same way as the rest
+    of the per-route surface: `day_type` filters by service-day-of-week,
+    `period` filters by Eastern hour of the leader's observed arrival.
+
+    Args:
+        route_id: Route identifier (e.g., 'C51').
+        days: Window length in days (default: 30).
+        day_type: One of `all` (default), `weekday`, `saturday`, `sunday`.
+        period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
+            `evening`, `late`.
+
+    Returns:
+        Dict with `route_id`, `days`, `day_type`, `period`,
+        `n_bunched_pairs`, and `breakdown` (per-category count + pct).
+    """
+    if day_type not in VALID_DAY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid day_type. Must be one of: {', '.join(VALID_DAY_TYPES)}",
+        )
+    if period not in VALID_PERIOD_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(VALID_PERIOD_KEYS)}",
+        )
+    if days < 1:
+        days = 1
+    if days > 90:
+        days = 90
+
+    db = get_session()
+    try:
+        return get_route_bunching_causes(
+            db,
+            route_id,
+            days=days,
+            day_type=day_type,
+            period=period,
         )
     finally:
         db.close()

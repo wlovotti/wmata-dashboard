@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-09 (closed NOTES-40 — `/api/routes/{route_id}/stops` per-(direction_id, stop_id) diagnostic endpoint + StopDiagnostic strip-chart heatmap on RouteDetail; per CLAUDE.md grouping rule).
+Last edited 2026-05-06 (closed NOTES-42 — bunching cause decomposition via `/api/routes/{route_id}/bunching-causes` + stacked-bar visualization on PeriodDrilldown; mechanism is textbook bus-bunching theory, presentation is internal).
 
 ---
 
@@ -43,12 +43,6 @@ proxies instead).
 - **NOTES-47 Per-route targets / commitments config.** Configurable
   per-route targets so trend cards can show "vs target," not only
   "vs prior period."
-
-**Diagnosis & Pareto (the "what's dragging us down?" question)**
-
-- **NOTES-42 Bunching cause decomposition.** Split bunching rate
-  into leader-late vs trailer-early vs both — targets dispatch fixes
-  vs running-time fixes.
 
 **Decision support & operator-side proxies**
 
@@ -159,22 +153,6 @@ on most routes. Production data currently starts 2026-05-02; revisit
 once the collector has accumulated ≥14 days of continuous data so the
 feature is interpretable rather than "mostly suppressed." The closed
 PR's commits remain retrievable via `gh pr diff 81` for re-use.
-
----
-
-## NOTES-42. Bunching cause decomposition
-
-**Severity: low.**
-
-`src/bunching.py` flags pairs where the observed headway is below the
-threshold but doesn't tell us *why*. For each bunched pair, compare
-both runs' deviations against schedule: if the leader is late and the
-trailer is on-time, it's a recovery failure (running-time problem); if
-the leader is on-time and the trailer is early, it's a dispatch
-failure (departure-discipline problem); if both are off, it's
-compounding. Add the breakdown to the bunching API surface and render
-it on `PeriodDrilldown` as a stacked bar. Lets a GM target the right
-intervention.
 
 ---
 
