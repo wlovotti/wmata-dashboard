@@ -16,6 +16,7 @@ from api.aggregations import (
     get_route_detail_metrics,
     get_route_period_drilldown,
     get_route_recent_runs,
+    get_route_stop_diagnostics,
     get_route_time_period_summary,
     get_route_trend_data,
     get_run_deviations,
@@ -445,6 +446,82 @@ async def get_route_period_drilldown_endpoint(route_id: str):
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         return result
+    finally:
+        db.close()
+
+
+@app.get("/api/routes/{route_id}/stops")
+async def get_route_stop_diagnostics_endpoint(
+    route_id: str,
+    days: int = 30,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+    direction_id: int | None = None,
+):
+    """
+    Stop-level diagnostic metrics for one route over a window (NOTES-40).
+
+    Returns per-(direction_id, stop_id) median/p95 deviation, OTP%, skip%,
+    and observation counts along the route's canonical stop sequence —
+    the answer to "where on the route do trips slip?" Output is ordered
+    by direction_id ASC then stop_sequence ASC, surfaceable as a strip
+    chart from origin to destination per direction.
+
+    Per the CLAUDE.md `stop_id` direction rule, aggregation groups
+    strictly by (route_id, direction_id, stop_id) — termini and shared
+    bays serve both directions under one stop_id and double-count
+    without it. The canonical sequence is the longest trip per direction
+    (handles partial / express variants by surfacing the longest superset).
+
+    `day_type` and `period` (NOTES-41) re-slice the per-stop aggregations:
+    `day_type` filters by service-day-of-week, `period` filters by Eastern
+    hour of `observed_arrival_ts` (or `scheduled_arrival_ts` for SKIPPED
+    rows that have no observed timestamp). Skip-rate denominator is the
+    count of trip_update rows for the stop — proximity never emits
+    SKIPPED, so it doesn't contribute to either numerator or denominator.
+
+    Args:
+        route_id: Route identifier (e.g., 'C51').
+        days: Window length in days (default: 30).
+        day_type: One of `all` (default), `weekday`, `saturday`, `sunday`.
+        period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
+            `evening`, `late`.
+        direction_id: Optional — restrict output to one direction (0 or 1).
+
+    Returns:
+        Dict with `route_id`, `days`, `day_type`, `period`, and `stops`
+        (list ordered by direction_id ASC then stop_sequence ASC).
+    """
+    if day_type not in VALID_DAY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid day_type. Must be one of: {', '.join(VALID_DAY_TYPES)}",
+        )
+    if period not in VALID_PERIOD_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(VALID_PERIOD_KEYS)}",
+        )
+    if days < 1:
+        days = 1
+    if days > 90:
+        days = 90
+    if direction_id is not None and direction_id not in (0, 1):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid direction_id. Must be 0 or 1 if provided.",
+        )
+
+    db = get_session()
+    try:
+        return get_route_stop_diagnostics(
+            db,
+            route_id,
+            days=days,
+            day_type=day_type,
+            period=period,
+            direction_id=direction_id,
+        )
     finally:
         db.close()
 

@@ -1927,3 +1927,451 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
             for r in chosen_runs
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Stop-level diagnostic (NOTES-40)
+#
+# `compute_route_stop_diagnostics` answers the "where on the route do trips
+# slip?" question by aggregating `stop_events` per (direction_id, stop_id)
+# along the route's canonical stop sequence. Output is a list of stops
+# ordered (direction_id ASC, stop_sequence ASC) — origin-to-destination per
+# direction — with median/p95 deviation, OTP%, skip%, observation counts.
+#
+# --- (route_id, direction_id, stop_id) grouping rule (load-bearing) ---
+# Per the CLAUDE.md gotcha: most WMATA stops are split by direction (NB and
+# SB are different stop_ids on opposite sides of a street), but termini,
+# layover bays, and some hubs serve both directions under one stop_id.
+# Grouping by (route_id, stop_id) alone silently double-counts at those
+# shared stops and produces metrics that look ~2x too tight. The query
+# groups strictly by (direction_id, stop_id), and the canonical-sequence
+# resolver below also keys on (direction_id, stop_sequence) so a shared
+# terminus appears once per direction in the output, never collapsed.
+#
+# --- Canonical stop sequence picker ---
+# Routes vary in trip length — express variants, short-turn patterns, and
+# branches all show up as different `stop_times` sequences for the same
+# (route_id, direction_id). For the strip chart we want one sequence per
+# direction that the user can read as "origin → destination" without
+# missing stops. Heuristic: pick the trip with the most stops in each
+# direction (the longest superset). This surfaces every stop the longest
+# variant serves and lets short-turn variants register their per-stop
+# metrics against the long sequence's positions.
+#
+# --- Skip-rate denominator ---
+# `schedule_relationship='SKIPPED'` rows count toward the numerator. The
+# denominator is the count of stop_events rows for the (direction, stop)
+# combination — i.e., the number of trips for which the trip_update feed
+# evaluated this stop and emitted a SCHEDULED, SKIPPED, or NO_DATA row.
+# Source is restricted to `trip_update` because proximity never emits
+# SKIPPED (the bus is either close enough or it isn't). NO_DATA rows are
+# included in the denominator because the trip *was* scheduled to serve
+# the stop — the absence of a confirmed arrival is itself diagnostic.
+#
+# --- day_type / period filter (PR #83 / NOTES-41 integration) ---
+# `day_type` filters service_dates by day-of-week (matches `_day_type_for`).
+# `period` filters by Eastern hour of `observed_arrival_ts`. SKIPPED rows
+# have null `observed_arrival_ts` and survive the period filter (we treat
+# the SKIPPED event as belonging to its scheduled hour bucket via
+# `scheduled_arrival_ts`); without that fallback, period-filtered skip
+# rates would always read 0 because skipped rows have no observed time.
+# ---------------------------------------------------------------------------
+
+_STOP_DIAGNOSTICS_TTL_SEC = 60.0
+_stop_diagnostics_cache: dict[tuple[str, int, str, str, int | None, str], tuple[float, dict]] = {}
+_stop_diagnostics_lock = Lock()
+
+
+def _canonical_stop_sequences_for_route(
+    db: Session, route_id: str
+) -> dict[int, list[tuple[str, int, str]]]:
+    """Return the canonical (direction_id → [(stop_id, stop_sequence, stop_name), ...]) sequence.
+
+    For each direction served by the route, picks the trip with the most
+    stops as the canonical sequence (the longest superset). Reads
+    `stops × stop_times × trips` filtered to `is_current=True` per the
+    CLAUDE.md GTFS rule. The output preserves stop_sequence ordering so
+    callers can render origin-to-destination directly.
+
+    Returns an empty dict when the route has no current trips. Returns a
+    direction-keyed dict where each value is a list of (stop_id,
+    stop_sequence, stop_name) tuples ordered by stop_sequence.
+    """
+    # Step 1: pick the longest trip per direction. We count stop_times rows
+    # per trip and pick the trip_id with the max count for each direction.
+    # Note we don't tiebreak — any trip tied for max will work (they have
+    # identical stop counts, which usually means they're the same pattern).
+    trip_counts = (
+        db.query(
+            Trip.trip_id,
+            Trip.direction_id,
+            func.count(StopTime.id).label("n_stops"),
+        )
+        .join(StopTime, StopTime.trip_id == Trip.trip_id)
+        .filter(
+            Trip.route_id == route_id,
+            Trip.is_current,
+            StopTime.is_current,
+        )
+        .group_by(Trip.trip_id, Trip.direction_id)
+        .all()
+    )
+
+    longest_trip_by_dir: dict[int, tuple[str, int]] = {}
+    for trip_id, direction_id, n_stops in trip_counts:
+        if direction_id is None:
+            continue
+        existing = longest_trip_by_dir.get(direction_id)
+        if existing is None or n_stops > existing[1]:
+            longest_trip_by_dir[direction_id] = (trip_id, n_stops)
+
+    if not longest_trip_by_dir:
+        return {}
+
+    # Step 2: load stop_times + stop names for each chosen trip, ordered.
+    out: dict[int, list[tuple[str, int, str]]] = {}
+    for direction_id, (trip_id, _n) in longest_trip_by_dir.items():
+        rows = (
+            db.query(StopTime.stop_id, StopTime.stop_sequence, Stop.stop_name)
+            .join(Stop, Stop.stop_id == StopTime.stop_id)
+            .filter(
+                StopTime.trip_id == trip_id,
+                StopTime.is_current,
+                Stop.is_current,
+            )
+            .order_by(StopTime.stop_sequence.asc())
+            .all()
+        )
+        # De-dup on (stop_id, stop_sequence) — the Stop join can produce
+        # multiple rows per stop_id if `is_current` filtering misses a
+        # stale duplicate (defensive; production data should have one
+        # current row per stop_id).
+        seen: set[tuple[str, int]] = set()
+        seq: list[tuple[str, int, str]] = []
+        for stop_id, stop_sequence, stop_name in rows:
+            key = (stop_id, stop_sequence)
+            if key in seen:
+                continue
+            seen.add(key)
+            seq.append((stop_id, stop_sequence, stop_name))
+        out[direction_id] = seq
+    return out
+
+
+def _percentile(values: list[int], pct: float) -> float | None:
+    """Return the `pct`-th percentile (0..100) using linear interpolation.
+
+    Uses the same NIST nearest-rank-with-interpolation semantics as
+    `numpy.percentile(..., interpolation='linear')` so callers get stable
+    values without pulling numpy as an API-layer dep. Returns None for an
+    empty list. `values` is mutated by the sort — callers should pass a
+    list they don't need preserved.
+    """
+    if not values:
+        return None
+    values.sort()
+    if len(values) == 1:
+        return float(values[0])
+    rank = (pct / 100.0) * (len(values) - 1)
+    lo = int(rank)
+    hi = min(lo + 1, len(values) - 1)
+    frac = rank - lo
+    return values[lo] + (values[hi] - values[lo]) * frac
+
+
+def compute_route_stop_diagnostics(
+    db: Session,
+    route_id: str,
+    days: int = 30,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+    direction_id: int | None = None,
+) -> dict:
+    """Compute per-stop diagnostic metrics for one route over a time window.
+
+    Returns one row per (direction_id, stop_id) along the route's canonical
+    stop sequence (the longest trip per direction — see module-level docstring
+    for the canonical-sequence rationale). Each row carries median/p95
+    deviation, OTP%, skip%, and observation counts.
+
+    --- Grouping (load-bearing) ---
+    Aggregation groups strictly by (route_id, direction_id, stop_id) per
+    the CLAUDE.md `stop_id` direction rule. Termini and shared bays serve
+    both directions under one stop_id; grouping without direction silently
+    double-counts and produces metrics that look ~2x too tight. The
+    canonical sequence is keyed on direction too, so a shared terminus
+    surfaces twice (once per direction) — never collapsed.
+
+    --- Skip-rate denominator ---
+    Numerator is `count(schedule_relationship='SKIPPED')`. Denominator is
+    the total stop_events rows for the (direction, stop) — i.e., the
+    number of trips for which the trip_update feed emitted a
+    SCHEDULED/SKIPPED/NO_DATA row. Source restricted to `trip_update`
+    because proximity never emits SKIPPED (the bus is either close
+    enough or it isn't). NO_DATA stays in the denominator because the
+    trip was scheduled — the absence of a confirmed arrival is itself
+    diagnostic.
+
+    --- day_type / period filter ---
+    `day_type` filters by `_day_type_for(service_date)`. `period` filters
+    by Eastern hour of `observed_arrival_ts` (or `scheduled_arrival_ts`
+    for SKIPPED rows that have null observed timestamps). Filtering
+    happens in Python after the row fetch — keeps test parity with
+    SQLite, mirrors the same approach `compute_otp_split` uses.
+
+    Args:
+        db: SQLAlchemy session.
+        route_id: Route identifier (e.g., 'C51').
+        days: Window length in days (default 30).
+        day_type: One of `all` / `weekday` / `saturday` / `sunday`.
+        period: One of `all` / `am_peak` / `midday` / `pm_peak` /
+            `evening` / `late`.
+        direction_id: Optional — restrict output to one direction. When
+            None, both directions are returned interleaved by
+            (direction_id, stop_sequence).
+
+    Returns:
+        Dict with `route_id`, `days`, `day_type`, `period`, and `stops`
+        (list ordered by direction_id ASC then stop_sequence ASC).
+    """
+    from src.timezones import eastern_today
+
+    end_date = eastern_today()
+    start_date = end_date - timedelta(days=days)
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+
+    no_period_filter = period == ALL_HOURS
+    no_day_type_filter = day_type == ALL_DAY_TYPES
+
+    # Step 1: canonical sequence per direction. Doubles as the output shape —
+    # any (direction, stop) not in the sequence is dropped from the response
+    # so partial-route variants (express trips, short-turns) don't add
+    # duplicate rows for stops the canonical longest pattern doesn't serve.
+    seq_by_direction = _canonical_stop_sequences_for_route(db, route_id)
+    if not seq_by_direction:
+        return {
+            "route_id": route_id,
+            "days": days,
+            "day_type": day_type,
+            "period": period,
+            "stops": [],
+        }
+
+    # Apply direction filter to the sequence keys early — no point fetching
+    # stop_events for directions we'll filter out.
+    if direction_id is not None:
+        seq_by_direction = {d: stops for d, stops in seq_by_direction.items() if d == direction_id}
+        if not seq_by_direction:
+            return {
+                "route_id": route_id,
+                "days": days,
+                "day_type": day_type,
+                "period": period,
+                "stops": [],
+            }
+
+    # Step 2: pull stop_events for the route over the window. We pull
+    # trip_update rows for skip/observation counts and proximity rows for
+    # OTP deviation (matches the legacy `route_metrics_daily.otp_percentage`
+    # source so the per-stop OTP rolls up to the same number the headline
+    # reports). Both sources go through the same direction/stop grouping.
+    rows = (
+        db.query(
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.deviation_sec,
+            StopEvent.observed_arrival_ts,
+            StopEvent.scheduled_arrival_ts,
+            StopEvent.schedule_relationship,
+            StopEvent.source,
+            StopEvent.service_date,
+        )
+        .filter(
+            StopEvent.route_id == route_id,
+            StopEvent.service_date >= start_iso,
+            StopEvent.service_date <= end_iso,
+        )
+        .all()
+    )
+
+    # Index aggregations by (direction_id, stop_id). Each cell holds:
+    #   devs: list of proximity deviation_sec values (for OTP / median / p95)
+    #   tu_total: count of trip_update rows (skip-rate denominator)
+    #   tu_skipped: count of trip_update SKIPPED rows (skip-rate numerator)
+    cells: dict[tuple[int, str], dict] = defaultdict(
+        lambda: {"devs": [], "tu_total": 0, "tu_skipped": 0}
+    )
+
+    # Pre-compute valid (direction, stop_id) keys from the sequence — anything
+    # outside this set is dropped (variant-only stops, off-route data drift).
+    valid_keys: set[tuple[int, str]] = set()
+    for d, stops in seq_by_direction.items():
+        for stop_id, _seq, _name in stops:
+            valid_keys.add((d, stop_id))
+
+    for (
+        d_id,
+        s_id,
+        dev,
+        obs_ts,
+        sched_ts,
+        sched_rel,
+        source,
+        service_date,
+    ) in rows:
+        key = (d_id, s_id)
+        if key not in valid_keys:
+            continue
+
+        # day_type filter
+        if not no_day_type_filter:
+            try:
+                d = datetime.strptime(service_date, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
+            if _day_type_for(d) != day_type:
+                continue
+
+        # period filter — apply to the row's effective hour. For observed
+        # rows that's observed_arrival_ts; for SKIPPED rows (no observed
+        # timestamp) we fall back to scheduled_arrival_ts so the row is
+        # still attributable to its scheduled hour bucket. Without this
+        # fallback, period-filtered skip rates would read 0% because
+        # SKIPPED rows would all drop out of the denominator.
+        if not no_period_filter:
+            ref_ts = obs_ts if obs_ts is not None else sched_ts
+            if ref_ts is None:
+                continue
+            h = _eastern_hour(ref_ts)
+            if h is None or not is_hour_in_period(h, period):
+                continue
+
+        if source == "proximity":
+            if dev is not None:
+                cells[key]["devs"].append(int(dev))
+        elif source == "trip_update":
+            cells[key]["tu_total"] += 1
+            if sched_rel == "SKIPPED":
+                cells[key]["tu_skipped"] += 1
+
+    # Step 3: emit one row per (direction, sequence-stop), ordered. This
+    # preserves direction ASC then stop_sequence ASC — origin-to-destination
+    # within each direction.
+    out_stops: list[dict] = []
+    for d in sorted(seq_by_direction.keys()):
+        for stop_id, stop_sequence, stop_name in seq_by_direction[d]:
+            cell = cells.get((d, stop_id))
+            if cell is None:
+                # No data for this stop in the window — surface as a row
+                # with null metrics so the strip chart still shows the
+                # stop's position (gaps are diagnostic in their own right).
+                out_stops.append(
+                    {
+                        "direction_id": d,
+                        "stop_id": stop_id,
+                        "stop_name": stop_name,
+                        "stop_sequence": stop_sequence,
+                        "median_deviation_sec": None,
+                        "p95_deviation_sec": None,
+                        "otp_pct": None,
+                        "skip_pct": None,
+                        "n_observations": 0,
+                        "n_scheduled": 0,
+                    }
+                )
+                continue
+
+            devs = cell["devs"]
+            n_obs = len(devs)
+            tu_total = cell["tu_total"]
+            tu_skipped = cell["tu_skipped"]
+
+            if n_obs == 0:
+                median = None
+                p95 = None
+                otp_pct = None
+            else:
+                # Copy before _percentile mutates via sort (we need devs
+                # twice — once for median, once for p95).
+                median = _percentile(list(devs), 50.0)
+                p95 = _percentile(list(devs), 95.0)
+                on_time = sum(1 for x in devs if OTP_EARLY_SEC <= x <= OTP_LATE_SEC)
+                otp_pct = round(on_time / n_obs, 4)
+
+            skip_pct = round(tu_skipped / tu_total, 4) if tu_total > 0 else None
+
+            out_stops.append(
+                {
+                    "direction_id": d,
+                    "stop_id": stop_id,
+                    "stop_name": stop_name,
+                    "stop_sequence": stop_sequence,
+                    "median_deviation_sec": int(round(median)) if median is not None else None,
+                    "p95_deviation_sec": int(round(p95)) if p95 is not None else None,
+                    "otp_pct": otp_pct,
+                    "skip_pct": skip_pct,
+                    "n_observations": n_obs,
+                    "n_scheduled": tu_total,
+                }
+            )
+
+    return {
+        "route_id": route_id,
+        "days": days,
+        "day_type": day_type,
+        "period": period,
+        "stops": out_stops,
+    }
+
+
+def get_route_stop_diagnostics(
+    db: Session,
+    route_id: str,
+    days: int = 30,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+    direction_id: int | None = None,
+) -> dict:
+    """Cached wrapper around `compute_route_stop_diagnostics`.
+
+    60-second TTL keyed by (route_id, days, day_type, period, direction_id,
+    today_iso). Cache key includes today's Eastern date so the cache
+    rolls naturally at the service-day boundary (matches the system-trend
+    and contributors caches above).
+
+    Args:
+        db: SQLAlchemy session.
+        route_id: Route identifier.
+        days: Window length in days (default 30).
+        day_type: One of `all` / `weekday` / `saturday` / `sunday`.
+        period: One of `all` / `am_peak` / `midday` / `pm_peak` /
+            `evening` / `late`.
+        direction_id: Optional direction filter.
+
+    Returns:
+        Dict with `route_id`, `days`, `day_type`, `period`, and `stops`
+        (list ordered by direction_id ASC then stop_sequence ASC).
+    """
+    from src.timezones import eastern_today
+
+    cache_key = (route_id, days, day_type, period, direction_id, eastern_today().isoformat())
+    with _stop_diagnostics_lock:
+        cached = _stop_diagnostics_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _STOP_DIAGNOSTICS_TTL_SEC:
+                return value
+
+    result = compute_route_stop_diagnostics(
+        db,
+        route_id,
+        days=days,
+        day_type=day_type,
+        period=period,
+        direction_id=direction_id,
+    )
+
+    with _stop_diagnostics_lock:
+        _stop_diagnostics_cache[cache_key] = (time.monotonic(), result)
+    return result
