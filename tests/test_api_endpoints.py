@@ -208,6 +208,52 @@ def test_get_route_period_drilldown_not_found(client):
 
 
 @pytest.mark.api
+def test_get_route_bunching_causes_empty(client, sample_route):
+    """GET /api/routes/{route_id}/bunching-causes returns the breakdown envelope.
+
+    With no stop_events seeded the result is a zero-pair payload — but the
+    five categories should all be present in the breakdown dict so the
+    frontend can render zero-height bars without conditional shape checks.
+    """
+    response = client.get("/api/routes/TEST1/bunching-causes")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["route_id"] == "TEST1"
+    assert data["days"] == 30
+    assert data["day_type"] == "all"
+    assert data["period"] == "all"
+    assert data["n_bunched_pairs"] == 0
+    breakdown = data["breakdown"]
+    assert set(breakdown.keys()) == {
+        "leader_late_only",
+        "trailer_early_only",
+        "both_off",
+        "neither_off",
+        "unknown",
+    }
+    for cat in breakdown.values():
+        assert cat["count"] == 0
+        assert cat["pct"] == 0.0
+
+
+@pytest.mark.api
+def test_get_route_bunching_causes_invalid_day_type(client, sample_route):
+    """Invalid day_type returns 400 with the validation error detail."""
+    response = client.get("/api/routes/TEST1/bunching-causes?day_type=funkyday")
+    assert response.status_code == 400
+    assert "day_type" in response.json()["detail"].lower()
+
+
+@pytest.mark.api
+def test_get_route_bunching_causes_invalid_period(client, sample_route):
+    """Invalid period returns 400 with the validation error detail."""
+    response = client.get("/api/routes/TEST1/bunching-causes?period=earlybird")
+    assert response.status_code == 400
+    assert "period" in response.json()["detail"].lower()
+
+
+@pytest.mark.api
 def test_get_route_shapes_success(client, db_session, sample_route, sample_trip):
     """Test GET /api/routes/{route_id}/shapes returns GTFS shapes"""
     # Create shape data

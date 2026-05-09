@@ -620,6 +620,90 @@ main {
   font-style: italic;
 }
 
+/* Bunching cause decomposition (NOTES-42).
+
+   Stacked horizontal bar showing the share of bunched pairs in each cause
+   category over the selected day_type / period window. The disclaimer is
+   small text on purpose — the mechanism is textbook but the five-bucket
+   decomposition is internal to this dashboard, not a TCRP-named or
+   transit-agency-published metric. */
+.bunching-cause-block {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.bunching-cause-block h3 {
+  margin: 0 0 0.5rem;
+  color: #1e293b;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.bunching-cause-disclaimer {
+  margin: 0 0 0.75rem;
+  color: #64748b;
+  font-size: 0.7rem;
+  font-style: italic;
+  line-height: 1.4;
+}
+
+.bunching-cause-bar {
+  display: flex;
+  width: 100%;
+  height: 1.5rem;
+  border-radius: 0.25rem;
+  overflow: hidden;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+}
+
+.bunching-cause-segment {
+  height: 100%;
+  min-width: 1px;
+  transition: width 200ms ease-out;
+}
+
+.bunching-cause-legend {
+  list-style: none;
+  padding: 0;
+  margin: 0.6rem 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.25rem 1rem;
+}
+
+.bunching-cause-legend li {
+  display: flex;
+  align-items: center;
+  font-size: 0.75rem;
+  color: #1e293b;
+  gap: 0.4rem;
+}
+
+.bunching-cause-swatch {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 0.15rem;
+  flex: none;
+}
+
+.bunching-cause-legend-label {
+  flex: 1;
+}
+
+.bunching-cause-legend-value {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.bunching-cause-meta {
+  margin: 0.5rem 0 0;
+  font-size: 0.7rem;
+  color: #64748b;
+}
+
 .detail-info {
   background: white;
   border-radius: 0.75rem;

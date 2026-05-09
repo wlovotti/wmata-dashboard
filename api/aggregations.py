@@ -22,6 +22,7 @@ from src.bunching import (
     BUNCHING_ABSOLUTE_FLOOR_SEC,
     BUNCHING_RATIO,
     MAX_OBSERVED_HEADWAY_SEC,
+    compute_bunching_cause_breakdown,
     compute_bunching_for_route_date,
     compute_bunching_headline_for_route,
     compute_bunching_headline_for_routes,
@@ -2374,4 +2375,80 @@ def get_route_stop_diagnostics(
 
     with _stop_diagnostics_lock:
         _stop_diagnostics_cache[cache_key] = (time.monotonic(), result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Bunching cause breakdown (NOTES-42)
+#
+# Wraps `src.bunching.compute_bunching_cause_breakdown` with the standard
+# 60-second TTL keyed by (route_id, days, day_type, period, today_iso) —
+# matches the contributors / system-trend / stop-diagnostics endpoint
+# pattern. The breakdown live-computes from `stop_events`; pulling all
+# bunched pairs over a 30-day window is cheap once `compute_bunching_for_route_date`
+# already runs in <1s on the headline path, but the cache keeps repeated
+# page loads from re-computing within the polling window.
+#
+# Surfaced on `PeriodDrilldown` per the NOTES-42 spec. The frontend
+# carries `dayType` / `period` from RouteDetail's filter (PR #83) so the
+# breakdown re-slices the same way as the rest of the route surface.
+# ---------------------------------------------------------------------------
+
+_BUNCHING_CAUSES_TTL_SEC = 60.0
+_bunching_causes_cache: dict[tuple[str, int, str, str, str], tuple[float, dict]] = {}
+_bunching_causes_lock = Lock()
+
+
+def get_route_bunching_causes(
+    db: Session,
+    route_id: str,
+    days: int = 30,
+    day_type: str = ALL_DAY_TYPES,
+    period: str = ALL_HOURS,
+) -> dict:
+    """Cached wrapper around `compute_bunching_cause_breakdown` (NOTES-42).
+
+    60-second TTL keyed by (route_id, days, day_type, period, today_iso).
+    Cache key includes today's Eastern date so the cache rolls naturally
+    at the service-day boundary (matches the contributors / stop-diagnostics
+    caches above).
+
+    The mechanism (late leaders pick up more passengers, trailers run
+    light) is well-established in the bus-bunching literature; the
+    five-bucket presentation is internal to this dashboard. See
+    `src.bunching.compute_bunching_cause_breakdown` and the section
+    comment in that module for the framing rationale.
+
+    Args:
+        db: SQLAlchemy session.
+        route_id: Route identifier (e.g., 'C51').
+        days: Window length in days (default 30).
+        day_type: One of `all` / `weekday` / `saturday` / `sunday`.
+        period: One of `all` / `am_peak` / `midday` / `pm_peak` /
+            `evening` / `late`.
+
+    Returns:
+        Dict with `route_id`, `days`, `day_type`, `period`,
+        `n_bunched_pairs`, and `breakdown` (per-category count + pct).
+    """
+    from src.timezones import eastern_today
+
+    cache_key = (route_id, days, day_type, period, eastern_today().isoformat())
+    with _bunching_causes_lock:
+        cached = _bunching_causes_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _BUNCHING_CAUSES_TTL_SEC:
+                return value
+
+    result = compute_bunching_cause_breakdown(
+        db,
+        route_id,
+        days=days,
+        day_type=day_type,
+        period=period,
+    )
+
+    with _bunching_causes_lock:
+        _bunching_causes_cache[cache_key] = (time.monotonic(), result)
     return result
