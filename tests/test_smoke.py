@@ -64,8 +64,8 @@ def test_api_server_responds(client):
 
 
 @pytest.mark.smoke
-def test_api_routes_endpoint_structure(client, sample_route, sample_route_metrics_summary):
-    """Test that /api/routes returns expected JSON structure"""
+def test_api_routes_endpoint_structure(client, sample_route):
+    """Test that /api/routes returns expected JSON structure (post NOTES-19)."""
     response = client.get("/api/routes")
     assert response.status_code == 200
 
@@ -73,15 +73,18 @@ def test_api_routes_endpoint_structure(client, sample_route, sample_route_metric
     assert isinstance(data, list)
 
     if len(data) > 0:
-        # Check first route has expected keys
+        # Identity + frequency_class + live overlay keys remain after the
+        # NOTES-19 cleanup of legacy `RouteMetricsSummary` fields.
         route = data[0]
         expected_keys = [
             "route_id",
             "route_name",
-            "otp_percentage",
-            "avg_headway_minutes",
-            "avg_speed_mph",
-            "grade",
+            "route_long_name",
+            "frequency_class",
+            "otp_all_pct",
+            "service_delivered_ratio",
+            "ewt_seconds",
+            "bunching_rate",
         ]
         for key in expected_keys:
             assert key in route, f"Missing key: {key}"

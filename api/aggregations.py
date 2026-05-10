@@ -41,8 +41,6 @@ from src.excess_trip_time import compute_excess_trip_time
 from src.models import (
     Calendar,
     Route,
-    RouteMetricsDaily,
-    RouteMetricsSummary,
     RouteServiceProfile,
     Run,
     Stop,
@@ -144,30 +142,6 @@ def sanitize_float(value):
         return float_value
     except (ValueError, TypeError):
         return None
-
-
-def calculate_performance_grade(otp_percentage: float | None) -> str:
-    """
-    Calculate letter grade from OTP percentage
-
-    Args:
-        otp_percentage: On-time performance percentage (0-100)
-
-    Returns:
-        Letter grade: A (>80%), B (60-80%), C (40-60%), D (20-40%), F (<20%)
-    """
-    if otp_percentage is None:
-        return "N/A"
-    if otp_percentage >= 80:
-        return "A"
-    elif otp_percentage >= 60:
-        return "B"
-    elif otp_percentage >= 40:
-        return "C"
-    elif otp_percentage >= 20:
-        return "D"
-    else:
-        return "F"
 
 
 def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]:
@@ -354,28 +328,27 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
     """
     Get performance scorecard for all routes.
 
-    Combines two data layers:
-      * **Legacy fields** (otp_percentage, avg_headway_minutes, etc.) from the
-        pre-computed `route_metrics_summary` table — populated by the nightly
-        batch job. Will be retired in NOTES-19 once new metrics fully replace.
-      * **New live metrics** (service-delivered, OTP origin/destination split,
-        EWT headline, bunching headline) computed live from `runs` and
-        `stop_events` for today's service date. Cached by service_date with a
-        short TTL — see `get_live_metrics_for_today`.
+    Returns one row per route with the live overlay metrics (OTP
+    origin/destination split, service-delivered, EWT headline, bunching
+    headline) plus identity fields and frequency class. Live metrics are
+    cached by service_date with a short TTL — see `get_live_metrics_for_today`.
+
+    The legacy `route_metrics_summary` fields (otp_percentage,
+    avg_headway_minutes, avg_speed_mph, total_observations, grade) were
+    dropped in the NOTES-19 migration. The OTP-only `grade` will be
+    reintroduced with a service-delivered + EWT composite via NOTES-18.
 
     Args:
         db: Database session
-        days: Number of days to analyze (ignored, uses pre-computed summaries)
+        days: Accepted for API compatibility; the live overlay anchors on
+            the latest service_date with stop_events regardless.
 
     Returns:
-        List of route summaries with both legacy and new performance metrics.
+        List of route summaries sorted by `otp_all_pct` descending
+        (best first), routes without OTP data last.
     """
     # Get all routes (current version only)
     routes = db.query(Route).filter(Route.is_current).all()
-    route_map = {r.route_id: r for r in routes}
-
-    # Get pre-computed summaries (legacy fields)
-    summaries = db.query(RouteMetricsSummary).all()
 
     # Get today's live metrics (cached)
     live = get_live_metrics_for_today(db)
@@ -383,59 +356,20 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
     # Frequency class per route (GTFS-derived, ~2ms — no caching needed).
     freq_classes = compute_route_frequency_classes(db)
 
-    scorecard = []
+    scorecard = [
+        {
+            "route_id": route.route_id,
+            "route_name": route.route_short_name,
+            "route_long_name": route.route_long_name,
+            "frequency_class": freq_classes.get(route.route_id),
+            **_live_metric_fields(live.get(route.route_id)),
+        }
+        for route in routes
+    ]
 
-    for summary in summaries:
-        route = route_map.get(summary.route_id)
-        if not route:
-            continue
-
-        scorecard.append(
-            {
-                "route_id": summary.route_id,
-                "route_name": route.route_short_name,
-                "route_long_name": route.route_long_name,
-                "otp_percentage": sanitize_float(summary.otp_percentage),
-                "avg_headway_minutes": sanitize_float(summary.avg_headway_minutes),
-                "headway_std_dev_minutes": sanitize_float(
-                    getattr(summary, "headway_std_dev_minutes", None)
-                ),
-                "avg_speed_mph": sanitize_float(summary.avg_speed_mph),
-                "grade": calculate_performance_grade(summary.otp_percentage),
-                "total_observations": summary.total_observations,
-                "data_updated_at": summary.last_data_timestamp.isoformat()
-                if summary.last_data_timestamp
-                else None,
-                "computed_at": summary.computed_at.isoformat() if summary.computed_at else None,
-                "frequency_class": freq_classes.get(summary.route_id),
-                **_live_metric_fields(live.get(summary.route_id)),
-            }
-        )
-
-    # Add routes without computed legacy metrics — but still surface live ones.
-    summary_route_ids = {s.route_id for s in summaries}
-    for route in routes:
-        if route.route_id not in summary_route_ids:
-            scorecard.append(
-                {
-                    "route_id": route.route_id,
-                    "route_name": route.route_short_name,
-                    "route_long_name": route.route_long_name,
-                    "otp_percentage": None,
-                    "avg_headway_minutes": None,
-                    "headway_std_dev_minutes": None,
-                    "avg_speed_mph": None,
-                    "grade": "N/A",
-                    "total_observations": 0,
-                    "data_updated_at": None,
-                    "computed_at": None,
-                    "frequency_class": freq_classes.get(route.route_id),
-                    **_live_metric_fields(live.get(route.route_id)),
-                }
-            )
-
-    # Sort by OTP descending (best routes first), None values last
-    scorecard.sort(key=lambda x: (x["otp_percentage"] is None, -(x["otp_percentage"] or 0)))
+    # Sort by live OTP descending (best first); routes without an OTP
+    # number sink to the bottom so the table reads top-down by signal.
+    scorecard.sort(key=lambda x: (x.get("otp_all_pct") is None, -(x.get("otp_all_pct") or 0)))
 
     return scorecard
 
@@ -488,42 +422,35 @@ def get_route_detail_metrics(
     period_key: str = ALL_HOURS,
 ) -> dict:
     """
-    Get detailed performance metrics for a specific route
+    Get detailed performance metrics for a specific route.
 
-    Returns current metrics and metadata for display on route detail page header.
-    Uses pre-computed summary metrics for fast response.
+    Returns the live overlay metrics (OTP origin/destination split,
+    service-delivered, EWT, bunching) plus the freshest excess-trip-time
+    snapshot, identity fields, and frequency class.
 
-    `day_type_filter` and `period_key` (NOTES-41) re-slice the live metrics
-    (OTP split, EWT, bunching) by day-of-week and time-of-day. Service-
-    delivered is trip-level so the period filter has no effect on its value;
-    the day_type filter anchors all live metrics on the latest matching
-    service_date. Excess-trip-time and the legacy summary fields
-    (avg_headway_minutes, avg_speed_mph, etc.) come from `route_metrics_daily`
-    / `route_metrics_summary` which aren't grouped by hour and are not
-    re-sliced by `period_key`. The day_type filter does NOT restrict the
-    legacy fields either — they remain a window mean over the legacy
-    pipeline's grouping.
+    `day_type_filter` and `period_key` (NOTES-41) re-slice the live
+    metrics by day-of-week and time-of-day. Service-delivered and
+    excess-trip-time are trip-level so the period filter has no effect on
+    them; the day_type filter anchors live metrics on the latest matching
+    service_date.
 
     Args:
         db: Database session
         route_id: Route identifier (e.g., 'C51')
-        days: Number of days to analyze (default: 7)
+        days: Window for the excess-trip-time freshest-day lookup
         day_type_filter: One of `all` / `weekday` / `saturday` / `sunday`
         period_key: One of `all` / `am_peak` / `midday` / `pm_peak` /
             `evening` / `late`
 
     Returns:
-        Dictionary with detailed route metrics; includes the active
-        filter values so the frontend can render the chip without a
-        round-trip to its own state.
+        Dictionary with detailed route metrics; echoes the active filter
+        values so the frontend can render the chip without a round-trip
+        to its own state.
     """
     # Get route info (current version only)
     route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
     if not route:
         return {"error": f"Route {route_id} not found"}
-
-    # Get pre-computed summary metrics (legacy, includes position stats)
-    summary = db.query(RouteMetricsSummary).filter(RouteMetricsSummary.route_id == route_id).first()
 
     # Live metrics for today (single-route compute on cache miss).
     live_fields = _live_metric_fields(
@@ -553,62 +480,17 @@ def get_route_detail_metrics(
     ]
     frequency_class = classify_route_frequency(headways, route_id)
 
-    # Return summary metrics if available
-    if summary:
-        return {
-            "route_id": route.route_id,
-            "route_name": route.route_short_name,
-            "route_long_name": route.route_long_name,
-            "time_period_days": days,
-            "day_type_filter": day_type_filter,
-            "period_key": period_key,
-            "date_range_start": summary.date_start if hasattr(summary, "date_start") else None,
-            "date_range_end": summary.date_end if hasattr(summary, "date_end") else None,
-            "otp_percentage": sanitize_float(summary.otp_percentage),
-            "early_percentage": sanitize_float(getattr(summary, "early_percentage", None)),
-            "late_percentage": sanitize_float(getattr(summary, "late_percentage", None)),
-            "avg_headway_minutes": sanitize_float(summary.avg_headway_minutes),
-            "headway_std_dev_minutes": sanitize_float(
-                getattr(summary, "headway_std_dev_minutes", None)
-            ),
-            "headway_cv": sanitize_float(getattr(summary, "headway_cv", None)),
-            "min_headway_minutes": None,  # Not in summary table
-            "max_headway_minutes": None,  # Not in summary table
-            "avg_speed_mph": sanitize_float(summary.avg_speed_mph),
-            "total_positions": getattr(summary, "total_positions_7d", 0) or 0,
-            "unique_vehicles": getattr(summary, "unique_vehicles_7d", 0) or 0,
-            "unique_trips": getattr(summary, "unique_trips_7d", 0) or 0,
-            "grade": calculate_performance_grade(summary.otp_percentage),
-            "frequency_class": frequency_class,
-            **live_fields,
-            **excess_fields,
-        }
-    else:
-        # No pre-computed metrics available
-        return {
-            "route_id": route.route_id,
-            "route_name": route.route_short_name,
-            "route_long_name": route.route_long_name,
-            "time_period_days": days,
-            "day_type_filter": day_type_filter,
-            "period_key": period_key,
-            "otp_percentage": None,
-            "early_percentage": None,
-            "late_percentage": None,
-            "avg_headway_minutes": None,
-            "headway_std_dev_minutes": None,
-            "headway_cv": None,
-            "min_headway_minutes": None,
-            "max_headway_minutes": None,
-            "avg_speed_mph": None,
-            "total_positions": 0,
-            "unique_vehicles": 0,
-            "unique_trips": 0,
-            "grade": "N/A",
-            "frequency_class": frequency_class,
-            **live_fields,
-            **excess_fields,
-        }
+    return {
+        "route_id": route.route_id,
+        "route_name": route.route_short_name,
+        "route_long_name": route.route_long_name,
+        "time_period_days": days,
+        "day_type_filter": day_type_filter,
+        "period_key": period_key,
+        "frequency_class": frequency_class,
+        **live_fields,
+        **excess_fields,
+    }
 
 
 def _compute_otp_per_day_with_filters(
@@ -829,92 +711,26 @@ def get_route_trend_data(
             "trend_data": trend_data,
         }
 
-    # OTP series — proximity stop_events are now the canonical source
+    # OTP series — proximity stop_events are the canonical source
     # (NOTES-19 migration). The same helper handles both the no-filter and
     # period-filtered cases — `is_hour_in_period(_, ALL_HOURS)` returns True
     # for every hour, so ALL_HOURS produces the unfiltered daily aggregate
     # the legacy `route_metrics_daily.otp_percentage` field used to carry.
-    # Unknown metrics also fall through here, preserving the previous
-    # implicit "default to OTP" behavior.
-    if metric == "otp" or metric not in {
-        "early",
-        "late",
-        "headway",
-        "headway_std_dev",
-        "speed",
-    }:
-        otp_by_date = _compute_otp_per_day_with_filters(
-            db, route_id, start_date, end_date, period_key
-        )
-        trend_data = []
-        current = start_date
-        while current <= end_date:
-            d_iso = current.isoformat()
-            value: float | None
-            if not _matches_day_type(current):
-                value = None
-            else:
-                value = otp_by_date.get(d_iso)
-            trend_data.append({"date": d_iso, "otp_percentage": value})
-            current = current + timedelta(days=1)
-        return {
-            "route_id": route_id,
-            "metric": metric,
-            "days": days,
-            "day_type_filter": day_type_filter,
-            "period_key": period_key,
-            "trend_data": trend_data,
-        }
-
-    # Get daily metrics from database
-    daily_metrics = (
-        db.query(RouteMetricsDaily)
-        .filter(
-            RouteMetricsDaily.route_id == route_id,
-            RouteMetricsDaily.date >= start_date.isoformat(),
-            RouteMetricsDaily.date <= end_date.isoformat(),
-        )
-        .order_by(RouteMetricsDaily.date)
-        .all()
-    )
-
-    # Map metric name to field and response key. `otp` and `excess_trip_time`
-    # are handled in their own branches above; only the legacy daily-batch
-    # fields remain.
-    metric_config = {
-        "early": {"field": "early_percentage", "key": "early_percentage"},
-        "late": {"field": "late_percentage", "key": "late_percentage"},
-        "headway": {"field": "avg_headway_minutes", "key": "avg_headway_minutes"},
-        "headway_std_dev": {"field": "headway_std_dev_minutes", "key": "headway_std_dev_minutes"},
-        "speed": {"field": "avg_speed_mph", "key": "avg_speed_mph"},
-    }
-
-    config = metric_config[metric]
-    field_name = config["field"]
-    response_key = config["key"]
-
-    # Emit one row per service date in the window. Days with no row in
-    # `route_metrics_daily` (or with a null value) carry `<key>: null` so
-    # the frontend can distinguish "no data" from a real zero and skip
-    # those points in both the sparkline and the 7-vs-prior-7-day delta.
-    # Without this, sparse early days in production data look like a cliff
-    # to zero and break every comparison.
-    by_date = {m.date: m for m in daily_metrics}
+    # OTP is the only remaining trend metric; the legacy `early/late/
+    # headway/headway_std_dev/speed` metrics were dropped in NOTES-19
+    # alongside the source table.
+    otp_by_date = _compute_otp_per_day_with_filters(db, route_id, start_date, end_date, period_key)
     trend_data = []
     current = start_date
     while current <= end_date:
-        date_str = current.isoformat()
+        d_iso = current.isoformat()
+        value: float | None
         if not _matches_day_type(current):
-            # Day-type filter active and this date doesn't match — emit a
-            # null gap so the sparkline doesn't compress disjoint windows.
-            trend_data.append({"date": date_str, response_key: None})
-            current = current + timedelta(days=1)
-            continue
-        day_metric = by_date.get(date_str)
-        value = getattr(day_metric, field_name, None) if day_metric else None
-        trend_data.append({"date": date_str, response_key: value})
+            value = None
+        else:
+            value = otp_by_date.get(d_iso)
+        trend_data.append({"date": d_iso, "otp_percentage": value})
         current = current + timedelta(days=1)
-
     return {
         "route_id": route_id,
         "metric": metric,

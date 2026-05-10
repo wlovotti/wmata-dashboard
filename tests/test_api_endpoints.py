@@ -28,22 +28,24 @@ def test_root_endpoint(client):
 
 
 @pytest.mark.api
-def test_get_routes_success(client, sample_route, sample_route_metrics_summary):
-    """Test GET /api/routes returns scorecard with data"""
+def test_get_routes_success(client, sample_route):
+    """Test GET /api/routes returns scorecard with identity + overlay shape."""
     response = client.get("/api/routes")
     assert response.status_code == 200
 
     data = response.json()
     assert isinstance(data, list)
-    assert len(data) == 1  # Only one route with metrics
+    assert len(data) == 1
 
     route = data[0]
     assert route["route_id"] == "TEST1"
     assert route["route_name"] == "T1"
-    assert route["otp_percentage"] == 75.5
-    assert route["avg_headway_minutes"] == 12.5
-    assert route["avg_speed_mph"] == 18.5
-    assert route["grade"] == "B"  # 75.5% OTP = B grade
+    assert "frequency_class" in route
+    # Live overlay keys are surfaced (values may be None without seeded data).
+    assert "otp_all_pct" in route
+    assert "service_delivered_ratio" in route
+    assert "ewt_seconds" in route
+    assert "bunching_rate" in route
 
 
 @pytest.mark.api
@@ -55,19 +57,18 @@ def test_get_routes_empty_database(client):
 
 
 @pytest.mark.api
-def test_get_routes_with_days_parameter(client, sample_route, sample_route_metrics_summary):
+def test_get_routes_with_days_parameter(client, sample_route):
     """Test GET /api/routes with days query parameter"""
     response = client.get("/api/routes?days=14")
     assert response.status_code == 200
 
     data = response.json()
     assert isinstance(data, list)
-    # Parameter is accepted (though ignored in current implementation using pre-computed data)
 
 
 @pytest.mark.api
-def test_get_route_success(client, sample_route, sample_route_metrics_summary):
-    """Test GET /api/routes/{route_id} returns detailed metrics"""
+def test_get_route_success(client, sample_route):
+    """Test GET /api/routes/{route_id} returns identity + filter echoes + overlay."""
     response = client.get("/api/routes/TEST1")
     assert response.status_code == 200
 
@@ -75,13 +76,10 @@ def test_get_route_success(client, sample_route, sample_route_metrics_summary):
     assert data["route_id"] == "TEST1"
     assert data["route_name"] == "T1"
     assert data["route_long_name"] == "Test Route 1"
-    assert data["otp_percentage"] == 75.5
-    assert data["avg_headway_minutes"] == 12.5
-    assert data["avg_speed_mph"] == 18.5
-    assert data["grade"] == "B"
-    assert data["total_positions"] == 1050
-    assert data["unique_vehicles"] == 8
-    assert data["unique_trips"] == 42
+    assert data["day_type_filter"] == "all"
+    assert data["period_key"] == "all"
+    assert "otp_all_pct" in data
+    assert "excess_trip_time_pct" in data
 
 
 @pytest.mark.api
@@ -93,20 +91,7 @@ def test_get_route_not_found(client):
 
 
 @pytest.mark.api
-def test_get_route_no_metrics(client, sample_route):
-    """Test GET /api/routes/{route_id} for route without computed metrics"""
-    response = client.get("/api/routes/TEST1")
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["route_id"] == "TEST1"
-    assert data["otp_percentage"] is None
-    assert data["avg_headway_minutes"] is None
-    assert data["grade"] == "N/A"
-
-
-@pytest.mark.api
-def test_get_route_with_days_parameter(client, sample_route, sample_route_metrics_summary):
+def test_get_route_with_days_parameter(client, sample_route):
     """Test GET /api/routes/{route_id} with days query parameter"""
     response = client.get("/api/routes/TEST1?days=14")
     assert response.status_code == 200
@@ -114,7 +99,7 @@ def test_get_route_with_days_parameter(client, sample_route, sample_route_metric
 
 
 @pytest.mark.api
-def test_get_route_trend_success(client, sample_route, sample_route_metrics_daily):
+def test_get_route_trend_success(client, sample_route):
     """Test GET /api/routes/{route_id}/trend returns time-series data"""
     response = client.get("/api/routes/TEST1/trend?metric=otp")
     assert response.status_code == 200
@@ -132,9 +117,9 @@ def test_get_route_trend_success(client, sample_route, sample_route_metrics_dail
 
 
 @pytest.mark.api
-def test_get_route_trend_all_metrics(client, sample_route, sample_route_metrics_daily):
-    """Test GET /api/routes/{route_id}/trend with all valid metrics"""
-    valid_metrics = ["otp", "early", "late", "headway", "headway_std_dev", "speed"]
+def test_get_route_trend_all_metrics(client, sample_route):
+    """Test GET /api/routes/{route_id}/trend with all surviving valid metrics"""
+    valid_metrics = ["otp", "service_delivered", "excess_trip_time"]
 
     for metric in valid_metrics:
         response = client.get(f"/api/routes/TEST1/trend?metric={metric}")
@@ -153,7 +138,15 @@ def test_get_route_trend_invalid_metric(client, sample_route):
 
 
 @pytest.mark.api
-def test_get_route_trend_with_days_parameter(client, sample_route, sample_route_metrics_daily):
+def test_get_route_trend_legacy_metric_rejected(client, sample_route):
+    """Legacy metrics dropped in NOTES-19 cleanup return 400."""
+    for legacy in ("early", "late", "headway", "headway_std_dev", "speed"):
+        response = client.get(f"/api/routes/TEST1/trend?metric={legacy}")
+        assert response.status_code == 400
+
+
+@pytest.mark.api
+def test_get_route_trend_with_days_parameter(client, sample_route):
     """Test GET /api/routes/{route_id}/trend with days parameter"""
     response = client.get("/api/routes/TEST1/trend?metric=otp&days=60")
     assert response.status_code == 200
