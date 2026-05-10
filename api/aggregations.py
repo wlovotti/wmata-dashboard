@@ -703,14 +703,12 @@ def get_route_trend_data(
     `day_type_filter` (NOTES-41) drops dates whose day-of-week doesn't match
     (weekday / saturday / sunday); the row's value is set to `None` so the
     sparkline draws gaps cleanly rather than collapsing the time axis.
-    `period_key` is meaningful only for the `otp` metric — when set, OTP is
-    re-computed per-day from `stop_events` with the hour filter applied
-    (the `route_metrics_daily` cache stores a daily aggregate that doesn't
-    decompose by hour). For non-otp metrics, `period_key` is ignored:
-    excess_trip_time and service_delivered are trip-level (the trip
-    spans hours), and headway / speed legacy fields aren't grouped by
-    hour. Document mismatch the frontend chip with a "filter applies to
-    OTP only" note when both are set on a non-otp metric.
+    `period_key` is meaningful only for the `otp` metric — OTP is computed
+    per-day from `stop_events` with the hour filter applied. For non-otp
+    metrics, `period_key` is ignored: excess_trip_time and service_delivered
+    are trip-level (the trip spans hours), and headway / speed legacy fields
+    aren't grouped by hour. Document mismatch the frontend chip with a
+    "filter applies to OTP only" note when both are set on a non-otp metric.
 
     Args:
         db: Database session
@@ -808,10 +806,21 @@ def get_route_trend_data(
             "trend_data": trend_data,
         }
 
-    # OTP with a period filter: route_metrics_daily stores a daily aggregate
-    # without an hour breakdown, so the period-restricted series has to come
-    # from `stop_events`. day_type filter applies on top.
-    if metric == "otp" and period_key != ALL_HOURS:
+    # OTP series — proximity stop_events are now the canonical source
+    # (NOTES-19 migration). The same helper handles both the no-filter and
+    # period-filtered cases — `is_hour_in_period(_, ALL_HOURS)` returns True
+    # for every hour, so ALL_HOURS produces the unfiltered daily aggregate
+    # the legacy `route_metrics_daily.otp_percentage` field used to carry.
+    # Unknown metrics also fall through here, preserving the previous
+    # implicit "default to OTP" behavior.
+    if metric == "otp" or metric not in {
+        "early",
+        "late",
+        "headway",
+        "headway_std_dev",
+        "speed",
+        "excess_trip_time",
+    }:
         otp_by_date = _compute_otp_per_day_with_filters(
             db, route_id, start_date, end_date, period_key
         )
@@ -847,9 +856,9 @@ def get_route_trend_data(
         .all()
     )
 
-    # Map metric name to field and response key
+    # Map metric name to field and response key. `otp` is handled above by
+    # the stop_events path, so it is not in this dict.
     metric_config = {
-        "otp": {"field": "otp_percentage", "key": "otp_percentage"},
         "early": {"field": "early_percentage", "key": "early_percentage"},
         "late": {"field": "late_percentage", "key": "late_percentage"},
         "headway": {"field": "avg_headway_minutes", "key": "avg_headway_minutes"},
@@ -864,7 +873,7 @@ def get_route_trend_data(
         },
     }
 
-    config = metric_config.get(metric, metric_config["otp"])
+    config = metric_config[metric]
     field_name = config["field"]
     response_key = config["key"]
 
@@ -1381,25 +1390,22 @@ def _system_baseline_for_window(
 def _route_otp_window_mean(
     db: Session, route_id: str, end_date: date_type, days: int
 ) -> float | None:
-    """Mean of `route_metrics_daily.otp_percentage` for one route over the window.
+    """Mean of per-day OTP for one route over the window.
 
-    Skips null entries. Returns None when no rows in the window have a
-    non-null OTP — the route either didn't run or the daily pipeline
-    didn't see enough data to score it.
+    Skips dates with no observations so a single empty day doesn't
+    poison the mean. Returns None when no day in the window has any
+    qualifying proximity stop_events — the route either didn't run or
+    the derivation pipeline hasn't materialized events yet.
+
+    Source is proximity `stop_events.deviation_sec` bucketed via the WMATA
+    OTP window — same path as `_compute_otp_per_day_with_filters` and
+    `_system_otp_series`. Mean-of-daily-percentages (not pooled) so the
+    route value stays comparable to the system baseline computed by
+    `_system_baseline_for_window`, which also averages per-day rates.
     """
-    start_iso = (end_date - timedelta(days=days - 1)).isoformat()
-    end_iso = end_date.isoformat()
-    rows = (
-        db.query(RouteMetricsDaily.otp_percentage)
-        .filter(
-            RouteMetricsDaily.route_id == route_id,
-            RouteMetricsDaily.date >= start_iso,
-            RouteMetricsDaily.date <= end_iso,
-            RouteMetricsDaily.otp_percentage.isnot(None),
-        )
-        .all()
-    )
-    values = [row[0] for row in rows if row[0] is not None]
+    start_date = end_date - timedelta(days=days - 1)
+    by_date = _compute_otp_per_day_with_filters(db, route_id, start_date, end_date, ALL_HOURS)
+    values = [v for v in by_date.values() if v is not None]
     if not values:
         return None
     return sum(values) / len(values)
