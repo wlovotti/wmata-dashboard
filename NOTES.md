@@ -6,12 +6,10 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-10 (added NOTES-48 / NOTES-49 / NOTES-50 — phased
-cloud migration. Trigger: trip_update_snapshots dedup landed (PR #86,
-~50% write-rate cut), but the laptop-resident collector + 94 GB DB on
-a `pmset disablesleep` machine remains a single point of failure for
-the most valuable artifact in the project — accumulated data since
-2026-05-02).
+Last edited 2026-05-09 (closed NOTES-18 with the composite grading
+rubric: 30/50/20 OTP/SD/EWT for frequent routes, 40/60 for non-frequent,
+EWT-to-score uses TfL bands; ships alongside the NOTES-19 cleanup PRs
+#88, #89, #90).
 
 ---
 
@@ -60,11 +58,6 @@ proxies instead).
   median deviation / p95 / trip count over 30 days as a maintenance/age
   proxy (not an operator-blame view).
 
-### P4 — Surface to API + UI
-
-- **NOTES-18 Update grading rubric.** Currently OTP-only; should
-  incorporate service-delivered and EWT now that both have shipped.
-
 ### P5 — Cleanup
 
 - **NOTES-19 Drop `route_metrics_daily` and `route_metrics_summary`.**
@@ -93,19 +86,6 @@ proxies instead).
   ceiling at the cost of admitting more single-ping ghost runs. Not
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
-
----
-
-## NOTES-18. Grading rubric refresh
-
-**Severity: low.**
-
-Current grade (A–F) is OTP-only, computed in `api/aggregations.py`.
-With service-delivered (PR #47) and EWT (PR #52) both shipped and now
-surfaced through the UI, the rubric should incorporate both —
-service-delivered especially, since that's the most rider-felt failure
-mode. Worth a separate decision conversation about weighting before
-implementing.
 
 ---
 
