@@ -13,6 +13,9 @@ Run with: pytest tests/test_aggregations.py
 from datetime import timedelta
 
 from api.aggregations import (
+    EWT_SCORE_FLOOR_SEC,
+    EWT_SCORE_TARGET_SEC,
+    compute_route_grade,
     get_all_routes_scorecard,
     get_route_detail_metrics,
     get_route_trend_data,
@@ -57,6 +60,78 @@ class TestSanitizeFloat:
         assert sanitize_float(42) == 42.0
 
 
+class TestComputeRouteGrade:
+    """Tests for the NOTES-18 composite grade rubric.
+
+    Covers the weighted-composite math for both frequent (EWT included)
+    and non-frequent (EWT absent) routes, the EWT-to-score interpolation,
+    bucket boundaries, and the missing-input N/A path.
+    """
+
+    def test_na_when_otp_missing(self):
+        """OTP is required for any grade — null returns N/A."""
+        assert compute_route_grade(None, 0.9, 60.0) == "N/A"
+
+    def test_na_when_service_delivered_missing(self):
+        """Service-delivered is required for any grade — null returns N/A."""
+        assert compute_route_grade(85.0, None, 60.0) == "N/A"
+
+    def test_frequent_route_perfect_a(self):
+        """100% OTP, 100% SD, EWT at TfL target → composite 100 → A."""
+        assert compute_route_grade(100.0, 1.0, EWT_SCORE_TARGET_SEC) == "A"
+
+    def test_frequent_route_terrible_f(self):
+        """0% OTP, 0% SD, EWT past floor → composite 0 → F."""
+        assert compute_route_grade(0.0, 0.0, EWT_SCORE_FLOOR_SEC + 60) == "F"
+
+    def test_frequent_route_weights_30_50_20(self):
+        """Composite math: OTP 70 + SD 0.8 + EWT 60s → 30*70 + 50*80 + 20*100 = 21+40+20 = 81 → A."""
+        # 70 * 0.30 = 21.0; 80 * 0.50 = 40.0; 100 * 0.20 = 20.0; total 81.0
+        assert compute_route_grade(70.0, 0.80, 60.0) == "A"
+
+    def test_non_frequent_route_weights_40_60(self):
+        """No EWT → composite uses 40/60. OTP 70 + SD 0.8 → 28 + 48 = 76 → B."""
+        # 70 * 0.40 = 28.0; 80 * 0.60 = 48.0; total 76.0
+        assert compute_route_grade(70.0, 0.80, None) == "B"
+
+    def test_ewt_score_clamps_below_target(self):
+        """EWT below TfL target gets full 100 — sub-target time isn't extra credit."""
+        # 100 OTP, 100 SD, EWT 30s (below 60s target) → 30+50+20 = 100 → A
+        assert compute_route_grade(100.0, 1.0, 30.0) == "A"
+
+    def test_ewt_score_clamps_above_floor(self):
+        """EWT above the 5-min floor gets 0 — caps the penalty so the grade reflects OTP+SD."""
+        # 80 OTP, 0.8 SD, EWT 600s (above 300s floor) → 24+40+0 = 64 → B
+        assert compute_route_grade(80.0, 0.80, 600.0) == "B"
+
+    def test_ewt_score_linear_interpolation(self):
+        """EWT at midpoint (180s, halfway between 60 and 300) → score 50."""
+        # 100 OTP, 1.0 SD, EWT 180s → score 50 → 30+50+10 = 90 → A
+        # Verify the EWT contribution by checking a borderline case:
+        # 50 OTP, 0.40 SD, EWT 180s → 15+20+10 = 45 → C
+        assert compute_route_grade(50.0, 0.40, 180.0) == "C"
+
+    def test_grade_b_boundary_at_60(self):
+        """Composite exactly 60 → B (>= boundary)."""
+        # Non-frequent: OTP 60, SD 0.6 → 24+36 = 60 → B
+        assert compute_route_grade(60.0, 0.60, None) == "B"
+
+    def test_grade_c_boundary_at_40(self):
+        """Composite exactly 40 → C."""
+        # Non-frequent: OTP 40, SD 0.4 → 16+24 = 40 → C
+        assert compute_route_grade(40.0, 0.40, None) == "C"
+
+    def test_grade_d_boundary_at_20(self):
+        """Composite exactly 20 → D."""
+        # Non-frequent: OTP 20, SD 0.2 → 8+12 = 20 → D
+        assert compute_route_grade(20.0, 0.20, None) == "D"
+
+    def test_grade_f_below_20(self):
+        """Composite below 20 → F."""
+        # Non-frequent: OTP 10, SD 0.10 → 4+6 = 10 → F
+        assert compute_route_grade(10.0, 0.10, None) == "F"
+
+
 class TestGetAllRoutesScorecard:
     """Tests for get_all_routes_scorecard function (post NOTES-19 cleanup).
 
@@ -81,6 +156,9 @@ class TestGetAllRoutesScorecard:
         assert "service_delivered_ratio" in route_data
         assert "ewt_seconds" in route_data
         assert "bunching_rate" in route_data
+        # Composite grade (NOTES-18): N/A without live data, since OTP and
+        # service_delivered are both required inputs.
+        assert route_data["grade"] == "N/A"
 
     def test_scorecard_with_multiple_routes(self, db_session, sample_routes):
         """Every is_current route appears, sorted with None OTP values last."""
@@ -120,6 +198,8 @@ class TestGetRouteDetailMetrics:
         assert "ewt_seconds" in result
         assert "bunching_rate" in result
         assert "excess_trip_time_pct" in result
+        # Composite grade (NOTES-18): N/A without live data.
+        assert result["grade"] == "N/A"
 
     def test_route_detail_nonexistent_route(self, db_session):
         """Test route detail for non-existent route"""

@@ -278,6 +278,83 @@ def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
     return result
 
 
+# --- NOTES-18 composite grade ---------------------------------------------
+# Replaces the OTP-only letter grade dropped in the NOTES-19 cleanup. Inputs
+# are mapped to a 0-100 scale, weighted, and bucketed into A-F. EWT is
+# included only for routes where it's defined (i.e. EWT is computed at all).
+#
+# Weights (rationale: service_delivered is the most rider-felt failure mode;
+# EWT captures unreliability for frequent service):
+#   - frequent route (EWT available): OTP 30 / SD 50 / EWT 20
+#   - non-frequent route (no EWT):    OTP 40 / SD 60 (renormalized)
+#
+# EWT-to-score mapping uses TfL's published EWT bands as the anchor:
+# TfL targets EWT ≤ 60s for high-frequency routes ("good") and labels >120s
+# as "poor." We need a 0 anchor too — pick 300s (5 min) as the "service
+# broken" floor, linearly interpolated. Editorial choices, not strictly
+# TfL-cited, but grounded in the same scale.
+EWT_SCORE_TARGET_SEC = 60  # TfL "good" threshold for high-frequency service
+EWT_SCORE_FLOOR_SEC = 300  # 5 min — editorial floor for "service is broken"
+
+
+def _ewt_to_score(ewt_sec: float | None) -> float | None:
+    """Map EWT seconds to a 0-100 score (higher is better) for grading.
+
+    Linear interpolation between TfL's "good" target (60s = 100) and an
+    editorial 5-min "broken" floor (300s = 0). Returns None when EWT is
+    unavailable (caller falls back to non-frequent weights).
+    """
+    if ewt_sec is None:
+        return None
+    if ewt_sec <= EWT_SCORE_TARGET_SEC:
+        return 100.0
+    if ewt_sec >= EWT_SCORE_FLOOR_SEC:
+        return 0.0
+    return 100.0 * (EWT_SCORE_FLOOR_SEC - ewt_sec) / (EWT_SCORE_FLOOR_SEC - EWT_SCORE_TARGET_SEC)
+
+
+def compute_route_grade(
+    otp_pct: float | None,
+    service_delivered_ratio: float | None,
+    ewt_sec: float | None,
+) -> str:
+    """Composite letter grade (NOTES-18).
+
+    Weighted composite of OTP, service-delivered, and EWT, bucketed:
+      A ≥ 80, B ≥ 60, C ≥ 40, D ≥ 20, F otherwise.
+
+    Returns "N/A" if either OTP or service-delivered is missing — those two
+    define the non-frequent grade and are required. EWT is optional: when
+    `ewt_sec` is None (route lacks frequent service the metric covers), the
+    weights renormalize to OTP 40 / SD 60.
+
+    Inputs:
+      - otp_pct: 0-100 percentage (`otp_all_pct` on the live overlay)
+      - service_delivered_ratio: 0-1 ratio (multiplied by 100 for scoring)
+      - ewt_sec: seconds, or None for non-frequent routes
+    """
+    if otp_pct is None or service_delivered_ratio is None:
+        return "N/A"
+
+    sd_score = service_delivered_ratio * 100.0
+    ewt_score = _ewt_to_score(ewt_sec)
+
+    if ewt_score is not None:
+        composite = otp_pct * 0.30 + sd_score * 0.50 + ewt_score * 0.20
+    else:
+        composite = otp_pct * 0.40 + sd_score * 0.60
+
+    if composite >= 80:
+        return "A"
+    if composite >= 60:
+        return "B"
+    if composite >= 40:
+        return "C"
+    if composite >= 20:
+        return "D"
+    return "F"
+
+
 def _live_metric_fields(metrics: dict | None) -> dict:
     """Flatten the per-route live-metrics bundle into scorecard fields.
 
@@ -330,13 +407,14 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
 
     Returns one row per route with the live overlay metrics (OTP
     origin/destination split, service-delivered, EWT headline, bunching
-    headline) plus identity fields and frequency class. Live metrics are
-    cached by service_date with a short TTL — see `get_live_metrics_for_today`.
+    headline) plus identity fields, frequency class, and the composite
+    `grade` (NOTES-18, computed via `compute_route_grade`). Live metrics
+    are cached by service_date with a short TTL — see
+    `get_live_metrics_for_today`.
 
     The legacy `route_metrics_summary` fields (otp_percentage,
-    avg_headway_minutes, avg_speed_mph, total_observations, grade) were
-    dropped in the NOTES-19 migration. The OTP-only `grade` will be
-    reintroduced with a service-delivered + EWT composite via NOTES-18.
+    avg_headway_minutes, avg_speed_mph, total_observations) were dropped
+    in the NOTES-19 migration.
 
     Args:
         db: Database session
@@ -356,16 +434,23 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
     # Frequency class per route (GTFS-derived, ~2ms — no caching needed).
     freq_classes = compute_route_frequency_classes(db)
 
-    scorecard = [
-        {
-            "route_id": route.route_id,
-            "route_name": route.route_short_name,
-            "route_long_name": route.route_long_name,
-            "frequency_class": freq_classes.get(route.route_id),
-            **_live_metric_fields(live.get(route.route_id)),
-        }
-        for route in routes
-    ]
+    scorecard = []
+    for route in routes:
+        live_fields = _live_metric_fields(live.get(route.route_id))
+        scorecard.append(
+            {
+                "route_id": route.route_id,
+                "route_name": route.route_short_name,
+                "route_long_name": route.route_long_name,
+                "frequency_class": freq_classes.get(route.route_id),
+                "grade": compute_route_grade(
+                    live_fields["otp_all_pct"],
+                    live_fields["service_delivered_ratio"],
+                    live_fields["ewt_seconds"],
+                ),
+                **live_fields,
+            }
+        )
 
     # Sort by live OTP descending (best first); routes without an OTP
     # number sink to the bottom so the table reads top-down by signal.
@@ -488,6 +573,11 @@ def get_route_detail_metrics(
         "day_type_filter": day_type_filter,
         "period_key": period_key,
         "frequency_class": frequency_class,
+        "grade": compute_route_grade(
+            live_fields["otp_all_pct"],
+            live_fields["service_delivered_ratio"],
+            live_fields["ewt_seconds"],
+        ),
         **live_fields,
         **excess_fields,
     }
