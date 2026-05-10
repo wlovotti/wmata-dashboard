@@ -84,6 +84,16 @@ PIPELINES: list[dict] = [
         "module": "pipelines.compute_bunching",
         "depends_on": "aggregate_runs",
     },
+    {
+        # Per-date system-level rollup written to `system_metrics_daily`.
+        # Depends on aggregate_runs (for service_delivered) and stop_events
+        # (for OTP / EWT / bunching). compute_bunching is the strongest
+        # transitive dep — if it succeeded, the inputs this pipeline needs
+        # are all current.
+        "name": "upsert_system_metrics_daily",
+        "module": "pipelines.upsert_system_metrics_daily",
+        "depends_on": "compute_bunching",
+    },
 ]
 
 # Housekeeping pipelines that aren't date-scoped — they operate on the global

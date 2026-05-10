@@ -77,14 +77,12 @@ uv run python scripts/collect_sample_data.py all 120
 # temporarily to avoid database locks when using the API/dashboard
 ```
 
-#### 2. Compute Metrics
+#### 2. Run the Daily Batch
 
 ```bash
-# Compute daily metrics for all routes with data
-uv run python pipelines/compute_daily_metrics.py --days 7
-
-# Compute metrics for a specific route
-uv run python pipelines/compute_daily_metrics.py --route C51 --days 7
+# Derive stop_events / runs / bunching for yesterday and any catch-up
+# dates, then upsert system_metrics_daily for each.
+uv run python pipelines/run_daily_batch.py
 ```
 
 #### 3. Start the Backend API
@@ -106,10 +104,10 @@ The dashboard will be available at `http://localhost:5173`
 
 ### API Endpoints
 
-- `GET /api/routes` - Get scorecard for all routes (includes OTP, headway, speed, headway regularity)
+- `GET /api/routes` - Get scorecard for all routes (live OTP split, service-delivered, EWT, bunching, composite grade)
 - `GET /api/routes/{route_id}` - Get detailed metrics for a specific route
 - `GET /api/routes/{route_id}/trend?days=30&metric=<metric>` - Get time-series trend data
-  - Supported metrics: `otp`, `early`, `late`, `headway`, `headway_std_dev`, `speed`
+  - Supported metrics: `otp`, `service_delivered`, `excess_trip_time`
 - `GET /api/routes/{route_id}/time-periods` - Get performance by time of day
 - `GET /api/routes/{route_id}/shapes` - Get GTFS shapes for map visualization
 
@@ -125,12 +123,16 @@ curl 'http://localhost:8000/api/routes/C51/trend?days=30&metric=otp'
 ### Data Pipeline
 
 1. **GTFS Static Data** → Downloaded from WMATA (routes, stops, trips, schedules, shapes)
-2. **GTFS-RT Data** → Polled every 60s (real-time vehicle positions with speed data)
-3. **Database** → Stores schedule data and position snapshots
-4. **Nightly Batch Job** → Computes daily metrics (OTP, headway, speed)
-5. **Aggregation Tables** → Pre-computed metrics for fast API responses
-6. **API** → FastAPI serves metrics with <100ms response times
-7. **Frontend** → React dashboard with charts and maps
+2. **GTFS-RT Data** → Polled every 60s (vehicle positions + trip updates)
+3. **Database** → Stores schedule data, raw position/trip-update snapshots
+4. **Daily Batch** → Derives `stop_events` (proximity + trip_update sources),
+   aggregates them into `runs`, then computes per-route bunching and the
+   system-wide rollup (`system_metrics_daily`). Orchestrated by
+   `pipelines/run_daily_batch.py`.
+5. **API** → FastAPI serves a mix of materialized aggregates
+   (`system_metrics_daily`) and live overlay metrics (per-route OTP,
+   service-delivered, EWT, bunching) computed from `stop_events` / `runs`
+6. **Frontend** → React dashboard with charts and maps
 
 ### Database Schema
 
@@ -139,11 +141,13 @@ curl 'http://localhost:8000/api/routes/C51/trend?days=30&metric=otp'
 - Agencies, Calendar, CalendarDates, FeedInfo
 
 **Real-time Data:**
-- VehiclePosition - GTFS-RT vehicle positions (primary, includes speed)
+- VehiclePosition - GTFS-RT vehicle positions
+- TripUpdateSnapshot - GTFS-RT trip updates
 
-**Aggregations:**
-- RouteMetricsDaily - Daily performance metrics per route (OTP, headway, speed, bunching metrics)
-- RouteMetricsSummary - Rolling 7-day summaries for API (all metrics aggregated)
+**Foundation tables:**
+- StopEvent - per (trip, stop) observed arrival/skip from proximity + trip_update sources
+- Run - per (trip, source) trip-level aggregate over StopEvent
+- SystemMetricsDaily - one row per service_date with OTP / service_delivered / EWT / bunching for the system
 
 ### Key Modules
 
@@ -153,9 +157,10 @@ curl 'http://localhost:8000/api/routes/C51/trend?days=30&metric=otp'
 - `src/wmata_collector.py` - GTFS/GTFS-RT data collection
 - `src/analytics.py` - OTP, headway, and speed calculations
 - `src/trip_matching.py` - Match real-time vehicles to scheduled trips
+- `src/system_metrics.py` - Per-date system rollup compute + upsert
 - `api/main.py` - FastAPI application
 - `api/aggregations.py` - API aggregation functions
-- `pipelines/compute_daily_metrics.py` - Nightly metrics computation
+- `pipelines/run_daily_batch.py` - Nightly batch orchestrator
 
 **Frontend:**
 - `frontend/src/App.jsx` - Main application with routing
@@ -179,7 +184,7 @@ wmata-dashboard/
 │   ├── main.py            # API routes
 │   └── aggregations.py    # Aggregation functions
 ├── pipelines/             # Data processing jobs
-│   └── compute_daily_metrics.py
+│   └── run_daily_batch.py
 ├── scripts/               # Utility scripts
 │   ├── init_database.py
 │   ├── collect_sample_data.py
@@ -226,7 +231,7 @@ psql wmata_dashboard
 # Example queries:
 wmata_dashboard=# SELECT COUNT(*) FROM vehicle_positions;
 wmata_dashboard=# SELECT * FROM routes WHERE route_short_name = 'C51';
-wmata_dashboard=# SELECT * FROM route_metrics_summary;
+wmata_dashboard=# SELECT * FROM system_metrics_daily ORDER BY service_date DESC LIMIT 7;
 
 # For SQLite (if using SQLite instead of PostgreSQL)
 sqlite3 wmata_dashboard.db
@@ -251,14 +256,13 @@ uv run python scripts/init_database.py --no-confirm
 # 4. Migrate collected data from SQLite (optional - or start fresh)
 uv run python scripts/migrate_sqlite_to_postgres.py
 
-# 5. Recompute metrics to populate aggregation tables
-uv run python pipelines/compute_daily_metrics.py --days 7 --recalculate
+# 5. Run the daily batch to populate stop_events / runs / system_metrics_daily
+uv run python pipelines/run_daily_batch.py
 ```
 
-**Note:** The migration script copies:
-- All vehicle position data (real-time snapshots)
-- Daily metrics (if previously computed)
-- Summary metrics (if previously computed)
+**Note:** The migration script copies vehicle position data and trip-update
+snapshots. The aggregation tables (`stop_events`, `runs`,
+`system_metrics_daily`) are re-derived by the daily batch.
 
 GTFS static data (routes, stops, trips, etc.) is reloaded from WMATA API via `init_database.py` to ensure consistency.
 
@@ -313,9 +317,9 @@ The codebase is database-agnostic and works with both SQLite and PostgreSQL:
    uv run python scripts/continuous_collector.py
    ```
 
-4. **Set up nightly metrics computation** (cron job)
+4. **Set up nightly metrics computation** (cron / launchd / systemd timer)
    ```bash
-   0 2 * * * cd /path/to/wmata-dashboard && uv run python pipelines/compute_daily_metrics.py --days 7
+   0 2 * * * cd /path/to/wmata-dashboard && uv run python pipelines/run_daily_batch.py
    ```
 
 5. **Run API server** (gunicorn, uvicorn, etc.)

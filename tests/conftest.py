@@ -22,8 +22,6 @@ from api.main import app
 from src.models import (
     Base,
     Route,
-    RouteMetricsDaily,
-    RouteMetricsSummary,
     Stop,
     StopEvent,
     Trip,
@@ -190,52 +188,6 @@ def sample_vehicle_positions(db_session, sample_route, sample_trip) -> list[Vehi
     for pos in positions:
         db_session.refresh(pos)
     return positions
-
-
-@pytest.fixture
-def sample_route_metrics_summary(db_session, sample_route) -> RouteMetricsSummary:
-    """Create and return a sample RouteMetricsSummary"""
-    summary = RouteMetricsSummary(
-        route_id=sample_route.route_id,
-        otp_percentage=75.5,
-        early_percentage=15.2,
-        late_percentage=9.3,
-        avg_headway_minutes=12.5,
-        headway_std_dev_minutes=3.2,
-        headway_cv=0.256,
-        avg_speed_mph=18.5,
-        total_observations=150,
-        total_positions_7d=1050,
-        unique_vehicles_7d=8,
-        unique_trips_7d=42,
-        last_data_timestamp=utcnow_naive(),
-        computed_at=utcnow_naive(),
-    )
-    db_session.add(summary)
-    db_session.commit()
-    db_session.refresh(summary)
-    return summary
-
-
-@pytest.fixture
-def sample_route_metrics_daily(db_session, sample_route) -> RouteMetricsDaily:
-    """Create and return a sample RouteMetricsDaily"""
-    daily = RouteMetricsDaily(
-        route_id=sample_route.route_id,
-        date=(utcnow_naive() - timedelta(days=1)).date().isoformat(),
-        otp_percentage=78.2,
-        early_percentage=12.5,
-        late_percentage=9.3,
-        avg_headway_minutes=11.8,
-        headway_std_dev_minutes=2.9,
-        avg_speed_mph=19.2,
-        total_arrivals=8,
-        computed_at=utcnow_naive(),
-    )
-    db_session.add(daily)
-    db_session.commit()
-    db_session.refresh(daily)
-    return daily
 
 
 @pytest.fixture

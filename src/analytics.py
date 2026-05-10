@@ -32,14 +32,16 @@ def get_date_format_expr(timestamp_column):
     """
     Get database-agnostic date formatting expression.
     Returns SQLAlchemy func for formatting timestamp as YYYYMMDD string.
+
+    Production is Postgres-only (`src/database.py` requires `DATABASE_URL`),
+    but tests run on SQLite in-memory — so the function still has to
+    branch. Tests set `DATABASE_URL=sqlite:///:memory:` via monkeypatch
+    in `tests/conftest.py`.
     """
-    database_url = os.getenv("DATABASE_URL", "sqlite:///./wmata_dashboard.db")
+    database_url = os.getenv("DATABASE_URL", "")
     if database_url.startswith("postgresql"):
-        # PostgreSQL: use to_char
         return func.to_char(timestamp_column, "YYYYMMDD")
-    else:
-        # SQLite: use strftime
-        return func.strftime("%Y%m%d", timestamp_column)
+    return func.strftime("%Y%m%d", timestamp_column)
 
 
 # Cache for exception service-dates (loaded once per session)

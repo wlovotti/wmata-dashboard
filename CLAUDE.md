@@ -8,15 +8,17 @@ without asking. See `NOTES.md` for the active punch list.
 ## Load-bearing constraints
 
 - **PostgreSQL only.** `src/database.py` requires `DATABASE_URL`; there is
-  no SQLite fallback. The `os.getenv("DATABASE_URL", "sqlite:///...")`
-  defaults you'll see in `src/analytics.py` and `pipelines/compute_daily_metrics.py`
-  are dead — the app crashes earlier without `DATABASE_URL`.
+  no SQLite fallback in production. Tests run on SQLite in-memory and set
+  `DATABASE_URL=sqlite:///:memory:` via `tests/conftest.py` monkeypatch.
 
-- **Pre-computed aggregations are the architectural rule.** API endpoints
-  read from `route_metrics_summary` / `route_metrics_daily`, populated by
-  `pipelines/compute_daily_metrics.py`. Never compute metrics live in an API
-  handler — that's the difference between 37 ms and 30 s. If a feature
-  needs an expensive calculation, do it offline.
+- **Stop_events / runs are the architectural foundation.** Per-route
+  metrics (OTP, service-delivered, EWT, bunching, excess-trip-time) are
+  derived from `stop_events` and `runs`, populated by the per-date
+  pipelines orchestrated via `pipelines/run_daily_batch.py`. The legacy
+  daily-batch pipeline (`compute_daily_metrics.py`) and its
+  materialization tables (`route_metrics_daily`, `route_metrics_summary`)
+  were retired in NOTES-19. System-level rollups land in
+  `system_metrics_daily` via `pipelines/upsert_system_metrics_daily.py`.
 
 - **GTFS schedule is versioned via `is_current`.** All queries against
   `routes`, `stops`, `trips`, `stop_times`, `calendar`, `calendar_dates`
@@ -82,8 +84,7 @@ uv sync --extra dev                                       # install
 uv run uvicorn api.main:app --reload                      # API on :8000
 cd frontend && npm run dev                                # frontend on :5173
 uv run python scripts/continuous_collector.py             # 60 s collector
-uv run python pipelines/compute_daily_metrics.py --recalculate              # batch (last 7 days)
-uv run python pipelines/compute_daily_metrics.py --route C51 --date 2025-10-21 --recalculate   # backfill one route/day
+uv run python pipelines/run_daily_batch.py                # nightly batch (derive + aggregate + system rollup)
 uv run pytest -m smoke                                    # fast tests
 uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
 ```

@@ -3,19 +3,18 @@ Unit tests for the system_metrics_daily materialization path (NOTES-48).
 
 Covers:
   - `src/system_metrics.py:compute_system_metrics_for_date` returns the
-    expected dict shape and reads OTP from `stop_events` (post-NOTES-19
-    pivot off the legacy `route_metrics_daily` path).
-  - `pipelines/compute_daily_metrics.py:upsert_system_metrics_for_date`
-    writes a row to `system_metrics_daily` for the requested date and
-    overwrites on second invocation (upsert semantics).
+    expected dict shape and reads OTP from `stop_events`.
+  - `src/system_metrics.py:upsert_system_metrics_for_date` writes a row
+    to `system_metrics_daily` for the requested date and overwrites on
+    second invocation (upsert semantics).
 """
 
 from datetime import datetime, timedelta
 
 import pytest
 
-from src.models import RouteMetricsDaily, StopEvent, SystemMetricsDaily
-from src.system_metrics import compute_system_metrics_for_date
+from src.models import StopEvent, SystemMetricsDaily
+from src.system_metrics import compute_system_metrics_for_date, upsert_system_metrics_for_date
 from src.timezones import eastern_today
 
 
@@ -139,31 +138,6 @@ def test_compute_system_metrics_for_date_otp_pooled(db_session, sample_routes):
 
 
 @pytest.mark.smoke
-def test_compute_system_metrics_for_date_ignores_route_metrics_daily_for_otp(
-    db_session, sample_routes
-):
-    """Pivot off `route_metrics_daily` for OTP: legacy rows must not surface.
-
-    Seed `route_metrics_daily` rows but no `stop_events` — OTP must be
-    null. Proves the system rollup no longer depends on the legacy
-    daily-batch pipeline for OTP (NOTES-19, partial).
-    """
-    target_date = eastern_today() - timedelta(days=6)
-    db_session.add(
-        RouteMetricsDaily(
-            route_id="TEST1",
-            date=target_date.isoformat(),
-            otp_percentage=88.0,
-            total_arrivals=500,
-        )
-    )
-    db_session.commit()
-
-    result = compute_system_metrics_for_date(db_session, target_date)
-    assert result["otp_percentage"] is None
-
-
-@pytest.mark.smoke
 def test_compute_system_metrics_for_date_service_delivered_null_when_no_runs(
     db_session, sample_routes
 ):
@@ -210,8 +184,6 @@ def test_pipeline_upserts_system_metrics_row(db_session, sample_routes):
     row with the computed values; calling it again replaces in place
     (primary key on service_date).
     """
-    from pipelines.compute_daily_metrics import upsert_system_metrics_for_date
-
     target_date = eastern_today() - timedelta(days=4)
     target_iso = target_date.isoformat()
 

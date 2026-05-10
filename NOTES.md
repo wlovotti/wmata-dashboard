@@ -6,10 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-09 (closed NOTES-18 with the composite grading
-rubric: 30/50/20 OTP/SD/EWT for frequent routes, 40/60 for non-frequent,
-EWT-to-score uses TfL bands; ships alongside the NOTES-19 cleanup PRs
-#88, #89, #90).
+Last edited 2026-05-09 (closed NOTES-19: deleted RouteMetricsDaily /
+RouteMetricsSummary models, `pipelines/compute_daily_metrics.py`, and
+the legacy migration script. `upsert_system_metrics_for_date` moved to
+`src/system_metrics.py`; new `pipelines/upsert_system_metrics_daily.py`
+wires it into `run_daily_batch.py`. Production DB needs a manual
+`DROP TABLE route_metrics_daily, route_metrics_summary` after merge —
+documented in the closing PR body).
 
 ---
 
@@ -60,9 +63,6 @@ proxies instead).
 
 ### P5 — Cleanup
 
-- **NOTES-19 Drop `route_metrics_daily` and `route_metrics_summary`.**
-  Once the new metrics fully replace them. Coexist for now to avoid UI
-  breakage during the transition.
 - **NOTES-20 Tighter rider-experience OTP.** A stricter window alongside
   WMATA's official. Tracked but not yet scoped — user wants
   comparability with WMATA's scorecard for now.
@@ -86,21 +86,6 @@ proxies instead).
   ceiling at the cost of admitting more single-ping ghost runs. Not
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
-
----
-
-## NOTES-19. Drop `route_metrics_daily` / `route_metrics_summary`
-
-**Severity: low (cleanup, after the new metrics fully replace them).**
-
-Both tables and the daily batch pipeline that populates them
-(`pipelines/compute_daily_metrics.py`) become dead code once the new
-stop_events-based pipeline covers all current API consumers. Coexist
-for now to avoid UI breakage during the transition. With NOTES-17
-closed, the only remaining `route_metrics_summary` consumers are the
-legacy scorecard fields (avg_headway_minutes, avg_speed_mph,
-total_observations) and the OTP-only grade — track as one final cleanup
-PR once those move to the new path.
 
 ---
 

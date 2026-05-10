@@ -5,9 +5,9 @@ UTC value. There are no `timestamptz` columns; the tz info is implicit
 in this rule.
 
 Service-date convention: WMATA buses run on Washington DC local time.
-Anything user-facing — "today's metrics", "last 7 days", a service date
-in route_metrics_daily — is an Eastern question even though the storage
-is UTC. Use the helpers here to bridge the two; never call
+Anything user-facing — "today's metrics", "last 7 days", a service_date
+on `runs` or `stop_events` — is an Eastern question even though the
+storage is UTC. Use the helpers here to bridge the two; never call
 ``datetime.now()`` (naive local) for date math.
 
 This module exists because vehicle_positions.timestamp was historically
