@@ -30,19 +30,24 @@ if not API_KEY:
 POLL_INTERVAL_SEC = 30
 
 
-def collect_trip_updates_once():
-    """Pull one TripUpdates snapshot and persist its stop_time_updates."""
+def collect_trip_updates_once(collector: WMATADataCollector) -> None:
+    """Pull one TripUpdates snapshot and persist its stop_time_updates.
+
+    The caller passes in a long-lived ``collector`` so its
+    ``_tu_dedup_cache`` survives between snapshots. The DB session is
+    rebound per call to keep the connection fresh on multi-day runs.
+    """
     db = get_session()
 
     try:
-        collector = WMATADataCollector(API_KEY, db_session=db)
+        collector.db = db
         snapshot_ts, rows = collector.get_realtime_trip_updates()
 
         if rows:
             collector._save_trip_updates(rows)
             print(
                 f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"Saved {len(rows)} trip update rows (snapshot_ts={snapshot_ts})"
+                f"Snapshot complete (snapshot_ts={snapshot_ts}, rows_in_feed={len(rows)})"
             )
         else:
             print(
@@ -69,9 +74,13 @@ def main():
 
     print("\nStarting continuous collection...")
 
+    # Single collector instance shared across polls so its dedup cache
+    # for trip_update_snapshots survives between snapshots.
+    collector = WMATADataCollector(API_KEY)
+
     try:
         while True:
-            collect_trip_updates_once()
+            collect_trip_updates_once(collector)
             time.sleep(POLL_INTERVAL_SEC)
 
     except KeyboardInterrupt:

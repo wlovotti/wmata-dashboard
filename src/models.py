@@ -392,14 +392,37 @@ class VehiclePosition(Base):
 
 class TripUpdateSnapshot(Base):
     """
-    Append-only raw rows from the WMATA GTFS-RT TripUpdates feed.
+    Append-only rows from the WMATA GTFS-RT TripUpdates feed.
 
-    One row per (trip_id, stop_id) entry in a single feed snapshot. The same
-    snapshot_ts is shared across every row materialized from one feed pull,
-    so per-pair time series can be reconstructed by ORDER BY snapshot_ts.
+    Stored as **value-transitions, not every-tick observations.** The
+    collector (``src/wmata_collector.py:_save_trip_updates``) keeps an
+    in-memory ``(trip_id, stop_id) → (predicted_arrival_ts,
+    predicted_departure_ts, schedule_relationship, vehicle_id)`` cache
+    and only persists a row when that tuple differs from the last row
+    stored for the same pair. The feed republishes every future stop on
+    every poll, but predictions for far-future stops are often stable
+    across many ticks; storing only transitions cuts row volume by ~50%
+    in steady state with no loss for the derivation pipeline.
+
+    Implications:
+      * ``snapshot_ts`` on a row is the time the value FIRST appeared,
+        not the most recent time it was observed in the feed. Pairs with
+        a stable prediction will have ``snapshot_ts`` lag behind real
+        time until the value changes or the stop drops out of the feed.
+      * Per-pair "how often did WMATA re-emit this prediction" counts
+        are a count of TRANSITIONS, not observations. The probe scripts
+        (``scripts/probe_trip_updates*.py``) read this distinction at
+        face value — adapt them if you need raw-observation counts.
+      * The downstream derivation
+        (``pipelines/derive_stop_events_trip_updates.py``) reduces all
+        snapshots per pair to the last tuple-distinct value anyway, so
+        dedup is provably lossless for ``stop_events`` and every metric
+        derived from it (parity-tested across 6 routes × 2 days, 53k
+        reduced keys, 0 mismatches).
+
     Stop entries drop out of the feed once the bus passes them — the last
-    predicted_arrival_ts before disappearance is WMATA's effective claimed
-    actual arrival, the basis for derived stop_events.
+    ``predicted_arrival_ts`` before disappearance is WMATA's effective
+    claimed actual arrival, the basis for derived stop_events.
     """
 
     __tablename__ = "trip_update_snapshots"
