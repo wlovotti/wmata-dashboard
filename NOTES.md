@@ -6,7 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-06 (closed NOTES-42 — bunching cause decomposition via `/api/routes/{route_id}/bunching-causes` + stacked-bar visualization on PeriodDrilldown; mechanism is textbook bus-bunching theory, presentation is internal).
+Last edited 2026-05-10 (added NOTES-48 / NOTES-49 / NOTES-50 — phased
+cloud migration. Trigger: trip_update_snapshots dedup landed (PR #86,
+~50% write-rate cut), but the laptop-resident collector + 94 GB DB on
+a `pmset disablesleep` machine remains a single point of failure for
+the most valuable artifact in the project — accumulated data since
+2026-05-02).
 
 ---
 
@@ -220,6 +225,128 @@ the contributors view (PR #80, where contribution is computed
 against the system-window baseline today; swap to per-route target
 once this item lands). Targets can stay editable by the operator, but
 a sensible starting set should be checked in.
+
+---
+
+## NOTES-48. Cloud migration phase 1 — lift collector + DB to a small VM
+
+**Severity: medium (data durability — single point of failure today).**
+
+The collector and DB both live on the dev laptop, which depends on
+`sudo pmset disablesleep 1` for lid-closed operation and on the disk
+not failing. Two-plus months of accumulated WMATA data (since 2026-05-02)
+is the most valuable artifact in the project — the WMATA feed has no
+replay window, so any gap is permanent. Phase 1 is the minimum cloud
+footprint that removes the laptop as a single point of failure: a
+small Linux VM running self-hosted Postgres + the collector + the
+existing archive job. API and frontend stay local for now (Phase 3).
+
+Concrete steps:
+1. Provision a small VM (Hetzner CPX21 / DigitalOcean basic / AWS t4g.small;
+   ~$10-15/mo). Needs ≥150 GB disk so the post-dedup ~50 GB equilibrium
+   plus parquet archives and headroom all fit.
+2. Install Postgres (same major version as local — check
+   `src/database.py` and `pyproject.toml`).
+3. `pg_dump -Fc` the local DB, scp the dump, `pg_restore` on the VM.
+   Plan for hours of transfer at consumer-internet upload speed; do it
+   over a weekend or use `pg_dump | ssh | pg_restore` to avoid
+   intermediate disk.
+4. Move the WMATA API key onto the VM via `.env` (NOT in git).
+5. Run the collector under systemd (`Restart=on-failure`,
+   `StandardOutput=append:/var/log/wmata-collector.log`) so it survives
+   crashes and reboots without `caffeinate` / `disablesleep` hacks.
+6. Schedule `pipelines/archive_trip_update_snapshots.py` and
+   `pipelines/run_daily_batch.py` via systemd timers (or cron).
+7. Point the local API at the VM's Postgres via SSH tunnel
+   (`ssh -L 5432:localhost:5432 vm` then `DATABASE_URL` to localhost),
+   so dev workflow doesn't change. Note that some pipelines doing bulk
+   writes (`derive_stop_events_*`, etc.) will be slow over a tunnel —
+   acceptable for backfills, run them on the VM for routine work.
+8. Park the local DB read-only as a backup until the cloud copy has
+   ≥7 days of clean operation; only then drop it.
+9. Once stable, `sudo pmset disablesleep 0` to reclaim normal sleep
+   on the laptop.
+
+Out of scope for Phase 1: managed Postgres (NOTES-49), public API
+deployment (NOTES-50), automated backups beyond a weekly `pg_dump` to
+S3/B2/R2 (one-line cron, include).
+
+---
+
+## NOTES-49. Cloud migration phase 2 — managed Postgres + backups
+
+**Severity: low (only when the VM-hosted DB outgrows hand-maintenance).**
+
+Trigger: any of (a) NOTES-48 has been stable for ≥30 days and we want
+to stop hand-maintaining Postgres, (b) DB grows past ~150 GB and a
+larger VM becomes more expensive than managed, (c) site goes
+semi-public and a single accidental `DROP TABLE` becomes
+unrecoverable. Until one of those, the VM-hosted Postgres from Phase 1
+is fine.
+
+Migration choices, roughly cheapest → most robust:
+- **Neon** (serverless Postgres, branching, generous free tier; cold starts on idle, fine for a low-traffic dashboard).
+- **Supabase** (managed Postgres + auth/storage we don't need, ~$25/mo for the relevant tier).
+- **DigitalOcean Managed Postgres** (~$15/mo for the cheapest tier, automated daily backups + PITR).
+- **AWS RDS** (most flexible, most expensive at this scale).
+
+Concrete steps:
+1. Pick the provider. Neon is simplest if cold-start latency on
+   `/api/routes` is acceptable (the warm path is ~37 ms; first query
+   after idle could be 1-2 s).
+2. Provision; copy the connection string into `.env` on both VM and
+   laptop.
+3. `pg_dump -Fc` from VM, `pg_restore` into managed; run both in
+   parallel for one week (collector double-writes via a small adapter
+   in `src/wmata_collector.py`, or a logical replication slot — the
+   adapter is simpler). Compare row counts daily.
+4. Cut the collector over to writing only to managed Postgres.
+5. Decommission the VM's Postgres; keep the VM for the collector
+   process itself.
+
+Backups: managed Postgres providers handle PITR. Until then, a weekly
+`pg_dump | xz | aws s3 cp` (or B2 / R2 — both cheaper than S3) on a
+cron is sufficient. Document the restore drill in `CLAUDE.md` or a
+runbook so it's not first-time-when-needed.
+
+---
+
+## NOTES-50. Cloud migration phase 3 — deploy API + frontend
+
+**Severity: low (only if/when the dashboard goes semi-public).**
+
+Trigger: someone other than the user wants to view the dashboard
+without a screenshare. Until then, running the API + Vite frontend on
+the laptop pointed at the cloud DB is fine and keeps iteration speed
+high.
+
+Concrete steps:
+1. **API** (`api/main.py`, FastAPI). Deploy options: Fly.io
+   (geographically close to managed-Postgres region; ~$5/mo for a
+   small instance), Render, Railway, or a separate VM. Ship as a
+   container; uvicorn workers behind whatever load balancer the
+   provider gives. Wire `DATABASE_URL` to the managed Postgres from
+   NOTES-49 (or to the VM-hosted Postgres from NOTES-48 if NOTES-49
+   isn't done yet).
+2. **Frontend** (`frontend/`, Vite static build). Deploy to Cloudflare
+   Pages / Vercel / Netlify — all free at this traffic level. Set
+   `VITE_API_URL` to the deployed API.
+3. **Domain + TLS.** Either provider issues TLS automatically; pick a
+   cheap domain or use a subdomain.
+4. **Auth.** Even for a "semi-public" dashboard, decide before launch
+   whether to gate it (HTTP basic auth on the API + frontend is
+   one-line in most providers; a shared bookmark with credentials is
+   probably enough, no need for a real auth system).
+5. **Monitoring.** Minimum: a healthcheck endpoint already exists
+   (`/api/health` if it doesn't, add one); wire any uptime monitor
+   (UptimeRobot free tier, etc.) to ping it. The collector should also
+   surface its own health — `scripts/collector_status.py` exists for
+   this.
+6. **CORS.** `api/main.py` currently sets `allow_origins=["*"]` —
+   tighten to the deployed frontend domain before launch.
+
+Out of scope: scaling beyond a single API instance, real auth
+(SSO/OAuth), CDN configuration beyond what Pages provides by default.
 
 ---
 
