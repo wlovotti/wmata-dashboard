@@ -47,15 +47,17 @@ def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def run_one_tick(tick_idx: int) -> None:
+def run_one_tick(tick_idx: int, collector: WMATADataCollector) -> None:
     """Run one fetch cycle: TripUpdates always, positions every Nth tick.
 
-    Opens a fresh DB session per tick so the loop survives stale
-    connections during multi-day runs.
+    Reuses the same ``WMATADataCollector`` across ticks so its
+    ``_tu_dedup_cache`` survives between snapshots. Opens a fresh DB
+    session per tick so the loop survives stale connections during
+    multi-day runs.
     """
     db = get_session()
     try:
-        collector = WMATADataCollector(API_KEY, db_session=db)
+        collector.db = db
 
         # Trip updates every tick
         try:
@@ -92,11 +94,16 @@ def main() -> None:
 
     print("\nStarting continuous collection...")
 
+    # Single collector instance shared across ticks so its dedup cache
+    # for trip_update_snapshots survives between snapshots. The DB
+    # session is rebound per tick inside run_one_tick.
+    collector = WMATADataCollector(API_KEY)
+
     tick_idx = 0
     try:
         while True:
             start = time.monotonic()
-            run_one_tick(tick_idx)
+            run_one_tick(tick_idx, collector)
             elapsed = time.monotonic() - start
 
             sleep_for = TICK_SEC - elapsed
