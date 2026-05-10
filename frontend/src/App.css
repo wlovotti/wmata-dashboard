@@ -868,3 +868,161 @@ main {
     margin-left: 0;
   }
 }
+
+/* --- Block-level cascade timeline (NOTES-45) ----------------------------
+   The view is reached from a per-trip context (RecentRuns row, RunDetail
+   header) so users land here knowing what trip / block they're inspecting.
+   The vertical timeline renders one row per chained trip; the dot-and-line
+   rail on the left visually reinforces "consecutive trips, same vehicle."
+   Each row's two deviation bars (origin + destination) are anchored on a
+   shared zero so the cascade signal — trip N's destination bar mirrored
+   in trip N+1's origin bar — reads at a glance. */
+
+.block-date-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.block-date-picker label {
+  font-size: 0.8rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.block-date-picker input {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+.block-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.block-timeline-row {
+  display: flex;
+  align-items: stretch;
+  gap: 1rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #ffffff;
+  transition: background-color 0.1s ease-in-out, border-color 0.1s ease-in-out;
+}
+
+.block-timeline-row[role='button'] {
+  cursor: pointer;
+}
+
+.block-timeline-row[role='button']:hover {
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.block-timeline-marker {
+  position: relative;
+  width: 16px;
+  flex-shrink: 0;
+}
+
+.block-timeline-marker-dot {
+  position: absolute;
+  top: 0.25rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #002F6C;
+}
+
+.block-timeline-marker-line {
+  position: absolute;
+  top: 1.25rem;
+  bottom: -0.5rem;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #cbd5e1;
+}
+
+.block-timeline-trip {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.block-timeline-trip-header {
+  font-size: 0.95rem;
+}
+
+.block-timeline-trip-times {
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.block-timeline-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.block-timeline-bar-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 120px;
+  gap: 0.75rem;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.block-timeline-bar-label {
+  color: #475569;
+  font-weight: 500;
+}
+
+.block-timeline-bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #0f172a;
+}
+
+.block-bar-track {
+  position: relative;
+  height: 14px;
+  background: #f1f5f9;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.block-bar-zero {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: #0f172a;
+}
+
+.block-bar-otp-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(22, 163, 74, 0.16);
+}
+
+.block-bar-fill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 2px;
+}

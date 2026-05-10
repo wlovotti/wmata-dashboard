@@ -159,6 +159,23 @@ function RunDetail() {
             Service date {data.service_date} · Trip {data.trip_id} ·{' '}
             {directionLabel} · Source {data.source}
             {data.vehicle_id && ` · Vehicle ${data.vehicle_id}`}
+            {data.block_id && (
+              <>
+                {' · Block '}
+                <a
+                  href={`/blocks/${encodeURIComponent(data.block_id)}?service_date=${encodeURIComponent(data.service_date)}`}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    navigate(
+                      `/blocks/${encodeURIComponent(data.block_id)}?service_date=${encodeURIComponent(data.service_date)}`,
+                    )
+                  }}
+                  title="View this block's cascade timeline"
+                >
+                  {data.block_id}
+                </a>
+              </>
+            )}
           </p>
         </div>
       </div>

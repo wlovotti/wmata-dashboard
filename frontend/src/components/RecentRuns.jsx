@@ -95,6 +95,7 @@ function RecentRuns({ routeId }) {
                 <th>Median dev</th>
                 <th>p95 dev</th>
                 <th>Vehicle</th>
+                <th>Block</th>
               </tr>
             </thead>
             <tbody>
@@ -115,6 +116,27 @@ function RecentRuns({ routeId }) {
                   <td>{formatDeviationSec(r.dev_p50_sec)}</td>
                   <td>{formatDeviationSec(r.dev_p95_sec)}</td>
                   <td>{r.vehicle_id || '—'}</td>
+                  <td>
+                    {r.block_id ? (
+                      // Stop row-level click so the block link doesn't also
+                      // navigate to the per-run drill-down.
+                      <a
+                        href={`/blocks/${encodeURIComponent(r.block_id)}?service_date=${encodeURIComponent(serviceDate || '')}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          e.preventDefault()
+                          navigate(
+                            `/blocks/${encodeURIComponent(r.block_id)}?service_date=${encodeURIComponent(serviceDate || '')}`,
+                          )
+                        }}
+                        title="View this block's cascade timeline"
+                      >
+                        {r.block_id}
+                      </a>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

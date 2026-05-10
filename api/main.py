@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.aggregations import (
     get_all_routes_scorecard,
+    get_block_timeline,
     get_route_bunching_causes,
     get_route_contributors,
     get_route_detail_metrics,
@@ -701,6 +702,63 @@ async def get_run_deviations_endpoint(run_id: int):
         result = get_run_deviations(db, run_id)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        return result
+    finally:
+        db.close()
+
+
+@app.get("/api/blocks/{block_id}/timeline")
+async def get_block_timeline_endpoint(block_id: str, service_date: str | None = None):
+    """Block-level cascade timeline for one (block_id, service_date) (NOTES-45).
+
+    A GTFS `block_id` chains a single vehicle's consecutive trips during a
+    service day. Trip-level lateness inherits down the chain — a late
+    arrival into one trip's destination becomes the next trip's late origin
+    departure. This endpoint strings every trip on the block in scheduled
+    order with origin/destination deviations side-by-side so the reader
+    can distinguish:
+
+    - **Cascade**: trip N's destination_dev_sec ≈ trip N+1's origin_dev_sec
+      (lateness propagates from layover arrival to next-trip departure)
+    - **Incidental**: each trip's deviations are independent (congestion /
+      dwell variance, not vehicle propagation)
+
+    Source picking follows the run-row asymmetry rule: origin_dev_sec from
+    the proximity row, destination_dev_sec from the trip_update row, with
+    cross-source fallback when the preferred row is missing. See
+    `Run` docstring "Source asymmetry" in `src/models.py` for why.
+
+    Args:
+        block_id: GTFS block_id (vehicle's chained-trips identifier).
+        service_date: ISO date string (YYYY-MM-DD), Eastern operational day.
+            Defaults to today (Eastern) if not provided.
+
+    Returns:
+        Block timeline envelope with `block_id`, `service_date`, `route_ids`
+        (distinct routes served), `summary` counts, and `trips` (list
+        ordered by scheduled start).
+    """
+    from src.timezones import eastern_today
+
+    if service_date is None:
+        service_date = eastern_today().isoformat()
+
+    # Lightweight ISO-date validation so a junk path doesn't reach the DB.
+    try:
+        from datetime import date as date_type
+
+        date_type.fromisoformat(service_date)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid service_date {service_date!r}; expected YYYY-MM-DD",
+        ) from exc
+
+    db = get_session()
+    try:
+        result = get_block_timeline(db, block_id, service_date)
+        if isinstance(result, dict) and result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
         return result
     finally:
         db.close()

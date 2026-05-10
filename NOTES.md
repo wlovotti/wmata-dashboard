@@ -6,7 +6,20 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-10 (closed NOTES-51 — `service_delivered=0`
+Last edited 2026-05-10 (closed NOTES-45 — block-level cascade view.
+`block_id` was already populated on `Trip` by the GTFS loader but
+never reached the API. New `/api/blocks/{block_id}/timeline` endpoint
+in `api/aggregations.py::get_block_timeline` returns one row per trip
+on a block for one service_date, ordered by scheduled start, with
+origin / destination deviations sourced asymmetrically per the Run
+docstring (proximity for origin, trip_update for destination). Each
+row carries the destination OTP bucket so cascade-driven misses (one
+root-cause delay propagating across a block's chain of trips) are
+distinguishable from incidental ones (each trip independently
+variable). Frontend adds `/blocks/:blockId` route with a vertical
+timeline of deviation bars; entry points: trip block_id badge in
+RunDetail header, block column in the RecentRuns table on RouteDetail.
+Earlier the same day, also closed NOTES-51 — `service_delivered=0`
 system-wide on Wed/Fri service dates was a date-mapping bug in
 `src/service_delivered.py`, not a pipeline gap as initially
 hypothesized. The "weekday → Tuesday-representative" Calendar filter
@@ -59,9 +72,6 @@ proxies instead).
 
 - **NOTES-44 Marginal-bus EWT model.** Per (route, period) ranking
   of where adding one trip would most reduce EWT.
-- **NOTES-45 Block-level cascade view.** Surface `block_id` and
-  visualize a vehicle's chained trips — identifies cascade lateness vs
-  incidental misses.
 - **NOTES-46 Vehicle performance leaderboard.** Aggregate per-`vehicle_id`
   median deviation / p95 / trip count over 30 days as a maintenance/age
   proxy (not an operator-blame view).
@@ -146,21 +156,6 @@ direct answer to "where should my next dollar go?"
 Most ambitious item in this set. Document modeling assumptions
 visibly in the UI; the absolute number is less reliable than the
 relative ranking.
-
----
-
-## NOTES-45. Block-level cascade view
-
-**Severity: low.**
-
-A `block_id` chains a vehicle's consecutive trips during a service
-day — when one trip falls behind, the next trip on the same block
-inherits the lateness. Today `block_id` lives on `Trip` but never
-reaches the API. Expose it; add a "block timeline" view (either on
-`RouteDetail` or a new `/blocks/:id` route) that strings together all
-trips in a block and shows deviation propagation. Identifies
-cascade-driven misses (one root cause, four bad trips) vs incidental
-ones (four independent misses).
 
 ---
 

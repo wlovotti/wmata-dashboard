@@ -2235,3 +2235,304 @@ def test_gtfs_freshness_endpoint_returns_newest_snapshot(client, db_session):
     assert body["routes_count"] == 305
     assert body["stops_count"] == 10050
     assert body["trips_count"] == 20100
+
+
+def _seed_block_with_chained_runs(db_session):
+    """Seed a block with three chained trips on one service_date.
+
+    Three trips on `BLOCK_X` running 12:00→12:30, 12:35→13:00, 13:05→13:30.
+    Trip 1's destination_dev_sec is +600 (10 min late) → trip 2's
+    origin_dev_sec is +600 (cascade), and trip 2's destination_dev_sec is
+    +900 → trip 3's origin_dev_sec is +900 (cascade compounds). This is
+    exactly the cascade signal the timeline view exists to surface.
+
+    Returns (block_id, service_date, route_id) for the test to consume.
+    """
+    from src.models import Route, Run, Stop, StopEvent, StopTime, Trip
+
+    route = Route(
+        route_id="BLK1",
+        route_short_name="BLK1",
+        route_long_name="Block Cascade Test Route",
+        route_type=3,
+        is_current=True,
+    )
+    db_session.add(route)
+
+    trips = [
+        Trip(
+            trip_id=f"BLK_TRIP_{i}",
+            route_id="BLK1",
+            service_id="WEEKDAY",
+            direction_id=i % 2,
+            trip_headsign=f"Headsign {i}",
+            block_id="BLOCK_X",
+            is_current=True,
+        )
+        for i in (1, 2, 3)
+    ]
+    db_session.add_all(trips)
+
+    # Two stops per trip — origin and destination — so scheduled bounds parse cleanly.
+    stops = [
+        Stop(
+            stop_id=f"BLK_STOP_{i}",
+            stop_name=f"Block Stop {i}",
+            stop_lat=38.9,
+            stop_lon=-77.0,
+            is_current=True,
+        )
+        for i in range(1, 7)
+    ]
+    db_session.add_all(stops)
+
+    # Trip 1: 12:00 → 12:30, Trip 2: 12:35 → 13:00, Trip 3: 13:05 → 13:30.
+    # Use unpadded hours on trip 3 so the GTFS-times-are-strings gotcha is exercised.
+    stop_times = [
+        StopTime(
+            trip_id="BLK_TRIP_1",
+            stop_id="BLK_STOP_1",
+            arrival_time="12:00:00",
+            departure_time="12:00:00",
+            stop_sequence=1,
+            is_current=True,
+        ),
+        StopTime(
+            trip_id="BLK_TRIP_1",
+            stop_id="BLK_STOP_2",
+            arrival_time="12:30:00",
+            departure_time="12:30:00",
+            stop_sequence=2,
+            is_current=True,
+        ),
+        StopTime(
+            trip_id="BLK_TRIP_2",
+            stop_id="BLK_STOP_3",
+            arrival_time="12:35:00",
+            departure_time="12:35:00",
+            stop_sequence=1,
+            is_current=True,
+        ),
+        StopTime(
+            trip_id="BLK_TRIP_2",
+            stop_id="BLK_STOP_4",
+            arrival_time="13:00:00",
+            departure_time="13:00:00",
+            stop_sequence=2,
+            is_current=True,
+        ),
+        StopTime(
+            trip_id="BLK_TRIP_3",
+            stop_id="BLK_STOP_5",
+            arrival_time="13:05:00",
+            departure_time="13:05:00",
+            stop_sequence=1,
+            is_current=True,
+        ),
+        StopTime(
+            trip_id="BLK_TRIP_3",
+            stop_id="BLK_STOP_6",
+            arrival_time="13:30:00",
+            departure_time="13:30:00",
+            stop_sequence=2,
+            is_current=True,
+        ),
+    ]
+    db_session.add_all(stop_times)
+    db_session.commit()
+
+    sd = "2026-05-09"
+
+    # Per-trip Runs, one row per source per trip — mirrors production where
+    # both proximity and trip_update derive runs for the same trip.
+    cascade_data = [
+        # (trip_id, prox_origin_dev, tu_destination_dev)
+        ("BLK_TRIP_1", 0, 600),  # On-time start, +600s late destination
+        ("BLK_TRIP_2", 600, 900),  # Inherits +600s, ends +900s
+        ("BLK_TRIP_3", 900, 1200),  # Inherits +900s, ends +1200s
+    ]
+    for trip_id, origin_dev, destination_dev in cascade_data:
+        # Proximity row carries origin_dev_sec.
+        db_session.add(
+            Run(
+                service_date=sd,
+                trip_id=trip_id,
+                route_id="BLK1",
+                direction_id=0,
+                source="proximity",
+                vehicle_id="V_BLK_1",
+                stops_scheduled=2,
+                stops_observable=2,
+                sched_first_seq=1,
+                sched_last_seq=2,
+                stops_observed=2,
+                stops_skipped=0,
+                first_obs_seq=1,
+                last_obs_seq=2,
+                first_obs_ts=datetime(2026, 5, 9, 16, 0, 0),
+                last_obs_ts=datetime(2026, 5, 9, 16, 30, 0),
+                dev_p50_sec=origin_dev,
+                dev_p95_sec=destination_dev,
+                origin_dev_sec=origin_dev,
+                destination_dev_sec=None,
+            )
+        )
+        # trip_update row carries destination_dev_sec.
+        db_session.add(
+            Run(
+                service_date=sd,
+                trip_id=trip_id,
+                route_id="BLK1",
+                direction_id=0,
+                source="trip_update",
+                vehicle_id="V_BLK_1",
+                stops_scheduled=2,
+                stops_observable=1,
+                sched_first_seq=1,
+                sched_last_seq=2,
+                stops_observed=1,
+                stops_skipped=0,
+                first_obs_seq=2,
+                last_obs_seq=2,
+                first_obs_ts=datetime(2026, 5, 9, 16, 0, 0),
+                last_obs_ts=datetime(2026, 5, 9, 16, 30, 0),
+                dev_p50_sec=destination_dev,
+                dev_p95_sec=destination_dev,
+                origin_dev_sec=None,
+                destination_dev_sec=destination_dev,
+            )
+        )
+    db_session.commit()
+
+    # One stop_event so the StopEvent fixture isn't an unused import — the
+    # block_timeline endpoint reads runs, not stop_events directly.
+    db_session.add(
+        StopEvent(
+            service_date=sd,
+            trip_id="BLK_TRIP_1",
+            route_id="BLK1",
+            direction_id=0,
+            stop_id="BLK_STOP_2",
+            stop_sequence=2,
+            source="trip_update",
+            schedule_relationship="SCHEDULED",
+            scheduled_arrival_ts=datetime(2026, 5, 9, 16, 30, 0),
+            observed_arrival_ts=datetime(2026, 5, 9, 16, 40, 0),
+            deviation_sec=600,
+        )
+    )
+    db_session.commit()
+
+    return "BLOCK_X", sd, "BLK1"
+
+
+@pytest.mark.smoke
+def test_block_timeline_endpoint_returns_chained_trips(client, db_session):
+    """GET /api/blocks/{block_id}/timeline returns trips in scheduled order with cascade signal."""
+    block_id, service_date, _route_id = _seed_block_with_chained_runs(db_session)
+
+    response = client.get(f"/api/blocks/{block_id}/timeline?service_date={service_date}")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["block_id"] == block_id
+    assert body["service_date"] == service_date
+    assert body["route_ids"] == ["BLK1"]
+
+    trips = body["trips"]
+    assert len(trips) == 3
+
+    # Trips ordered by scheduled_start ASC (12:00, 12:35, 13:05).
+    assert [t["trip_id"] for t in trips] == ["BLK_TRIP_1", "BLK_TRIP_2", "BLK_TRIP_3"]
+    assert [t["scheduled_start"] for t in trips] == ["12:00", "12:35", "13:05"]
+    assert [t["scheduled_end"] for t in trips] == ["12:30", "13:00", "13:30"]
+
+    # Cascade signal: each trip's origin_dev_sec ≈ prior trip's destination_dev_sec.
+    assert trips[0]["origin_dev_sec"] == 0
+    assert trips[0]["destination_dev_sec"] == 600
+    assert trips[1]["origin_dev_sec"] == 600  # Inherits trip 1's destination lateness
+    assert trips[1]["destination_dev_sec"] == 900
+    assert trips[2]["origin_dev_sec"] == 900  # Inherits trip 2's destination lateness
+    assert trips[2]["destination_dev_sec"] == 1200
+
+    # OTP bucket reflects destination behavior — all three trips ended late
+    # (>420s), so all three rows bucket as "late."
+    assert [t["otp_bucket"] for t in trips] == ["late", "late", "late"]
+
+    # Headline run_id is populated (TU run preferred for headline).
+    assert all(t["run_id"] is not None for t in trips)
+    assert all(t["vehicle_id"] == "V_BLK_1" for t in trips)
+
+    summary = body["summary"]
+    assert summary["n_trips"] == 3
+    assert summary["n_observed"] == 3
+    assert summary["n_late_destination"] == 3
+    assert summary["max_destination_dev_sec"] == 1200
+
+
+@pytest.mark.smoke
+def test_block_timeline_endpoint_404_for_unknown_block(client):
+    """Unknown block_id returns 404 with a helpful detail."""
+    response = client.get("/api/blocks/NOT_A_BLOCK/timeline?service_date=2026-05-09")
+    assert response.status_code == 404
+    assert "NOT_A_BLOCK" in response.json()["detail"]
+
+
+@pytest.mark.smoke
+def test_block_timeline_endpoint_rejects_bad_service_date(client):
+    """Malformed service_date returns 400, not 500."""
+    response = client.get("/api/blocks/BLOCK_X/timeline?service_date=not-a-date")
+    assert response.status_code == 400
+
+
+@pytest.mark.smoke
+def test_block_timeline_endpoint_handles_block_with_no_runs(client, db_session):
+    """Block exists in GTFS but has no runs on the requested date — returns rows with null obs fields."""
+    block_id, _service_date, _route_id = _seed_block_with_chained_runs(db_session)
+
+    # Ask for a date with no Run rows.
+    response = client.get(f"/api/blocks/{block_id}/timeline?service_date=2024-01-01")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["service_date"] == "2024-01-01"
+    assert len(body["trips"]) == 3
+    # No observed runs → every trip's observed fields are null, OTP buckets are null.
+    assert all(t["run_id"] is None for t in body["trips"])
+    assert all(t["otp_bucket"] is None for t in body["trips"])
+    assert body["summary"]["n_observed"] == 0
+    assert body["summary"]["n_late_destination"] == 0
+    assert body["summary"]["max_destination_dev_sec"] is None
+
+
+@pytest.mark.smoke
+def test_run_deviations_endpoint_includes_block_id(client, db_session):
+    """The per-run drill-down payload exposes block_id so the UI can link to the cascade view."""
+    from src.models import Trip
+
+    run_id, _route_id = _seed_run_with_stop_events(db_session)
+    # Set block_id on the trip seeded by the helper.
+    trip = db_session.query(Trip).filter(Trip.trip_id == "DEV_TRIP_1").first()
+    trip.block_id = "BLOCK_DEV"
+    db_session.commit()
+
+    response = client.get(f"/api/runs/{run_id}/deviations")
+    assert response.status_code == 200
+    assert response.json()["block_id"] == "BLOCK_DEV"
+
+
+@pytest.mark.smoke
+def test_route_recent_runs_endpoint_includes_block_id(client, db_session):
+    """The recent-runs payload exposes block_id per row so each row can deep-link to its block."""
+    from src.models import Trip
+
+    _run_id, route_id = _seed_run_with_stop_events(db_session)
+    trip = db_session.query(Trip).filter(Trip.trip_id == "DEV_TRIP_1").first()
+    trip.block_id = "BLOCK_DEV"
+    db_session.commit()
+
+    response = client.get(f"/api/routes/{route_id}/recent-runs")
+    assert response.status_code == 200
+    runs = response.json()["runs"]
+    assert len(runs) >= 1
+    assert runs[0]["block_id"] == "BLOCK_DEV"

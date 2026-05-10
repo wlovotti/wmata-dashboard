@@ -1726,6 +1726,11 @@ def get_run_deviations(db: Session, run_id: int) -> dict | None:
         "source": run.source,
         "vehicle_id": run.vehicle_id,
         "trip_headsign": trip.trip_headsign if trip else None,
+        # block_id surfaces the GTFS block (vehicle's chained trips) so the UI
+        # can link from a run drill-down to the block cascade view (NOTES-45 /
+        # `get_block_timeline`). Joined live from current GTFS Trip — historical
+        # block_id changes are rare enough that we don't snapshot it on Run.
+        "block_id": trip.block_id if trip else None,
         "stops_scheduled": run.stops_scheduled,
         # stops_observable is the per-source structural ceiling — see
         # `Run.stops_observable` doc. Surfaced alongside stops_scheduled so
@@ -1814,16 +1819,20 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
     )
     chosen_runs = chosen_runs[:limit]
 
-    # Batch-fetch headsigns for the relevant trips.
+    # Batch-fetch headsigns and block_ids for the relevant trips. block_id
+    # rides along with headsign so each row in the recent-runs list can link
+    # to the block cascade view (NOTES-45) without a second round-trip.
     trip_ids = [r.trip_id for r in chosen_runs]
     headsigns: dict[str, str] = {}
+    block_ids: dict[str, str | None] = {}
     if trip_ids:
         for trip in (
-            db.query(Trip.trip_id, Trip.trip_headsign)
+            db.query(Trip.trip_id, Trip.trip_headsign, Trip.block_id)
             .filter(Trip.trip_id.in_(trip_ids), Trip.is_current)
             .all()
         ):
             headsigns[trip.trip_id] = trip.trip_headsign
+            block_ids[trip.trip_id] = trip.block_id
 
     return {
         "route_id": route_id,
@@ -1836,6 +1845,7 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
                 "source": r.source,
                 "vehicle_id": r.vehicle_id,
                 "headsign": headsigns.get(r.trip_id),
+                "block_id": block_ids.get(r.trip_id),
                 "start_time": _utc_naive_to_eastern_hhmm(r.first_obs_ts),
                 "end_time": _utc_naive_to_eastern_hhmm(r.last_obs_ts),
                 "stops_scheduled": r.stops_scheduled,
@@ -2373,3 +2383,242 @@ def get_route_bunching_causes(
     with _bunching_causes_lock:
         _bunching_causes_cache[cache_key] = (time.monotonic(), result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Block-level cascade timeline (NOTES-45)
+#
+# A GTFS `block_id` chains a single vehicle's consecutive trips during a
+# service day. When one trip falls behind, the next trip on the same block
+# inherits the lateness — a structural source of "four bad trips in a row"
+# that looks like four separate misses if you only see them per-trip. The
+# timeline endpoint strings every trip on a `block_id` for one service_date
+# in scheduled order with origin/destination deviations side-by-side, so the
+# reader can distinguish:
+#
+#   - Cascade: trip N's destination_dev_sec is large and trip N+1's
+#     origin_dev_sec inherits roughly the same magnitude (bus arrived late
+#     to its layover, started the next trip late).
+#   - Incidental: each trip's deviations are independent — congestion or
+#     dwell variance, not vehicle propagation.
+#
+# Source picking follows the run docstring's source-asymmetry rule:
+#   - origin_dev_sec → proximity row (TU has 0% literal-origin coverage)
+#   - destination_dev_sec → trip_update row (proximity has ~0-5% literal-
+#     destination coverage because layover bays sit outside the proximity
+#     radius)
+# When only one source has a row for a given trip, we surface what's there.
+# When both exist, we collapse to one timeline row per (trip_id) and prefer
+# trip_update for the headline metadata (matches `get_route_recent_runs`).
+#
+# Scheduled start/end come from `stop_times` (current GTFS, `is_current`)
+# parsed via `_parse_gtfs_time_to_seconds` because GTFS times are unpadded
+# strings — `MIN(arrival_time)` does the wrong thing lexicographically
+# (CLAUDE.md gotcha). Times in the response are returned as Eastern HH:MM
+# for human readability — the timeline is always rendered against one
+# service_date so a date prefix would be redundant noise.
+# ---------------------------------------------------------------------------
+
+
+def _gtfs_seconds_to_eastern_hhmm(secs: int | None) -> str | None:
+    """Render an integer seconds-since-service-day-start back as HH:MM Eastern.
+
+    GTFS hours can be ≥ 24 for trips that extend past midnight on the same
+    service day; we preserve that ("25:30" is a meaningful schedule entry,
+    not a typo). Returns None if `secs` is None.
+    """
+    if secs is None:
+        return None
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    return f"{h:02d}:{m:02d}"
+
+
+def get_block_timeline(db: Session, block_id: str, service_date: str) -> dict:
+    """Return the chained trips on one block for one service_date, in scheduled order.
+
+    Output rows are one-per-trip — both proximity and trip_update Run rows
+    are collapsed into a single timeline row keyed on (block_id, trip_id).
+    Origin deviation is sourced from proximity (literal origin observed in
+    78-93% of runs), destination deviation from trip_update (~87-97% literal
+    destination coverage). See `Run` docstring "Source asymmetry" for why.
+
+    Per-trip OTP bucket reflects destination behavior — the most informative
+    cell for the cascade question, since destination lateness is what gets
+    inherited by the next trip on the block. Falls back to origin_dev_sec
+    when destination_dev_sec is null (e.g. trip aborted mid-route, or the
+    block's last trip had no proximity row at the layover).
+
+    Returns `{"error": ...}` if the block_id has no trips in current GTFS
+    or no runs on the requested date.
+
+    Args:
+        db: Database session.
+        block_id: GTFS block_id (vehicle's chained-trips identifier).
+        service_date: ISO date string (YYYY-MM-DD), Eastern operational day.
+
+    Returns:
+        Dict with `block_id`, `service_date`, `route_ids` (distinct routes
+        served by this block), `trips` (list ordered by scheduled start),
+        and a `summary` carrying counts that highlight the cascade:
+        `n_trips`, `n_observed`, `n_late_destination` (bucket=='late' on
+        the destination), `max_destination_dev_sec`.
+    """
+    from src.otp_metrics import _bucket_deviation
+
+    # 1. Resolve the block's current-GTFS trips and their scheduled start/end.
+    #    Pull stop_times for those trips, then group min/max in Python (GTFS
+    #    times are unpadded strings; SQL min/max would mis-order across the
+    #    9:xx → 10:xx boundary).
+    block_trips = (
+        db.query(Trip.trip_id, Trip.route_id, Trip.direction_id, Trip.trip_headsign)
+        .filter(Trip.block_id == block_id, Trip.is_current)
+        .all()
+    )
+    if not block_trips:
+        return {"error": f"Block {block_id} not found in current GTFS"}
+
+    trip_ids = [t.trip_id for t in block_trips]
+    trip_meta = {
+        t.trip_id: {
+            "route_id": t.route_id,
+            "direction_id": t.direction_id,
+            "headsign": t.trip_headsign,
+        }
+        for t in block_trips
+    }
+
+    # Fetch arrival_time for every (trip, stop_sequence) on the block; reduce
+    # to (min, max) in seconds-since-service-day-start.
+    stop_time_rows = (
+        db.query(StopTime.trip_id, StopTime.arrival_time, StopTime.stop_sequence)
+        .filter(StopTime.trip_id.in_(trip_ids), StopTime.is_current)
+        .all()
+    )
+    from src.service_profile import _parse_gtfs_time_to_seconds
+
+    sched_bounds: dict[str, dict] = {}
+    for trip_id, arrival_time, stop_sequence in stop_time_rows:
+        try:
+            secs = _parse_gtfs_time_to_seconds(arrival_time)
+        except (ValueError, AttributeError):
+            continue
+        bounds = sched_bounds.setdefault(
+            trip_id,
+            {
+                "first_secs": secs,
+                "last_secs": secs,
+                "first_seq": stop_sequence,
+                "last_seq": stop_sequence,
+            },
+        )
+        if secs < bounds["first_secs"]:
+            bounds["first_secs"] = secs
+            bounds["first_seq"] = stop_sequence
+        if secs > bounds["last_secs"]:
+            bounds["last_secs"] = secs
+            bounds["last_seq"] = stop_sequence
+
+    # 2. Pull every Run row on this service_date for trips on the block, both
+    #    sources. Index by (trip_id, source).
+    run_rows = (
+        db.query(Run)
+        .filter(
+            Run.trip_id.in_(trip_ids),
+            Run.service_date == service_date,
+        )
+        .all()
+    )
+    runs_by_trip_source: dict[tuple[str, str], Run] = {(r.trip_id, r.source): r for r in run_rows}
+
+    # 3. Build one row per trip, ordered by scheduled first_secs ASC. Trips
+    #    without a Run row on this date still appear (so the cascade view
+    #    shows where the block's planned trips were vs what got observed).
+    timeline = []
+    n_observed = 0
+    n_late_destination = 0
+    max_destination_dev_sec: int | None = None
+    route_ids_seen: set[str] = set()
+
+    for trip_id in sorted(
+        trip_ids, key=lambda tid: sched_bounds.get(tid, {}).get("first_secs", 1 << 30)
+    ):
+        meta = trip_meta[trip_id]
+        bounds = sched_bounds.get(trip_id, {})
+        prox_run = runs_by_trip_source.get((trip_id, "proximity"))
+        tu_run = runs_by_trip_source.get((trip_id, "trip_update"))
+
+        # Source-asymmetry-aware deviation pick.
+        origin_dev_sec = prox_run.origin_dev_sec if prox_run else None
+        destination_dev_sec = tu_run.destination_dev_sec if tu_run else None
+        # Fall back across sources when the preferred row is missing the
+        # endpoint deviation — better to surface partial signal than blank.
+        if origin_dev_sec is None and tu_run is not None:
+            origin_dev_sec = tu_run.origin_dev_sec
+        if destination_dev_sec is None and prox_run is not None:
+            destination_dev_sec = prox_run.destination_dev_sec
+
+        # Headline run for vehicle / observed-window display: prefer TU if
+        # present, else proximity. Mirrors `get_route_recent_runs` semantics.
+        headline_run = tu_run or prox_run
+
+        # OTP bucket reflects destination if available, else origin — the
+        # destination is the cascade-relevant cell because that's what the
+        # next trip on the block inherits.
+        otp_bucket: str | None = None
+        if destination_dev_sec is not None:
+            otp_bucket = _bucket_deviation(destination_dev_sec)
+        elif origin_dev_sec is not None:
+            otp_bucket = _bucket_deviation(origin_dev_sec)
+
+        if headline_run is not None:
+            n_observed += 1
+        if otp_bucket == "late" and destination_dev_sec is not None:
+            n_late_destination += 1
+        if destination_dev_sec is not None:
+            if max_destination_dev_sec is None or destination_dev_sec > max_destination_dev_sec:
+                max_destination_dev_sec = destination_dev_sec
+
+        route_ids_seen.add(meta["route_id"])
+
+        timeline.append(
+            {
+                "trip_id": trip_id,
+                "route_id": meta["route_id"],
+                "direction_id": meta["direction_id"],
+                "headsign": meta["headsign"],
+                "scheduled_start": _gtfs_seconds_to_eastern_hhmm(bounds.get("first_secs")),
+                "scheduled_end": _gtfs_seconds_to_eastern_hhmm(bounds.get("last_secs")),
+                "observed_start": (
+                    _utc_naive_to_eastern_hhmm(headline_run.first_obs_ts) if headline_run else None
+                ),
+                "observed_end": (
+                    _utc_naive_to_eastern_hhmm(headline_run.last_obs_ts) if headline_run else None
+                ),
+                "origin_dev_sec": origin_dev_sec,
+                "destination_dev_sec": destination_dev_sec,
+                "otp_bucket": otp_bucket,
+                # run_id of whichever source we picked for the headline — gives
+                # the UI a target for the per-run drill-down link. Null when
+                # neither source observed the trip on this date.
+                "run_id": headline_run.id if headline_run else None,
+                "vehicle_id": headline_run.vehicle_id if headline_run else None,
+                "stops_scheduled": headline_run.stops_scheduled if headline_run else None,
+                "stops_observed": headline_run.stops_observed if headline_run else None,
+                "dev_p50_sec": headline_run.dev_p50_sec if headline_run else None,
+                "dev_p95_sec": headline_run.dev_p95_sec if headline_run else None,
+            }
+        )
+
+    return {
+        "block_id": block_id,
+        "service_date": service_date,
+        "route_ids": sorted(route_ids_seen),
+        "summary": {
+            "n_trips": len(timeline),
+            "n_observed": n_observed,
+            "n_late_destination": n_late_destination,
+            "max_destination_dev_sec": max_destination_dev_sec,
+        },
+        "trips": timeline,
+    }
