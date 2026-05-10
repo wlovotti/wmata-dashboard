@@ -15,6 +15,10 @@ from datetime import timedelta
 from api.aggregations import (
     EWT_SCORE_FLOOR_SEC,
     EWT_SCORE_TARGET_SEC,
+    _aggregate_bunching_window,
+    _aggregate_ewt_window,
+    _aggregate_otp_split_window,
+    _aggregate_service_delivered_window,
     compute_route_grade,
     get_all_routes_scorecard,
     get_route_detail_metrics,
@@ -133,19 +137,27 @@ class TestComputeRouteGrade:
 
 
 class TestGetAllRoutesScorecard:
-    """Tests for get_all_routes_scorecard function (post NOTES-19 cleanup).
+    """Tests for get_all_routes_scorecard function.
 
-    The scorecard payload is now identity + frequency_class + the live
-    overlay fields. The legacy `RouteMetricsSummary` fields were dropped
-    because no UI consumer reads them.
+    The scorecard payload is `{window: {start, end, days}, routes: [...]}`
+    where each row in `routes` is identity + frequency_class + the windowed
+    live overlay (OTP/SD/EWT/bunching pooled over `[end - days + 1, end]`).
     """
 
     def test_scorecard_with_single_route(self, db_session, sample_route):
         """Single route shows identity + frequency_class even without live data."""
-        scorecard = get_all_routes_scorecard(db_session, days=7)
+        result = get_all_routes_scorecard(db_session, days=7)
 
-        assert len(scorecard) == 1
-        route_data = scorecard[0]
+        assert "window" in result
+        assert result["window"]["days"] == 7
+        # No stop_events seeded → window endpoints are null but the route
+        # row still renders with its identity fields.
+        assert result["window"]["start"] is None
+        assert result["window"]["end"] is None
+
+        routes = result["routes"]
+        assert len(routes) == 1
+        route_data = routes[0]
 
         assert route_data["route_id"] == "TEST1"
         assert route_data["route_name"] == "T1"
@@ -162,19 +174,172 @@ class TestGetAllRoutesScorecard:
 
     def test_scorecard_with_multiple_routes(self, db_session, sample_routes):
         """Every is_current route appears, sorted with None OTP values last."""
-        scorecard = get_all_routes_scorecard(db_session, days=7)
+        result = get_all_routes_scorecard(db_session, days=7)
+        routes = result["routes"]
 
-        assert len(scorecard) == 3
+        assert len(routes) == 3
         # Without seeded live data, all routes have None for otp_all_pct.
         # The sort key puts None values at the end — but with all None,
         # the order is whatever the upstream query returned (still all 3).
-        for route in scorecard:
+        for route in routes:
             assert route["otp_all_pct"] is None
 
     def test_scorecard_empty_database(self, db_session):
-        """No routes means an empty scorecard."""
-        scorecard = get_all_routes_scorecard(db_session, days=7)
-        assert scorecard == []
+        """No routes means an empty `routes` list with window metadata still set."""
+        result = get_all_routes_scorecard(db_session, days=7)
+        assert result["routes"] == []
+        assert result["window"]["days"] == 7
+
+    def test_scorecard_days_clamped_to_minimum(self, db_session, sample_route):
+        """`days < 1` clamps to 1 — match endpoint validation."""
+        result = get_all_routes_scorecard(db_session, days=0)
+        assert result["window"]["days"] == 1
+
+
+class TestAggregateOtpSplitWindow:
+    """Sufficient-statistics pooling for the windowed OTP split."""
+
+    def test_returns_none_when_all_days_empty(self):
+        """No daily results → None."""
+        assert _aggregate_otp_split_window([None, None]) is None
+
+    def test_pools_counts_across_days(self):
+        """Day1 (4 on, 1 late, 0 early) + Day2 (2 on, 0 late, 1 early) → 6 on / 1 late / 1 early of 8."""
+        day1 = {
+            "route_id": "R1",
+            "window": {"early_sec": -120, "late_sec": 420},
+            "origin": {"source": "proximity", "n": 0},
+            "destination": {"source": "trip_update", "n": 0},
+            "all_timepoints": {
+                "source": "proximity",
+                "n": 5,
+                "early": 0,
+                "on_time": 4,
+                "late": 1,
+                "early_pct": 0.0,
+                "on_time_pct": 80.0,
+                "late_pct": 20.0,
+            },
+        }
+        day2 = {
+            "route_id": "R1",
+            "window": {"early_sec": -120, "late_sec": 420},
+            "origin": {"source": "proximity", "n": 0},
+            "destination": {"source": "trip_update", "n": 0},
+            "all_timepoints": {
+                "source": "proximity",
+                "n": 3,
+                "early": 1,
+                "on_time": 2,
+                "late": 0,
+                "early_pct": 33.33,
+                "on_time_pct": 66.67,
+                "late_pct": 0.0,
+            },
+        }
+        result = _aggregate_otp_split_window([day1, day2])
+        assert result["all_timepoints"]["n"] == 8
+        assert result["all_timepoints"]["on_time"] == 6
+        assert result["all_timepoints"]["late"] == 1
+        assert result["all_timepoints"]["early"] == 1
+        assert result["all_timepoints"]["on_time_pct"] == 75.0
+        # Empty sub-blocks pool to n=0 — preserves "no data" vs "0% on-time".
+        assert result["origin"]["n"] == 0
+        assert result["destination"]["n"] == 0
+
+
+class TestAggregateServiceDeliveredWindow:
+    """Service-delivered pooling sums the trip counts and recomputes the ratio."""
+
+    def test_returns_none_when_no_days(self):
+        assert _aggregate_service_delivered_window([None]) is None
+
+    def test_sums_scheduled_and_delivered(self):
+        """Day1 100/95 + Day2 100/80 → 200/175 = 0.875."""
+        day1 = {"route_id": "R1", "scheduled_trips": 100, "delivered_trips": 95, "ratio": 0.95}
+        day2 = {"route_id": "R1", "scheduled_trips": 100, "delivered_trips": 80, "ratio": 0.80}
+        result = _aggregate_service_delivered_window([day1, day2])
+        assert result["scheduled_trips"] == 200
+        assert result["delivered_trips"] == 175
+        assert result["ratio"] == 0.875
+
+    def test_zero_scheduled_returns_none_ratio(self):
+        """No scheduled trips in window → ratio is None (route never runs)."""
+        day1 = {"route_id": "R1", "scheduled_trips": 0, "delivered_trips": 0, "ratio": None}
+        result = _aggregate_service_delivered_window([day1, day1])
+        assert result["ratio"] is None
+        assert result["scheduled_trips"] == 0
+
+
+class TestAggregateEwtWindow:
+    """EWT pooling uses sufficient stats so AWT/SWT match a recomputed pool."""
+
+    def test_returns_none_when_empty(self):
+        assert _aggregate_ewt_window([]) is None
+        assert _aggregate_ewt_window([None]) is None
+
+    def test_pools_sufficient_stats(self):
+        """Two days of identical (h=600s) headways pool to AWT=300 (h/2).
+
+        The AWT formula `Σh² / (2·Σh)` over uniform headways reduces to h/2.
+        Both days have one observed headway of 600s and one scheduled of 600s,
+        so the windowed AWT and SWT must both be 300, and EWT 0.
+        """
+        day = {
+            "route_id": "R1",
+            "obs_sum_h": 600.0,
+            "obs_sum_h_sq": 600.0 * 600.0,
+            "sched_sum_h": 600.0,
+            "sched_sum_h_sq": 600.0 * 600.0,
+            "n_observed_headways": 1,
+            "n_scheduled_headways": 1,
+        }
+        result = _aggregate_ewt_window([day, day])
+        assert result["awt_seconds"] == 300.0
+        assert result["swt_seconds"] == 300.0
+        assert result["ewt_seconds"] == 0.0
+        assert result["n_observed_headways"] == 2
+        assert result["n_scheduled_headways"] == 2
+        assert result["coverage_ratio"] == 1.0
+
+    def test_ewt_positive_when_observed_bunchier(self):
+        """A day with bunched observed headways and even scheduled → AWT > SWT → EWT > 0."""
+        day = {
+            "route_id": "R1",
+            "obs_sum_h": 600.0,
+            # Two headways: 100s and 500s → sum=600, sum_h_sq = 10000+250000 = 260000.
+            "obs_sum_h_sq": 260000.0,
+            "sched_sum_h": 600.0,
+            # Two even headways: 300, 300 → sum=600, sum_h_sq=180000.
+            "sched_sum_h_sq": 180000.0,
+            "n_observed_headways": 2,
+            "n_scheduled_headways": 2,
+        }
+        result = _aggregate_ewt_window([day])
+        # AWT = 260000 / (2 * 600) = 216.67; SWT = 180000 / 1200 = 150.
+        assert result["awt_seconds"] == 216.67
+        assert result["swt_seconds"] == 150.0
+        assert result["ewt_seconds"] == 66.67
+
+
+class TestAggregateBunchingWindow:
+    """Bunching pooling sums counts and recomputes the rate."""
+
+    def test_pools_bunched_and_total(self):
+        """Day1 5/100 + Day2 10/50 → 15/150 = 0.1."""
+        day1 = {"route_id": "R1", "bunching_count": 5, "total_headways": 100, "bunching_rate": 0.05}
+        day2 = {"route_id": "R1", "bunching_count": 10, "total_headways": 50, "bunching_rate": 0.20}
+        result = _aggregate_bunching_window([day1, day2])
+        assert result["bunching_count"] == 15
+        assert result["total_headways"] == 150
+        assert result["bunching_rate"] == 0.1
+
+    def test_zero_total_returns_none_rate(self):
+        """No observed pairs → rate is None (route had no headways at all)."""
+        day = {"route_id": "R1", "bunching_count": 0, "total_headways": 0, "bunching_rate": None}
+        result = _aggregate_bunching_window([day])
+        assert result["bunching_rate"] is None
+        assert result["total_headways"] == 0
 
 
 class TestGetRouteDetailMetrics:

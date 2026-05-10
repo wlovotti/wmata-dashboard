@@ -75,6 +75,18 @@ _LIVE_METRICS_TTL_SEC = 60.0
 _live_metrics_cache: dict[str, tuple[float, dict[str, dict]]] = {}
 _live_metrics_lock = Lock()
 
+# Default scorecard window (in days). The scorecard pools each metric over
+# this window so a route that only runs Mon-Fri doesn't appear empty just
+# because the latest service_date is a Sunday. Comparable across rows: every
+# route's metric is computed over the same calendar window.
+_SCORECARD_WINDOW_DAYS = 7
+
+# Windowed live-metrics cache keyed by `(end_service_date, days)`. Same TTL
+# as the per-day cache; computed once per (anchor_date, window_size) and
+# reused by every concurrent /api/routes request within the TTL.
+_window_metrics_cache: dict[tuple[str, int], tuple[float, dict[str, dict]]] = {}
+_window_metrics_lock = Lock()
+
 
 def _latest_service_date_with_stop_events(db: Session):
     """Return the most recent service_date that has any stop_events, or None.
@@ -172,6 +184,228 @@ def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]
         }
         for route_id in all_routes
     }
+
+
+def _aggregate_otp_split_window(daily_otp: list[dict]) -> dict | None:
+    """Pool OTP split sub-blocks across days by summing raw deviation counts.
+
+    Each per-day result has `origin`/`destination`/`all_timepoints` blocks with
+    `early`/`on_time`/`late`/`n` counts (when `n > 0`) — sum them across days
+    and recompute the percentages. Empty/missing days contribute nothing.
+    Returns None if no day in the window has data for any sub-block.
+    """
+    daily_otp = [d for d in daily_otp if d is not None]
+    if not daily_otp:
+        return None
+
+    def _pool_block(block_key: str) -> dict:
+        early = on_time = late = 0
+        source = None
+        for d in daily_otp:
+            block = d.get(block_key) or {}
+            if source is None:
+                source = block.get("source")
+            n = block.get("n", 0)
+            if n == 0:
+                continue
+            early += block.get("early", 0)
+            on_time += block.get("on_time", 0)
+            late += block.get("late", 0)
+        n = early + on_time + late
+        if n == 0:
+            return {"source": source, "n": 0}
+        return {
+            "source": source,
+            "n": n,
+            "early": early,
+            "on_time": on_time,
+            "late": late,
+            "early_pct": round(early * 100 / n, 2),
+            "on_time_pct": round(on_time * 100 / n, 2),
+            "late_pct": round(late * 100 / n, 2),
+        }
+
+    first = daily_otp[0]
+    return {
+        "route_id": first.get("route_id"),
+        "window": first.get("window"),
+        "origin": _pool_block("origin"),
+        "destination": _pool_block("destination"),
+        "all_timepoints": _pool_block("all_timepoints"),
+    }
+
+
+def _aggregate_service_delivered_window(daily_sd: list[dict]) -> dict | None:
+    """Pool service-delivered counts across days; recompute the ratio.
+
+    Sums `scheduled_trips` and `delivered_trips`, then `ratio =
+    delivered / scheduled` (None if scheduled is zero across the window —
+    same "didn't run any" vs "wasn't supposed to" distinction as the per-day
+    function). Returns None if no day in the window had a result.
+    """
+    daily_sd = [d for d in daily_sd if d is not None]
+    if not daily_sd:
+        return None
+    scheduled = sum(d.get("scheduled_trips", 0) for d in daily_sd)
+    delivered = sum(d.get("delivered_trips", 0) for d in daily_sd)
+    ratio = round(delivered / scheduled, 4) if scheduled else None
+    first = daily_sd[0]
+    return {
+        "route_id": first.get("route_id"),
+        "scheduled_trips": int(scheduled),
+        "delivered_trips": int(delivered),
+        "ratio": ratio,
+    }
+
+
+def _aggregate_ewt_window(daily_ewt: list[dict]) -> dict | None:
+    """Pool EWT sufficient statistics across days; recompute AWT/SWT/EWT.
+
+    Uses the algebraic identity `AWT = Σh² / (2·Σh)` so daily `obs_sum_h` /
+    `obs_sum_h_sq` (and the scheduled equivalents, added in this PR) sum
+    cleanly across the window without re-pulling raw headways. The result
+    is mathematically identical to pooling every individual headway in
+    one shot.
+    """
+    daily_ewt = [d for d in daily_ewt if d is not None]
+    if not daily_ewt:
+        return None
+    obs_sum_h = sum(d.get("obs_sum_h", 0.0) for d in daily_ewt)
+    obs_sum_h_sq = sum(d.get("obs_sum_h_sq", 0.0) for d in daily_ewt)
+    sched_sum_h = sum(d.get("sched_sum_h", 0.0) for d in daily_ewt)
+    sched_sum_h_sq = sum(d.get("sched_sum_h_sq", 0.0) for d in daily_ewt)
+    n_observed = sum(d.get("n_observed_headways", 0) for d in daily_ewt)
+    n_scheduled = sum(d.get("n_scheduled_headways", 0) for d in daily_ewt)
+
+    awt = obs_sum_h_sq / (2.0 * obs_sum_h) if obs_sum_h > 0 else None
+    swt = sched_sum_h_sq / (2.0 * sched_sum_h) if sched_sum_h > 0 else None
+    ewt = (awt - swt) if (awt is not None and swt is not None) else None
+    coverage = (n_observed / n_scheduled) if n_scheduled > 0 else None
+
+    first = daily_ewt[0]
+    return {
+        "route_id": first.get("route_id"),
+        "awt_seconds": round(awt, 2) if awt is not None else None,
+        "swt_seconds": round(swt, 2) if swt is not None else None,
+        "ewt_seconds": round(ewt, 2) if ewt is not None else None,
+        "n_observed_headways": int(n_observed),
+        "n_scheduled_headways": int(n_scheduled),
+        "coverage_ratio": round(coverage, 4) if coverage is not None else None,
+    }
+
+
+def _aggregate_bunching_window(daily_bun: list[dict]) -> dict | None:
+    """Pool bunching counts across days; recompute the rate.
+
+    Sums `bunching_count` and `total_headways`, then `rate = bunched / total`.
+    Returns None if no day had any observed pairs.
+    """
+    daily_bun = [d for d in daily_bun if d is not None]
+    if not daily_bun:
+        return None
+    bunched = sum(d.get("bunching_count", 0) for d in daily_bun)
+    total = sum(d.get("total_headways", 0) for d in daily_bun)
+    rate = round(bunched / total, 4) if total else None
+    first = daily_bun[0]
+    return {
+        "route_id": first.get("route_id"),
+        "bunching_count": int(bunched),
+        "total_headways": int(total),
+        "bunching_rate": rate,
+    }
+
+
+def _aggregate_live_metrics_window(
+    per_date_results: list[dict[str, dict]],
+) -> dict[str, dict]:
+    """Combine per-date `_compute_live_metrics_uncached` outputs into a windowed dict.
+
+    Walks every route_id that appeared on any day in the window and applies
+    the per-metric aggregator. Routes that didn't run on a given day simply
+    contribute nothing on that day — but the window itself is identical
+    across every row, so the resulting metrics are comparable.
+    """
+    all_routes: set[str] = set()
+    for d_result in per_date_results:
+        all_routes |= set(d_result.keys())
+
+    aggregated: dict[str, dict] = {}
+    for route_id in all_routes:
+        daily_otp = [d.get(route_id, {}).get("otp_split") for d in per_date_results]
+        daily_sd = [d.get(route_id, {}).get("service_delivered") for d in per_date_results]
+        daily_ewt = [d.get(route_id, {}).get("ewt") for d in per_date_results]
+        daily_bun = [d.get(route_id, {}).get("bunching") for d in per_date_results]
+        aggregated[route_id] = {
+            "service_delivered": _aggregate_service_delivered_window(daily_sd),
+            "otp_split": _aggregate_otp_split_window(daily_otp),
+            "ewt": _aggregate_ewt_window(daily_ewt),
+            "bunching": _aggregate_bunching_window(daily_bun),
+        }
+    return aggregated
+
+
+def _compute_live_metrics_for_window_uncached(
+    db: Session,
+    end_date: date_type,
+    days: int,
+) -> dict[str, dict]:
+    """Pool the four scorecard metrics over `[end_date - days + 1, end_date]`.
+
+    Calls `_compute_live_metrics_uncached` for each date in the window, then
+    aggregates per-route via the per-metric sufficient-statistics aggregators.
+    The per-date results are also cached individually under `_live_metrics_cache`
+    — so a window slide of one day keeps `days - 1` daily results warm.
+
+    Schedule-fetch cost across the window is bounded by the number of
+    distinct day_types (≤ 3 for any window). Each `_compute_live_metrics_uncached`
+    call still re-fetches the schedule for its date's day_type; if cold-cache
+    cost becomes a problem, lift the schedule fetch out and pass it through
+    via `sched_by_route_cell_hour=` (the underlying compute fns already accept it).
+    """
+    dates = [end_date - timedelta(days=i) for i in range(days)]
+    per_date_results = [_compute_live_metrics_for_date(db, d) for d in dates]
+    return _aggregate_live_metrics_window(per_date_results)
+
+
+def _compute_live_metrics_for_date(db: Session, service_date) -> dict[str, dict]:
+    """Cached wrapper around `_compute_live_metrics_uncached` for any service_date.
+
+    The pre-existing `get_live_metrics_for_today` cache only covers the
+    latest service_date. The windowed scorecard needs cached lookup for any
+    date in the window, so this helper applies the same cache + TTL logic
+    keyed by `service_date.isoformat()`.
+    """
+    cache_key = service_date.isoformat()
+    with _live_metrics_lock:
+        cached = _live_metrics_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
+                return value
+    result = _compute_live_metrics_uncached(db, service_date)
+    with _live_metrics_lock:
+        _live_metrics_cache[cache_key] = (time.monotonic(), result)
+    return result
+
+
+def get_live_metrics_for_window(db: Session, end_date: date_type, days: int) -> dict[str, dict]:
+    """Cached-by-(end_date, days) wrapper around `_compute_live_metrics_for_window_uncached`.
+
+    Cold-cache cost grows roughly linearly in `days`, but the per-date cache
+    means a window-slide hits the slow path only on the newly-included date.
+    Empty result dict if the window has no derived stop_events at all.
+    """
+    cache_key = (end_date.isoformat(), days)
+    with _window_metrics_lock:
+        cached = _window_metrics_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
+                return value
+    result = _compute_live_metrics_for_window_uncached(db, end_date, days)
+    with _window_metrics_lock:
+        _window_metrics_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def _compute_single_route_live_metrics(
@@ -401,40 +635,60 @@ def _live_metric_fields(metrics: dict | None) -> dict:
     }
 
 
-def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
+def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) -> dict:
     """
-    Get performance scorecard for all routes.
+    Get performance scorecard for all routes, pooled over a rolling window.
 
-    Returns one row per route with the live overlay metrics (OTP
-    origin/destination split, service-delivered, EWT headline, bunching
-    headline) plus identity fields, frequency class, and the composite
-    `grade` (NOTES-18, computed via `compute_route_grade`). Live metrics
-    are cached by service_date with a short TTL — see
-    `get_live_metrics_for_today`.
+    Each metric is pooled across `[end_date - days + 1, end_date]` where
+    `end_date` is the latest service_date with stop_events. Pooling uses
+    sufficient statistics so the windowed values are mathematically identical
+    to recomputing each metric over every raw observation in the window:
+      - OTP: sum early/on_time/late counts, recompute pcts.
+      - Service-delivered: sum scheduled and delivered, recompute ratio.
+      - EWT: sum Σh and Σh² for observed and scheduled pools, recompute
+        AWT/SWT/EWT (the formula `mean(h²)/(2·mean(h))` is exact under sums).
+      - Bunching: sum bunched_count and total_headways, recompute rate.
 
-    The legacy `route_metrics_summary` fields (otp_percentage,
-    avg_headway_minutes, avg_speed_mph, total_observations) were dropped
-    in the NOTES-19 migration.
+    Why a window: prior behavior anchored on a single service_date, so any
+    route that didn't run that day (Sunday-only short turns, school routes,
+    layover-only routes) showed empty cells even when its weekday data was
+    healthy. Every row now reflects the same calendar window — comparable
+    across routes.
 
     Args:
         db: Database session
-        days: Accepted for API compatibility; the live overlay anchors on
-            the latest service_date with stop_events regardless.
+        days: Window length in days (default 7). The window ends on the
+            latest service_date with stop_events.
 
     Returns:
-        List of route summaries sorted by `otp_all_pct` descending
-        (best first), routes without OTP data last.
+        Dict with `window` (with `start`, `end`, `days`) and `routes` (list
+        of route summaries sorted by `otp_all_pct` descending; routes
+        without OTP data last). Returns an empty `routes` list when no
+        derived stop_events exist yet.
     """
+    if days < 1:
+        days = 1
+
     # Get all routes (current version only)
     routes = db.query(Route).filter(Route.is_current).all()
 
-    # Get today's live metrics (cached)
-    live = get_live_metrics_for_today(db)
+    end_date = _latest_service_date_with_stop_events(db)
+    if end_date is None:
+        # No derived stop_events yet — every row gets all-None overlay; the
+        # window block reports the requested length but null endpoints so
+        # the frontend can still render the heading without a date range.
+        live: dict[str, dict] = {}
+        window_start_iso = None
+        window_end_iso = None
+    else:
+        live = get_live_metrics_for_window(db, end_date, days)
+        window_end_iso = end_date.isoformat()
+        window_start_iso = (end_date - timedelta(days=days - 1)).isoformat()
 
     # Frequency class per route (GTFS-derived, ~2ms — no caching needed).
     freq_classes = compute_route_frequency_classes(db)
 
-    scorecard = []
+    scorecard: list[dict] = []
     for route in routes:
         live_fields = _live_metric_fields(live.get(route.route_id))
         scorecard.append(
@@ -456,7 +710,14 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
     # number sink to the bottom so the table reads top-down by signal.
     scorecard.sort(key=lambda x: (x.get("otp_all_pct") is None, -(x.get("otp_all_pct") or 0)))
 
-    return scorecard
+    return {
+        "window": {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "days": days,
+        },
+        "routes": scorecard,
+    }
 
 
 def _excess_trip_time_fields(db: Session, route_id: str, days: int = 7) -> dict:

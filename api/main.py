@@ -167,17 +167,24 @@ async def get_gtfs_freshness():
 @app.get("/api/routes")
 async def get_routes(days: int = 7):
     """
-    Get performance scorecard for all routes
+    Get performance scorecard for all routes, pooled over a rolling window.
 
-    Returns summary metrics for all routes including OTP, headway, and speed.
-    Used by the dashboard landing page.
+    Each metric is pooled across `[end_date - days + 1, end_date]` where
+    `end_date` is the latest service_date with derived stop_events. Returns
+    `{window: {start, end, days}, routes: [...]}` so the frontend can label
+    the visible date range. Used by the dashboard landing page.
 
     Args:
-        days: Number of days to analyze (default: 7)
+        days: Window length in days (default: 7, capped at 30 to bound the
+            cold-cache cost)
 
     Returns:
-        List of route summaries with performance metrics
+        Dict with `window` and `routes` (route summaries sorted by OTP desc).
     """
+    if days < 1:
+        days = 1
+    if days > 30:
+        days = 30
     db = get_session()
     try:
         return get_all_routes_scorecard(db, days=days)

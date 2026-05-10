@@ -391,7 +391,16 @@ def _ewt_headline_from_pools(
 
     Shared by `compute_ewt_headline_for_route` and the vectorized
     `compute_ewt_headline_for_routes` so both produce identical output.
+
+    The `obs_sum_h`, `obs_sum_h_sq`, `sched_sum_h`, `sched_sum_h_sq` fields
+    are sufficient statistics for AWT/SWT — they let a windowed aggregator
+    pool across multiple service_dates without re-pulling raw headways.
+    AWT(window) = Σ obs_sum_h_sq / (2 · Σ obs_sum_h); same shape for SWT.
     """
+    obs_sum_h = sum(obs_pool)
+    obs_sum_h_sq = sum(h * h for h in obs_pool)
+    sched_sum_h = sum(sched_pool)
+    sched_sum_h_sq = sum(h * h for h in sched_pool)
     awt = compute_awt(obs_pool)
     swt = compute_awt(sched_pool)
     ewt = (awt - swt) if (awt is not None and swt is not None) else None
@@ -404,6 +413,10 @@ def _ewt_headline_from_pools(
         "ewt_seconds": round(ewt, 2) if ewt is not None else None,
         "n_observed_headways": len(obs_pool),
         "n_scheduled_headways": len(sched_pool),
+        "obs_sum_h": obs_sum_h,
+        "obs_sum_h_sq": obs_sum_h_sq,
+        "sched_sum_h": sched_sum_h,
+        "sched_sum_h_sq": sched_sum_h_sq,
         "coverage_ratio": _coverage_ratio(len(obs_pool), len(sched_pool)),
         "frequent_cell_hours": freq_cells,
     }
