@@ -37,6 +37,7 @@ from src.ewt import (
     compute_ewt_headline_for_routes,
     fetch_scheduled_cell_hours_for_routes,
 )
+from src.excess_trip_time import compute_excess_trip_time
 from src.models import (
     Calendar,
     Route,
@@ -440,46 +441,42 @@ def get_all_routes_scorecard(db: Session, days: int = 7) -> list[dict]:
 
 
 def _excess_trip_time_fields(db: Session, route_id: str, days: int = 7) -> dict:
-    """Most-recent non-null excess-trip-time values for one route.
+    """Most-recent non-zero excess-trip-time values for one route.
 
-    NOTES-43 columns live on `route_metrics_daily`, not on the rolling
-    summary table. The KPI card and subline use the most recent day where
-    the metric was populated within the last `days` window — gives a
-    "freshest reasonable signal" rather than a smoothed average over days
-    that may have been TU-blind. Returns all fields as None when no daily
-    row in the window has the columns set.
+    Walks back day-by-day through the last `days`-day window, calling
+    `compute_excess_trip_time` (NOTES-19 migration: now sourced live from
+    `runs`, not from materialized `route_metrics_daily.excess_trip_time_pct`).
+    Returns the first day with `n_trips > 0` — the "freshest reasonable
+    signal" the KPI card and subline display, rather than a smoothed
+    average over days that may have been TU-blind. Returns all fields as
+    None when no day in the window has any qualifying trips.
+
+    Cost: typically one `compute_excess_trip_time` call (the most recent
+    day usually has data); worst case `days` calls. Each call is one
+    SELECT against `runs` for the route+date plus a small Python pass.
     """
     from datetime import timedelta
 
     from src.timezones import eastern_today
 
     end_date = eastern_today()
-    start_date = end_date - timedelta(days=days)
-    row = (
-        db.query(RouteMetricsDaily)
-        .filter(
-            RouteMetricsDaily.route_id == route_id,
-            RouteMetricsDaily.date >= start_date.isoformat(),
-            RouteMetricsDaily.date <= end_date.isoformat(),
-            RouteMetricsDaily.excess_trip_time_pct.isnot(None),
-        )
-        .order_by(RouteMetricsDaily.date.desc())
-        .first()
-    )
-    if row is None:
-        return {
-            "excess_trip_time_pct": None,
-            "excess_trip_time_median_actual_sec": None,
-            "excess_trip_time_median_scheduled_sec": None,
-            "excess_trip_time_n_trips": None,
-            "excess_trip_time_as_of_date": None,
-        }
+    for offset in range(days + 1):
+        d = end_date - timedelta(days=offset)
+        result = compute_excess_trip_time(db, route_id, d)
+        if result["n_trips"] > 0:
+            return {
+                "excess_trip_time_pct": sanitize_float(result["pct_over_110"]),
+                "excess_trip_time_median_actual_sec": result["median_actual_sec"],
+                "excess_trip_time_median_scheduled_sec": result["median_scheduled_sec"],
+                "excess_trip_time_n_trips": result["n_trips"],
+                "excess_trip_time_as_of_date": d.isoformat(),
+            }
     return {
-        "excess_trip_time_pct": sanitize_float(row.excess_trip_time_pct),
-        "excess_trip_time_median_actual_sec": row.median_actual_trip_time_sec,
-        "excess_trip_time_median_scheduled_sec": row.median_scheduled_trip_time_sec,
-        "excess_trip_time_n_trips": row.excess_trip_time_n_trips,
-        "excess_trip_time_as_of_date": row.date,
+        "excess_trip_time_pct": None,
+        "excess_trip_time_median_actual_sec": None,
+        "excess_trip_time_median_scheduled_sec": None,
+        "excess_trip_time_n_trips": None,
+        "excess_trip_time_as_of_date": None,
     }
 
 
@@ -535,13 +532,12 @@ def get_route_detail_metrics(
         )
     )
 
-    # Excess trip time (NOTES-43): freshest non-null value within the window.
-    # Trip-level metric — period filter doesn't decompose into it (the trip
-    # spans hours), so we leave the lookup unfiltered. The day_type filter
-    # is also not threaded through here for the same reason it's not in
-    # the legacy summary fields: `route_metrics_daily.excess_trip_time_pct`
-    # is per-day, and the freshest-non-null lookup over a 7-day window
-    # already collapses across day_types.
+    # Excess trip time (NOTES-43): freshest non-zero value within the window,
+    # computed live per-day from `runs` (NOTES-19 migration). Trip-level
+    # metric — period filter doesn't decompose into it (the trip spans
+    # hours). The day_type filter is also not threaded through here: the
+    # freshest-non-zero lookup over a 7-day window already collapses across
+    # day_types in practice.
     excess_fields = _excess_trip_time_fields(db, route_id, days=days)
 
     # Frequency class — single-route lookup against route_service_profile.
@@ -806,6 +802,33 @@ def get_route_trend_data(
             "trend_data": trend_data,
         }
 
+    # excess_trip_time series — computed live per-day from `runs`
+    # (NOTES-19 migration). Trip-level metric so `period_key` doesn't
+    # decompose into it. Days with no qualifying trips emit `null` so the
+    # frontend can distinguish "no observations" from a real zero — same
+    # null-gap convention OTP and service_delivered use.
+    if metric == "excess_trip_time":
+        trend_data = []
+        current = start_date
+        while current <= end_date:
+            d_iso = current.isoformat()
+            value: float | None
+            if not _matches_day_type(current):
+                value = None
+            else:
+                result = compute_excess_trip_time(db, route_id, current)
+                value = sanitize_float(result["pct_over_110"]) if result["n_trips"] > 0 else None
+            trend_data.append({"date": d_iso, "excess_trip_time_pct": value})
+            current = current + timedelta(days=1)
+        return {
+            "route_id": route_id,
+            "metric": metric,
+            "days": days,
+            "day_type_filter": day_type_filter,
+            "period_key": period_key,
+            "trend_data": trend_data,
+        }
+
     # OTP series — proximity stop_events are now the canonical source
     # (NOTES-19 migration). The same helper handles both the no-filter and
     # period-filtered cases — `is_hour_in_period(_, ALL_HOURS)` returns True
@@ -819,7 +842,6 @@ def get_route_trend_data(
         "headway",
         "headway_std_dev",
         "speed",
-        "excess_trip_time",
     }:
         otp_by_date = _compute_otp_per_day_with_filters(
             db, route_id, start_date, end_date, period_key
@@ -856,21 +878,15 @@ def get_route_trend_data(
         .all()
     )
 
-    # Map metric name to field and response key. `otp` is handled above by
-    # the stop_events path, so it is not in this dict.
+    # Map metric name to field and response key. `otp` and `excess_trip_time`
+    # are handled in their own branches above; only the legacy daily-batch
+    # fields remain.
     metric_config = {
         "early": {"field": "early_percentage", "key": "early_percentage"},
         "late": {"field": "late_percentage", "key": "late_percentage"},
         "headway": {"field": "avg_headway_minutes", "key": "avg_headway_minutes"},
         "headway_std_dev": {"field": "headway_std_dev_minutes", "key": "headway_std_dev_minutes"},
         "speed": {"field": "avg_speed_mph", "key": "avg_speed_mph"},
-        # NOTES-43: share of trips on the day with actual end-to-end duration
-        # > 110% of scheduled. Source: `src/excess_trip_time.py`, materialized
-        # in `route_metrics_daily.excess_trip_time_pct` by the daily pipeline.
-        "excess_trip_time": {
-            "field": "excess_trip_time_pct",
-            "key": "excess_trip_time_pct",
-        },
     }
 
     config = metric_config[metric]
