@@ -25,6 +25,7 @@ from src.models import (
     RouteMetricsDaily,
     RouteMetricsSummary,
     Stop,
+    StopEvent,
     Trip,
     VehiclePosition,
 )
@@ -235,6 +236,42 @@ def sample_route_metrics_daily(db_session, sample_route) -> RouteMetricsDaily:
     db_session.commit()
     db_session.refresh(daily)
     return daily
+
+
+@pytest.fixture
+def sample_route_otp_stop_events(db_session, sample_route) -> list[StopEvent]:
+    """Proximity stop_events for `sample_route` on yesterday, 80% on-time.
+
+    Five rows on `today - 1` with deviation_sec values that bucket to four
+    on-time + one late under the WMATA -2/+7 OTP window — the new
+    canonical OTP source after NOTES-19. Seeded as `proximity` to match
+    the source filter the OTP path uses (matches legacy
+    `route_metrics_daily.otp_percentage` semantics, position-derived).
+    """
+    yesterday = utcnow_naive() - timedelta(days=1)
+    base_ts = yesterday.replace(hour=14, minute=0, second=0, microsecond=0)
+    deviations = [0, 30, 60, -30, 600]  # 4 on-time, 1 late (>420s) → 80%
+    events = []
+    for i, dev in enumerate(deviations):
+        events.append(
+            StopEvent(
+                service_date=yesterday.date().isoformat(),
+                trip_id=f"TRIP_OTP_{i}",
+                route_id=sample_route.route_id,
+                direction_id=0,
+                stop_id="STOP_OTP_TEST",
+                stop_sequence=1,
+                observed_arrival_ts=base_ts + timedelta(minutes=i * 5),
+                deviation_sec=dev,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+    db_session.add_all(events)
+    db_session.commit()
+    for ev in events:
+        db_session.refresh(ev)
+    return events
 
 
 @pytest.fixture(autouse=True)

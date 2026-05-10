@@ -237,12 +237,13 @@ class TestGetRouteDetailMetrics:
 class TestGetRouteTrendData:
     """Tests for get_route_trend_data function"""
 
-    def test_trend_data_otp(self, db_session, sample_route, sample_route_metrics_daily):
+    def test_trend_data_otp(self, db_session, sample_route, sample_route_otp_stop_events):
         """Test trend data for OTP metric.
 
-        The fixture inserts one daily row at `today - 1`. The endpoint
-        emits `days + 1` rows (inclusive endpoints), with the fixture
-        row carrying its real OTP and every other day carrying null.
+        The fixture inserts five proximity stop_events on `today - 1`
+        with a 4-on-time + 1-late deviation distribution → 80%. The
+        endpoint emits `days + 1` rows (inclusive endpoints); only that
+        one date carries a real value, the rest are null.
         """
         result = get_route_trend_data(db_session, "TEST1", metric="otp", days=30)
 
@@ -257,10 +258,10 @@ class TestGetRouteTrendData:
         assert "date" in trend_point
         assert "otp_percentage" in trend_point
 
-        # Exactly one real value (the fixture row); the rest are null.
+        # Exactly one real value (the fixture date); the rest are null.
         real_values = [row for row in result["trend_data"] if row["otp_percentage"] is not None]
         assert len(real_values) == 1
-        assert real_values[0]["otp_percentage"] == 78.2
+        assert real_values[0]["otp_percentage"] == 80.0
 
     def test_trend_data_all_metrics(self, db_session, sample_route, sample_route_metrics_daily):
         """Test trend data for all supported metrics"""
@@ -551,19 +552,54 @@ class TestGetRouteContributors:
         db_session.commit()
 
     def _seed_route_otp(self, db_session, route_id, otp_value, n_days=5):
-        """Seed N days of `route_metrics_daily.otp_percentage` for one route."""
-        from src.models import RouteMetricsDaily
+        """Seed N days of proximity stop_events so `_route_otp_window_mean` reads `otp_value`%.
 
+        Post NOTES-19 migration: route OTP is computed from stop_events, not
+        `route_metrics_daily`. Seeds 100 proximity events per day with the
+        on-time/late split that buckets to `otp_value`% under the WMATA
+        window — a uniform per-day rate so the window mean equals the seed.
+        """
+        from datetime import datetime as _dt
+
+        from src.models import StopEvent
+
+        events_per_day = 100
+        on_time_count = int(round(otp_value / 100.0 * events_per_day))
+        late_count = events_per_day - on_time_count
         rows = []
         for i in range(n_days):
             d = eastern_today() - timedelta(days=i + 1)
-            rows.append(
-                RouteMetricsDaily(
-                    route_id=route_id,
-                    date=d.isoformat(),
-                    otp_percentage=otp_value,
+            base_ts = _dt.combine(d, _dt.min.time()).replace(hour=14)
+            for j in range(on_time_count):
+                rows.append(
+                    StopEvent(
+                        service_date=d.isoformat(),
+                        trip_id=f"TRIP_{route_id}_{i}_OT_{j}",
+                        route_id=route_id,
+                        direction_id=0,
+                        stop_id=f"STOP_OTP_{route_id}",
+                        stop_sequence=1,
+                        observed_arrival_ts=base_ts + timedelta(seconds=j),
+                        deviation_sec=0,
+                        source="proximity",
+                        schedule_relationship="SCHEDULED",
+                    )
                 )
-            )
+            for j in range(late_count):
+                rows.append(
+                    StopEvent(
+                        service_date=d.isoformat(),
+                        trip_id=f"TRIP_{route_id}_{i}_LATE_{j}",
+                        route_id=route_id,
+                        direction_id=0,
+                        stop_id=f"STOP_OTP_{route_id}",
+                        stop_sequence=1,
+                        observed_arrival_ts=base_ts + timedelta(seconds=on_time_count + j),
+                        deviation_sec=600,
+                        source="proximity",
+                        schedule_relationship="SCHEDULED",
+                    )
+                )
         db_session.add_all(rows)
         db_session.commit()
 
