@@ -246,23 +246,23 @@ async def get_route(
     Used by the route detail page header.
 
     `day_type` and `period` (NOTES-41) re-slice the live KPIs (OTP split,
-    EWT, bunching) by day-of-week and time-of-day Eastern hour. The legacy
-    summary fields (avg_headway_minutes, avg_speed_mph) and excess-trip-
-    time aren't grouped by hour and aren't filtered by `period`.
-    Service-delivered is trip-level so `period` doesn't change its value;
-    `day_type` does, by anchoring on the latest matching service_date.
+    EWT, bunching) by day-of-week and time-of-day Eastern hour.
+    Excess-trip-time and service-delivered are trip-level so `period`
+    doesn't change their values; `day_type` does, by anchoring on the
+    latest matching service_date.
 
     Args:
         route_id: Route identifier (e.g., 'C51')
-        days: Number of days to analyze (default: 7)
+        days: Window for the excess-trip-time freshest-day lookup
         day_type: One of `all` (default), `weekday`, `saturday`, `sunday`
         period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
             `evening`, `late`
 
     Returns:
-        Detailed route metrics including OTP, headway, speed, and trip counts.
-        Echoes `day_type_filter` and `period_key` so the UI can render the
-        active-filter chip without holding extra state.
+        Detailed route metrics — live OTP/EWT/bunching, service-delivered,
+        excess-trip-time, frequency class. Echoes `day_type_filter` and
+        `period_key` so the UI can render the active-filter chip without
+        holding extra state.
     """
     if day_type not in VALID_DAY_TYPES:
         raise HTTPException(
@@ -308,13 +308,12 @@ async def get_route_trend(
     match (sparkline draws gaps cleanly rather than collapsing the time
     axis). `period` is meaningful only for `metric=otp` — when set, OTP
     is recomputed per-day from `stop_events` with the hour filter applied.
-    Other metrics (`service_delivered`, `excess_trip_time`, headway, speed)
-    are trip- or daily-aggregate level and ignore `period`.
+    `service_delivered` and `excess_trip_time` are trip-level and ignore
+    `period`.
 
     Args:
         route_id: Route identifier (e.g., 'C51')
-        metric: Metric to analyze ('otp', 'early', 'late', 'headway',
-            'headway_std_dev', 'speed', 'service_delivered',
+        metric: Metric to analyze ('otp', 'service_delivered',
             'excess_trip_time')
         days: Number of days to analyze (default: 30)
         day_type: One of `all` (default), `weekday`, `saturday`, `sunday`
@@ -326,11 +325,6 @@ async def get_route_trend(
     """
     valid_metrics = [
         "otp",
-        "early",
-        "late",
-        "headway",
-        "headway_std_dev",
-        "speed",
         "service_delivered",
         "excess_trip_time",
     ]
