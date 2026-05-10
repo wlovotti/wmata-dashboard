@@ -726,102 +726,6 @@ class RouteServiceProfile(Base):
     )
 
 
-class RouteMetricsDaily(Base):
-    """
-    Pre-computed daily performance metrics for routes.
-
-    This table stores calculated metrics for each route for each day,
-    enabling fast API responses without recalculating from raw vehicle positions.
-    Populated by nightly batch job (pipelines/compute_daily_metrics.py).
-    """
-
-    __tablename__ = "route_metrics_daily"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    route_id = Column(String, nullable=False, index=True)
-    date = Column(String, nullable=False, index=True)  # YYYY-MM-DD format
-
-    # On-time performance metrics
-    otp_percentage = Column(Float)
-    early_percentage = Column(Float)
-    late_percentage = Column(Float)
-
-    # Headway metrics
-    avg_headway_minutes = Column(Float)
-    min_headway_minutes = Column(Float)
-    max_headway_minutes = Column(Float)
-    headway_std_dev_minutes = Column(Float)  # Standard deviation for bunching detection
-    headway_cv = Column(Float)  # Coefficient of variation (std_dev / mean)
-
-    # Speed metrics
-    avg_speed_mph = Column(Float)
-    median_speed_mph = Column(Float)
-
-    # Excess trip time (NOTES-43): end-to-end actual vs scheduled duration.
-    # `excess_trip_time_pct` is the share of qualifying trips on the day where
-    # actual duration > 110% of scheduled (`pct_over_110` from
-    # `src/excess_trip_time.py`). The two duration columns let the UI render a
-    # "median trip ran 18 min, schedule 16 min" subline. `excess_trip_time_n_trips`
-    # is the qualifying-trip count (trips that observed both literal endpoints
-    # via the proximity-origin / TU-destination rule).
-    excess_trip_time_pct = Column(Float)
-    median_actual_trip_time_sec = Column(Integer)
-    median_scheduled_trip_time_sec = Column(Integer)
-    excess_trip_time_n_trips = Column(Integer)
-
-    # Data quality metrics
-    total_arrivals = Column(Integer)
-    unique_vehicles = Column(Integer)
-    unique_trips = Column(Integer)
-
-    # Metadata
-    computed_at = Column(DateTime, default=utcnow_naive)
-
-    # Composite index for efficient queries
-    __table_args__ = (Index("idx_route_date", "route_id", "date", unique=True),)
-
-
-class RouteMetricsSummary(Base):
-    """
-    Pre-computed rolling summary metrics for routes (typically 7 days).
-
-    This table stores aggregated metrics over a recent time period
-    for quick scorecard/summary displays. Updated by nightly batch job.
-    """
-
-    __tablename__ = "route_metrics_summary"
-
-    route_id = Column(String, primary_key=True)
-
-    # Time period analyzed
-    days_analyzed = Column(Integer, default=7)
-    date_start = Column(String)  # YYYY-MM-DD
-    date_end = Column(String)  # YYYY-MM-DD
-
-    # Performance metrics
-    otp_percentage = Column(Float)
-    early_percentage = Column(Float)
-    late_percentage = Column(Float)
-    avg_headway_minutes = Column(Float)
-    headway_std_dev_minutes = Column(Float)  # Standard deviation for bunching detection
-    headway_cv = Column(Float)  # Coefficient of variation (std_dev / mean)
-    avg_speed_mph = Column(Float)
-
-    # Data quality
-    total_observations = Column(Integer)
-    unique_vehicles = Column(Integer)
-    last_data_timestamp = Column(DateTime)
-
-    # Pre-computed position statistics (7-day window)
-    total_positions_7d = Column(Integer)  # Total position records
-    unique_vehicles_7d = Column(Integer)  # Unique vehicles seen
-    unique_trips_7d = Column(Integer)  # Unique trips tracked
-    last_position_timestamp = Column(DateTime)  # Most recent position timestamp
-
-    # Metadata
-    computed_at = Column(DateTime, default=utcnow_naive)
-
-
 class SystemMetricsDaily(Base):
     """
     Pre-computed daily system-wide rollup metrics for the home-page trend
@@ -829,7 +733,9 @@ class SystemMetricsDaily(Base):
 
     One row per service_date holding the system-level OTP, service-delivered
     ratio, EWT, and bunching rate. Populated by
-    `pipelines/compute_daily_metrics.py` after per-route rollups complete.
+    `pipelines/upsert_system_metrics_daily.py`, dispatched per-date from
+    `pipelines/run_daily_batch.py` after the derivation pipelines commit
+    their stop_events / runs rows.
 
     Why this table exists: the live system-trend rollup over a 60-day window
     (visible 30 + prior 30) costs ~30s on cold cache because EWT and bunching
@@ -837,8 +743,7 @@ class SystemMetricsDaily(Base):
     day. Materializing the rollup turns the trend endpoint into a SELECT plus
     a single-day live compute for "today" — sub-50ms warm, sub-second cold.
 
-    `service_date` is the primary key, matching the string format used by
-    `route_metrics_daily.date` (`YYYY-MM-DD`, Eastern operational day).
+    `service_date` is the primary key (`YYYY-MM-DD`, Eastern operational day).
     """
 
     __tablename__ = "system_metrics_daily"

@@ -200,12 +200,12 @@ async def get_routes_contributors(metric: str = "otp", days: int = 30):
     is not available — so the score answers "where would moving the needle
     move the system most?" rather than just "which route looks worst."
 
-    For OTP, `route_value` is the window mean from the materialized
-    `route_metrics_daily` table. For service-delivered, EWT, and bunching,
-    `route_value` is the latest single-day snapshot from the live-metrics
-    cache (those metrics aren't materialized per-route per-day; a window
-    mean would require N× per-day computes per route). The baseline is
-    always a window mean from `system_metrics_daily`.
+    For OTP, `route_value` is the window mean computed live from
+    `stop_events`. For service-delivered, EWT, and bunching, `route_value`
+    is the latest single-day snapshot from the live-metrics cache (those
+    metrics aren't materialized per-route per-day; a window mean would
+    require N× per-day computes per route). The baseline is always a
+    window mean from `system_metrics_daily`.
 
     Args:
         metric: One of `otp`, `service_delivered`, `ewt`, `bunching`

@@ -6,15 +6,8 @@ Tests database model creation, relationships, and constraints.
 Run with: pytest tests/test_models.py
 """
 
-from datetime import timedelta
-
-import pytest
-from sqlalchemy.exc import IntegrityError
-
 from src.models import (
     Route,
-    RouteMetricsDaily,
-    RouteMetricsSummary,
     Stop,
     StopTime,
     Trip,
@@ -123,46 +116,6 @@ def test_vehicle_position_creation(db_session, sample_route, sample_trip):
     assert queried.speed == 25.5
 
 
-def test_route_metrics_summary_creation(db_session, sample_route):
-    """Test creating RouteMetricsSummary"""
-    summary = RouteMetricsSummary(
-        route_id=sample_route.route_id,
-        otp_percentage=85.5,
-        avg_headway_minutes=12.0,
-        avg_speed_mph=18.5,
-        total_observations=200,
-        computed_at=utcnow_naive(),
-    )
-    db_session.add(summary)
-    db_session.commit()
-
-    queried = (
-        db_session.query(RouteMetricsSummary).filter_by(route_id=sample_route.route_id).first()
-    )
-    assert queried.otp_percentage == 85.5
-    assert queried.avg_headway_minutes == 12.0
-
-
-def test_route_metrics_daily_creation(db_session, sample_route):
-    """Test creating RouteMetricsDaily"""
-    yesterday = (utcnow_naive() - timedelta(days=1)).date()
-    daily = RouteMetricsDaily(
-        route_id=sample_route.route_id,
-        date=yesterday.isoformat(),
-        otp_percentage=82.0,
-        avg_headway_minutes=11.5,
-        avg_speed_mph=19.0,
-        total_arrivals=50,
-        computed_at=utcnow_naive(),
-    )
-    db_session.add(daily)
-    db_session.commit()
-
-    queried = db_session.query(RouteMetricsDaily).filter_by(route_id=sample_route.route_id).first()
-    assert queried.otp_percentage == 82.0
-    assert queried.date == yesterday.isoformat()
-
-
 def test_query_multiple_routes(db_session, sample_routes):
     """Test querying multiple routes"""
     routes = db_session.query(Route).filter(Route.is_current).all()
@@ -180,34 +133,3 @@ def test_query_vehicle_positions_by_route(db_session, sample_route, sample_vehic
 
     assert len(positions) == 5
     assert all(p.route_id == sample_route.route_id for p in positions)
-
-
-def test_route_metrics_unique_constraint(db_session, sample_route):
-    """Test that route_id is unique in RouteMetricsSummary"""
-    route_id = sample_route.route_id
-
-    db_session.add(
-        RouteMetricsSummary(
-            route_id=route_id,
-            otp_percentage=85.0,
-            computed_at=utcnow_naive(),
-        )
-    )
-    db_session.flush()
-
-    # Inside a SAVEPOINT so the failing flush doesn't unwind the outer
-    # test transaction managed by the db_session fixture.
-    savepoint = db_session.begin_nested()
-    db_session.add(
-        RouteMetricsSummary(
-            route_id=route_id,
-            otp_percentage=90.0,
-            computed_at=utcnow_naive(),
-        )
-    )
-    with pytest.raises(IntegrityError):
-        db_session.flush()
-    savepoint.rollback()
-
-    count = db_session.query(RouteMetricsSummary).filter_by(route_id=route_id).count()
-    assert count == 1

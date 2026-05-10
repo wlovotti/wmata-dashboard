@@ -1,10 +1,8 @@
 """
 OTP (on-time performance) metrics computed from the stop_events / runs foundation.
 
-This module replaces the OTP parts of the legacy `pipelines/compute_daily_metrics.py`
-path (which reads vehicle_positions and writes route_metrics_daily). It computes
-OTP at three levels — origin, destination, and all-timepoints — for one
-(route, service_date), returning per-source aggregates.
+Computes OTP at three levels — origin, destination, and all-timepoints —
+for one (route, service_date), returning per-source aggregates.
 
 Origin / destination split (PR #46) requires picking a source per endpoint
 because the two derivation sources have nearly inverse blind spots:
@@ -19,11 +17,10 @@ because the two derivation sources have nearly inverse blind spots:
 So origin OTP reads `proximity` runs and destination OTP reads `trip_update`
 runs. See the Run model docstring for the full source-asymmetry write-up.
 
-All-timepoints OTP uses `proximity` stop_events to match the existing
-`route_metrics_daily` semantics (position-derived, comparable to what
-WMATA publishes). Future variants (rider-experience window per NOTES-20,
-EWT for frequent routes — see `src/ewt.py`) layer on the same per-stop
-deviation data.
+All-timepoints OTP uses `proximity` stop_events (position-derived, every
+observed stop) — comparable to what WMATA publishes. Future variants
+(rider-experience window per NOTES-20, EWT for frequent routes — see
+`src/ewt.py`) layer on the same per-stop deviation data.
 """
 
 from __future__ import annotations
@@ -156,9 +153,9 @@ def compute_otp_split(
             if (h := _eastern_hour(ts)) is not None and is_hour_in_period(h, period_key)
         ]
 
-    # All timepoints: proximity stop_events directly (matches existing
-    # route_metrics_daily semantics — position-derived, every observed stop).
-    # Bucket each stop event by its own `observed_arrival_ts`.
+    # All timepoints: proximity stop_events directly (position-derived,
+    # every observed stop). Bucket each stop event by its own
+    # `observed_arrival_ts`.
     all_rows = (
         db.query(StopEvent.deviation_sec, StopEvent.observed_arrival_ts)
         .filter(

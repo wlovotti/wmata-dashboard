@@ -592,18 +592,16 @@ def _compute_otp_per_day_with_filters(
 ) -> dict[str, float | None]:
     """Per-service-date OTP for one route, computed live from stop_events.
 
-    Used by the trend endpoint when `period_key` restricts to a specific
-    Eastern-hour bucket — `route_metrics_daily.otp_percentage` is a daily
-    aggregate that doesn't decompose by hour, so we read `stop_events`
-    directly and apply the hour filter in Python (to keep test parity
-    with SQLite, which can't EXTRACT(HOUR FROM ... AT TIME ZONE ...)).
-
     Mirrors `compute_otp_split`'s `all_timepoints` semantics: source =
-    proximity (matches the legacy daily-batch `otp_percentage` rule the
-    trend has historically reported), bucketed by Eastern hour of
-    `observed_arrival_ts`. Returns `{date_str: percentage_or_None}` for
-    every date in the window — `None` when no qualifying stops exist on
-    that date.
+    proximity (position-derived, every observed stop), bucketed by
+    Eastern hour of `observed_arrival_ts` and filtered by `period_key`.
+    Returns `{date_str: percentage_or_None}` for every date in the window
+    — `None` when no qualifying stops exist on that date.
+
+    Hour filter is applied in Python to keep test parity with SQLite
+    (which can't `EXTRACT(HOUR FROM ... AT TIME ZONE ...)`).
+    `is_hour_in_period(_, ALL_HOURS)` returns True for every hour, so
+    passing `ALL_HOURS` produces the unfiltered daily aggregate.
     """
     start_iso = start_date.isoformat()
     end_iso = end_date.isoformat()
@@ -662,11 +660,10 @@ def get_route_trend_data(
     Computes daily values for OTP, headway, speed, or service-delivered over the
     specified time period. Used for trend charts on the route detail page.
 
-    `service_delivered` is computed live per service_date from `runs` + GTFS via
-    `compute_service_delivered` (NOTES-37). It is not stored in
-    `route_metrics_daily`, so the trend loop pays one pair of count queries per
-    day in the window; acceptable on a per-route detail page (not iterated over
-    a route list).
+    `service_delivered` is computed live per service_date from `runs` + GTFS
+    via `compute_service_delivered` (NOTES-37). The trend loop pays one pair
+    of count queries per day in the window; acceptable on a per-route detail
+    page (not iterated over a route list).
 
     `day_type_filter` (NOTES-41) drops dates whose day-of-week doesn't match
     (weekday / saturday / sunday); the row's value is set to `None` so the
@@ -707,17 +704,15 @@ def get_route_trend_data(
             return True
         return _day_type_for(d) == day_type_filter
 
-    # service_delivered isn't materialized in RouteMetricsDaily; compute per-day
-    # from runs + GTFS. Same Eastern service-date window as the daily-table path.
-    #
-    # Emit one row per service date in the window; days with no observations
-    # carry `service_delivered_ratio: null` so the frontend can distinguish
-    # "no data" from "ran zero trips" and skip the point in both the
-    # sparkline and the 7-vs-prior-7-day delta. The discriminator is
-    # `Run` existence — if no runs exist for the route on that date, we
-    # have no observations regardless of what the schedule says. If runs
-    # exist but `delivered_trips == 0`, that's a real 0% (every trip was
-    # too thin to count as delivered).
+    # service_delivered: compute per-day from runs + GTFS. Emit one row per
+    # service date in the window; days with no observations carry
+    # `service_delivered_ratio: null` so the frontend can distinguish "no
+    # data" from "ran zero trips" and skip the point in both the sparkline
+    # and the 7-vs-prior-7-day delta. The discriminator is `Run` existence
+    # — if no runs exist for the route on that date, we have no
+    # observations regardless of what the schedule says. If runs exist but
+    # `delivered_trips == 0`, that's a real 0% (every trip was too thin to
+    # count as delivered).
     if metric == "service_delivered":
         trend_data = []
         current = start_date
@@ -844,13 +839,14 @@ def get_route_trend_data(
 #
 # Hybrid serve path: history (every date strictly before today's Eastern
 # service date) is served from the materialized `system_metrics_daily`
-# table populated by `pipelines/compute_daily_metrics.py`. Today is
-# computed live via `compute_system_metrics_for_date` because the daily
-# pipeline runs once and won't have written today's row yet — keeps the
-# strip current without paying the 60-day cold-cache cost the original
-# fully-live path incurred. The `_SYSTEM_TREND_TTL_SEC` cache now mostly
-# absorbs today's single-day compute on rapid refreshes; the historical
-# read is sub-50ms either way.
+# table populated by `pipelines/upsert_system_metrics_daily.py` (run once
+# per service date by the daily batch). Today is computed live via
+# `compute_system_metrics_for_date` because the batch runs once per day
+# and won't have written today's row yet — keeps the strip current
+# without paying the 60-day cold-cache cost the original fully-live path
+# incurred. The `_SYSTEM_TREND_TTL_SEC` cache now mostly absorbs today's
+# single-day compute on rapid refreshes; the historical read is
+# sub-50ms either way.
 # ---------------------------------------------------------------------------
 
 _SYSTEM_TREND_TTL_SEC = 60.0
@@ -865,16 +861,13 @@ def _system_otp_series(db: Session, dates: list[date_type]) -> dict[str, float |
     all routes for each date and returns `on_time_count / total_count * 100`,
     where on-time is `OTP_EARLY_SEC <= deviation_sec <= OTP_LATE_SEC` (the
     WMATA -2/+7 window). Pooling is mathematically equivalent to weighting
-    each route's OTP by its observation count — the rider-weighted aggregate
-    the prior `route_metrics_daily`-backed implementation produced.
+    each route's OTP by its observation count — the rider-weighted aggregate.
 
     Source filter is `proximity` to match `compute_otp_split`'s
-    `all_timepoints` block (position-derived, every observed stop) and the
-    historical `RouteMetricsDaily.otp_percentage` semantics.
+    `all_timepoints` block (position-derived, every observed stop).
 
     Days with zero qualifying stop_events return `None` so the frontend
-    plots a gap. Pivoting off `route_metrics_daily` decouples the system
-    trend from the legacy daily-batch pipeline (NOTES-19, partial).
+    plots a gap.
     """
     if not dates:
         return {}
@@ -1252,15 +1245,15 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 # `src/service_delivered.py`.
 #
 # Snapshot semantics for `route_value`:
-#   - OTP: window-mean of `route_metrics_daily.otp_percentage` (cheap;
-#     materialized).
+#   - OTP: window-mean computed live from `stop_events` via
+#     `_route_otp_window_mean` (one per-day OTP per date in the window,
+#     averaged with null-skip).
 #   - service_delivered / EWT / bunching: latest single-day value from the
 #     live cache (`get_live_metrics_for_today`). These metrics are not
 #     materialized per-route per-day, so a window mean would require N×
 #     per-day computes per route — too expensive for an interactive
 #     ranking endpoint. The single-day snapshot is the freshest reasonable
-#     signal; a full window-mean implementation would land alongside
-#     materializing those metrics in `route_metrics_daily`.
+#     signal.
 #
 # `baseline_value` always uses the window-mean from `system_metrics_daily`
 # regardless of metric, since that table holds all four metrics per day. The
@@ -2102,9 +2095,9 @@ def compute_route_stop_diagnostics(
 
     # Step 2: pull stop_events for the route over the window. We pull
     # trip_update rows for skip/observation counts and proximity rows for
-    # OTP deviation (matches the legacy `route_metrics_daily.otp_percentage`
-    # source so the per-stop OTP rolls up to the same number the headline
-    # reports). Both sources go through the same direction/stop grouping.
+    # OTP deviation (same source as the headline OTP, so the per-stop
+    # rollup reconciles with the headline number). Both sources go
+    # through the same direction/stop grouping.
     rows = (
         db.query(
             StopEvent.direction_id,
