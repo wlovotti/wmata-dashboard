@@ -6,13 +6,14 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-09 (closed NOTES-19: deleted RouteMetricsDaily /
-RouteMetricsSummary models, `pipelines/compute_daily_metrics.py`, and
-the legacy migration script. `upsert_system_metrics_for_date` moved to
-`src/system_metrics.py`; new `pipelines/upsert_system_metrics_daily.py`
-wires it into `run_daily_batch.py`. Production DB needs a manual
-`DROP TABLE route_metrics_daily, route_metrics_summary` after merge —
-documented in the closing PR body).
+Last edited 2026-05-09 (added NOTES-51 — system-wide
+`service_delivered=0` on intermittent service dates, surfaced when
+verifying the new composite grade on the live dashboard. Also closed
+NOTES-19 today: deleted RouteMetricsDaily / RouteMetricsSummary models,
+`pipelines/compute_daily_metrics.py`, and the legacy migration script;
+moved `upsert_system_metrics_for_date` to `src/system_metrics.py` with
+a new `pipelines/upsert_system_metrics_daily.py` wrapper wired into
+`run_daily_batch.py`. Production legacy tables dropped post-merge).
 
 ---
 
@@ -86,6 +87,24 @@ proxies instead).
   ceiling at the cost of admitting more single-ping ghost runs. Not
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
+
+- **NOTES-51 service_delivered intermittently zero across whole system.**
+  Surfaced when verifying NOTES-18 grades on the live dashboard. Among
+  the most recent eight service dates (2026-05-01 through 2026-05-08),
+  three came out at `delivered_trips=0` for **every** route despite
+  `scheduled_trips > 0`, while four others fully populated and one was
+  partial. Not consistent with day_type — affected dates span
+  Fri / Wed / Fri, healthy dates span Mon / Tue / Thu. Pattern points to
+  a derivation gap (likely a `runs` aggregation step that didn't fire
+  for those service dates) rather than a metric-formula bug, since the
+  code path is unchanged across affected and healthy dates. Knock-on:
+  the new composite grade (NOTES-18) reads the live overlay's
+  `service_delivered_ratio` directly, so on a SD=0 anchor date every
+  route grades D/F regardless of OTP. Investigation should start with
+  whether `runs` rows exist on the affected dates and whether
+  `aggregate_runs` succeeded in `run_daily_batch.py`'s log for those
+  days. Severity: medium — distorts the headline grade, easily noticed
+  on the homepage.
 
 ---
 
