@@ -1574,22 +1574,28 @@ def test_compute_service_delivered_zero_delivered_returns_zero_ratio(db_session)
 
 
 @pytest.mark.smoke
-def test_compute_service_delivered_uses_correct_day_type(db_session):
-    """Weekday date pulls Tuesday-Calendar trips, ignoring saturday/sunday."""
+def test_compute_service_delivered_uses_actual_day_of_week(db_session):
+    """Monday date pulls Monday-Calendar trips, ignoring tue/sat/sun service_ids.
+
+    Confirms the per-date (not representative-weekday) filter that closed
+    NOTES-51 — see `_scheduled_trip_ids_query`.
+    """
     from datetime import date
 
     from src.service_delivered import compute_service_delivered
 
     db_session.add_all(
         [
-            _gtfs_calendar(service_id="WKD", tuesday=1),
-            *[_gtfs_trip(f"W{i}", service_id="WKD") for i in range(10)],
+            _gtfs_calendar(service_id="MON", monday=1),
+            *[_gtfs_trip(f"M{i}", service_id="MON") for i in range(10)],
+            _gtfs_calendar(service_id="TUE", tuesday=1),
+            *[_gtfs_trip(f"T{i}", service_id="TUE") for i in range(7)],
             _gtfs_calendar(service_id="SAT", saturday=1),
             *[_gtfs_trip(f"S{i}", service_id="SAT") for i in range(5)],
-            _gtfs_calendar(service_id="SUN", sunday=1),
-            *[_gtfs_trip(f"U{i}", service_id="SUN") for i in range(3)],
-            # 2026-05-04 is a Monday — should match WKD (Tuesday-flagged) only
-            _run("W0", "proximity", 10, service_date="2026-05-04"),
+            # 2026-05-04 is a Monday — must match MON-flagged service_id only,
+            # NOT the TUE-flagged one (the pre-NOTES-51 representative-weekday
+            # filter would have matched TUE and produced scheduled_trips=7).
+            _run("M0", "proximity", 10, service_date="2026-05-04"),
         ]
     )
     db_session.commit()
@@ -1598,6 +1604,105 @@ def test_compute_service_delivered_uses_correct_day_type(db_session):
     assert out["day_type"] == "weekday"
     assert out["scheduled_trips"] == 10
     assert out["delivered_trips"] == 1
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_friday_only_service_id_regression(db_session):
+    """NOTES-51 regression: WMATA's Friday-only service_id must be picked up.
+
+    WMATA's GTFS in May 2026 split weekday service across distinct
+    service_ids — `service_id=6` carries Friday-only schedule
+    (`friday=1`, all other days 0). Before NOTES-51, the representative-
+    weekday filter (`tuesday=1`) excluded these trips on every Friday
+    service date, producing system-wide `delivered_trips=0`. The
+    per-date filter must now pick them up.
+    """
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            # Friday-only service_id (the WMATA shape that triggered NOTES-51).
+            _gtfs_calendar(service_id="FRI_ONLY", friday=1),
+            *[_gtfs_trip(f"F{i}", service_id="FRI_ONLY") for i in range(8)],
+            # 2026-05-08 is a Friday.
+            _run("F0", "proximity", 10, service_date="2026-05-08"),
+            _run("F1", "proximity", 10, service_date="2026-05-08"),
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 8))
+    assert out["scheduled_trips"] == 8
+    assert out["delivered_trips"] == 2
+    assert out["ratio"] == 0.25
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_honors_calendar_dates_added(db_session):
+    """A service_id added for a specific date via calendar_dates type=1 counts.
+
+    The NOTES-51 fix routes through `calendar_dates` so federal holidays
+    and other one-off schedule swaps resolve correctly — closes the
+    holiday limitation noted in the module docstring.
+    """
+    from datetime import date
+
+    from src.models import CalendarDate
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            # Holiday Sunday-service mapped onto a weekday via type-1 exception.
+            _gtfs_calendar(service_id="HOLIDAY_SUN", sunday=1),
+            *[_gtfs_trip(f"H{i}", service_id="HOLIDAY_SUN") for i in range(4)],
+            CalendarDate(
+                service_id="HOLIDAY_SUN",
+                date="20260504",  # Monday — added explicitly
+                exception_type=1,
+                is_current=True,
+            ),
+            _run("H0", "proximity", 10, service_date="2026-05-04"),
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 4))
+    assert out["scheduled_trips"] == 4
+    assert out["delivered_trips"] == 1
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_honors_calendar_dates_removed(db_session):
+    """A service_id removed for a specific date via calendar_dates type=2 drops.
+
+    Inverse of the added-exception case — a holiday that explicitly
+    cancels weekday service via `calendar_dates` type 2 must subtract
+    those trips from the schedule denominator.
+    """
+    from datetime import date
+
+    from src.models import CalendarDate
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _gtfs_calendar(service_id="WKD", monday=1),
+            *[_gtfs_trip(f"W{i}", service_id="WKD") for i in range(10)],
+            CalendarDate(
+                service_id="WKD",
+                date="20260504",  # Monday — explicitly removed
+                exception_type=2,
+                is_current=True,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 4))
+    assert out["scheduled_trips"] == 0
+    assert out["ratio"] is None
 
 
 @pytest.mark.smoke
