@@ -81,11 +81,13 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date as date_type
 from datetime import datetime
+from threading import Lock
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from src.models import Calendar, StopEvent, StopTime, Trip
+from src.models import Calendar, GTFSSnapshot, StopEvent, StopTime, Trip
 from src.time_periods import is_hour_in_period
 
 EASTERN = ZoneInfo("America/New_York")
@@ -470,6 +472,20 @@ def compute_ewt_headline_for_route(
     )
 
 
+# Module-level cache for the scheduled-cell-hour fetch. The schedule depends
+# only on the active GTFS snapshot (which versions trips/stop_times/calendar
+# via `is_current`), so the result is valid until a new snapshot is loaded.
+# Keying by `(day_type, snapshot_id)` means the cache naturally invalidates
+# the moment `reload_gtfs_complete.py` writes a new gtfs_snapshots row — no
+# TTL or restart needed.
+#
+# Only the unfiltered (`route_ids is None`) path is cached. The filtered
+# path is uncommon and could legitimately collide with a cached entry's key
+# space without proper isolation.
+_schedule_cache: dict[tuple[str, int], dict[str, dict[CellHour, list[float]]]] = {}
+_schedule_cache_lock = Lock()
+
+
 def fetch_scheduled_cell_hours_for_routes(
     db: Session,
     day_type: str,
@@ -483,12 +499,20 @@ def fetch_scheduled_cell_hours_for_routes(
     — each list is consecutive scheduled headways within that cell, bucketed
     by the earlier arrival's hour-of-day.
 
-    The dominant cost in the live scorecard path. Both EWT and bunching
-    consume this; the API layer fetches it once and shares it to avoid
-    paying the ~1.7s cost twice. Schedule data only changes on GTFS reload,
-    so it's also a natural candidate for module-level caching with a long
-    TTL if the cost ever needs further amortization.
+    Cached at module level by `(day_type, gtfs_snapshot_id)` when called with
+    `route_ids=None` (the dashboard path). The cost is ~1.5s for the full
+    SQL pass + Python pairing; the cache invalidates automatically when
+    `reload_gtfs_complete.py` writes a new `gtfs_snapshots` row, so no
+    manual flush is needed after a GTFS refresh.
     """
+    if route_ids is None:
+        snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+        cache_key = (day_type, snapshot_id)
+        with _schedule_cache_lock:
+            cached = _schedule_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     field_name = DAY_TYPE_REPRESENTATIVE_FIELD[day_type]
     field = getattr(Calendar, field_name)
 
@@ -529,6 +553,15 @@ def fetch_scheduled_cell_hours_for_routes(
             if delta > 0:
                 hour = (secs[i] // 3600) % 24
                 sched_by_route_cell_hour[route_id][(direction, stop, hour)].append(float(delta))
+
+    if route_ids is None:
+        # Stash the unfiltered result and evict any entries from older GTFS
+        # snapshots so the cache doesn't accumulate every historical version.
+        with _schedule_cache_lock:
+            _schedule_cache[cache_key] = sched_by_route_cell_hour
+            for k in list(_schedule_cache.keys()):
+                if k[1] != snapshot_id:
+                    del _schedule_cache[k]
     return sched_by_route_cell_hour
 
 
@@ -618,4 +651,131 @@ def compute_ewt_headline_for_routes(
         results[route_id] = _ewt_headline_from_pools(
             route_id, service_date_str, day_type, obs_pool, sched_pool, freq_cells
         )
+    return results
+
+
+def fetch_observed_stop_events_for_window(
+    db: Session,
+    service_dates: list[date_type],
+    route_ids: list[str] | None = None,
+) -> list[tuple]:
+    """Pull source='trip_update' observed stop_events for the whole window in one query.
+
+    Returns a list of `(service_date_str, route_id, direction_id, stop_id,
+    observed_arrival_ts, schedule_relationship)` tuples, ordered for the
+    headway-pairing logic in both EWT and bunching. EWT pairs every
+    consecutive arrival; bunching pairs only those with
+    `schedule_relationship='SCHEDULED'`. Sharing this pull saves the
+    duplicate ~9s SQL+materialize cost the two metrics would otherwise pay
+    individually.
+    """
+    if not service_dates:
+        return []
+    date_strs = [d.isoformat() for d in service_dates]
+    q = (
+        db.query(
+            StopEvent.service_date,
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+            StopEvent.schedule_relationship,
+        )
+        .filter(
+            StopEvent.service_date.in_(date_strs),
+            StopEvent.source == "trip_update",
+            StopEvent.observed_arrival_ts.isnot(None),
+        )
+        .order_by(
+            StopEvent.service_date,
+            StopEvent.route_id,
+            StopEvent.direction_id,
+            StopEvent.stop_id,
+            StopEvent.observed_arrival_ts,
+        )
+    )
+    if route_ids is not None:
+        q = q.filter(StopEvent.route_id.in_(route_ids))
+    return q.all()
+
+
+def compute_ewt_headline_for_routes_multi_date(
+    db: Session,
+    service_dates: list[date_type],
+    sched_by_day_type: dict[str, dict[str, dict[CellHour, list[float]]]] | None = None,
+    route_ids: list[str] | None = None,
+    observed_rows: list[tuple] | None = None,
+) -> dict[str, dict[str, dict]]:
+    """Multi-date headline EWT — one SQL pull for the whole window.
+
+    Equivalent to calling `compute_ewt_headline_for_routes` once per date in
+    `service_dates`, but collapses the per-date observed-stop_events queries
+    into a single SQL pass using `service_date IN (...)`. Returns
+    `{service_date_str: {route_id: headline_dict}}` — each per-date inner
+    dict is identical to what the single-date function returns for that day.
+
+    Pass `observed_rows` to skip the observed fetch — used by the windowed
+    scorecard path so EWT and bunching share one pull. Pass
+    `sched_by_day_type` to share schedule fetches the same way. Both are
+    auto-fetched when None.
+
+    Pairing is strictly within `(service_date, route, direction, stop)` —
+    consecutive arrivals never cross a day boundary, so the headway list
+    each date produces is identical to what the single-date function would.
+    """
+    if not service_dates:
+        return {}
+
+    date_strs = [d.isoformat() for d in service_dates]
+    day_types = {ds: _day_type_for(d) for ds, d in zip(date_strs, service_dates, strict=True)}
+
+    if sched_by_day_type is None:
+        sched_by_day_type = {}
+        for dt in set(day_types.values()):
+            sched_by_day_type[dt] = fetch_scheduled_cell_hours_for_routes(db, dt, route_ids)
+
+    if observed_rows is None:
+        observed_rows = fetch_observed_stop_events_for_window(db, service_dates, route_ids)
+
+    # `{(service_date_str, route_id): {cell_hour: [headways]}}` — pairing is
+    # reset every time the (service_date, route, direction, stop) key changes,
+    # so per-(date, route) pools never cross day boundaries.
+    obs_by_date_route_cell_hour: dict[tuple[str, str], dict[CellHour, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    prev_key: tuple[str, str, int, str] | None = None
+    prev_ts: datetime | None = None
+    for service_date_str, route_id, direction_id, stop_id, ts, _sr in observed_rows:
+        key = (service_date_str, route_id, direction_id, stop_id)
+        if prev_key == key and prev_ts is not None:
+            delta = (ts - prev_ts).total_seconds()
+            if delta > 0:
+                obs_by_date_route_cell_hour[(service_date_str, route_id)][
+                    (direction_id, stop_id, _eastern_hour(prev_ts))
+                ].append(delta)
+        prev_key = key
+        prev_ts = ts
+
+    results: dict[str, dict[str, dict]] = {ds: {} for ds in date_strs}
+    for service_date_str in date_strs:
+        day_type = day_types[service_date_str]
+        sched_by_route_cell_hour = sched_by_day_type.get(day_type, {})
+        all_routes = set(sched_by_route_cell_hour.keys())
+        if route_ids is not None:
+            all_routes &= set(route_ids)
+        for route_id in all_routes:
+            sched_cells = sched_by_route_cell_hour.get(route_id, {})
+            obs_cells = obs_by_date_route_cell_hour.get((service_date_str, route_id), {})
+            obs_pool: list[float] = []
+            sched_pool: list[float] = []
+            freq_cells = 0
+            for cell_hour, sched_headways in sched_cells.items():
+                if not _is_cell_hour_frequent(sched_headways):
+                    continue
+                sched_pool.extend(sched_headways)
+                obs_pool.extend(obs_cells.get(cell_hour, []))
+                freq_cells += 1
+            results[service_date_str][route_id] = _ewt_headline_from_pools(
+                route_id, service_date_str, day_type, obs_pool, sched_pool, freq_cells
+            )
     return results

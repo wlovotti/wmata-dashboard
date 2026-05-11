@@ -5,13 +5,18 @@ This API serves pre-computed transit performance metrics for the web dashboard.
 Endpoints provide route-level OTP, headway, and speed data.
 """
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.aggregations import (
+    _latest_service_date_with_stop_events,
     get_all_routes_scorecard,
+    get_live_metrics_for_window,
     get_route_bunching_causes,
     get_route_contributors,
     get_route_detail_metrics,
@@ -33,11 +38,47 @@ from src.time_periods import (
 )
 from src.timezones import utcnow_naive
 
+logger = logging.getLogger(__name__)
+
+
+def _warm_scorecard_cache_sync():
+    """Compute the windowed scorecard once so the first user request finds a warm cache.
+
+    Runs in a background thread at app startup. The cold compute is ~30-40s
+    (7 days × per-date EWT/bunching/SD/OTP); paying it once at boot beats
+    making the first user wait. Subsequent requests within the 1-hour
+    per-date TTL hit dict-lookup speed.
+    """
+    try:
+        db = get_session()
+        try:
+            end_date = _latest_service_date_with_stop_events(db)
+            if end_date is None:
+                logger.info("Scorecard warm-up skipped: no derived stop_events yet")
+                return
+            get_live_metrics_for_window(db, end_date, 7)
+            logger.info("Scorecard cache warmed for window ending %s", end_date)
+        finally:
+            db.close()
+    except Exception:
+        # Warming is best-effort — never let it crash startup. A failure
+        # here just means the first user request pays the cold cost.
+        logger.exception("Scorecard cache warm-up failed")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Kick off background cache warming at startup, no-op on shutdown."""
+    asyncio.create_task(asyncio.to_thread(_warm_scorecard_cache_sync))
+    yield
+
+
 # Create FastAPI app
 app = FastAPI(
     title="WMATA Performance API",
     description="REST API for WMATA transit performance metrics",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS for frontend development

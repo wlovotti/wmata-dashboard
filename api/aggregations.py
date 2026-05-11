@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from datetime import date as date_type
 from datetime import datetime, timedelta
-from threading import Lock
+from threading import Event, Lock
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -66,12 +66,14 @@ from src.time_periods import (
 )
 from src.timezones import utcnow_naive
 
-# Per-service-date cache of the new live-computed scorecard metrics. The
-# scheduled stop_times fetch (~1.7s) dominates cost; observed stop_events are
-# the only thing that changes minute-to-minute. A short TTL keeps the
-# scorecard within ~60s of fresh while amortizing the scheduled fetch across
-# every page load in the window.
-_LIVE_METRICS_TTL_SEC = 60.0
+# Per-service-date cache of the new live-computed scorecard metrics. Cold
+# per-date compute costs ~6-7s (scheduled fetch + observed stop_events pull
+# + Python pairing). Historical dates never change once the pipeline has
+# derived them, so they're safe to cache for a long time. Today's date
+# being up to an hour stale on a 7-day rollup dashboard is invisible (the
+# window dwarfs any in-day delta). The 1-hour TTL is the right tradeoff
+# given how expensive a recompute is.
+_LIVE_METRICS_TTL_SEC = 3600.0
 _live_metrics_cache: dict[str, tuple[float, dict[str, dict]]] = {}
 _live_metrics_lock = Lock()
 
@@ -81,11 +83,20 @@ _live_metrics_lock = Lock()
 # route's metric is computed over the same calendar window.
 _SCORECARD_WINDOW_DAYS = 7
 
-# Windowed live-metrics cache keyed by `(end_service_date, days)`. Same TTL
-# as the per-day cache; computed once per (anchor_date, window_size) and
-# reused by every concurrent /api/routes request within the TTL.
+# Windowed live-metrics cache keyed by `(end_service_date, days)`. Shorter
+# TTL than the per-date cache because this layer also caches the
+# cross-route aggregation pass; refreshing it lets newly-warmed per-date
+# entries flow into the rollup without waiting an hour.
+_WINDOW_METRICS_TTL_SEC = 300.0
 _window_metrics_cache: dict[tuple[str, int], tuple[float, dict[str, dict]]] = {}
 _window_metrics_lock = Lock()
+
+# Singleflight registry for windowed-cache compute. Without this, two
+# concurrent callers on a cold cache (e.g. the lifespan-startup warm task
+# and the first user request) each run the full ~40s compute in parallel.
+# Threads that find an in-flight Event for their cache key wait on it,
+# then read the freshly-populated cache.
+_window_metrics_inflight: dict[tuple[str, int], Event] = {}
 
 
 def _latest_service_date_with_stop_events(db: Session):
@@ -351,19 +362,102 @@ def _compute_live_metrics_for_window_uncached(
 ) -> dict[str, dict]:
     """Pool the four scorecard metrics over `[end_date - days + 1, end_date]`.
 
-    Calls `_compute_live_metrics_uncached` for each date in the window, then
-    aggregates per-route via the per-metric sufficient-statistics aggregators.
-    The per-date results are also cached individually under `_live_metrics_cache`
-    — so a window slide of one day keeps `days - 1` daily results warm.
+    Cold path: any date not in `_live_metrics_cache` is computed via the
+    multi-date helpers, which collapse the per-date SQL fetches for EWT and
+    bunching into one query each across the missing dates. Schedule is
+    fetched once per distinct day_type (module-level cache in
+    `src/ewt.py`). Service-delivered and OTP still loop per date — those
+    are smaller chunks of the per-date cost and aren't worth refactoring
+    until the dashboard demands it. Each freshly-computed per-date result
+    is stuffed into `_live_metrics_cache` so subsequent window slides reuse
+    the warm dates.
 
-    Schedule-fetch cost across the window is bounded by the number of
-    distinct day_types (≤ 3 for any window). Each `_compute_live_metrics_uncached`
-    call still re-fetches the schedule for its date's day_type; if cold-cache
-    cost becomes a problem, lift the schedule fetch out and pass it through
-    via `sched_by_route_cell_hour=` (the underlying compute fns already accept it).
+    Warm path: when every date is in cache, this collapses to a dict lookup
+    and the aggregator pass.
     """
+    from src.bunching import compute_bunching_headline_for_routes_multi_date
+    from src.ewt import (
+        compute_ewt_headline_for_routes_multi_date,
+        fetch_observed_stop_events_for_window,
+    )
+
     dates = [end_date - timedelta(days=i) for i in range(days)]
-    per_date_results = [_compute_live_metrics_for_date(db, d) for d in dates]
+    cached_results: dict[str, dict[str, dict]] = {}
+    cold_dates: list[date_type] = []
+
+    now = time.monotonic()
+    with _live_metrics_lock:
+        for d in dates:
+            cache_key = d.isoformat()
+            cached = _live_metrics_cache.get(cache_key)
+            if cached is not None and (now - cached[0]) < _LIVE_METRICS_TTL_SEC:
+                cached_results[cache_key] = cached[1]
+            else:
+                cold_dates.append(d)
+
+    if cold_dates:
+        # Pre-fetch schedule once per distinct day_type across the cold dates;
+        # the EWT and bunching multi-date computes will share the dict and
+        # avoid re-fetching for every date.
+        sched_by_day_type: dict[str, dict] = {}
+        for d in cold_dates:
+            dt = _day_type_for(d)
+            if dt not in sched_by_day_type:
+                sched_by_day_type[dt] = fetch_scheduled_cell_hours_for_routes(db, dt)
+
+        # Pull observed stop_events ONCE for the window — EWT and bunching
+        # share the same source filter (source='trip_update' + non-null
+        # observed_arrival_ts), differing only in whether they pair across
+        # non-SCHEDULED rows. Sharing the materialization saves ~9s on cold.
+        observed_rows = fetch_observed_stop_events_for_window(db, cold_dates)
+
+        ewt_by_date = compute_ewt_headline_for_routes_multi_date(
+            db,
+            cold_dates,
+            sched_by_day_type=sched_by_day_type,
+            observed_rows=observed_rows,
+        )
+        bunching_by_date = compute_bunching_headline_for_routes_multi_date(
+            db,
+            cold_dates,
+            sched_by_day_type=sched_by_day_type,
+            observed_rows=observed_rows,
+        )
+
+        # Service-delivered and OTP are still per-date — each does a small
+        # per-route loop. Total cost across the window is modest compared to
+        # the EWT/bunching pulls and not worth refactoring yet.
+        sd_by_date: dict[str, dict[str, dict]] = {}
+        otp_by_date: dict[str, dict[str, dict]] = {}
+        for d in cold_dates:
+            ds = d.isoformat()
+            sd_by_date[ds] = {r["route_id"]: r for r in compute_service_delivered_for_routes(db, d)}
+            otp_by_date[ds] = {r["route_id"]: r for r in compute_otp_split_for_routes(db, d)}
+
+        # Stitch the four metrics into the per-date shape that
+        # `_aggregate_live_metrics_window` consumes, then stash each cold
+        # date in the per-date cache for future window slides to reuse.
+        for d in cold_dates:
+            ds = d.isoformat()
+            ewt_d = ewt_by_date.get(ds, {})
+            bun_d = bunching_by_date.get(ds, {})
+            sd_d = sd_by_date.get(ds, {})
+            otp_d = otp_by_date.get(ds, {})
+            all_routes = set(ewt_d) | set(bun_d) | set(sd_d) | set(otp_d)
+            per_date = {
+                route_id: {
+                    "service_delivered": sd_d.get(route_id),
+                    "otp_split": otp_d.get(route_id),
+                    "ewt": ewt_d.get(route_id),
+                    "bunching": bun_d.get(route_id),
+                }
+                for route_id in all_routes
+            }
+            cached_results[ds] = per_date
+            with _live_metrics_lock:
+                _live_metrics_cache[ds] = (time.monotonic(), per_date)
+
+    per_date_results = [cached_results[d.isoformat()] for d in dates]
     return _aggregate_live_metrics_window(per_date_results)
 
 
@@ -391,21 +485,48 @@ def _compute_live_metrics_for_date(db: Session, service_date) -> dict[str, dict]
 def get_live_metrics_for_window(db: Session, end_date: date_type, days: int) -> dict[str, dict]:
     """Cached-by-(end_date, days) wrapper around `_compute_live_metrics_for_window_uncached`.
 
+    Singleflight: when one thread is computing a given (end_date, days),
+    concurrent callers wait on the same Event and then read the populated
+    cache — they don't each run the full ~40s compute. This is the
+    difference between "first user after restart waits 40s once" vs
+    "warm-up thread and first user each pay 40s in parallel."
+
     Cold-cache cost grows roughly linearly in `days`, but the per-date cache
     means a window-slide hits the slow path only on the newly-included date.
     Empty result dict if the window has no derived stop_events at all.
     """
     cache_key = (end_date.isoformat(), days)
-    with _window_metrics_lock:
-        cached = _window_metrics_cache.get(cache_key)
-        if cached is not None:
-            ts, value = cached
-            if (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
-                return value
-    result = _compute_live_metrics_for_window_uncached(db, end_date, days)
-    with _window_metrics_lock:
-        _window_metrics_cache[cache_key] = (time.monotonic(), result)
-    return result
+    while True:
+        with _window_metrics_lock:
+            cached = _window_metrics_cache.get(cache_key)
+            if cached is not None:
+                ts, value = cached
+                if (time.monotonic() - ts) < _WINDOW_METRICS_TTL_SEC:
+                    return value
+            inflight = _window_metrics_inflight.get(cache_key)
+            if inflight is None:
+                inflight = Event()
+                _window_metrics_inflight[cache_key] = inflight
+                we_compute = True
+            else:
+                we_compute = False
+        if not we_compute:
+            # Another thread is already computing this key — wait for it to
+            # finish, then loop and read the freshly-populated cache.
+            inflight.wait()
+            continue
+        try:
+            result = _compute_live_metrics_for_window_uncached(db, end_date, days)
+        except Exception:
+            with _window_metrics_lock:
+                _window_metrics_inflight.pop(cache_key, None)
+            inflight.set()
+            raise
+        with _window_metrics_lock:
+            _window_metrics_cache[cache_key] = (time.monotonic(), result)
+            _window_metrics_inflight.pop(cache_key, None)
+        inflight.set()
+        return result
 
 
 def _compute_single_route_live_metrics(
