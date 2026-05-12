@@ -242,6 +242,22 @@ main {
   font-size: 1.5rem;
 }
 
+/* When a window-range note follows the h2, drop the h2's bottom border so
+   the heading and its subtitle read as one block — the note then carries
+   the divider into the filter row. */
+.table-container h2:has(+ .scorecard-window-note) {
+  padding-bottom: 0.25rem;
+  border-bottom: none;
+}
+
+.scorecard-window-note {
+  margin: 0;
+  padding: 0 1.5rem 1rem 1.5rem;
+  border-bottom: 1px solid #e2e8f0;
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
 /* Filters */
 .filters {
   display: flex;

@@ -801,3 +801,82 @@ class RouteHeadwayMetrics(Base):
         UniqueConstraint("route_id", "date", "time_period", name="uq_route_headway_metrics_key"),
         Index("idx_route_headway_metrics_route_date", "route_id", "date"),
     )
+
+
+class RouteMetricsDailyOverlay(Base):
+    """
+    Per-(route, service_date) sufficient statistics for the four scorecard
+    metrics. Materialized by `pipelines/upsert_route_metrics_overlay.py`,
+    read by the windowed-scorecard endpoint.
+
+    Why this table exists: the live windowed compute pulls ~3.27M
+    stop_events rows for a 7-day window and runs Python pairing — ~35s
+    cold. Materializing per-(route, date) sufficient statistics turns the
+    endpoint into 126 × 7 = 882 row reads plus the cross-route aggregator
+    pass — sub-100ms cold, no warm-up needed.
+
+    What it stores: **sufficient statistics, not finalized metrics.** The
+    EWT formula (AWT = Σh² / 2Σh), the OTP window (±X seconds), and the
+    bunching threshold (0.25× scheduled, 120s floor) are all applied in
+    code by the API aggregator at read time. If any formula changes,
+    Python changes and not this table — that quarantines the brittleness
+    that retired the original `route_metrics_daily` (NOTES-19).
+
+    What it does NOT store:
+      - day_type or period decomposition — the scorecard's window pools
+        across day_types, and the per-route detail page recomputes live.
+      - `route_headway_metrics` (per-(route, date, period) bunching) is a
+        separate materialization used by the route-detail page; this one
+        is the scorecard rollup.
+
+    Re-derivation: `upsert_route_metrics_for_date` is idempotent — re-runs
+    against the same (route, service_date) replace the prior row.
+    """
+
+    __tablename__ = "route_metrics_daily_overlay"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(String, nullable=False)
+    service_date = Column(String, nullable=False)  # YYYY-MM-DD, Eastern service day
+    day_type = Column(String, nullable=False)  # weekday | saturday | sunday
+
+    # OTP sufficient statistics — one (early, on_time, late) triple per
+    # sub-block, mirroring `compute_otp_split`'s output structure. The
+    # aggregator sums counts across rows and finalizes pcts at read time.
+    # `n` is implicit as early + on_time + late.
+    otp_origin_early = Column(Integer, nullable=False, default=0)
+    otp_origin_on_time = Column(Integer, nullable=False, default=0)
+    otp_origin_late = Column(Integer, nullable=False, default=0)
+    otp_destination_early = Column(Integer, nullable=False, default=0)
+    otp_destination_on_time = Column(Integer, nullable=False, default=0)
+    otp_destination_late = Column(Integer, nullable=False, default=0)
+    otp_all_early = Column(Integer, nullable=False, default=0)
+    otp_all_on_time = Column(Integer, nullable=False, default=0)
+    otp_all_late = Column(Integer, nullable=False, default=0)
+
+    # Service-delivered numerator/denominator.
+    scheduled_trips = Column(Integer, nullable=False, default=0)
+    delivered_trips = Column(Integer, nullable=False, default=0)
+
+    # EWT sufficient statistics. `AWT = sum_h_sq / (2 · sum_h)` is exact
+    # under sums, so windowed AWT/SWT are computed from these directly.
+    # `n_*` are convenient denominators for coverage_ratio.
+    ewt_obs_sum_h = Column(Float, nullable=False, default=0.0)
+    ewt_obs_sum_h_sq = Column(Float, nullable=False, default=0.0)
+    ewt_n_observed_headways = Column(Integer, nullable=False, default=0)
+    ewt_sched_sum_h = Column(Float, nullable=False, default=0.0)
+    ewt_sched_sum_h_sq = Column(Float, nullable=False, default=0.0)
+    ewt_n_scheduled_headways = Column(Integer, nullable=False, default=0)
+
+    # Bunching counts.
+    bunching_count = Column(Integer, nullable=False, default=0)
+    bunching_total_headways = Column(Integer, nullable=False, default=0)
+
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint("route_id", "service_date", name="uq_route_metrics_overlay_route_date"),
+        # Window reads filter by `service_date IN (...)`, then group by
+        # route. A date-first index keeps the per-window read narrow.
+        Index("idx_route_metrics_overlay_date", "service_date"),
+    )

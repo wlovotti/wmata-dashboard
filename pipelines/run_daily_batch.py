@@ -94,6 +94,17 @@ PIPELINES: list[dict] = [
         "module": "pipelines.upsert_system_metrics_daily",
         "depends_on": "compute_bunching",
     },
+    {
+        # Per-(route, service_date) sufficient-statistics overlay written
+        # to `route_metrics_daily_overlay`. Lets the windowed scorecard
+        # endpoint read materialized rows instead of recomputing ~35s of
+        # live aggregation on every cold cache hit. Same upstream deps as
+        # `upsert_system_metrics_daily` — both consume the per-date
+        # stop_events + runs the prior pipelines produced.
+        "name": "upsert_route_metrics_overlay",
+        "module": "pipelines.upsert_route_metrics_overlay",
+        "depends_on": "compute_bunching",
+    },
 ]
 
 # Housekeeping pipelines that aren't date-scoped — they operate on the global

@@ -29,15 +29,17 @@ def test_root_endpoint(client):
 
 @pytest.mark.api
 def test_get_routes_success(client, sample_route):
-    """Test GET /api/routes returns scorecard with identity + overlay shape."""
+    """Test GET /api/routes returns `{window, routes}` scorecard shape."""
     response = client.get("/api/routes")
     assert response.status_code == 200
 
     data = response.json()
-    assert isinstance(data, list)
-    assert len(data) == 1
+    assert "window" in data
+    assert data["window"]["days"] == 7
+    assert isinstance(data["routes"], list)
+    assert len(data["routes"]) == 1
 
-    route = data[0]
+    route = data["routes"][0]
     assert route["route_id"] == "TEST1"
     assert route["route_name"] == "T1"
     assert "frequency_class" in route
@@ -50,20 +52,23 @@ def test_get_routes_success(client, sample_route):
 
 @pytest.mark.api
 def test_get_routes_empty_database(client):
-    """Test GET /api/routes with no data returns empty list"""
+    """Test GET /api/routes with no data returns empty `routes` list with window metadata."""
     response = client.get("/api/routes")
     assert response.status_code == 200
-    assert response.json() == []
+    body = response.json()
+    assert body["routes"] == []
+    assert body["window"]["days"] == 7
 
 
 @pytest.mark.api
 def test_get_routes_with_days_parameter(client, sample_route):
-    """Test GET /api/routes with days query parameter"""
+    """Test GET /api/routes with days query parameter sets window length."""
     response = client.get("/api/routes?days=14")
     assert response.status_code == 200
 
     data = response.json()
-    assert isinstance(data, list)
+    assert data["window"]["days"] == 14
+    assert isinstance(data["routes"], list)
 
 
 @pytest.mark.api

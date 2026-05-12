@@ -65,17 +65,19 @@ def test_api_server_responds(client):
 
 @pytest.mark.smoke
 def test_api_routes_endpoint_structure(client, sample_route):
-    """Test that /api/routes returns expected JSON structure (post NOTES-19)."""
+    """Test that /api/routes returns the windowed `{window, routes}` shape."""
     response = client.get("/api/routes")
     assert response.status_code == 200
 
     data = response.json()
-    assert isinstance(data, list)
+    assert "window" in data
+    assert "days" in data["window"]
+    assert isinstance(data["routes"], list)
 
-    if len(data) > 0:
+    if len(data["routes"]) > 0:
         # Identity + frequency_class + live overlay keys remain after the
         # NOTES-19 cleanup of legacy `RouteMetricsSummary` fields.
-        route = data[0]
+        route = data["routes"][0]
         expected_keys = [
             "route_id",
             "route_name",

@@ -8,6 +8,7 @@ import SystemTrend from './SystemTrend'
 // in the background. The API itself is also cached server-side (60s TTL),
 // so the background fetch is cheap when warm.
 let _cachedRoutes = null
+let _cachedWindow = null
 let _cachedLastUpdated = null
 let _cachedGtfsFreshness = null
 
@@ -58,6 +59,24 @@ function formatSnapshotDate(isoString) {
   })
 }
 
+// Format the scorecard's pooled-window range as a subtle one-line annotation.
+// Inputs are ISO date strings (YYYY-MM-DD); both null when the DB has no
+// derived stop_events yet, in which case we render nothing.
+function formatWindowRange(startIso, endIso) {
+  if (!startIso || !endIso) return null
+  const parse = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number)
+    return new Date(y, m - 1, d)
+  }
+  const monthDay = (date) =>
+    date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const start = parse(startIso)
+  const end = parse(endIso)
+  const sameYear = start.getFullYear() === end.getFullYear()
+  const startLabel = sameYear ? monthDay(start) : `${monthDay(start)}, ${start.getFullYear()}`
+  return `${startLabel} – ${monthDay(end)}, ${end.getFullYear()}`
+}
+
 function formatLoadedAt(isoString) {
   if (!isoString) return null
   const d = new Date(isoString.endsWith('Z') ? isoString : `${isoString}Z`)
@@ -75,6 +94,7 @@ function formatLoadedAt(isoString) {
 function RouteList() {
   const navigate = useNavigate()
   const [routes, setRoutes] = useState(_cachedRoutes ?? [])
+  const [scorecardWindow, setScorecardWindow] = useState(_cachedWindow)
   const [loading, setLoading] = useState(_cachedRoutes === null)
   const [error, setError] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
@@ -99,10 +119,16 @@ function RouteList() {
         return res.json()
       })
       .then(data => {
-        setRoutes(data)
+        // Response shape: `{window: {start, end, days}, routes: [...]}`. The
+        // window block lets us label the pooled date range under the heading.
+        const routesList = data.routes ?? []
+        const window = data.window ?? null
+        setRoutes(routesList)
+        setScorecardWindow(window)
         const now = new Date()
         setLastUpdated(now)
-        _cachedRoutes = data
+        _cachedRoutes = routesList
+        _cachedWindow = window
         _cachedLastUpdated = now
         setError(null)
       })
@@ -275,6 +301,19 @@ function RouteList() {
 
       <div className="table-container">
         <h2>Route Performance Scorecard</h2>
+        {(() => {
+          const range = formatWindowRange(
+            scorecardWindow?.start,
+            scorecardWindow?.end,
+          )
+          if (!range) return null
+          const days = scorecardWindow?.days
+          return (
+            <p className="scorecard-window-note">
+              Pooled over {days}-day window · {range}
+            </p>
+          )
+        })()}
 
         <div className="mode-toggle" style={{ marginBottom: '1rem' }}>
           <button

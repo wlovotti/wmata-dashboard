@@ -408,6 +408,96 @@ def compute_bunching_headline_for_routes(
     return results
 
 
+def compute_bunching_headline_for_routes_multi_date(
+    db: Session,
+    service_dates: list[date_type],
+    sched_by_day_type: dict[str, dict[str, dict[CellHour, list[float]]]] | None = None,
+    route_ids: list[str] | None = None,
+    observed_rows: list[tuple] | None = None,
+) -> dict[str, dict[str, dict]]:
+    """Multi-date headline bunching — one SQL pull for the whole window.
+
+    Equivalent to calling `compute_bunching_headline_for_routes` once per date
+    in `service_dates`. Returns `{service_date_str: {route_id: headline_dict}}`.
+
+    Pass `observed_rows` (from `fetch_observed_stop_events_for_window` — the
+    same rows EWT consumes) to skip the observed fetch. The bunching-vs-EWT
+    semantic difference is applied in Python here: non-SCHEDULED rows are
+    silently filtered before pairing, so an `ADDED` real-time-only trip
+    slotting between two scheduled buses doesn't generate a tight observed
+    pair. Pairing never crosses day boundaries.
+    """
+    if not service_dates:
+        return {}
+
+    from src.ewt import (
+        _day_type_for,
+        fetch_observed_stop_events_for_window,
+        fetch_scheduled_cell_hours_for_routes,
+    )
+
+    date_strs = [d.isoformat() for d in service_dates]
+    day_types = {ds: _day_type_for(d) for ds, d in zip(date_strs, service_dates, strict=True)}
+
+    if sched_by_day_type is None:
+        sched_by_day_type = {}
+        for dt in set(day_types.values()):
+            sched_by_day_type[dt] = fetch_scheduled_cell_hours_for_routes(db, dt, route_ids)
+
+    if observed_rows is None:
+        observed_rows = fetch_observed_stop_events_for_window(db, service_dates, route_ids)
+
+    obs_by_date_route_cell_hour: dict[tuple[str, str], dict[CellHour, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    prev_key: tuple[str, str, int, str] | None = None
+    prev_ts: datetime | None = None
+    for service_date_str, route_id, direction_id, stop_id, ts, sr in observed_rows:
+        # Filter to scheduled rows BEFORE pairing — see module docstring.
+        # Non-SCHEDULED rows don't reset the pairing key; they're invisible
+        # so the next SCHEDULED arrival pairs with the previous SCHEDULED.
+        if sr != "SCHEDULED":
+            continue
+        key = (service_date_str, route_id, direction_id, stop_id)
+        if prev_key == key and prev_ts is not None:
+            delta = (ts - prev_ts).total_seconds()
+            if delta > 0:
+                obs_by_date_route_cell_hour[(service_date_str, route_id)][
+                    (direction_id, stop_id, _eastern_hour(prev_ts))
+                ].append(delta)
+        prev_key = key
+        prev_ts = ts
+
+    results: dict[str, dict[str, dict]] = {ds: {} for ds in date_strs}
+    for service_date_str in date_strs:
+        day_type = day_types[service_date_str]
+        sched_by_route_cell_hour = sched_by_day_type.get(day_type, {})
+        all_routes = set(sched_by_route_cell_hour.keys()) | {
+            r for (d, r) in obs_by_date_route_cell_hour if d == service_date_str
+        }
+        if route_ids is not None:
+            all_routes &= set(route_ids)
+        for route_id in all_routes:
+            sched_cells = sched_by_route_cell_hour.get(route_id, {})
+            obs_cells = obs_by_date_route_cell_hour.get((service_date_str, route_id), {})
+            bunched = 0
+            total = 0
+            for cell_hour, observed in obs_cells.items():
+                threshold = _cell_hour_threshold_sec(sched_cells.get(cell_hour, []))
+                if threshold is None:
+                    continue
+                for headway in observed:
+                    if headway > MAX_OBSERVED_HEADWAY_SEC:
+                        continue
+                    total += 1
+                    if headway < threshold:
+                        bunched += 1
+            results[service_date_str][route_id] = _bunching_headline_from_counts(
+                route_id, service_date_str, day_type, bunched, total
+            )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Bunching cause decomposition (NOTES-42)
 #
