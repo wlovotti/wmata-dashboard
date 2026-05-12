@@ -7,7 +7,7 @@ NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
 Last edited 2026-05-11 (closed NOTES-45 — block-level cascade view —
-in PR #N. Surfaces `block_id` on per-trip API responses and adds a
+in PR #98. Surfaces `block_id` on per-trip API responses and adds a
 "Blocks" tab on RouteDetail plus a `/blocks/:blockId` timeline page
 that strings together all trips chained to one bus on one service
 day, color-coded by origin/destination deviation with swap and
