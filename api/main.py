@@ -15,8 +15,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.aggregations import (
     _latest_service_date_with_stop_events,
+    compute_block_timeline,
     get_all_routes_scorecard,
     get_live_metrics_for_window,
+    get_route_blocks,
     get_route_bunching_causes,
     get_route_contributors,
     get_route_detail_metrics,
@@ -36,7 +38,7 @@ from src.time_periods import (
     VALID_DAY_TYPES,
     VALID_PERIOD_KEYS,
 )
-from src.timezones import utcnow_naive
+from src.timezones import eastern_today, utcnow_naive
 
 logger = logging.getLogger(__name__)
 
@@ -749,6 +751,90 @@ async def get_run_deviations_endpoint(run_id: int):
         result = get_run_deviations(db, run_id)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        return result
+    finally:
+        db.close()
+
+
+def _parse_service_date_param(service_date: str | None):
+    """Parse a YYYY-MM-DD query string to a `date`, defaulting to Eastern today.
+
+    Centralized so the block endpoints share one parsing path. Raises
+    HTTPException(400) for malformed input — pulling this into the
+    endpoints keeps them slim.
+    """
+    from datetime import date as date_type
+
+    if service_date is None or service_date == "":
+        return eastern_today()
+    try:
+        return date_type.fromisoformat(service_date)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid service_date {service_date!r}; expected YYYY-MM-DD",
+        ) from exc
+
+
+@app.get("/api/routes/{route_id}/blocks")
+async def get_route_blocks_endpoint(route_id: str, service_date: str | None = None):
+    """
+    List blocks that touch one route on one service date (NOTES-45).
+
+    Populates the "Blocks" tab on RouteDetail. Each row carries the block_id,
+    the trip count chained on the block (across all routes the block serves),
+    how many of those trips are on this route, the scheduled origin time in
+    Eastern, and the worst per-trip absolute deviation observed.
+
+    Args:
+        route_id: Route identifier (e.g., 'C51').
+        service_date: YYYY-MM-DD Eastern date. Defaults to today (Eastern).
+
+    Returns:
+        Dict with `route_id`, `service_date`, and `blocks` (ordered by the
+        block's earliest scheduled start).
+    """
+    sd = _parse_service_date_param(service_date)
+    db = get_session()
+    try:
+        result = get_route_blocks(db, route_id, sd)
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    finally:
+        db.close()
+
+
+@app.get("/api/blocks/{block_id}")
+async def get_block_timeline_endpoint(block_id: str, service_date: str | None = None):
+    """
+    Block timeline for one block on one service date (NOTES-45).
+
+    Returns the scheduled chain of trips for `(block_id, service_date)`,
+    each annotated with origin/destination deviation (per the
+    `src/otp_metrics.py` source-asymmetry rule — origin from proximity,
+    destination from trip_update), the observed vehicle_id, and a coarse
+    status. Trips with no observations on the day still appear in the
+    chain so the planning context is visible; the frontend renders them
+    greyed out.
+
+    Args:
+        block_id: GTFS block_id (e.g., '3').
+        service_date: YYYY-MM-DD Eastern date. Defaults to today (Eastern).
+
+    Returns:
+        Dict with `block_id`, `service_date`, and `trips` (ordered by
+        scheduled start).
+    """
+    sd = _parse_service_date_param(service_date)
+    db = get_session()
+    try:
+        result = compute_block_timeline(db, block_id, sd)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Block {block_id} not found in current GTFS",
+            )
         return result
     finally:
         db.close()

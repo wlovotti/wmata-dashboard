@@ -159,6 +159,31 @@ function RunDetail() {
             Service date {data.service_date} · Trip {data.trip_id} ·{' '}
             {directionLabel} · Source {data.source}
             {data.vehicle_id && ` · Vehicle ${data.vehicle_id}`}
+            {data.block_id && (
+              <>
+                {' · Block '}
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate(
+                      `/blocks/${encodeURIComponent(data.block_id)}?service_date=${encodeURIComponent(data.service_date)}`,
+                    )
+                  }
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    color: '#0a4a8c',
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                    font: 'inherit',
+                  }}
+                  title="View block timeline — chained trips on the same vehicle"
+                >
+                  {data.block_id}
+                </button>
+              </>
+            )}
           </p>
         </div>
       </div>

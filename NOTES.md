@@ -6,13 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-11 (closed NOTES-46 as "considered and rejected"
-after external research showed per-vehicle OTP/deviation aggregates
-would be dominated by dispatch confounders (garage, route mix, ToD,
-operator behavior) rather than vehicle condition. Industry-standard
-per-vehicle reliability metric is MDBF, which requires road-call data
-not in public GTFS-RT. Rationale lives in PR #97 — see PR body for
-citations.
+Last edited 2026-05-11 (closed NOTES-45 — block-level cascade view —
+in PR #98. Surfaces `block_id` on per-trip API responses and adds a
+"Blocks" tab on RouteDetail plus a `/blocks/:blockId` timeline page
+that strings together all trips chained to one bus on one service
+day, color-coded by origin/destination deviation with swap and
+cascade badges between adjacent trips.
 
 ---
 
@@ -54,9 +53,6 @@ proxies instead).
 
 - **NOTES-44 Marginal-bus EWT model.** Per (route, period) ranking
   of where adding one trip would most reduce EWT.
-- **NOTES-45 Block-level cascade view.** Surface `block_id` and
-  visualize a vehicle's chained trips — identifies cascade lateness vs
-  incidental misses.
 
 ### P5 — Cleanup
 
@@ -138,21 +134,6 @@ direct answer to "where should my next dollar go?"
 Most ambitious item in this set. Document modeling assumptions
 visibly in the UI; the absolute number is less reliable than the
 relative ranking.
-
----
-
-## NOTES-45. Block-level cascade view
-
-**Severity: low.**
-
-A `block_id` chains a vehicle's consecutive trips during a service
-day — when one trip falls behind, the next trip on the same block
-inherits the lateness. Today `block_id` lives on `Trip` but never
-reaches the API. Expose it; add a "block timeline" view (either on
-`RouteDetail` or a new `/blocks/:id` route) that strings together all
-trips in a block and shows deviation propagation. Identifies
-cascade-driven misses (one root cause, four bad trips) vs incidental
-ones (four independent misses).
 
 ---
 

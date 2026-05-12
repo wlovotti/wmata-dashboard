@@ -3,6 +3,7 @@ import { useState } from 'react'
 import RouteList from './components/RouteList'
 import RouteDetail from './components/RouteDetail'
 import RunDetail from './components/RunDetail'
+import BlockTimeline from './components/BlockTimeline'
 import './App.css'
 
 function App() {
@@ -42,6 +43,7 @@ function App() {
           <Route path="/" element={<RouteList />} />
           <Route path="/route/:routeId" element={<RouteDetail />} />
           <Route path="/runs/:runId" element={<RunDetail />} />
+          <Route path="/blocks/:blockId" element={<BlockTimeline />} />
         </Routes>
       </div>
     </Router>
