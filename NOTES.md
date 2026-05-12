@@ -6,18 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-10 (closed NOTES-51 — `service_delivered=0`
-system-wide on Wed/Fri service dates was a date-mapping bug in
-`src/service_delivered.py`, not a pipeline gap as initially
-hypothesized. The "weekday → Tuesday-representative" Calendar filter
-silently dropped trips with WMATA's Wed-only (`service_id=10`) and
-Fri-only (`service_id=6`) GTFS schedules. Fix replaces the
-representative-weekday filter with the actual day-of-week column for
-the target service_date and threads `calendar_dates` exceptions
-(type-1 added / type-2 removed) for forward-compatibility on federal
-holidays — closes the holiday-handling limitation noted in the module
-docstring. Recovery: re-run `pipelines/upsert_system_metrics_daily.py`
-for any affected date already persisted with `service_delivered_ratio=0`.
+Last edited 2026-05-11 (closed NOTES-46 as "considered and rejected"
+after external research showed per-vehicle OTP/deviation aggregates
+would be dominated by dispatch confounders (garage, route mix, ToD,
+operator behavior) rather than vehicle condition. Industry-standard
+per-vehicle reliability metric is MDBF, which requires road-call data
+not in public GTFS-RT. Rationale lives in the closing PR — see PR body
+for citations.
 
 ---
 
@@ -41,7 +36,7 @@ no trend / period-over-period framing (so "are we improving?" is
 unanswered); no Pareto / contribution view (so attention isn't
 directed); no drill-down to the *where* (stop) or *what* (block,
 vehicle); and existing dead-code metrics that should be wired
-through. The 12 items below close those gaps. Public/rider-facing
+through. The items below close those gaps. Public/rider-facing
 surface deferred; operator/dispatcher attribution out of scope
 without internal WMATA feeds (vehicle_id and block_id used as
 proxies instead).
@@ -62,9 +57,6 @@ proxies instead).
 - **NOTES-45 Block-level cascade view.** Surface `block_id` and
   visualize a vehicle's chained trips — identifies cascade lateness vs
   incidental misses.
-- **NOTES-46 Vehicle performance leaderboard.** Aggregate per-`vehicle_id`
-  median deviation / p95 / trip count over 30 days as a maintenance/age
-  proxy (not an operator-blame view).
 
 ### P5 — Cleanup
 
@@ -161,22 +153,6 @@ reaches the API. Expose it; add a "block timeline" view (either on
 trips in a block and shows deviation propagation. Identifies
 cascade-driven misses (one root cause, four bad trips) vs incidental
 ones (four independent misses).
-
----
-
-## NOTES-46. Vehicle performance leaderboard
-
-**Severity: low.**
-
-Aggregate per-`vehicle_id` median deviation, p95 deviation, and trip
-count over the last 30 days. Render as a sortable table. Frame
-explicitly as a maintenance / vehicle-age proxy — operators rotate
-across vehicles and we have no operator IDs in the public feeds, so
-this is *not* an operator-performance view. A persistent
-underperformer is more likely an aging vehicle, a garage-assignment
-quirk, or a maintenance backlog signal. Suppress vehicles with low
-trip counts (e.g. <20) to avoid small-sample noise dominating the
-ranking.
 
 ---
 
