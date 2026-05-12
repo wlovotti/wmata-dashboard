@@ -132,15 +132,9 @@ def test_read_overlay_for_dates_groups_by_date(db_session):
     dates = [date(2026, 5, 3), date(2026, 5, 4)]
     db_session.add_all(
         [
-            RouteMetricsDailyOverlay(
-                route_id="R1", service_date="2026-05-03", day_type="weekday"
-            ),
-            RouteMetricsDailyOverlay(
-                route_id="R2", service_date="2026-05-03", day_type="weekday"
-            ),
-            RouteMetricsDailyOverlay(
-                route_id="R1", service_date="2026-05-04", day_type="weekday"
-            ),
+            RouteMetricsDailyOverlay(route_id="R1", service_date="2026-05-03", day_type="weekday"),
+            RouteMetricsDailyOverlay(route_id="R2", service_date="2026-05-03", day_type="weekday"),
+            RouteMetricsDailyOverlay(route_id="R1", service_date="2026-05-04", day_type="weekday"),
         ]
     )
     db_session.commit()
