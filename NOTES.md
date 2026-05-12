@@ -11,8 +11,8 @@ after external research showed per-vehicle OTP/deviation aggregates
 would be dominated by dispatch confounders (garage, route mix, ToD,
 operator behavior) rather than vehicle condition. Industry-standard
 per-vehicle reliability metric is MDBF, which requires road-call data
-not in public GTFS-RT. Rationale lives in the closing PR — see PR body
-for citations.
+not in public GTFS-RT. Rationale lives in PR #97 — see PR body for
+citations.
 
 ---
 
