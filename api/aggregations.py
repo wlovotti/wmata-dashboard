@@ -41,6 +41,7 @@ from src.excess_trip_time import compute_excess_trip_time
 from src.models import (
     Calendar,
     Route,
+    RouteMetricsDailyOverlay,
     RouteServiceProfile,
     Run,
     Stop,
@@ -355,6 +356,94 @@ def _aggregate_live_metrics_window(
     return aggregated
 
 
+def _hydrate_overlay_row(row: RouteMetricsDailyOverlay) -> dict:
+    """Reshape one `route_metrics_daily_overlay` row into the per-date bundle
+    shape `_aggregate_live_metrics_window` consumes.
+
+    The aggregator reads sufficient statistics from each sub-dict and
+    finalizes the metric (OTP pcts, SD ratio, AWT/SWT/EWT, bunching rate)
+    at the window level. Empty OTP sub-blocks emit `{n: 0}` — same
+    distinction the live path uses between "no data" and "0% on-time."
+    """
+
+    def _otp_block(early: int, on_time: int, late: int, source: str) -> dict:
+        n = early + on_time + late
+        if n == 0:
+            return {"source": source, "n": 0}
+        return {
+            "source": source,
+            "n": n,
+            "early": early,
+            "on_time": on_time,
+            "late": late,
+            "early_pct": round(early * 100 / n, 2),
+            "on_time_pct": round(on_time * 100 / n, 2),
+            "late_pct": round(late * 100 / n, 2),
+        }
+
+    return {
+        "service_delivered": {
+            "scheduled_trips": row.scheduled_trips,
+            "delivered_trips": row.delivered_trips,
+            "ratio": (
+                round(row.delivered_trips / row.scheduled_trips, 4) if row.scheduled_trips else None
+            ),
+        },
+        "otp_split": {
+            "origin": _otp_block(
+                row.otp_origin_early, row.otp_origin_on_time, row.otp_origin_late, "proximity"
+            ),
+            "destination": _otp_block(
+                row.otp_destination_early,
+                row.otp_destination_on_time,
+                row.otp_destination_late,
+                "trip_update",
+            ),
+            "all_timepoints": _otp_block(
+                row.otp_all_early, row.otp_all_on_time, row.otp_all_late, "proximity"
+            ),
+        },
+        "ewt": {
+            "obs_sum_h": row.ewt_obs_sum_h,
+            "obs_sum_h_sq": row.ewt_obs_sum_h_sq,
+            "n_observed_headways": row.ewt_n_observed_headways,
+            "sched_sum_h": row.ewt_sched_sum_h,
+            "sched_sum_h_sq": row.ewt_sched_sum_h_sq,
+            "n_scheduled_headways": row.ewt_n_scheduled_headways,
+        },
+        "bunching": {
+            "bunching_count": row.bunching_count,
+            "total_headways": row.bunching_total_headways,
+        },
+    }
+
+
+def _read_overlay_for_dates(db: Session, dates: list[date_type]) -> dict[str, dict[str, dict]]:
+    """Read materialized overlay rows for `dates`, hydrated into per-date bundles.
+
+    Returns `{service_date_str: {route_id: bundle}}` covering only dates
+    that have at least one overlay row. Dates absent from the result are
+    not materialized yet (typically today, before the daily batch runs)
+    and the caller should fall back to live compute for those.
+
+    One SQL query for the whole window, then a Python pass to reshape —
+    cost is dominated by ~126 routes × N days rows being materialized
+    (well under 1k for a 7-day window). Sub-100ms on a warm Postgres.
+    """
+    if not dates:
+        return {}
+    date_strs = [d.isoformat() for d in dates]
+    rows = (
+        db.query(RouteMetricsDailyOverlay)
+        .filter(RouteMetricsDailyOverlay.service_date.in_(date_strs))
+        .all()
+    )
+    out: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        out.setdefault(row.service_date, {})[row.route_id] = _hydrate_overlay_row(row)
+    return out
+
+
 def _compute_live_metrics_for_window_uncached(
     db: Session,
     end_date: date_type,
@@ -362,18 +451,17 @@ def _compute_live_metrics_for_window_uncached(
 ) -> dict[str, dict]:
     """Pool the four scorecard metrics over `[end_date - days + 1, end_date]`.
 
-    Cold path: any date not in `_live_metrics_cache` is computed via the
-    multi-date helpers, which collapse the per-date SQL fetches for EWT and
-    bunching into one query each across the missing dates. Schedule is
-    fetched once per distinct day_type (module-level cache in
-    `src/ewt.py`). Service-delivered and OTP still loop per date — those
-    are smaller chunks of the per-date cost and aren't worth refactoring
-    until the dashboard demands it. Each freshly-computed per-date result
-    is stuffed into `_live_metrics_cache` so subsequent window slides reuse
-    the warm dates.
+    Three-tier read path, fastest first:
+      1. In-memory per-date cache (`_live_metrics_cache`, 1-hour TTL).
+      2. Materialized `route_metrics_daily_overlay` rows (written by the
+         daily batch — see `pipelines/upsert_route_metrics_overlay.py`).
+         Sub-100ms for a 7-day window.
+      3. Live compute via the multi-date helpers — used only for dates
+         the daily batch hasn't materialized yet (typically today). Still
+         ~35s for 7 days but normally only one date is cold at any time.
 
-    Warm path: when every date is in cache, this collapses to a dict lookup
-    and the aggregator pass.
+    Anything resolved from tiers 2 or 3 is stashed into the in-memory
+    per-date cache, so subsequent window slides reuse it as tier 1.
     """
     from src.bunching import compute_bunching_headline_for_routes_multi_date
     from src.ewt import (
@@ -383,7 +471,7 @@ def _compute_live_metrics_for_window_uncached(
 
     dates = [end_date - timedelta(days=i) for i in range(days)]
     cached_results: dict[str, dict[str, dict]] = {}
-    cold_dates: list[date_type] = []
+    uncached_dates: list[date_type] = []
 
     now = time.monotonic()
     with _live_metrics_lock:
@@ -392,6 +480,21 @@ def _compute_live_metrics_for_window_uncached(
             cached = _live_metrics_cache.get(cache_key)
             if cached is not None and (now - cached[0]) < _LIVE_METRICS_TTL_SEC:
                 cached_results[cache_key] = cached[1]
+            else:
+                uncached_dates.append(d)
+
+    # Tier 2: read the overlay for everything that wasn't in-memory cached.
+    # Stash hits back in the per-date cache so the next window slide reads
+    # tier 1.
+    cold_dates: list[date_type] = []
+    if uncached_dates:
+        overlay = _read_overlay_for_dates(db, uncached_dates)
+        for d in uncached_dates:
+            ds = d.isoformat()
+            if ds in overlay:
+                cached_results[ds] = overlay[ds]
+                with _live_metrics_lock:
+                    _live_metrics_cache[ds] = (time.monotonic(), overlay[ds])
             else:
                 cold_dates.append(d)
 
