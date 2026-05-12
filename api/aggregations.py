@@ -2211,6 +2211,11 @@ def get_run_deviations(db: Session, run_id: int) -> dict | None:
         "source": run.source,
         "vehicle_id": run.vehicle_id,
         "trip_headsign": trip.trip_headsign if trip else None,
+        # block_id (NOTES-45) — surface so the per-run page can link to the
+        # block timeline (`/blocks/:blockId`) for cascade-vs-incidental
+        # context. Null when the trip predates the current GTFS snapshot or
+        # has no block assigned.
+        "block_id": trip.block_id if trip else None,
         "stops_scheduled": run.stops_scheduled,
         # stops_observable is the per-source structural ceiling — see
         # `Run.stops_observable` doc. Surfaced alongside stops_scheduled so
@@ -2299,16 +2304,21 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
     )
     chosen_runs = chosen_runs[:limit]
 
-    # Batch-fetch headsigns for the relevant trips.
+    # Batch-fetch headsigns + block_ids for the relevant trips. `block_id` is
+    # surfaced (NOTES-45) so the recent-runs row can hyperlink to the block
+    # timeline view (`/blocks/:blockId`), where a run's lateness is shown
+    # alongside the chained sibling trips on the same vehicle.
     trip_ids = [r.trip_id for r in chosen_runs]
     headsigns: dict[str, str] = {}
+    block_ids: dict[str, str | None] = {}
     if trip_ids:
         for trip in (
-            db.query(Trip.trip_id, Trip.trip_headsign)
+            db.query(Trip.trip_id, Trip.trip_headsign, Trip.block_id)
             .filter(Trip.trip_id.in_(trip_ids), Trip.is_current)
             .all()
         ):
             headsigns[trip.trip_id] = trip.trip_headsign
+            block_ids[trip.trip_id] = trip.block_id
 
     return {
         "route_id": route_id,
@@ -2321,6 +2331,7 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
                 "source": r.source,
                 "vehicle_id": r.vehicle_id,
                 "headsign": headsigns.get(r.trip_id),
+                "block_id": block_ids.get(r.trip_id),
                 "start_time": _utc_naive_to_eastern_hhmm(r.first_obs_ts),
                 "end_time": _utc_naive_to_eastern_hhmm(r.last_obs_ts),
                 "stops_scheduled": r.stops_scheduled,
@@ -2858,3 +2869,418 @@ def get_route_bunching_causes(
     with _bunching_causes_lock:
         _bunching_causes_cache[cache_key] = (time.monotonic(), result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Block-level cascade view (NOTES-45)
+#
+# A `block_id` chains a vehicle's consecutive trips during a service day —
+# when one trip falls behind, the next trip on the same block inherits the
+# lateness unless a recovery layover absorbs it. The cascade view surfaces
+# that chain so a GM can tell a single-root-cause four-bad-trips story
+# apart from four independent misses.
+#
+# --- Scheduled chain, not observed chain ---
+# A block timeline is the scheduled chain: all trips with the same
+# (block_id, service_date) ordered by GTFS scheduled start time. Vehicle
+# swaps mid-day (dispatcher pulls a bus for maintenance, drops another
+# in) appear as `observed_vehicle_id` changing between adjacent cards;
+# the timeline does NOT slice the chain by vehicle_id because the back
+# half on a different bus is still riding the front half's schedule
+# slip until a layover or holding adjusts it.
+#
+# --- Origin/destination deviation sourcing ---
+# Same source-asymmetry rule as `src/otp_metrics.py`: origin_dev_sec
+# comes from a trip's `proximity` Run row; destination_dev_sec comes
+# from its `trip_update` Run row. A trip with only one source observed
+# still yields a partial card (e.g., only origin known). Both null →
+# "not_observed" status, scheduled chain still rendered for the planning
+# context.
+#
+# --- GTFS time → wall-clock datetime ---
+# GTFS `stop_times.arrival_time` is HH:MM:SS with hour possibly ≥ 24
+# (post-midnight service on the same service day). The scheduled start
+# of a trip is the MIN parsed arrival_time across its stop_times rows;
+# scheduled end is the MAX. Translating those to Eastern wall-clock
+# requires anchoring on the service_date's Eastern midnight then adding
+# the seconds offset (DST-safe via `eastern_midnight_as_utc`).
+#
+# --- Calendar / service_id filtering ---
+# A `block_id` is reused across calendar variants (weekday / saturday /
+# sunday / federal holidays). Naively pulling every Trip with the block_id
+# would surface 90+ rows for a block that only chains ~24 trips on any
+# real-world day. We resolve which service_ids actually run on the
+# given service_date via the GTFS calendar / calendar_dates rules
+# (same logic `src/service_delivered.py` uses) and restrict the trip
+# pull to those.
+# ---------------------------------------------------------------------------
+
+
+_WEEKDAY_TO_CALENDAR_FIELD_NAMES = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
+
+def _active_service_ids_for_date(db: Session, service_date: date_type) -> set[str]:
+    """Return the set of GTFS service_ids that actually run on `service_date`.
+
+    Mirrors the calendar / calendar_dates resolution rule in
+    `src/service_delivered.py:_scheduled_trip_ids_query`: base service_ids
+    are picked by day-of-week + date-window in `calendar`, minus type-2
+    removals on the date and union type-1 additions on the date.
+
+    Returns a Python set so the caller can filter the Trip query in
+    application code — keeps the SQL small and avoids the subquery
+    plumbing the service_delivered version uses (the trip list per block
+    is small enough that a Python intersect is fine).
+    """
+    service_date_str = service_date.strftime("%Y%m%d")
+    weekday_field = getattr(Calendar, _WEEKDAY_TO_CALENDAR_FIELD_NAMES[service_date.weekday()])
+
+    base_ids = {
+        sid
+        for (sid,) in db.query(Calendar.service_id).filter(
+            Calendar.is_current,
+            weekday_field == 1,
+            Calendar.start_date <= service_date_str,
+            Calendar.end_date >= service_date_str,
+        )
+    }
+    from src.models import CalendarDate
+
+    removed = {
+        sid
+        for (sid,) in db.query(CalendarDate.service_id).filter(
+            CalendarDate.is_current,
+            CalendarDate.date == service_date_str,
+            CalendarDate.exception_type == 2,
+        )
+    }
+    added = {
+        sid
+        for (sid,) in db.query(CalendarDate.service_id).filter(
+            CalendarDate.is_current,
+            CalendarDate.date == service_date_str,
+            CalendarDate.exception_type == 1,
+        )
+    }
+    return (base_ids - removed) | added
+
+
+def _gtfs_seconds_to_eastern_iso(seconds: int | None, service_date: date_type) -> str | None:
+    """Convert GTFS seconds-since-service-day-start to an Eastern ISO timestamp.
+
+    Anchors on Eastern midnight for `service_date` and adds the seconds
+    offset. `seconds` can exceed 86400 for post-midnight service that's still
+    part of the prior service day (a 25:30:00 GTFS time on 2026-05-10 is
+    1:30am Eastern on 2026-05-11). Returns None if `seconds` is None.
+
+    The result is a naive ISO string in Eastern local time (no offset
+    suffix) to match the rest of the API's serialization convention.
+    """
+    if seconds is None:
+        return None
+    from src.timezones import EASTERN, UTC, eastern_midnight_as_utc
+
+    midnight_utc = eastern_midnight_as_utc(service_date)
+    aware_utc = midnight_utc.replace(tzinfo=UTC)
+    target = aware_utc + timedelta(seconds=seconds)
+    eastern = target.astimezone(EASTERN).replace(tzinfo=None)
+    return eastern.isoformat()
+
+
+def _scheduled_endpoints_for_trips(
+    db: Session, trip_ids: list[str]
+) -> dict[str, tuple[int | None, int | None]]:
+    """Return {trip_id: (start_seconds, end_seconds)} from current GTFS.
+
+    Reads `stop_times` filtered to `is_current=True`, parses each
+    arrival_time to integer seconds (GTFS strings are unpadded — see
+    CLAUDE.md gotcha), takes the min/max per trip. Trips with no current
+    stop_times rows map to (None, None).
+    """
+    from src.service_profile import _parse_gtfs_time_to_seconds
+
+    if not trip_ids:
+        return {}
+    rows = (
+        db.query(StopTime.trip_id, StopTime.arrival_time)
+        .filter(StopTime.trip_id.in_(trip_ids), StopTime.is_current)
+        .all()
+    )
+    by_trip: dict[str, list[int]] = defaultdict(list)
+    for tid, arr in rows:
+        if arr is None:
+            continue
+        try:
+            by_trip[tid].append(_parse_gtfs_time_to_seconds(arr))
+        except (ValueError, AttributeError):
+            # Malformed GTFS time — skip rather than crash. The trip will
+            # show with null scheduled times, which renders fine downstream.
+            continue
+    return {tid: (min(secs), max(secs)) if secs else (None, None) for tid, secs in by_trip.items()}
+
+
+def _runs_by_trip_for_block(
+    db: Session, trip_ids: list[str], service_date: str
+) -> dict[str, dict[str, Run]]:
+    """Return {trip_id: {source: Run}} for the given trips on one service date.
+
+    A trip can have 0, 1, or 2 Run rows (one per source). Used by the
+    block timeline to pull origin_dev_sec from `proximity` and
+    destination_dev_sec from `trip_update` per the source-asymmetry rule.
+    """
+    if not trip_ids:
+        return {}
+    rows = db.query(Run).filter(Run.trip_id.in_(trip_ids), Run.service_date == service_date).all()
+    out: dict[str, dict[str, Run]] = defaultdict(dict)
+    for r in rows:
+        out[r.trip_id][r.source] = r
+    return out
+
+
+def _observed_vehicle_for_trip(runs_for_trip: dict[str, Run]) -> str | None:
+    """Pick the observed vehicle_id from a trip's Run rows.
+
+    Prefer `trip_update` (its vehicle.id field is the AVL log-in record and
+    is what the dispatcher considers authoritative); fall back to
+    `proximity` (vehicle_id is derived from the matched VehiclePosition
+    rows). Either may be null even when its Run exists — TU only carries
+    vehicle.id ~40% of the time. Returns None if neither source has a
+    vehicle_id.
+    """
+    for src in ("trip_update", "proximity"):
+        run = runs_for_trip.get(src)
+        if run is not None and run.vehicle_id:
+            return run.vehicle_id
+    return None
+
+
+def _trip_status(
+    runs_for_trip: dict[str, Run], origin_dev: int | None, destination_dev: int | None
+) -> str:
+    """Classify a trip's observation status for the timeline.
+
+    - "complete" when both endpoint deviations are populated
+    - "partial" when at least one Run row exists (any observation) but
+      not both endpoint deviations
+    - "not_observed" when no Run rows exist for this trip
+    """
+    if origin_dev is not None and destination_dev is not None:
+        return "complete"
+    if runs_for_trip:
+        return "partial"
+    return "not_observed"
+
+
+def compute_block_timeline(db: Session, block_id: str, service_date: date_type) -> dict | None:
+    """Build the timeline payload for one block on one service date.
+
+    Returns the scheduled chain of trips for `(block_id, service_date)`
+    in order, each annotated with the observed vehicle_id (if any),
+    origin/destination deviation in seconds, and a coarse status. Returns
+    None when no trips exist for the block_id in the current GTFS
+    snapshot — the caller should 404. Returns the chain (with empty
+    observations) when trips exist but no Runs do — the planning view
+    is still useful when no buses have run yet.
+
+    The chain is scheduled-block, not observed-block: dispatcher
+    vehicle swaps mid-day appear as `observed_vehicle_id` changing
+    between adjacent trips, and the frontend flags them as swap points.
+    """
+    # Pull trips for this block from the current GTFS snapshot, restricted
+    # to service_ids that actually run on `service_date`. Without this
+    # filter the same block_id pulls 90+ trips because the static feed
+    # carries weekday / Saturday / Sunday / holiday variants under the
+    # same block_id — a real-world block on any one day chains ~24.
+    active_service_ids = _active_service_ids_for_date(db, service_date)
+    base_q = db.query(Trip).filter(Trip.block_id == block_id, Trip.is_current)
+    trips = (
+        base_q.filter(Trip.service_id.in_(active_service_ids)).all() if active_service_ids else []
+    )
+    if not trips:
+        # Fallback: surface every trip on the block_id when the calendar
+        # resolver returns nothing (fresh DB without calendar / a service
+        # date outside any calendar window). The chain may include
+        # variants that don't actually run, but a 404 here would hide
+        # legitimate block_ids — return the unfiltered chain so the
+        # caller can still see the planned chain.
+        trips = base_q.all()
+        if not trips:
+            return None
+
+    trip_ids = [t.trip_id for t in trips]
+    sched_endpoints = _scheduled_endpoints_for_trips(db, trip_ids)
+    runs_by_trip = _runs_by_trip_for_block(db, trip_ids, service_date.isoformat())
+
+    timeline = []
+    for trip in trips:
+        start_sec, end_sec = sched_endpoints.get(trip.trip_id, (None, None))
+        runs_for_trip = runs_by_trip.get(trip.trip_id, {})
+        proximity_run = runs_for_trip.get("proximity")
+        tu_run = runs_for_trip.get("trip_update")
+        origin_dev = proximity_run.origin_dev_sec if proximity_run else None
+        destination_dev = tu_run.destination_dev_sec if tu_run else None
+        # Surface the run_id for click-through to the per-run deviation
+        # chart. Prefer trip_update (its destination observation rate is
+        # materially higher, so the chart looks more complete); fall back
+        # to proximity. Null when no Run exists.
+        run_id = None
+        if tu_run is not None:
+            run_id = tu_run.id
+        elif proximity_run is not None:
+            run_id = proximity_run.id
+        timeline.append(
+            {
+                "trip_id": trip.trip_id,
+                "route_id": trip.route_id,
+                "direction_id": trip.direction_id,
+                "trip_headsign": trip.trip_headsign,
+                "scheduled_start": _gtfs_seconds_to_eastern_iso(start_sec, service_date),
+                "scheduled_end": _gtfs_seconds_to_eastern_iso(end_sec, service_date),
+                "scheduled_start_sec": start_sec,
+                "scheduled_end_sec": end_sec,
+                "observed_vehicle_id": _observed_vehicle_for_trip(runs_for_trip),
+                "origin_deviation_seconds": origin_dev,
+                "destination_deviation_seconds": destination_dev,
+                "trip_status": _trip_status(runs_for_trip, origin_dev, destination_dev),
+                "run_id": run_id,
+            }
+        )
+
+    # Order by scheduled start; trips with no parseable start sink to the
+    # end so the chain still renders. Tie-break on trip_id for determinism.
+    timeline.sort(
+        key=lambda row: (
+            row["scheduled_start_sec"] is None,
+            row["scheduled_start_sec"] if row["scheduled_start_sec"] is not None else 0,
+            row["trip_id"],
+        )
+    )
+
+    return {
+        "block_id": block_id,
+        "service_date": service_date.isoformat(),
+        "trips": timeline,
+    }
+
+
+def get_route_blocks(db: Session, route_id: str, service_date: date_type) -> dict:
+    """List blocks that touch one route on one service date.
+
+    Populates the "Blocks" tab on RouteDetail. For each distinct block_id
+    among current trips on the route, returns the block's origin start
+    time (Eastern), the number of trips chained on it, the worst
+    per-trip absolute deviation observed (max(|origin_dev|,
+    |destination_dev|) across the chain's Runs), and the count of trips
+    on this route in the block (so blocks that mix multiple routes show
+    their route share). Returns `{"error": ...}` for unknown routes.
+
+    The list is ordered by the block's earliest scheduled start so the
+    UI reads as "first block out → last block out."
+    """
+    route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
+    if not route:
+        return {"error": f"Route {route_id} not found"}
+
+    # Pull every block_id that touches the route in current GTFS, along
+    # with the trips on this route per block. Trips on other routes that
+    # share the block still appear in the block timeline; this list just
+    # answers "which blocks touch this route?" Restrict to service_ids
+    # active on `service_date` so the list matches the day's real
+    # dispatch (without this filter, weekday/saturday/sunday variants of
+    # the same block all show up regardless of the picked date).
+    active_service_ids = _active_service_ids_for_date(db, service_date)
+    route_trips_q = db.query(Trip.trip_id, Trip.block_id).filter(
+        Trip.route_id == route_id, Trip.is_current, Trip.block_id.isnot(None)
+    )
+    if active_service_ids:
+        route_trips_q = route_trips_q.filter(Trip.service_id.in_(active_service_ids))
+    route_trips = route_trips_q.all()
+    if not route_trips:
+        return {
+            "route_id": route_id,
+            "service_date": service_date.isoformat(),
+            "blocks": [],
+        }
+
+    trips_by_block: dict[str, list[str]] = defaultdict(list)
+    for tid, bid in route_trips:
+        trips_by_block[bid].append(tid)
+
+    block_ids = list(trips_by_block.keys())
+    # Pull the full trip set per block (including trips on OTHER routes
+    # that share the block) so the count + scheduled-start columns
+    # reflect the real chain, not just this route's slice. Apply the same
+    # service_id filter so the chain matches the day's running schedule.
+    all_block_trips_q = db.query(Trip.trip_id, Trip.block_id).filter(
+        Trip.block_id.in_(block_ids), Trip.is_current
+    )
+    if active_service_ids:
+        all_block_trips_q = all_block_trips_q.filter(Trip.service_id.in_(active_service_ids))
+    all_block_trips = all_block_trips_q.all()
+    full_trips_by_block: dict[str, list[str]] = defaultdict(list)
+    for tid, bid in all_block_trips:
+        full_trips_by_block[bid].append(tid)
+
+    all_trip_ids = [tid for tids in full_trips_by_block.values() for tid in tids]
+    sched_endpoints = _scheduled_endpoints_for_trips(db, all_trip_ids)
+    runs_by_trip = _runs_by_trip_for_block(db, all_trip_ids, service_date.isoformat())
+
+    rows = []
+    for bid, full_tids in full_trips_by_block.items():
+        starts = [
+            sched_endpoints.get(tid, (None, None))[0]
+            for tid in full_tids
+            if sched_endpoints.get(tid, (None, None))[0] is not None
+        ]
+        block_start_sec = min(starts) if starts else None
+
+        worst_dev_abs = None
+        for tid in full_tids:
+            runs_for_trip = runs_by_trip.get(tid, {})
+            prox = runs_for_trip.get("proximity")
+            tu = runs_for_trip.get("trip_update")
+            candidates = []
+            if prox is not None and prox.origin_dev_sec is not None:
+                candidates.append(abs(prox.origin_dev_sec))
+            if tu is not None and tu.destination_dev_sec is not None:
+                candidates.append(abs(tu.destination_dev_sec))
+            if candidates:
+                trip_worst = max(candidates)
+                if worst_dev_abs is None or trip_worst > worst_dev_abs:
+                    worst_dev_abs = trip_worst
+
+        any_observed = any(tid in runs_by_trip and runs_by_trip[tid] for tid in full_tids)
+
+        rows.append(
+            {
+                "block_id": bid,
+                "trip_count": len(full_tids),
+                "trips_on_route": len(trips_by_block[bid]),
+                "scheduled_start": _gtfs_seconds_to_eastern_iso(block_start_sec, service_date),
+                "scheduled_start_sec": block_start_sec,
+                "worst_deviation_seconds": worst_dev_abs,
+                "any_observed": any_observed,
+            }
+        )
+
+    rows.sort(
+        key=lambda r: (
+            r["scheduled_start_sec"] is None,
+            r["scheduled_start_sec"] if r["scheduled_start_sec"] is not None else 0,
+            r["block_id"],
+        )
+    )
+
+    return {
+        "route_id": route_id,
+        "service_date": service_date.isoformat(),
+        "blocks": rows,
+    }

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import RouteMap from './RouteMap'
 import PeriodDrilldown from './PeriodDrilldown'
 import RecentRuns from './RecentRuns'
+import BlockList from './BlockList'
 import RouteTrend, { computeWindowDelta, DeltaIndicator } from './RouteTrend'
 import StopDiagnostic from './StopDiagnostic'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
@@ -40,6 +41,11 @@ function RouteDetail() {
   // initial load preserves the unfiltered cached path.
   const [dayType, setDayType] = useState('all')
   const [period, setPeriod] = useState('all')
+
+  // Recent runs vs Blocks tab (NOTES-45). 'runs' is the default; the user
+  // switches to 'blocks' to see the per-vehicle chained-trip view that
+  // surfaces cascade lateness.
+  const [trailingTab, setTrailingTab] = useState('runs')
 
   // Trend data is fetched here (rather than inside RouteTrend) so the same
   // 30-day series can drive both the sparkline block and the per-KPI-card
@@ -489,7 +495,54 @@ function RouteDetail() {
         <PeriodDrilldown routeId={routeId} dayType={dayType} period={period} />
       )}
 
-      <RecentRuns routeId={routeId} />
+      <div
+        style={{
+          display: 'flex',
+          gap: '0.5rem',
+          margin: '1rem 0 0.5rem',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setTrailingTab('runs')}
+          className={trailingTab === 'runs' ? 'route-tab-active' : 'route-tab'}
+          style={{
+            padding: '0.4rem 0.9rem',
+            border: '1px solid #cbd5e1',
+            background: trailingTab === 'runs' ? '#002F6C' : 'white',
+            color: trailingTab === 'runs' ? 'white' : '#1e293b',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '0.875rem',
+            fontWeight: 500,
+          }}
+        >
+          Recent runs
+        </button>
+        <button
+          type="button"
+          onClick={() => setTrailingTab('blocks')}
+          className={trailingTab === 'blocks' ? 'route-tab-active' : 'route-tab'}
+          style={{
+            padding: '0.4rem 0.9rem',
+            border: '1px solid #cbd5e1',
+            background: trailingTab === 'blocks' ? '#002F6C' : 'white',
+            color: trailingTab === 'blocks' ? 'white' : '#1e293b',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '0.875rem',
+            fontWeight: 500,
+          }}
+        >
+          Blocks
+        </button>
+      </div>
+
+      {trailingTab === 'runs' ? (
+        <RecentRuns routeId={routeId} />
+      ) : (
+        <BlockList routeId={routeId} />
+      )}
 
       <div className="chart-container">
         <h2>Route Map</h2>

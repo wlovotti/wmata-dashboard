@@ -2237,3 +2237,388 @@ def test_gtfs_freshness_endpoint_returns_newest_snapshot(client, db_session):
     assert body["routes_count"] == 305
     assert body["stops_count"] == 10050
     assert body["trips_count"] == 20100
+
+
+# ---------------------------------------------------------------------------
+# Block-level cascade view (NOTES-45)
+#
+# Helper seeds a small block with 3 chained trips on one route plus a single
+# trip on a second route that shares the same block_id (so the
+# multi-route-block edge case has coverage). The individual tests then add
+# Run rows as needed to cover the four scenarios called out in the task spec:
+# full observations, partial observations, vehicle swap, deviation cascade.
+# ---------------------------------------------------------------------------
+
+
+def _seed_block_with_trips(db_session, *, block_id="BLK_A"):
+    """Seed a route, second route, four trips on `block_id`, and stop_times.
+
+    Returns (block_id, primary_route_id). The first three trips run on the
+    primary route, the fourth on a secondary route — same block_id so the
+    block-list and block-timeline endpoints can be exercised against a
+    multi-route block.
+
+    No Run rows are created here — tests add them inline as needed.
+    """
+    routes = [
+        Route(
+            route_id="BLK1",
+            route_short_name="BLK1",
+            route_long_name="Block Test Primary",
+            route_type=3,
+            is_current=True,
+        ),
+        Route(
+            route_id="BLK2",
+            route_short_name="BLK2",
+            route_long_name="Block Test Secondary",
+            route_type=3,
+            is_current=True,
+        ),
+    ]
+    db_session.add_all(routes)
+
+    # Three trips on BLK1 in scheduled order, then a fourth on BLK2.
+    trip_specs = [
+        ("BLK_T1", "BLK1", 0, "Trip 1", "08:00:00", "08:30:00"),
+        ("BLK_T2", "BLK1", 1, "Trip 2", "09:00:00", "09:30:00"),
+        ("BLK_T3", "BLK1", 0, "Trip 3", "10:00:00", "10:30:00"),
+        ("BLK_T4", "BLK2", 1, "Trip 4", "11:00:00", "11:30:00"),
+    ]
+    for trip_id, route_id, direction_id, headsign, _start, _end in trip_specs:
+        db_session.add(
+            Trip(
+                trip_id=trip_id,
+                route_id=route_id,
+                service_id="WEEKDAY",
+                direction_id=direction_id,
+                trip_headsign=headsign,
+                block_id=block_id,
+                is_current=True,
+            )
+        )
+    for trip_id, _route, _dir, _hs, start, end in trip_specs:
+        db_session.add(
+            StopTime(
+                trip_id=trip_id,
+                stop_id="BLK_STOP_O",
+                arrival_time=start,
+                departure_time=start,
+                stop_sequence=1,
+                is_current=True,
+            )
+        )
+        db_session.add(
+            StopTime(
+                trip_id=trip_id,
+                stop_id="BLK_STOP_D",
+                arrival_time=end,
+                departure_time=end,
+                stop_sequence=2,
+                is_current=True,
+            )
+        )
+
+    db_session.commit()
+    return block_id, "BLK1"
+
+
+def _add_block_run(
+    db_session,
+    *,
+    trip_id,
+    route_id,
+    service_date,
+    direction_id,
+    source,
+    vehicle_id=None,
+    origin_dev_sec=None,
+    destination_dev_sec=None,
+):
+    """Add a single Run row with the minimum fields needed for block tests."""
+    db_session.add(
+        Run(
+            service_date=service_date,
+            trip_id=trip_id,
+            route_id=route_id,
+            direction_id=direction_id,
+            source=source,
+            vehicle_id=vehicle_id,
+            stops_scheduled=2,
+            stops_observable=2 if source == "proximity" else 1,
+            sched_first_seq=1,
+            sched_last_seq=2,
+            stops_observed=2,
+            stops_skipped=0,
+            dev_p50_sec=destination_dev_sec or origin_dev_sec or 0,
+            dev_p95_sec=destination_dev_sec or origin_dev_sec or 0,
+            origin_dev_sec=origin_dev_sec,
+            destination_dev_sec=destination_dev_sec,
+        )
+    )
+
+
+@pytest.mark.smoke
+def test_block_timeline_full_observations(client, db_session):
+    """All three primary-route trips on the block have proximity+TU runs.
+
+    Each card should show both origin_deviation_seconds (from proximity)
+    and destination_deviation_seconds (from trip_update), and the
+    trip_status should be "complete" for those three.
+    """
+    block_id, _ = _seed_block_with_trips(db_session)
+    sd = "2026-05-09"
+    for trip_id, direction_id, origin_dev, dest_dev in (
+        ("BLK_T1", 0, 0, 60),
+        ("BLK_T2", 1, 60, 120),
+        ("BLK_T3", 0, 120, 180),
+    ):
+        _add_block_run(
+            db_session,
+            trip_id=trip_id,
+            route_id="BLK1",
+            service_date=sd,
+            direction_id=direction_id,
+            source="proximity",
+            vehicle_id="V100",
+            origin_dev_sec=origin_dev,
+        )
+        _add_block_run(
+            db_session,
+            trip_id=trip_id,
+            route_id="BLK1",
+            service_date=sd,
+            direction_id=direction_id,
+            source="trip_update",
+            vehicle_id="V100",
+            destination_dev_sec=dest_dev,
+        )
+    db_session.commit()
+
+    response = client.get(f"/api/blocks/{block_id}?service_date={sd}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["block_id"] == block_id
+    assert body["service_date"] == sd
+
+    trips = body["trips"]
+    # All four trips are returned (3 primary + 1 secondary).
+    assert len(trips) == 4
+    # Scheduled order: 08:00 → 09:00 → 10:00 → 11:00.
+    assert [t["trip_id"] for t in trips] == ["BLK_T1", "BLK_T2", "BLK_T3", "BLK_T4"]
+
+    # First three have both endpoint deviations and "complete" status.
+    for t, expected_origin, expected_dest in zip(
+        trips[:3], [0, 60, 120], [60, 120, 180], strict=True
+    ):
+        assert t["origin_deviation_seconds"] == expected_origin
+        assert t["destination_deviation_seconds"] == expected_dest
+        assert t["trip_status"] == "complete"
+        assert t["observed_vehicle_id"] == "V100"
+        assert t["run_id"] is not None
+        assert t["scheduled_start"] is not None
+        assert t["scheduled_end"] is not None
+
+    # Fourth (secondary-route) trip is unobserved — no runs were added.
+    assert trips[3]["origin_deviation_seconds"] is None
+    assert trips[3]["destination_deviation_seconds"] is None
+    assert trips[3]["trip_status"] == "not_observed"
+    assert trips[3]["observed_vehicle_id"] is None
+    assert trips[3]["route_id"] == "BLK2"
+
+
+@pytest.mark.smoke
+def test_block_timeline_partial_observations(client, db_session):
+    """A block with NO runs on the service_date still returns the scheduled chain.
+
+    All trips show null deviations and trip_status="not_observed". This is
+    the early-morning / no-collector-data case — the planning view is still
+    useful so the UI greys out the chain rather than 404-ing.
+    """
+    block_id, _ = _seed_block_with_trips(db_session)
+    sd = "2026-05-09"
+    # Intentionally no Run rows.
+
+    response = client.get(f"/api/blocks/{block_id}?service_date={sd}")
+    assert response.status_code == 200
+    body = response.json()
+    trips = body["trips"]
+    assert len(trips) == 4
+    for t in trips:
+        assert t["origin_deviation_seconds"] is None
+        assert t["destination_deviation_seconds"] is None
+        assert t["trip_status"] == "not_observed"
+        assert t["observed_vehicle_id"] is None
+
+
+@pytest.mark.smoke
+def test_block_timeline_vehicle_swap_detected_via_vehicle_id(client, db_session):
+    """A vehicle swap mid-block shows up as different observed_vehicle_id values.
+
+    Sets up trip 1 on V100, trips 2-3 on V200 — the frontend's adjacency
+    check (different non-null vehicle_ids) is what surfaces the swap badge,
+    so the API just needs to return the two distinct vehicle_ids.
+    """
+    block_id, _ = _seed_block_with_trips(db_session)
+    sd = "2026-05-09"
+    # Trip 1 on V100.
+    _add_block_run(
+        db_session,
+        trip_id="BLK_T1",
+        route_id="BLK1",
+        service_date=sd,
+        direction_id=0,
+        source="trip_update",
+        vehicle_id="V100",
+        destination_dev_sec=30,
+    )
+    # Trips 2-3 on V200 (different bus = swap).
+    for trip_id, direction_id in (("BLK_T2", 1), ("BLK_T3", 0)):
+        _add_block_run(
+            db_session,
+            trip_id=trip_id,
+            route_id="BLK1",
+            service_date=sd,
+            direction_id=direction_id,
+            source="trip_update",
+            vehicle_id="V200",
+            destination_dev_sec=60,
+        )
+    db_session.commit()
+
+    response = client.get(f"/api/blocks/{block_id}?service_date={sd}")
+    assert response.status_code == 200
+    trips = response.json()["trips"]
+    by_trip = {t["trip_id"]: t for t in trips}
+    assert by_trip["BLK_T1"]["observed_vehicle_id"] == "V100"
+    assert by_trip["BLK_T2"]["observed_vehicle_id"] == "V200"
+    assert by_trip["BLK_T3"]["observed_vehicle_id"] == "V200"
+
+
+@pytest.mark.smoke
+def test_block_timeline_cascade_deviation_returned_in_order(client, db_session):
+    """A deviation cascade (each trip later than the last) is preserved end-to-end.
+
+    The API doesn't classify cascade itself — that's a frontend pairwise
+    check — but the chained trips must come back ordered with increasing
+    destination_deviation_seconds so the UI can spot the pattern.
+    """
+    block_id, _ = _seed_block_with_trips(db_session)
+    sd = "2026-05-09"
+    for trip_id, direction_id, dest_dev in (
+        ("BLK_T1", 0, 60),
+        ("BLK_T2", 1, 480),
+        ("BLK_T3", 0, 900),
+    ):
+        _add_block_run(
+            db_session,
+            trip_id=trip_id,
+            route_id="BLK1",
+            service_date=sd,
+            direction_id=direction_id,
+            source="trip_update",
+            vehicle_id="V300",
+            destination_dev_sec=dest_dev,
+        )
+        _add_block_run(
+            db_session,
+            trip_id=trip_id,
+            route_id="BLK1",
+            service_date=sd,
+            direction_id=direction_id,
+            source="proximity",
+            vehicle_id="V300",
+            origin_dev_sec=dest_dev - 30,
+        )
+    db_session.commit()
+
+    response = client.get(f"/api/blocks/{block_id}?service_date={sd}")
+    assert response.status_code == 200
+    trips = response.json()["trips"]
+    primary = [t for t in trips if t["trip_id"].startswith("BLK_T") and t["route_id"] == "BLK1"]
+    assert [t["trip_id"] for t in primary] == ["BLK_T1", "BLK_T2", "BLK_T3"]
+    assert [t["destination_deviation_seconds"] for t in primary] == [60, 480, 900]
+
+
+@pytest.mark.smoke
+def test_block_timeline_unknown_block_id_returns_404(client):
+    """Unknown block_id returns 404, not 500."""
+    response = client.get("/api/blocks/NOT_A_BLOCK?service_date=2026-05-09")
+    assert response.status_code == 404
+
+
+@pytest.mark.smoke
+def test_block_timeline_invalid_service_date_returns_400(client):
+    """Malformed service_date returns 400 with a usable message."""
+    response = client.get("/api/blocks/anything?service_date=05-09-2026")
+    assert response.status_code == 400
+
+
+@pytest.mark.smoke
+def test_route_blocks_endpoint_returns_blocks_with_counts(client, db_session):
+    """GET /api/routes/{route_id}/blocks lists blocks that touch the route."""
+    block_id, route_id = _seed_block_with_trips(db_session)
+    sd = "2026-05-09"
+    # Seed one Run so the any_observed flag flips.
+    _add_block_run(
+        db_session,
+        trip_id="BLK_T1",
+        route_id=route_id,
+        service_date=sd,
+        direction_id=0,
+        source="trip_update",
+        vehicle_id="V100",
+        destination_dev_sec=420,
+    )
+    db_session.commit()
+
+    response = client.get(f"/api/routes/{route_id}/blocks?service_date={sd}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route_id"] == route_id
+    assert body["service_date"] == sd
+    blocks = body["blocks"]
+    assert len(blocks) == 1
+    row = blocks[0]
+    assert row["block_id"] == block_id
+    assert row["trip_count"] == 4  # 3 BLK1 + 1 BLK2
+    assert row["trips_on_route"] == 3
+    assert row["any_observed"] is True
+    assert row["worst_deviation_seconds"] == 420
+
+
+@pytest.mark.smoke
+def test_route_blocks_endpoint_unknown_route_returns_404(client):
+    """Unknown route returns 404."""
+    response = client.get("/api/routes/NOPE/blocks?service_date=2026-05-09")
+    assert response.status_code == 404
+
+
+@pytest.mark.smoke
+def test_recent_runs_endpoint_includes_block_id(client, db_session):
+    """`block_id` is surfaced on `/api/routes/{route_id}/recent-runs` (NOTES-45)."""
+    run_id, route_id = _seed_run_with_stop_events(db_session)
+    # Patch the seeded trip with a block_id since the helper doesn't set one.
+    trip = db_session.query(Trip).filter(Trip.trip_id == "DEV_TRIP_1").first()
+    trip.block_id = "BLK_DEV"
+    db_session.commit()
+
+    response = client.get(f"/api/routes/{route_id}/recent-runs")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["runs"]) == 1
+    assert body["runs"][0]["run_id"] == run_id
+    assert body["runs"][0]["block_id"] == "BLK_DEV"
+
+
+@pytest.mark.smoke
+def test_run_deviations_endpoint_includes_block_id(client, db_session):
+    """`block_id` is surfaced on `/api/runs/{run_id}/deviations` (NOTES-45)."""
+    run_id, _ = _seed_run_with_stop_events(db_session)
+    trip = db_session.query(Trip).filter(Trip.trip_id == "DEV_TRIP_1").first()
+    trip.block_id = "BLK_DEV"
+    db_session.commit()
+
+    response = client.get(f"/api/runs/{run_id}/deviations")
+    assert response.status_code == 200
+    assert response.json()["block_id"] == "BLK_DEV"
