@@ -309,15 +309,31 @@ main {
   font-size: 1.5rem;
 }
 
-/* When a subtitle note follows the h2, drop the h2's bottom border so the
-   heading and its subtitle read as one block — the note then carries the
-   divider into the filter row. Applies to .scorecard-window-note and to
-   .drilldown-anchor (the latter has a -0.5rem top margin and would
-   otherwise render its text on top of the h2's bottom border). */
-.table-container h2:has(+ .scorecard-window-note),
-.table-container h2:has(+ .drilldown-anchor) {
+/* When a window-range note follows the h2, drop the h2's bottom border and
+   tighten the padding so the heading and its subtitle read as one block —
+   the note then carries the divider into the filter row. */
+.table-container h2:has(+ .scorecard-window-note) {
   padding-bottom: 0.25rem;
   border-bottom: none;
+}
+
+/* When a .drilldown-anchor subtitle follows the h2, drop the h2's bottom
+   border so the annotation's -0.5rem top margin doesn't render its text
+   onto the border line. Keep the h2's default 1.5rem padding-bottom —
+   combined with the annotation's negative top margin it yields the same
+   1rem gap that the .chart-container surfaces have. */
+.table-container h2:has(+ .drilldown-anchor) {
+  border-bottom: none;
+}
+
+/* .drilldown-anchor's base rule has no horizontal padding because its
+   intended host (.chart-container) provides 1.5rem container padding.
+   .table-container has no padding of its own — its h2, filters, and
+   .scorecard-window-note each carry their own 1.5rem horizontal padding —
+   so the annotation needs the same to line up under the h2 instead of
+   sitting flush against the container's left edge. */
+.table-container .drilldown-anchor {
+  padding: 0 1.5rem;
 }
 
 .scorecard-window-note {
