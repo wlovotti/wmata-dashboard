@@ -54,6 +54,11 @@ const CONTRIB_METRICS = [
   { key: 'bunching', label: 'Bunching' },
 ]
 
+// NOTES-51 step 4: contributors table caps at the top N by default, with
+// a "Show all (M)" expander revealing the rest. Ten is enough to surface
+// the routes worth investigating without overwhelming the first viewport.
+const CONTRIB_TOP_N = 10
+
 function formatContribMetricValue(metric, value) {
   if (value == null) return '—'
   if (metric === 'otp') return `${Math.round(value)}%`
@@ -130,13 +135,23 @@ function RouteList() {
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(_cachedLastUpdated)
   const [gtfsFreshness, setGtfsFreshness] = useState(_cachedGtfsFreshness)
-  // Mode toggle: 'default' (current scorecard) vs 'contributors' (NOTES-39).
-  // Pure additive — toggling away leaves the default view unchanged.
-  const [viewMode, setViewMode] = useState('default')
+  // Mode toggle: 'contributors' (NOTES-39, default after NOTES-51) vs
+  // 'default' (full alphabetic scorecard table, now collapsed behind a
+  // <details> disclosure). Clicking the "Default" toggle still flips the
+  // disclosure open; the disclosure can also be expanded independently
+  // without leaving contributors mode.
+  const [viewMode, setViewMode] = useState('contributors')
   const [contribMetric, setContribMetric] = useState('otp')
   const [contribData, setContribData] = useState(null)
   const [contribLoading, setContribLoading] = useState(false)
   const [contribError, setContribError] = useState(null)
+  // NOTES-51 step 4: top-10 contributors by default with a "Show all"
+  // expander; reset to top-10 when the metric changes so the user sees
+  // the new metric's top movers, not a previously-expanded list.
+  const [showAllContributors, setShowAllContributors] = useState(false)
+  useEffect(() => {
+    setShowAllContributors(false)
+  }, [contribMetric])
 
   const fetchRoutes = () => {
     return fetch('/api/routes')
@@ -257,24 +272,27 @@ function RouteList() {
     navigate(`/route/${routeId}`)
   }
 
+  // NOTES-51: the lifted search input applies to both views. Filter
+  // contributors by the same `searchTerm` against route short/long name
+  // so name lookup works regardless of which mode is active. The
+  // expander then slices the filtered list — search wins over the cap.
+  const lowerSearch = searchTerm.toLowerCase()
+  const filteredContributors = (contribData?.contributors ?? []).filter(c => {
+    if (!lowerSearch) return true
+    return (
+      c.route_short_name?.toLowerCase().includes(lowerSearch) ||
+      c.route_long_name?.toLowerCase().includes(lowerSearch) ||
+      c.route_id?.toLowerCase().includes(lowerSearch)
+    )
+  })
+  const visibleContributors = showAllContributors
+    ? filteredContributors
+    : filteredContributors.slice(0, CONTRIB_TOP_N)
+
   if (loading) {
     return (
       <main>
         <SystemTrend />
-        <div className="stats-summary">
-          <div className="stat-card skeleton">
-            <div className="skeleton-line skeleton-stat-value"></div>
-            <div className="skeleton-line skeleton-stat-label"></div>
-          </div>
-          <div className="stat-card skeleton">
-            <div className="skeleton-line skeleton-stat-value"></div>
-            <div className="skeleton-line skeleton-stat-label"></div>
-          </div>
-          <div className="stat-card skeleton">
-            <div className="skeleton-line skeleton-stat-value"></div>
-            <div className="skeleton-line skeleton-stat-label"></div>
-          </div>
-        </div>
         <div className="table-container">
           <h2>Route Performance Scorecard</h2>
           <div className="loading-spinner">
@@ -304,29 +322,6 @@ function RouteList() {
 
       <SystemTrend />
 
-      <div className="stats-summary">
-        <div className="stat-card">
-          <div className="stat-value">{routes.length}</div>
-          <div className="stat-label">Total Routes</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">
-            {routes.filter(r => r.otp_all_pct !== null && r.otp_all_pct !== undefined).length}
-          </div>
-          <div className="stat-label">Routes with Data</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">
-            {(() => {
-              const withData = routes.filter(r => r.otp_all_pct !== null && r.otp_all_pct !== undefined)
-              if (withData.length === 0) return 'N/A'
-              return `${Math.round(withData.reduce((sum, r) => sum + r.otp_all_pct, 0) / withData.length)}%`
-            })()}
-          </div>
-          <div className="stat-label">System-wide OTP</div>
-        </div>
-      </div>
-
       <div className="table-container">
         <h2>Route Performance Scorecard</h2>
         {(() => {
@@ -343,24 +338,28 @@ function RouteList() {
           )
         })()}
 
+        {/* NOTES-51: search lifted above both views so name lookup is one
+            keystroke regardless of which mode is active. The same
+            `searchTerm` filters the contributors panel and the full table. */}
+        <div className="filters" style={{ marginBottom: '1rem' }}>
+          <div className="search-box">
+            <input
+              type="text"
+              placeholder="Search routes..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="search-input"
+            />
+          </div>
+        </div>
+
         <div className="mode-toggle" style={{ marginBottom: '1rem' }}>
-          <button
-            type="button"
-            onClick={() => setViewMode('default')}
-            className={viewMode === 'default' ? 'mode-active' : 'mode-inactive'}
-            style={{
-              marginRight: '0.5rem',
-              padding: '0.4rem 0.9rem',
-              fontWeight: viewMode === 'default' ? 'bold' : 'normal',
-            }}
-          >
-            Default
-          </button>
           <button
             type="button"
             onClick={() => setViewMode('contributors')}
             className={viewMode === 'contributors' ? 'mode-active' : 'mode-inactive'}
             style={{
+              marginRight: '0.5rem',
               padding: '0.4rem 0.9rem',
               fontWeight: viewMode === 'contributors' ? 'bold' : 'normal',
             }}
@@ -368,9 +367,21 @@ function RouteList() {
           >
             Biggest contributors
           </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('default')}
+            className={viewMode === 'default' ? 'mode-active' : 'mode-inactive'}
+            style={{
+              padding: '0.4rem 0.9rem',
+              fontWeight: viewMode === 'default' ? 'bold' : 'normal',
+            }}
+            title="Alphabetic full-route table (collapses behind a disclosure when not active)"
+          >
+            All routes
+          </button>
         </div>
 
-        {viewMode === 'contributors' ? (
+        {viewMode === 'contributors' && (
           <div className="contributors-view">
             <div className="filters" style={{ marginBottom: '0.75rem' }}>
               <div>
@@ -446,96 +457,117 @@ function RouteList() {
                 contributors yet. Once the daily metrics pipeline writes a row to{' '}
                 <code>system_metrics_daily</code> the table will populate.
               </p>
-            ) : contribData.contributors.length === 0 ? (
-              <p>No routes have enough data to score contribution for this metric.</p>
+            ) : filteredContributors.length === 0 ? (
+              <p>
+                {searchTerm
+                  ? 'No contributors match your search.'
+                  : 'No routes have enough data to score contribution for this metric.'}
+              </p>
             ) : (
-              <table className="routes-table">
-                <thead>
-                  <tr>
-                    <th>Rank</th>
-                    <th>Route</th>
-                    <th>Name</th>
-                    <th>Route value</th>
-                    <th title="Per-route target if configured, otherwise system 30-day baseline">
-                      Reference
-                    </th>
-                    <th>Scheduled trips (30d)</th>
-                    <th>Contribution score</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {contribData.contributors.map((c, idx) => {
-                    // Width of the score bar relative to the top contributor;
-                    // anchored on the largest absolute score so negative scores
-                    // (routes outperforming baseline) still get a visible bar.
-                    const maxAbs = Math.max(
-                      ...contribData.contributors.map(x => Math.abs(x.contribution_score || 0)),
-                      1
-                    )
-                    const barPct = (Math.abs(c.contribution_score || 0) / maxAbs) * 100
-                    const barColor = (c.contribution_score || 0) >= 0 ? '#d97706' : '#16a34a'
-                    return (
-                      <tr
-                        key={c.route_id}
-                        onClick={() => navigate(`/route/${c.route_id}`)}
-                        style={{ cursor: 'pointer' }}
-                      >
-                        <td>{idx + 1}</td>
-                        <td className="route-id">
-                          <span
-                            className="route-badge"
-                            style={{ backgroundColor: badgeColor(null, true) }}
-                          >
-                            {c.route_short_name || c.route_id}
-                          </span>
-                        </td>
-                        <td className="route-name">{c.route_long_name || 'N/A'}</td>
-                        <td className="metric">
-                          {formatContribMetricValue(contribMetric, c.route_value)}
-                        </td>
-                        <td className="metric">
-                          {formatContribMetricValue(
-                            contribMetric,
-                            c.reference_value ?? c.baseline_value,
-                          )}
-                          {c.reference_source && (
-                            <div
-                              style={{
-                                fontSize: '0.7rem',
-                                color: '#64748b',
-                                marginTop: '0.1rem',
-                              }}
+              <>
+                <table className="routes-table">
+                  <thead>
+                    <tr>
+                      <th>Rank</th>
+                      <th>Route</th>
+                      <th>Name</th>
+                      <th>Route value</th>
+                      <th title="Per-route target if configured, otherwise system 30-day baseline">
+                        Reference
+                      </th>
+                      <th>Scheduled trips (30d)</th>
+                      <th>Contribution score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleContributors.map((c, idx) => {
+                      // Width of the score bar relative to the top contributor;
+                      // anchored on the largest absolute score so negative scores
+                      // (routes outperforming baseline) still get a visible bar.
+                      // Scale to the full filtered list, not just the visible
+                      // slice, so the "Show all" toggle doesn't re-scale bars.
+                      const maxAbs = Math.max(
+                        ...filteredContributors.map(x => Math.abs(x.contribution_score || 0)),
+                        1
+                      )
+                      const barPct = (Math.abs(c.contribution_score || 0) / maxAbs) * 100
+                      const barColor = (c.contribution_score || 0) >= 0 ? '#d97706' : '#16a34a'
+                      return (
+                        <tr
+                          key={c.route_id}
+                          onClick={() => navigate(`/route/${c.route_id}`)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <td>{idx + 1}</td>
+                          <td className="route-id">
+                            <span
+                              className="route-badge"
+                              style={{ backgroundColor: badgeColor(null, true) }}
                             >
-                              {c.reference_source === 'target'
-                                ? 'route target'
-                                : 'system baseline'}
+                              {c.route_short_name || c.route_id}
+                            </span>
+                          </td>
+                          <td className="route-name">{c.route_long_name || 'N/A'}</td>
+                          <td className="metric">
+                            {formatContribMetricValue(contribMetric, c.route_value)}
+                          </td>
+                          <td className="metric">
+                            {formatContribMetricValue(
+                              contribMetric,
+                              c.reference_value ?? c.baseline_value,
+                            )}
+                            {c.reference_source && (
+                              <div
+                                style={{
+                                  fontSize: '0.7rem',
+                                  color: '#64748b',
+                                  marginTop: '0.1rem',
+                                }}
+                              >
+                                {c.reference_source === 'target'
+                                  ? 'route target'
+                                  : 'system baseline'}
+                              </div>
+                            )}
+                          </td>
+                          <td className="metric">{c.scheduled_trips.toLocaleString('en-US')}</td>
+                          <td className="metric">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <div
+                                style={{
+                                  width: `${barPct}%`,
+                                  minWidth: '2px',
+                                  maxWidth: '120px',
+                                  height: '10px',
+                                  backgroundColor: barColor,
+                                  borderRadius: '2px',
+                                }}
+                                title={`Contribution magnitude: ${formatContribScore(
+                                  c.contribution_score
+                                )}`}
+                              />
+                              <span>{formatContribScore(c.contribution_score)}</span>
                             </div>
-                          )}
-                        </td>
-                        <td className="metric">{c.scheduled_trips.toLocaleString('en-US')}</td>
-                        <td className="metric">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <div
-                              style={{
-                                width: `${barPct}%`,
-                                minWidth: '2px',
-                                maxWidth: '120px',
-                                height: '10px',
-                                backgroundColor: barColor,
-                                borderRadius: '2px',
-                              }}
-                              title={`Contribution magnitude: ${formatContribScore(
-                                c.contribution_score
-                              )}`}
-                            />
-                            <span>{formatContribScore(c.contribution_score)}</span>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+                {filteredContributors.length > CONTRIB_TOP_N && (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowAllContributors(v => !v)}
+                      className="show-all-contributors"
+                    >
+                      {showAllContributors
+                        ? `Show top ${CONTRIB_TOP_N}`
+                        : `Show all (${filteredContributors.length})`}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
             <p style={{ marginTop: '1rem', fontSize: '0.85em', color: '#666' }}>
               Contribution = (reference − route value) × scheduled trips, sign-flipped for
@@ -543,65 +575,63 @@ function RouteList() {
               (config/route_targets.yaml), otherwise the system 30-day window mean.
             </p>
           </div>
-        ) : (
-        <>
-        <div className="filters">
-          <div className="search-box">
-            <input
-              type="text"
-              placeholder="Search routes..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="search-input"
-            />
-          </div>
+        )}
 
-          <div className="results-count">
-            Showing {filteredAndSortedRoutes.length} of {routes.length} routes
-          </div>
-        </div>
-
-        <table className="routes-table">
-          <thead>
-            <tr>
-              <th onClick={() => handleSort('route_name')} className="sortable">
-                Route {getSortIcon('route_name')}
-              </th>
-              <th onClick={() => handleSort('route_long_name')} className="sortable">
-                Name {getSortIcon('route_long_name')}
-              </th>
-              <th onClick={() => handleSort('otp_all_pct')} className="sortable">
-                On-Time % {getSortIcon('otp_all_pct')}
-              </th>
-              <th onClick={() => handleSort('service_delivered_ratio')} className="sortable">
-                Service Delivered {getSortIcon('service_delivered_ratio')}
-              </th>
-              <th onClick={() => handleSort('ewt_seconds')} className="sortable">
-                EWT {getSortIcon('ewt_seconds')}
-              </th>
-              <th onClick={() => handleSort('bunching_rate')} className="sortable">
-                Bunching {getSortIcon('bunching_rate')}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredAndSortedRoutes.length === 0 ? (
-              <tr>
-                <td colSpan="6" className="empty-state">
-                  <div className="empty-state-content">
-                    <div className="empty-state-icon">🔍</div>
-                    <p>No routes match your filters</p>
-                    <button
-                      onClick={() => setSearchTerm('')}
-                      className="clear-filters-btn"
-                    >
-                      Clear Filters
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ) : (
-              filteredAndSortedRoutes.map(route => (
+        {/* NOTES-51 step 3: full alphabetic table lives inside a disclosure
+            below the contributors view. Clicking the "All routes" toggle
+            flips the disclosure open; the user can also expand it manually
+            without switching modes. */}
+        <details
+          className="all-routes-disclosure"
+          open={viewMode === 'default'}
+          style={{ marginTop: '1.5rem' }}
+        >
+          <summary>
+            See all routes ({filteredAndSortedRoutes.length}
+            {searchTerm ? ` of ${routes.length}` : ''})
+          </summary>
+          <div style={{ marginTop: '1rem' }}>
+            <table className="routes-table">
+              <thead>
+                <tr>
+                  <th onClick={() => handleSort('route_name')} className="sortable">
+                    Route {getSortIcon('route_name')}
+                  </th>
+                  <th onClick={() => handleSort('route_long_name')} className="sortable">
+                    Name {getSortIcon('route_long_name')}
+                  </th>
+                  <th onClick={() => handleSort('otp_all_pct')} className="sortable">
+                    On-Time % {getSortIcon('otp_all_pct')}
+                  </th>
+                  <th onClick={() => handleSort('service_delivered_ratio')} className="sortable">
+                    Service Delivered {getSortIcon('service_delivered_ratio')}
+                  </th>
+                  <th onClick={() => handleSort('ewt_seconds')} className="sortable">
+                    EWT {getSortIcon('ewt_seconds')}
+                  </th>
+                  <th onClick={() => handleSort('bunching_rate')} className="sortable">
+                    Bunching {getSortIcon('bunching_rate')}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredAndSortedRoutes.length === 0 ? (
+                  <tr>
+                    <td colSpan="6" className="empty-state">
+                      <div className="empty-state-content">
+                        <div className="empty-state-icon">🔍</div>
+                        <p>No routes match your filters</p>
+                        <button
+                          onClick={() => setSearchTerm('')}
+                          className="clear-filters-btn"
+                        >
+                          Clear Filters
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredAndSortedRoutes.map(route => (
               <tr
                 key={route.route_id}
                 className={route.otp_all_pct == null ? 'no-data' : ''}
@@ -701,8 +731,8 @@ function RouteList() {
             )}
           </tbody>
         </table>
-        </>
-        )}
+          </div>
+        </details>
       </div>
 
       {gtfsFreshness && gtfsFreshness.snapshot_date && (

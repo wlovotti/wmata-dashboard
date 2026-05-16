@@ -186,17 +186,6 @@ main {
   }
 }
 
-.skeleton-stat-value {
-  height: 3rem;
-  width: 80%;
-  margin-bottom: 0.75rem;
-}
-
-.skeleton-stat-label {
-  height: 1rem;
-  width: 60%;
-}
-
 /* Stats Summary */
 .stats-summary {
   display: grid;
@@ -452,6 +441,41 @@ main {
 
 .clear-filters-btn:hover {
   background-color: #003594;
+}
+
+/* NOTES-51: "See all routes" disclosure wrapping the full alphabetic
+   scorecard table. The default <summary> styling is a small disclosure
+   triangle next to flat text; we lift it into the same typography as
+   the page so it reads as a section header rather than browser default. */
+.all-routes-disclosure > summary {
+  cursor: pointer;
+  padding: 0.5rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #002F6C;
+  user-select: none;
+}
+
+.all-routes-disclosure > summary:hover {
+  color: #003594;
+}
+
+/* NOTES-51: top-10 / show-all toggle below the contributors table. */
+.show-all-contributors {
+  padding: 0.4rem 0.9rem;
+  background-color: white;
+  color: #002F6C;
+  border: 1px solid #002F6C;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.show-all-contributors:hover {
+  background-color: #002F6C;
+  color: white;
 }
 
 /* Route Detail Page */
