@@ -242,10 +242,28 @@ def compute_segment_slip(
     position. Without this filter, multiple stop_id pairs land at the same
     ``(direction_id, from_seq, to_seq)`` and produce both a constraint
     violation on insert and an inflated cumsum on safe routes.
+
+    Performance note (PR #109 follow-up)
+    ------------------------------------
+    The canonical mapping is computed by a separate small query first
+    (:func:`compute_canonical_stop_mapping`) and then passed into the slip
+    SQL as a small ``VALUES``-CTE used purely as a hash-filter join target.
+    An earlier shape that derived ``canonical`` inline from the same
+    ``ordered`` CTE caused Postgres to re-materialize the 30-day window
+    (~60s/route on production data, a 45x regression). Keep canonical out
+    of the inline pipeline.
     """
     if period not in PERIOD_HOURS:
         raise ValueError(f"unknown period: {period}")
     start, end = service_date_range
+
+    # Resolve the canonical (direction_id, stop_sequence) -> stop_id mapping
+    # via a separate small query — this keeps the dominant-pattern join in
+    # the slip SQL a tiny hash filter rather than a re-aggregation over the
+    # 30-day window.
+    canonical_mapping = compute_canonical_stop_mapping(db, route_id, service_date_range)
+    if not canonical_mapping:
+        return []
 
     # Period filter on the *scheduled* hour of the from-stop in Eastern. We
     # don't filter on observed hour because chronic lateness would push
@@ -258,17 +276,33 @@ def compute_segment_slip(
         lo, hi = PERIOD_HOURS[period]  # type: ignore[misc]
         period_clause = f"AND o.sched_et_hr >= {lo} AND o.sched_et_hr < {hi}"
 
-    # The `canonical` CTE selects the most-served stop_id per
-    # (direction_id, stop_sequence) — the dominant route pattern. The `seg`
-    # CTE joins each event row + its LEAD-next row to canonical twice, once
-    # on each endpoint, so any observation that diverges from the canonical
-    # pattern at either end is dropped. Without this filter, route variants
-    # produce multiple rows per (direction_id, from_seq, to_seq) which
-    # violates the segment table's unique constraint and inflates the
-    # downstream cumsum walk.
+    # Build the canonical VALUES list with parameter binding — never
+    # string-format stop_ids into SQL (injection + escaping risk). One
+    # named placeholder per column per row; values bound via the params
+    # dict below.
+    values_placeholders: list[str] = []
+    canonical_params: dict[str, Any] = {}
+    for i, ((direction_id, stop_sequence), stop_id) in enumerate(sorted(canonical_mapping.items())):
+        values_placeholders.append(f"(:c_dir_{i}, :c_seq_{i}, :c_stop_{i})")
+        canonical_params[f"c_dir_{i}"] = direction_id
+        canonical_params[f"c_seq_{i}"] = stop_sequence
+        canonical_params[f"c_stop_{i}"] = stop_id
+    values_clause = ",\n            ".join(values_placeholders)
+
+    # The `canonical` CTE is now a tiny VALUES-driven set (one row per
+    # (direction_id, stop_sequence) — typically O(stops) ~ tens to low
+    # hundreds). The `seg` CTE joins each event row + its LEAD-next row to
+    # canonical twice, once on each endpoint, so any observation that
+    # diverges from the canonical pattern at either end is dropped. Both
+    # joins are hash lookups against the small VALUES set, not scans of
+    # the 30-day window — that's the fix for the PR #109 perf regression.
     sql = text(
         f"""
-        WITH ordered AS (
+        WITH canonical (direction_id, stop_sequence, stop_id) AS (
+          VALUES
+            {values_clause}
+        ),
+        ordered AS (
           SELECT
             se.trip_id,
             se.service_date,
@@ -294,23 +328,6 @@ def compute_segment_slip(
             PARTITION BY se.service_date, se.trip_id
             ORDER BY se.stop_sequence
           )
-        ),
-        canonical_ranked AS (
-          SELECT
-            direction_id,
-            stop_sequence,
-            stop_id,
-            ROW_NUMBER() OVER (
-              PARTITION BY direction_id, stop_sequence
-              ORDER BY COUNT(*) DESC, stop_id ASC
-            ) AS rk
-          FROM ordered
-          GROUP BY direction_id, stop_sequence, stop_id
-        ),
-        canonical AS (
-          SELECT direction_id, stop_sequence, stop_id
-          FROM canonical_ranked
-          WHERE rk = 1
         ),
         seg AS (
           SELECT
@@ -350,15 +367,14 @@ def compute_segment_slip(
         """
     )
 
-    rows = db.execute(
-        sql,
-        {
-            "route_id": route_id,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "min_obs": MIN_SEGMENT_OBSERVATIONS,
-        },
-    ).fetchall()
+    params: dict[str, Any] = {
+        "route_id": route_id,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "min_obs": MIN_SEGMENT_OBSERVATIONS,
+    }
+    params.update(canonical_params)
+    rows = db.execute(sql, params).fetchall()
 
     raw_rows = [
         {
