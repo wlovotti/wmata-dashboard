@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { computeSpectrumBar } from '../utils/spectrumBar'
 import SystemTrend from './SystemTrend'
@@ -361,6 +361,30 @@ function RouteList() {
       )}
 
       <SystemTrend />
+
+      {/* NOTES-44: entry point to the marginal-bus ranking. Decision-support
+          surface is shallow (one page) for now; a top-level nav (NOTES-52)
+          would absorb this link into a "Decision support" section. */}
+      <div
+        className="decision-support-strip"
+        style={{
+          margin: '1rem 0',
+          padding: '0.75rem 1rem',
+          background: '#eff6ff',
+          border: '1px solid #bfdbfe',
+          borderRadius: '0.5rem',
+          fontSize: '0.875rem',
+          color: '#1e40af',
+        }}
+      >
+        Operator decision support:{' '}
+        <Link
+          to="/marginal-bus"
+          style={{ color: '#002F6C', fontWeight: 600, textDecoration: 'underline' }}
+        >
+          Where would the next bus help most? →
+        </Link>
+      </div>
 
       <div className="table-container">
         <h2>Route Performance Scorecard</h2>

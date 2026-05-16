@@ -4,6 +4,7 @@ import RouteList from './components/RouteList'
 import RouteDetail from './components/RouteDetail'
 import RunDetail from './components/RunDetail'
 import BlockTimeline from './components/BlockTimeline'
+import MarginalBus from './components/MarginalBus'
 import './App.css'
 
 function App() {
@@ -44,6 +45,7 @@ function App() {
           <Route path="/route/:routeId" element={<RouteDetail />} />
           <Route path="/runs/:runId" element={<RunDetail />} />
           <Route path="/blocks/:blockId" element={<BlockTimeline />} />
+          <Route path="/marginal-bus" element={<MarginalBus />} />
         </Routes>
       </div>
     </Router>

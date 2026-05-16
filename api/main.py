@@ -18,6 +18,7 @@ from api.aggregations import (
     compute_block_timeline,
     get_all_routes_scorecard,
     get_live_metrics_for_window,
+    get_marginal_ewt_ranking,
     get_route_blocks,
     get_route_bunching_causes,
     get_route_contributors,
@@ -280,6 +281,55 @@ async def get_routes_contributors(metric: str = "otp", days: int = 30):
     db = get_session()
     try:
         return get_route_contributors(db, metric=metric, days=days)
+    finally:
+        db.close()
+
+
+@app.get("/api/marginal-ewt")
+async def get_marginal_ewt(day_type: str | None = None):
+    """
+    Per-(route, period) marginal-bus EWT ranking (NOTES-44).
+
+    Estimates the SWT reduction from adding one scheduled trip in each
+    (route, EWT-period) cell, using the closed-form headway model:
+
+        SWT_reduction_minutes = period_minutes / (2 * N * (N + 1))
+
+    where `N` is the current count of scheduled trips in the period (from
+    `route_service_profile`). The result is ranked descending — "where
+    would the next bus help most?" — across every cell on the network for
+    the chosen day_type.
+
+    Modeling caveats — surfaced verbatim in the UI:
+      - SWT-based: assumes riders arrive uniformly across a headway and
+        existing trips are evenly spaced. Real AWT depends on observed
+        variance and where in the schedule the new trip lands; the
+        absolute reduction is an upper-bound proxy.
+      - Trip count is from the trunk-stop hourly bucket and may differ
+        from "buses operating in the period" by trips that cross the
+        period boundary at the trunk stop.
+      - The ranking — which (route, period) cells gain most — is the
+        defensible artifact. Absolute minutes are interpretation-bounded.
+
+    Args:
+        day_type: Optional. One of `weekday`, `saturday`, `sunday`.
+            Defaults to today's day_type (Eastern).
+
+    Returns:
+        Dict with `day_type` and `rankings` (list of per-row dicts:
+        `route_id`, `route_short_name`, `route_long_name`, `time_period`,
+        `period_minutes`, `current_trip_count`, `current_swt_minutes`,
+        `marginal_swt_reduction_minutes`, `marginal_swt_reduction_pct`).
+    """
+    if day_type is not None and day_type not in ("weekday", "saturday", "sunday"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid day_type. Must be one of: weekday, saturday, sunday",
+        )
+
+    db = get_session()
+    try:
+        return get_marginal_ewt_ranking(db, day_type=day_type)
     finally:
         db.close()
 

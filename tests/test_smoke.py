@@ -2622,3 +2622,105 @@ def test_run_deviations_endpoint_includes_block_id(client, db_session):
     response = client.get(f"/api/runs/{run_id}/deviations")
     assert response.status_code == 200
     assert response.json()["block_id"] == "BLK_DEV"
+
+
+@pytest.mark.smoke
+def test_marginal_ewt_endpoint_returns_envelope(client):
+    """`/api/marginal-ewt` returns an envelope with `day_type` and `rankings`.
+
+    Empty DB → empty list; the shape is the durable contract the frontend
+    consumes regardless of data presence.
+    """
+    # Drop the module-level cache so we don't observe a stale value from a
+    # previous test that seeded different data.
+    from api import aggregations as _agg
+
+    _agg._marginal_ewt_cache.clear()
+
+    response = client.get("/api/marginal-ewt")
+    assert response.status_code == 200
+    body = response.json()
+    assert "day_type" in body
+    assert "rankings" in body
+    assert isinstance(body["rankings"], list)
+
+
+@pytest.mark.smoke
+def test_marginal_ewt_endpoint_ranks_by_swt_reduction(client, db_session):
+    """A route with 3 weekday trips in AM Peak produces a SWT-reduction row.
+
+    Verifies the closed-form arithmetic and the envelope ordering. AM Peak
+    is 6-9 (180 minutes); with N=3 trips the SWT reduction is
+    `180 / (2 * 3 * 4) = 7.5 minutes`.
+    """
+    from api import aggregations as _agg
+    from src.models import Route, RouteServiceProfile
+
+    _agg._marginal_ewt_cache.clear()
+
+    # Seed a route plus a few hourly profile rows that bucket into AM Peak.
+    db_session.add(
+        Route(
+            route_id="MB1",
+            route_short_name="MB1",
+            route_long_name="Marginal Bus Test Route",
+            route_type=3,
+            is_current=True,
+        )
+    )
+    db_session.add_all(
+        [
+            RouteServiceProfile(
+                route_id="MB1",
+                day_type="weekday",
+                hour=6,
+                scheduled_trips=1,
+                is_frequent=False,
+            ),
+            RouteServiceProfile(
+                route_id="MB1",
+                day_type="weekday",
+                hour=7,
+                scheduled_trips=1,
+                is_frequent=False,
+            ),
+            RouteServiceProfile(
+                route_id="MB1",
+                day_type="weekday",
+                hour=8,
+                scheduled_trips=1,
+                is_frequent=False,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.get("/api/marginal-ewt?day_type=weekday")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["day_type"] == "weekday"
+
+    am_peak_row = next(
+        (
+            r
+            for r in body["rankings"]
+            if r["route_id"] == "MB1" and r["time_period"].startswith("AM Peak")
+        ),
+        None,
+    )
+    assert am_peak_row is not None
+    assert am_peak_row["current_trip_count"] == 3
+    assert am_peak_row["period_minutes"] == 180
+    # 180 / (2 * 3) = 30, but we round to 2dp.
+    assert am_peak_row["current_swt_minutes"] == 30.0
+    # 180 / (2 * 3 * 4) = 7.5
+    assert am_peak_row["marginal_swt_reduction_minutes"] == 7.5
+    # 1 / (3 + 1) = 0.25
+    assert am_peak_row["marginal_swt_reduction_pct"] == 0.25
+
+
+@pytest.mark.smoke
+def test_marginal_ewt_endpoint_rejects_bad_day_type(client):
+    """Garbage `day_type` returns 400 — the API validates the enum."""
+    response = client.get("/api/marginal-ewt?day_type=funday")
+    assert response.status_code == 400

@@ -2063,6 +2063,69 @@ def get_route_contributors(db: Session, metric: str = "otp", days: int = 30) -> 
     return result
 
 
+# Marginal-bus EWT cache (NOTES-44). The ranking is purely a function of
+# `route_service_profile` rows (one DB pull, ~ms of Python), so a tight TTL
+# is plenty. Keyed by `(day_type, today_iso)` so the cache rolls naturally
+# at the service-day boundary and a GTFS reload that shifts day_type
+# attribution between routes shows up within a minute.
+_MARGINAL_EWT_TTL_SEC = 60.0
+_marginal_ewt_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_marginal_ewt_lock = Lock()
+
+
+def get_marginal_ewt_ranking(db: Session, day_type: str | None = None) -> dict:
+    """Per-(route, period) ranked marginal-bus SWT-reduction estimates.
+
+    For each (route, EWT-period) cell with current scheduled service, returns
+    the closed-form SWT reduction predicted from adding one trip
+    (`period_minutes / (2 N (N + 1))`), ranked descending. Anchors `day_type`
+    on today's Eastern service date when not passed; passing it explicitly
+    is the way to ask "what about Saturdays?" without waiting for a Saturday.
+
+    See `src/marginal_bus.py` for the modeling assumptions surfaced in the
+    UI alongside the ranking (the absolute number is a uniform-arrival SWT
+    proxy; the relative ranking is the defensible part).
+
+    Args:
+        db: Database session.
+        day_type: One of `weekday`, `saturday`, `sunday`, or None (default —
+            anchors on today's Eastern date).
+
+    Returns:
+        Dict with `day_type` and `rankings` (list of per-(route, period)
+        rows sorted by `marginal_swt_reduction_minutes` desc).
+    """
+    from src.marginal_bus import (
+        compute_marginal_ewt_for_routes,
+        compute_marginal_ewt_for_today,
+    )
+    from src.timezones import eastern_today
+
+    if day_type is None:
+        # Anchor on today; cache key reflects that resolved day_type.
+        resolved = _day_type_for(eastern_today())
+    else:
+        resolved = day_type
+
+    cache_key = (resolved, eastern_today().isoformat())
+    with _marginal_ewt_lock:
+        cached = _marginal_ewt_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _MARGINAL_EWT_TTL_SEC:
+                return value
+
+    if day_type is None:
+        result = compute_marginal_ewt_for_today(db)
+    else:
+        rows = compute_marginal_ewt_for_routes(db, day_type)
+        result = {"day_type": day_type, "rankings": rows}
+
+    with _marginal_ewt_lock:
+        _marginal_ewt_cache[cache_key] = (time.monotonic(), result)
+    return result
+
+
 def get_route_period_drilldown(db: Session, route_id: str) -> dict:
     """Per-time-period EWT and bunching for one route on the latest service_date.
 
