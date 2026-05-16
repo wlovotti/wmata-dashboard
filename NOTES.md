@@ -6,18 +6,16 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-15. Closed NOTES-47 — per-route targets /
-commitments config — in PR #99 (adds `config/route_targets.yaml`,
-`src/route_targets.py`, and threads `targets` / `target_value` into
-the system-trend, scorecard, route-detail, and contributors API
-payloads; frontend renders inline target pills on all four
-surfaces). Also added NOTES-51 through NOTES-55 capturing a phased
-information-architecture redesign of the landing page and primary
-nav — the dashboard currently leads with weak aggregate stat-cards
-and a 100-row alphabetic table, with the action-oriented "Biggest
-contributors" view hidden behind a toggle; these items reorient the
-landing flow around the operator questions "are we OK?", "where
-should I look?", and "what changed?".
+Last edited 2026-05-15. Closed NOTES-51 — landing-page declutter —
+in this PR. RouteList now leads with the "Biggest contributors"
+view (previously hidden behind a toggle most users wouldn't find),
+drops the three weak `.stats-summary` cards (Total Routes was a
+constant, Routes with Data was pipeline plumbing, System-wide OTP
+duplicated the OTP card in `<SystemTrend>` immediately above), and
+collapses the full alphabetic table behind a `<details>` "See all
+routes" disclosure. Search is lifted above both views so name
+lookup is one keystroke regardless of mode, and the contributors
+table caps at the top 10 by default with a "Show all" expander.
 
 ---
 
@@ -59,10 +57,6 @@ proxies instead).
 
 **Information architecture & navigation**
 
-- **NOTES-51 Landing-page declutter.** Drop the three weak stat
-  cards, flip the route-table default to "Biggest contributors,"
-  collapse the full table behind a disclosure. Minimum-viable
-  clarity win; no new pages.
 - **NOTES-52 Overview page + primary navigation.** Add top-level
   nav (Overview / Routes / Blocks / Targets); make `/` an Overview
   page anchored by a health-pulse banner, the existing system
@@ -158,44 +152,6 @@ direct answer to "where should my next dollar go?"
 Most ambitious item in this set. Document modeling assumptions
 visibly in the UI; the absolute number is less reliable than the
 relative ranking.
-
----
-
-## NOTES-51. Landing-page declutter
-
-**Severity: low.**
-
-Today `/` is `RouteList`: a `<SystemTrend>` strip (four sparkline
-cards with 30-vs-prior-30 deltas) → a three-card `.stats-summary`
-block → the full scorecard table with a "Default vs Biggest
-contributors" mode toggle. The three stat cards are weak: "Total
-Routes" is a constant, "Routes with Data" is data-pipeline plumbing
-the operator shouldn't see, and "System-wide OTP" duplicates the OTP
-card in `<SystemTrend>` directly above it. Below them, the ~100-row
-alphabetic table makes every route look equally important on first
-load; the action-oriented "Biggest contributors" view (which
-actually answers "where should I look?") is hidden behind a toggle
-most users won't find.
-
-Concrete cleanup (minimum-viable redesign, no new pages):
-1. Delete the three `.stats-summary` `stat-card`s and the associated
-   CSS in `frontend/src/App.css`.
-2. Flip the mode toggle default to `contributors`
-   (`useState('default')` → `useState('contributors')` in
-   `frontend/src/components/RouteList.jsx`).
-3. Collapse the full route table behind a `<details>` / "See all 98
-   routes" disclosure below the contributors view. Always-visible
-   search box stays above so name lookup remains one-keystroke.
-4. Cap the contributors table at top 10 by default with a "Show
-   all" expander.
-
-Low risk, fully reversible, one PR. Doesn't depend on any new data —
-all components already exist. Buys most of the clarity win without
-committing to the bigger nav / Overview redesign in NOTES-52.
-
-### Dependencies
-
-Independent.
 
 ---
 
