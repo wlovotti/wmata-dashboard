@@ -77,14 +77,36 @@ without asking. See `NOTES.md` for the active punch list.
   or `LPAD(arrival_time, 8, '0')` before sorting. Also: hours can be
   `≥ 24` for service that extends past midnight on the same service day.
 
+- **`timepoints` table uses GTFS-Plus internal `stop_id`s** that do
+  NOT match public GTFS `stops.stop_id`. To map a timepoint to a
+  public stop you must lat/lon-join (50m haversine usually suffices;
+  `timepoint_times` uses the same internal IDs). Direct stop_id joins
+  silently return zero matches.
+
+- **`src/otp_constants.py` docstring lists illustrative headway-based
+  routes** (70, 79, X2, 90, 92, 16Y, Metroway) — this is NOT WMATA's
+  Frequent Service Map. D80, for example, has 7-10 min daytime
+  headways and is on WMATA's frequent map but absent from this list.
+  Until NOTES-56 persists the authoritative list, determine frequency
+  from data: `src/ewt.py:FREQUENT_HEADWAY_MAX_SEC = 15 min` at the
+  cell-hour level.
+
+- **`stop_events.source` is dual ('proximity' | 'trip_update')** with
+  nearly inverse blind spots at trip endpoints (see StopEvent / Run
+  docstrings). Pick `proximity` for OTP and per-stop spatial analysis;
+  pick `trip_update` for headways / EWT / bunching. Mixing or
+  wrong-source picks silently double-count or miss data.
+
 ## Commands
 
 ```bash
 uv sync --extra dev                                       # install
+uv sync --extra viz --extra postgres                      # add for matplotlib / psycopg2-using scripts
 uv run uvicorn api.main:app --reload                      # API on :8000
 cd frontend && npm run dev                                # frontend on :5173
 uv run python scripts/continuous_collector.py             # 60 s collector
 uv run python pipelines/run_daily_batch.py                # nightly batch (derive + aggregate + system rollup)
+psql -d wmata_dashboard                                   # ad-hoc DB queries
 uv run pytest -m smoke                                    # fast tests
 uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
 ```
