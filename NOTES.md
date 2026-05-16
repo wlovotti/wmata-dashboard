@@ -6,12 +6,17 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-11 (closed NOTES-45 — block-level cascade view —
-in PR #98. Surfaces `block_id` on per-trip API responses and adds a
-"Blocks" tab on RouteDetail plus a `/blocks/:blockId` timeline page
-that strings together all trips chained to one bus on one service
-day, color-coded by origin/destination deviation with swap and
-cascade badges between adjacent trips.
+Last edited 2026-05-15 (closed NOTES-47 — per-route targets /
+commitments config — in PR #99. Adds `config/route_targets.yaml`
+(checked-in defaults + per-route overrides), `src/route_targets.py`
+(mtime-cached loader), and threads `target_value` / `targets` into
+the system-trend, scorecard, route-detail, and contributors payloads.
+The contributors view now scores each route against its own target
+when set, falling back to the system 30-day baseline when not.
+Frontend renders inline target pills on system trend cards,
+RouteList scorecard rows, RouteDetail KPI cards, and a Reference
+column on the contributors table with a per-row "route target" /
+"system baseline" annotation.
 
 ---
 
@@ -45,9 +50,6 @@ proxies instead).
 - **NOTES-38 Period-over-period deltas on every KPI** *(deferred — needs ≥14 days of data; closed PR #81)*. Augment the
   scorecard payload with deltas; add up/down/flat indicators
   throughout.
-- **NOTES-47 Per-route targets / commitments config.** Configurable
-  per-route targets so trend cards can show "vs target," not only
-  "vs prior period."
 
 **Decision support & operator-side proxies**
 
@@ -134,24 +136,6 @@ direct answer to "where should my next dollar go?"
 Most ambitious item in this set. Document modeling assumptions
 visibly in the UI; the absolute number is less reliable than the
 relative ranking.
-
----
-
-## NOTES-47. Per-route targets / commitments config
-
-**Severity: low.**
-
-To answer "vs target" rather than only "vs prior period," the system
-needs a place to store per-route (and per-system) targets for OTP,
-service-delivered, EWT, and bunching. Keep it simple: one number per
-(route, metric); null means "use system default"; system default is a
-single config row. Storage can be yaml in the repo or a small
-`route_targets` table. Surface targets on the system trend cards
-(PR #78, RouteList) and the per-route trend cards (PR #77, RouteDetail), and on
-the contributors view (PR #80, where contribution is computed
-against the system-window baseline today; swap to per-route target
-once this item lands). Targets can stay editable by the operator, but
-a sensible starting set should be checked in.
 
 ---
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { DeltaIndicator, Sparkline } from './RouteTrend'
+import { DeltaIndicator, Sparkline, TargetIndicator } from './RouteTrend'
 
 const OTP_LINE_COLOR = '#002F6C'
 const SD_LINE_COLOR = '#0E8A6F'
@@ -161,6 +161,23 @@ function SystemTrend() {
   const bunDeltaTitle = (d) =>
     `Last 30 days mean ${d.currentMean.toFixed(2)}% vs prior 30-day mean ${d.priorMean.toFixed(2)}%`
 
+  // System-default targets (NOTES-47). The trend endpoint emits
+  // `target_value` next to `prior_window_value`; units follow each
+  // metric's payload (OTP %, service_delivered 0-1, EWT seconds,
+  // bunching 0-1). We compare against the current 30-day mean — the
+  // pill says "✓ Target X" / "✗ Target X" based on whether the window
+  // mean meets the commitment.
+  const otpTarget = data.otp?.target_value
+  const sdTargetPct =
+    data.service_delivered?.target_value != null
+      ? data.service_delivered.target_value * 100
+      : null
+  const ewtTarget = data.ewt?.target_value
+  const bunTargetPct =
+    data.bunching?.target_value != null
+      ? data.bunching.target_value * 100
+      : null
+
   return (
     <div className="chart-container">
       <h2>30-Day System Trend</h2>
@@ -175,6 +192,12 @@ function SystemTrend() {
                 title={otpDeltaTitle(otpDelta)}
               />
             )}
+            <TargetIndicator
+              value={otpDelta ? otpDelta.currentMean : null}
+              target={otpTarget}
+              higherIsBetter
+              format={(t) => `${t.toFixed(0)}%`}
+            />
           </div>
           <Sparkline
             data={otpSeries}
@@ -199,6 +222,12 @@ function SystemTrend() {
                 title={otpDeltaTitle(sdDelta)}
               />
             )}
+            <TargetIndicator
+              value={sdDelta ? sdDelta.currentMean : null}
+              target={sdTargetPct}
+              higherIsBetter
+              format={(t) => `${t.toFixed(0)}%`}
+            />
           </div>
           <Sparkline
             data={sdSeries}
@@ -223,6 +252,12 @@ function SystemTrend() {
                 title={ewtDeltaTitle(ewtDelta)}
               />
             )}
+            <TargetIndicator
+              value={ewtDelta ? ewtDelta.currentMean : null}
+              target={ewtTarget}
+              higherIsBetter={false}
+              format={(t) => `${(t / 60).toFixed(1)} min`}
+            />
           </div>
           <Sparkline
             data={ewtSeries}
@@ -247,6 +282,12 @@ function SystemTrend() {
                 title={bunDeltaTitle(bunDelta)}
               />
             )}
+            <TargetIndicator
+              value={bunDelta ? bunDelta.currentMean : null}
+              target={bunTargetPct}
+              higherIsBetter={false}
+              format={(t) => `${t.toFixed(1)}%`}
+            />
           </div>
           <Sparkline
             data={bunSeries}

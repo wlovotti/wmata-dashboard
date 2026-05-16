@@ -1,0 +1,55 @@
+# Per-route and system-default performance targets (NOTES-47).
+#
+# Used by the dashboard to answer "vs target" instead of only
+# "vs prior period." Loader: src/route_targets.py.
+# Targets surface alongside metric values on the system trend strip,
+# RouteList scorecard, RouteDetail KPI cards, and the contributors view
+# (where the per-route target replaces the system window mean as the
+# comparison baseline once defined).
+#
+# Schema
+# ------
+# system_default:
+#   otp:                  0-100  (percent on-time, WMATA -2/+7 window)
+#   service_delivered:    0-1    (fraction of scheduled trips delivered)
+#   ewt_minutes:          float  (excess wait time in minutes; lower is better)
+#   bunching_pct:         0-1    (fraction of headway pairs bunched; lower is better)
+#
+# routes:
+#   "<route_id>":
+#     <metric>: <value>   # any subset of the four metrics; missing
+#                         # entries inherit system_default
+#
+# Edit by committing changes to this file. Reload is lazy: the loader
+# re-reads when the file mtime changes (see src/route_targets.py).
+#
+# Units note for ewt: the YAML stores minutes (operator-friendly); the
+# loader exposes seconds via `get_target(route_id, "ewt")` so callers
+# can compare directly to `ewt_seconds` columns in the DB and API.
+#
+# Default-value rationale (2026-05-15)
+# ------------------------------------
+# Values are aspirational but reachable, set roughly 5-10 percentage
+# points above the system's observed 30-day window means from
+# system_metrics_daily so trend cards can show meaningful progress
+# without rendering "below target" on every row from day one.
+#
+# Observed system 30-day baselines (2026-04-15 → 2026-05-14):
+#   - OTP:               ~67-70 %    -> target 75 %  (matches WMATA published bus targets in the high-70s)
+#   - service_delivered: ~92 %       -> target 0.95   (industry-typical reliability target)
+#   - EWT:               ~150-200 s  -> target 3.0 min (180 s; aligned with TfL/MBTA EWT guideposts)
+#   - bunching:          ~3-4 %      -> target 0.04   (just above observed median; CTA's bunching control programs aim for ~5 %)
+#
+# Per-route overrides should reflect commitments that differ from the
+# system default — e.g., a frequent trunk route with a stricter EWT
+# commitment, or a long-haul commuter route with a more permissive OTP
+# given highway exposure. Start empty; let operators add overrides as
+# commitments are negotiated.
+
+system_default:
+  otp: 75.0
+  service_delivered: 0.95
+  ewt_minutes: 3.0
+  bunching_pct: 0.04
+
+routes: {}

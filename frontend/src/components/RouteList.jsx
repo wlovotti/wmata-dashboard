@@ -12,6 +12,34 @@ let _cachedWindow = null
 let _cachedLastUpdated = null
 let _cachedGtfsFreshness = null
 
+// Inline target subline for the scorecard table cells (NOTES-47).
+// `current` and `target` should already be in the same units the cell
+// renders (percent for OTP/SD/bunching, seconds for EWT). Returns null
+// when no target is set so the cell stays unchanged for unconfigured
+// metrics. Color tracks "meets target" semantics: green when current
+// is at/beyond target in the favorable direction, red otherwise.
+function TargetSubline({ current, target, format, higherIsBetter = true }) {
+  if (target == null) return null
+  let color = '#94a3b8'
+  if (current != null) {
+    const meets = higherIsBetter ? current >= target : current <= target
+    color = meets ? '#0E8A6F' : '#C8102E'
+  }
+  return (
+    <div
+      className="metric-target-subline"
+      style={{
+        fontSize: '0.7rem',
+        color,
+        marginTop: '0.1rem',
+      }}
+      title="Per-route target (config/route_targets.yaml)"
+    >
+      tgt {format(target)}
+    </div>
+  )
+}
+
 // "Biggest contributors" view (NOTES-39): ranks routes by their absolute
 // contribution to system underperformance instead of raw worst percentage.
 // The contribution score is `(baseline - route_value) * scheduled_trips`
@@ -361,12 +389,40 @@ function RouteList() {
                   ))}
                 </select>
               </div>
-              {contribData && contribData.baseline_value != null && (
+              {contribData && (
                 <div className="results-count">
-                  System baseline (30d):{' '}
-                  <strong>
-                    {formatContribMetricValue(contribMetric, contribData.baseline_value)}
-                  </strong>
+                  {contribData.system_target_value != null ? (
+                    <>
+                      System target:{' '}
+                      <strong>
+                        {formatContribMetricValue(
+                          contribMetric,
+                          contribData.system_target_value,
+                        )}
+                      </strong>
+                      {contribData.baseline_value != null && (
+                        <>
+                          {' '}· baseline (30d):{' '}
+                          <strong>
+                            {formatContribMetricValue(
+                              contribMetric,
+                              contribData.baseline_value,
+                            )}
+                          </strong>
+                        </>
+                      )}
+                    </>
+                  ) : contribData.baseline_value != null ? (
+                    <>
+                      System baseline (30d):{' '}
+                      <strong>
+                        {formatContribMetricValue(
+                          contribMetric,
+                          contribData.baseline_value,
+                        )}
+                      </strong>
+                    </>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -400,7 +456,9 @@ function RouteList() {
                     <th>Route</th>
                     <th>Name</th>
                     <th>Route value</th>
-                    <th>Baseline</th>
+                    <th title="Per-route target if configured, otherwise system 30-day baseline">
+                      Reference
+                    </th>
                     <th>Scheduled trips (30d)</th>
                     <th>Contribution score</th>
                   </tr>
@@ -436,7 +494,23 @@ function RouteList() {
                           {formatContribMetricValue(contribMetric, c.route_value)}
                         </td>
                         <td className="metric">
-                          {formatContribMetricValue(contribMetric, c.baseline_value)}
+                          {formatContribMetricValue(
+                            contribMetric,
+                            c.reference_value ?? c.baseline_value,
+                          )}
+                          {c.reference_source && (
+                            <div
+                              style={{
+                                fontSize: '0.7rem',
+                                color: '#64748b',
+                                marginTop: '0.1rem',
+                              }}
+                            >
+                              {c.reference_source === 'target'
+                                ? 'route target'
+                                : 'system baseline'}
+                            </div>
+                          )}
                         </td>
                         <td className="metric">{c.scheduled_trips.toLocaleString('en-US')}</td>
                         <td className="metric">
@@ -464,9 +538,9 @@ function RouteList() {
               </table>
             )}
             <p style={{ marginTop: '1rem', fontSize: '0.85em', color: '#666' }}>
-              Contribution = (baseline − route value) × scheduled trips, sign-flipped for
-              lower-is-better metrics. Baseline is the system 30-day window mean; per-route
-              targets land with NOTES-47.
+              Contribution = (reference − route value) × scheduled trips, sign-flipped for
+              lower-is-better metrics. Reference is the route&apos;s configured target when set
+              (config/route_targets.yaml), otherwise the system 30-day window mean.
             </p>
           </div>
         ) : (
@@ -550,11 +624,31 @@ function RouteList() {
                   {route.otp_all_pct != null
                     ? `${Math.round(route.otp_all_pct)}%`
                     : '—'}
+                  <TargetSubline
+                    current={route.otp_all_pct}
+                    target={route.targets?.otp}
+                    higherIsBetter
+                    format={(t) => `${t.toFixed(0)}%`}
+                  />
                 </td>
                 <td className="metric">
                   {route.service_delivered_ratio != null
                     ? `${Math.round(route.service_delivered_ratio * 100)}%`
                     : '—'}
+                  <TargetSubline
+                    current={
+                      route.service_delivered_ratio != null
+                        ? route.service_delivered_ratio * 100
+                        : null
+                    }
+                    target={
+                      route.targets?.service_delivered != null
+                        ? route.targets.service_delivered * 100
+                        : null
+                    }
+                    higherIsBetter
+                    format={(t) => `${t.toFixed(0)}%`}
+                  />
                 </td>
                 <td className="metric">
                   {route.ewt_seconds != null
@@ -568,6 +662,12 @@ function RouteList() {
                       Thin
                     </span>
                   )}
+                  <TargetSubline
+                    current={route.ewt_seconds}
+                    target={route.targets?.ewt}
+                    higherIsBetter={false}
+                    format={(t) => `${(t / 60).toFixed(1)}m`}
+                  />
                 </td>
                 <td className="metric">
                   {route.bunching_rate != null
@@ -581,6 +681,20 @@ function RouteList() {
                       Thin
                     </span>
                   )}
+                  <TargetSubline
+                    current={
+                      route.bunching_rate != null
+                        ? route.bunching_rate * 100
+                        : null
+                    }
+                    target={
+                      route.targets?.bunching != null
+                        ? route.targets.bunching * 100
+                        : null
+                    }
+                    higherIsBetter={false}
+                    format={(t) => `${t.toFixed(1)}%`}
+                  />
                 </td>
               </tr>
               ))

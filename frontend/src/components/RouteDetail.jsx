@@ -4,7 +4,11 @@ import RouteMap from './RouteMap'
 import PeriodDrilldown from './PeriodDrilldown'
 import RecentRuns from './RecentRuns'
 import BlockList from './BlockList'
-import RouteTrend, { computeWindowDelta, DeltaIndicator } from './RouteTrend'
+import RouteTrend, {
+  computeWindowDelta,
+  DeltaIndicator,
+  TargetIndicator,
+} from './RouteTrend'
 import StopDiagnostic from './StopDiagnostic'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 
@@ -364,6 +368,12 @@ function RouteDetail() {
                 title={`7-day mean ${otpDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${otpDelta.priorMean.toFixed(1)}%`}
               />
             )}
+            <TargetIndicator
+              value={routeData.otp_all_pct}
+              target={routeData.targets?.otp}
+              higherIsBetter
+              format={(t) => `${t.toFixed(0)}%`}
+            />
           </div>
         </div>
         <div className="stat-card">
@@ -381,6 +391,20 @@ function RouteDetail() {
                 title={`7-day mean ${sdDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${sdDelta.priorMean.toFixed(1)}%`}
               />
             )}
+            <TargetIndicator
+              value={
+                routeData.service_delivered_ratio != null
+                  ? routeData.service_delivered_ratio * 100
+                  : null
+              }
+              target={
+                routeData.targets?.service_delivered != null
+                  ? routeData.targets.service_delivered * 100
+                  : null
+              }
+              higherIsBetter
+              format={(t) => `${t.toFixed(0)}%`}
+            />
           </div>
           {routeData.service_delivered_scheduled != null && (
             <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
@@ -413,7 +437,15 @@ function RouteDetail() {
               </span>
             )}
           </div>
-          <div className="stat-label">Excess Wait Time</div>
+          <div className="stat-label">
+            Excess Wait Time
+            <TargetIndicator
+              value={routeData.ewt_seconds}
+              target={routeData.targets?.ewt}
+              higherIsBetter={false}
+              format={(t) => `${(t / 60).toFixed(1)} min`}
+            />
+          </div>
           {routeData.ewt_seconds == null && (
             <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
               (frequent service only)
@@ -439,7 +471,23 @@ function RouteDetail() {
               </span>
             )}
           </div>
-          <div className="stat-label">Bunching Rate</div>
+          <div className="stat-label">
+            Bunching Rate
+            <TargetIndicator
+              value={
+                routeData.bunching_rate != null
+                  ? routeData.bunching_rate * 100
+                  : null
+              }
+              target={
+                routeData.targets?.bunching != null
+                  ? routeData.targets.bunching * 100
+                  : null
+              }
+              higherIsBetter={false}
+              format={(t) => `${t.toFixed(1)}%`}
+            />
+          </div>
           {routeData.bunching_total_headways != null && routeData.bunching_total_headways > 0 && (
             <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
               ({routeData.bunching_count} of {routeData.bunching_total_headways} pairs)
@@ -482,6 +530,14 @@ function RouteDetail() {
           otpDelta={otpDelta}
           sdDelta={sdDelta}
           excessDelta={excessDelta}
+          otpTarget={routeData.targets?.otp ?? null}
+          sdTarget={routeData.targets?.service_delivered ?? null}
+          otpCurrent={routeData.otp_all_pct ?? null}
+          sdCurrent={
+            routeData.service_delivered_ratio != null
+              ? routeData.service_delivered_ratio * 100
+              : null
+          }
           loading={trendLoading}
           error={trendError}
         />
