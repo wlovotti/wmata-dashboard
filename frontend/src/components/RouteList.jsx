@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
+import { computeSpectrumBar } from '../utils/spectrumBar'
 import SystemTrend from './SystemTrend'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
@@ -36,6 +37,45 @@ function TargetSubline({ current, target, format, higherIsBetter = true }) {
       title="Per-route target (config/route_targets.yaml)"
     >
       tgt {format(target)}
+    </div>
+  )
+}
+
+// Spectrum bar for the scorecard table cells (NOTES-55). A thin
+// red/yellow/green track under each numeric value lets the eye
+// pre-classify "needs attention" before parsing digits, eliminating the
+// number-then-target comparison the original `TargetSubline` required on
+// every cell. Returns null when there's no target or no current value
+// (the cell falls back to the bare numeric / em-dash). Color mapping
+// lives in `utils/spectrumBar.js` so it can be reused if another table
+// adopts the pattern; the same ±10% yellow band applies to all metrics
+// to keep the visual language consistent across the row.
+function SpectrumBar({ current, target, higherIsBetter }) {
+  const result = computeSpectrumBar({ current, target, higherIsBetter })
+  if (result == null) return null
+  const { color, fillPct } = result
+  return (
+    <div
+      className="spectrum-bar-track"
+      style={{
+        marginTop: '0.25rem',
+        width: '100%',
+        height: '5px',
+        backgroundColor: '#e5e7eb',
+        borderRadius: '2px',
+        overflow: 'hidden',
+      }}
+      aria-hidden="true"
+    >
+      <div
+        className="spectrum-bar-fill"
+        style={{
+          width: `${fillPct}%`,
+          height: '100%',
+          backgroundColor: color,
+          transition: 'width 0.2s ease',
+        }}
+      />
     </div>
   )
 }
@@ -654,6 +694,11 @@ function RouteList() {
                   {route.otp_all_pct != null
                     ? `${Math.round(route.otp_all_pct)}%`
                     : '—'}
+                  <SpectrumBar
+                    current={route.otp_all_pct}
+                    target={route.targets?.otp}
+                    higherIsBetter
+                  />
                   <TargetSubline
                     current={route.otp_all_pct}
                     target={route.targets?.otp}
@@ -665,6 +710,19 @@ function RouteList() {
                   {route.service_delivered_ratio != null
                     ? `${Math.round(route.service_delivered_ratio * 100)}%`
                     : '—'}
+                  <SpectrumBar
+                    current={
+                      route.service_delivered_ratio != null
+                        ? route.service_delivered_ratio * 100
+                        : null
+                    }
+                    target={
+                      route.targets?.service_delivered != null
+                        ? route.targets.service_delivered * 100
+                        : null
+                    }
+                    higherIsBetter
+                  />
                   <TargetSubline
                     current={
                       route.service_delivered_ratio != null
@@ -692,6 +750,11 @@ function RouteList() {
                       Thin
                     </span>
                   )}
+                  <SpectrumBar
+                    current={route.ewt_seconds}
+                    target={route.targets?.ewt}
+                    higherIsBetter={false}
+                  />
                   <TargetSubline
                     current={route.ewt_seconds}
                     target={route.targets?.ewt}
@@ -711,6 +774,19 @@ function RouteList() {
                       Thin
                     </span>
                   )}
+                  <SpectrumBar
+                    current={
+                      route.bunching_rate != null
+                        ? route.bunching_rate * 100
+                        : null
+                    }
+                    target={
+                      route.targets?.bunching != null
+                        ? route.targets.bunching * 100
+                        : null
+                    }
+                    higherIsBetter={false}
+                  />
                   <TargetSubline
                     current={
                       route.bunching_rate != null

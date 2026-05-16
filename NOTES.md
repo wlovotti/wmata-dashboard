@@ -6,16 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-15. Closed NOTES-51 — landing-page declutter —
-in this PR. RouteList now leads with the "Biggest contributors"
-view (previously hidden behind a toggle most users wouldn't find),
-drops the three weak `.stats-summary` cards (Total Routes was a
-constant, Routes with Data was pipeline plumbing, System-wide OTP
-duplicated the OTP card in `<SystemTrend>` immediately above), and
-collapses the full alphabetic table behind a `<details>` "See all
-routes" disclosure. Search is lifted above both views so name
-lookup is one keystroke regardless of mode, and the contributors
-table caps at the top 10 by default with a "Show all" expander.
+Last edited 2026-05-15. Closed NOTES-55 — route table information
+density — in this PR. Each scorecard metric cell now renders a
+thin red/yellow/green spectrum bar beneath the numeric value,
+classified against the route's target with a uniform ±10% yellow
+band. The eye can pre-classify "needs attention" before parsing
+digits across a 50+ row table. Variant (b) sparklines deferred —
+that's a payload extension on `/api/routes` and a separate scope.
 
 ---
 
@@ -68,9 +65,6 @@ proxies instead).
 - **NOTES-54 "What changed" panel on Overview** *(deferred — needs
   NOTES-38 + ≥14d data)*. Week-over-week movers split into
   improvements / degradations.
-- **NOTES-55 Route table information density.** Spectrum bars per
-  cell or sparkline-per-row, to make the scorecard scannable
-  without parsing digits.
 
 ### P5 — Cleanup
 
@@ -251,45 +245,6 @@ item becomes implementable).
 
 NOTES-52 (Overview shell). NOTES-38 (period-over-period deltas —
 deferred).
-
----
-
-## NOTES-55. Route table information density
-
-**Severity: low.**
-
-The current scorecard table cells stack a number plus a small `tgt
-X` subline (NOTES-47, PR #99). For an operator scanning 50+ rows,
-raw numbers don't tell the "good or bad?" story at a glance — the
-eye has to parse digits, then compare to the target subline, on
-every cell.
-
-Two alternatives, in increasing ambition:
-
-(a) **Spectrum bars per cell.** A thin horizontal bar colored
-    red→yellow→green relative to that route's target, with the
-    numeric value small to the right. Reference: Stripe Sigma,
-    Datadog cost cards. Lets the eye pre-classify "needs attention"
-    before parsing digits.
-(b) **Sparkline-per-row.** A tiny 7-day trend in a sparkline column
-    so each row tells its own time-series story (is this route
-    drifting, recovering, or stable?). Requires extending
-    `/api/routes` to include a compact per-route trend series, or
-    fan-out to the existing `/api/routes/{id}/trend` with batching.
-    Reference: GitHub repo cards, Linear issue rows.
-
-Both are pure rendering / payload work — no new metrics. (b) is
-bigger because of the payload extension and the per-route fetch
-budget. Either makes the table itself scannable even without the
-Overview redesign, so this item is independent of NOTES-52 — it can
-ship as RouteList polish on its own track.
-
-### Dependencies
-
-Independent. Best after the landing-page declutter (PR #101) —
-density work is wasted if the table is rebuilt structurally first.
-Ordering with NOTES-52 doesn't matter — the `/routes` table benefits
-from this regardless of whether `/` is the table or the Overview.
 
 ---
 
