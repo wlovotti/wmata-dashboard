@@ -880,3 +880,212 @@ class RouteMetricsDailyOverlay(Base):
         # route. A date-first index keeps the per-window read narrow.
         Index("idx_route_metrics_overlay_date", "service_date"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Route diagnostic profile (NOTES-57)
+# ---------------------------------------------------------------------------
+#
+# Three sibling tables hold the diagnostic surfaces materialized by
+# `src/route_diagnostics.py` and refreshed nightly by
+# `pipelines/refresh_route_diagnostic_profile.py`. The split is deliberate —
+# each downstream panel (NOTES-58/59/60/61/62) reads exactly one shape:
+#
+#   route_diagnostic_segment   — per-segment slip + cumulative slip
+#                                drives slip-trajectory charts (NOTES-58),
+#                                stop-pair / corridor diagnostic
+#                                (NOTES-59/62), schedule audit (NOTES-60)
+#
+#   route_diagnostic_timepoint — per-timepoint behavior classification
+#                                drives timepoint behavior table (NOTES-58),
+#                                hold-down candidates (NOTES-61)
+#
+#   route_diagnostic_direction — per-direction early%/late%/signature
+#                                drives direction-asymmetry summary (NOTES-58)
+#
+# One denormalized table was considered; rejected because per-segment rows
+# are per-edge (~50 per direction per route), per-timepoint rows are
+# per-node (~5-10 per direction per route), and per-direction rows are 1
+# per direction. Stuffing the three shapes into one table would either
+# leave most columns null per row or require a discriminator and downstream
+# filters at every read. Three narrow tables keep each panel's query trivial.
+
+
+class RouteDiagnosticSegment(Base):
+    """
+    Per-(route_id, direction_id, period, from_seq, to_seq) mean slip and
+    cumulative slip. Materialized nightly from `stop_events.source =
+    'proximity'` over the last 30 days. NOTES-57.
+
+    Slip = observed segment travel time − scheduled segment travel time,
+    averaged across all observed trips in the period. The origin-departure
+    segment is excluded (dominated by layover artifact, not real slip);
+    see `src/route_diagnostics.py:compute_segment_slip`.
+
+    The `period` dimension carries one of am_peak / midday / pm_peak /
+    evening / late / all. The `all` row pools every hour and is the most
+    common rendering target; the named-period rows enable time-of-day
+    slicing.
+
+    `is_timepoint` is a denormalized flag derived from the 50m haversine
+    match between `timepoints` (GTFS-Plus internal stop_ids) and `stops`
+    (public GTFS). Stored on the to-stop so panels can mark timepoint
+    arrivals on the slip trajectory chart in one pass.
+
+    `cum_slip_sec` is the running sum of `mean_slip_sec` in stop-sequence
+    order per (route_id, direction_id, period), with the origin-departure
+    segment already excluded. Stored so the renderer doesn't have to scan
+    every prior row to compute the running total.
+    """
+
+    __tablename__ = "route_diagnostic_segment"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(String, nullable=False)
+    direction_id = Column(Integer, nullable=False)
+    period = Column(String, nullable=False)  # am_peak | midday | pm_peak | evening | late | all
+
+    from_seq = Column(Integer, nullable=False)
+    from_stop_id = Column(String, nullable=False)
+    to_seq = Column(Integer, nullable=False)
+    to_stop_id = Column(String, nullable=False)
+
+    mean_slip_sec = Column(Float, nullable=False)
+    cum_slip_sec = Column(Float, nullable=False)
+    n_observations = Column(Integer, nullable=False)
+    is_timepoint = Column(Boolean, nullable=False, default=False)  # to-stop matches a timepoint
+
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "route_id",
+            "direction_id",
+            "period",
+            "from_seq",
+            "to_seq",
+            name="uq_route_diag_segment_key",
+        ),
+        # Most-common read: one route, one period, all directions in order.
+        Index(
+            "idx_route_diag_segment_route_period",
+            "route_id",
+            "period",
+            "direction_id",
+            "from_seq",
+        ),
+        # Cross-route segment ranking (NOTES-59/62): scan by from_stop/to_stop.
+        Index("idx_route_diag_segment_pair", "from_stop_id", "to_stop_id", "period"),
+    )
+
+
+class RouteDiagnosticTimepoint(Base):
+    """
+    Per-(route_id, direction_id, period, timepoint_stop_id) behavior
+    classification with the entering/leaving distribution summaries that
+    justify the label. Materialized nightly. NOTES-57.
+
+    Classification values (from `src/route_diagnostics.py:classify_timepoint`):
+      - `recovery`     — median deviation drops ≥ 120s across the timepoint
+      - `leaky`        — p10 drops ≥ 180s downstream (early-departure bleed)
+      - `underpowered` — median entering ≥ 120s, no material compression
+      - `neutral`      — median in ±60s entering, no notable shift
+
+    Insufficient-sample timepoints (< 30 observations on either side) are
+    suppressed at the source — they don't get rows here. The renderer
+    treats missing rows as "no data" rather than emitting a row with a
+    null classification.
+
+    The hold-down candidates page (NOTES-61) reads
+    `classification = 'leaky'` over all routes and ranks by p10 drop;
+    the timepoint behavior table on RouteDetail (NOTES-58) reads one
+    `route_id` at a time.
+    """
+
+    __tablename__ = "route_diagnostic_timepoint"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(String, nullable=False)
+    direction_id = Column(Integer, nullable=False)
+    period = Column(String, nullable=False)
+    timepoint_stop_id = Column(String, nullable=False)
+
+    classification = Column(String, nullable=False)  # recovery | leaky | underpowered | neutral
+
+    # Distribution summaries that justify the classification — surfaced in
+    # the RouteDetail timepoint table so the badge isn't a black box.
+    median_dev_entering = Column(Float)
+    median_dev_leaving = Column(Float)
+    p10_dev_entering = Column(Float)
+    p10_dev_leaving = Column(Float)
+
+    n_observations = Column(Integer, nullable=False)
+
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "route_id",
+            "direction_id",
+            "period",
+            "timepoint_stop_id",
+            name="uq_route_diag_timepoint_key",
+        ),
+        # NOTES-58 RouteDetail read: one route, one period.
+        Index(
+            "idx_route_diag_timepoint_route_period",
+            "route_id",
+            "period",
+            "direction_id",
+        ),
+        # NOTES-61 hold-down candidates read: scan by classification.
+        Index(
+            "idx_route_diag_timepoint_classification",
+            "classification",
+            "period",
+        ),
+    )
+
+
+class RouteDiagnosticDirection(Base):
+    """
+    Per-(route_id, direction_id, period) early% / late% / signature.
+    Materialized nightly. NOTES-57.
+
+    The signature is one of:
+      - `early_dominant` — early% > late% + 5pp
+      - `late_dominant`  — late% > early% + 5pp
+      - `balanced`       — within the 5pp margin
+
+    Reads OTP-style buckets (−2 / +7 minute window, mirroring
+    `src/otp_constants.py`) but does not store on_time% — it's
+    `100 − early% − late%` if a panel wants it.
+
+    Sample size guard lives upstream — rows with no observations at all in
+    the period are suppressed; the renderer can scale visual emphasis by
+    `n_observations` if it wants.
+    """
+
+    __tablename__ = "route_diagnostic_direction"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(String, nullable=False)
+    direction_id = Column(Integer, nullable=False)
+    period = Column(String, nullable=False)
+
+    early_pct = Column(Float, nullable=False)
+    late_pct = Column(Float, nullable=False)
+    signature = Column(String, nullable=False)  # early_dominant | late_dominant | balanced
+    n_observations = Column(Integer, nullable=False)
+
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "route_id",
+            "direction_id",
+            "period",
+            name="uq_route_diag_direction_key",
+        ),
+        Index("idx_route_diag_direction_route_period", "route_id", "period"),
+    )

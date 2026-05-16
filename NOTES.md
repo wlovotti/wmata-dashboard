@@ -6,14 +6,16 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-15. Closed NOTES-52 — Overview page + primary
-navigation — in this PR (#105). Header now carries Overview /
-Routes / Blocks / Targets nav; `/` is a new Overview page anchored
-on a system health-pulse banner, the existing 30-day system trend
-strip, and a top-5 contributors panel; `/routes` hosts the legacy
-scorecard table; `/blocks` lists active blocks system-wide ranked
-by trip count; `/targets` renders `config/route_targets.yaml`
-read-only.
+Last edited 2026-05-16. Closed NOTES-57 — Per-route diagnostic
+pipeline (foundation) — in this PR (#107). New
+`src/route_diagnostics.py` computes per-(route, direction, period)
+segment slip + cumulative slip, per-timepoint behavior
+classification (recovery / leaky / underpowered / neutral), and
+direction asymmetry signatures. Persisted to three sibling tables
+(`route_diagnostic_segment`, `_timepoint`, `_direction`) refreshed
+nightly via `pipelines/refresh_route_diagnostic_profile.py`,
+wired into `pipelines/run_daily_batch.py`'s housekeeping pass.
+Foundation for NOTES-58/59/60/61/62.
 
 ---
 
@@ -74,15 +76,12 @@ target lists directly.
   Service Map (D80, 7-10 min daytime headways, is frequent but not
   listed). Establishes the authoritative list and wires it into
   headline-metric selection (EWT for frequent, OTP for standard).
-- **NOTES-57 Per-route diagnostic pipeline (foundation).**
-  Materialize per-(route, direction, stop_sequence, period) slip
-  statistics and per-timepoint behavior classification (recovery /
-  leaky / underpowered / neutral). Foundation for 58-61.
-- **NOTES-58 RouteDetail per-route diagnosis panel.** Renders
-  NOTES-57 — slip trajectory chart (both directions, timepoint
-  markers) + timepoint behavior table + LLM-generated diagnosis
-  narrative (generated batch / on-demand by the user, persisted;
-  public reads from cache). The D80 deep-dive shape, productized.
+- **NOTES-58 RouteDetail per-route diagnosis panel.** Renders the
+  route_diagnostic_profile foundation (PR #107) — slip trajectory
+  chart (both directions, timepoint markers) + timepoint behavior
+  table + LLM-generated diagnosis narrative (generated batch /
+  on-demand by the user, persisted; public reads from cache). The
+  D80 deep-dive shape, productized.
 - **NOTES-59 Cross-route segment diagnostic (V1, stop-pair).**
   Aggregate slip across all routes per `(from_stop, to_stop)`
   segment → ranked infrastructure-investment candidates (TSP /
@@ -392,57 +391,12 @@ once a year).
 
 ---
 
-## NOTES-57. Per-route diagnostic pipeline (foundation)
-
-**Severity: medium (blocks NOTES-58/59/60/61).**
-
-Materialize per-route diagnostic primitives so dashboard panels and
-ranked target lists are O(1) renders rather than ad-hoc queries.
-Codifies the analytical pattern from the D80 deep-dive (May 2026 session).
-
-Per-route, per-direction, per-period (am_peak / midday / pm_peak /
-evening / late / all):
-- **Per-segment slip:** for each consecutive `(arrive_seq, stop_id)`
-  pair on the route, mean and count of `observed_gap - scheduled_gap`
-  across all observed trips. Excludes the origin-departure segment
-  (dominated by layover artifact, not real slip). Reference impl:
-  `visualizations/slip_trajectory.py:fetch_slip`.
-- **Cumulative slip:** running sum of mean per-segment slip from
-  first non-origin segment. Equals the typical schedule deviation at
-  each stop for a bus that left origin on time.
-- **Timepoint behavior classification:** for each WMATA timepoint on
-  the route (joined via 50m haversine match between `timepoints` and
-  `stops` — the GTFS-Plus internal stop_ids don't match public GTFS),
-  classify behavior based on deviation distribution shift across the
-  timepoint:
-  - *recovery* — median deviation drops by ≥120s
-  - *leaky* — p10 drops by ≥180s downstream (early-departure bleed)
-  - *underpowered* — median deviation does not drop materially
-    (≥+120s entering, no compression)
-  - *neutral* — median within ±60s, low variance change
-- **Direction asymmetry signature:** early-dominant / late-dominant /
-  balanced based on the early% vs late% split (D80 dir 0 is
-  early-dominant at 26% early; dir 1 is late-dominant at 26% late).
-
-Persistence: materialized table `route_diagnostic_profile` refreshed
-nightly via a new entry in `pipelines/run_daily_batch.py`. Keep the
-raw computation in `src/route_diagnostics.py` so it's testable
-independently.
-
-### Dependencies
-
-Stop_events + runs foundation (already landed). No dependency on
-NOTES-56 — frequent-route designation doesn't change diagnostic
-computation, only what the headline metric is in the UI surface.
-
----
-
 ## NOTES-58. RouteDetail per-route diagnosis panel
 
 **Severity: low.**
 
-Surfaces the NOTES-57 materialized profile on RouteDetail as a new
-"Diagnosis" tab or panel. Two-direction layout (matching how slip
+Surfaces the route_diagnostic_profile materialized in PR #107 on
+RouteDetail as a new "Diagnosis" tab or panel. Two-direction layout (matching how slip
 trajectory naturally splits):
 
 - **Slip trajectory chart** — per-direction line chart of cumulative
@@ -455,23 +409,24 @@ trajectory naturally splits):
   underpowered / neutral), median dev entering, median dev leaving,
   p10/p90 spread change. Per-period breakdown via the period selector.
 - **LLM-generated diagnosis narrative** — 200-300 word interpretation
-  of the route's diagnostic profile (NOTES-57): direction asymmetry,
+  of the route's diagnostic profile (PR #107): direction asymmetry,
   key delay zones, timepoint behavior (recovery / leaky / underpowered),
   2-3 ranked hypotheses with evidence, suggested intervention class.
   Generated in a batch / on-demand workflow, never in the request
   path, since the public site will eventually serve this content
   uncached:
   - New CLI `scripts/generate_route_diagnosis.py` invoked by the user
-    (per route or `--all`). Reads the materialized profile from
-    NOTES-57, calls Claude with a structured prompt + the profile as
-    context, writes the result to a new `route_diagnosis_narrative`
+    (per route or `--all`). Reads the materialized profile from the
+    `route_diagnostic_*` tables (PR #107), calls Claude with a
+    structured prompt + the profile as context, writes the result to
+    a new `route_diagnosis_narrative`
     table keyed by `(route_id, period)` with `generated_at`,
     `model_id`, `prompt_version`, `profile_snapshot_hash` columns.
   - API endpoint `GET /api/routes/{id}/diagnosis?period=...` reads
     from the cache table; never invokes Claude. Returns
     `is_stale=true` when `profile_snapshot_hash` differs from the
-    current NOTES-57 profile so the panel can show a "diagnosis is
-    out of date" badge — regeneration stays manual.
+    current diagnostic profile (PR #107) so the panel can show a
+    "diagnosis is out of date" badge — regeneration stays manual.
   - Example narrative (from the D80 May 2026 deep-dive): "Direction 0
     (Union Station → Friendship Heights): schedule under-budgets
     running time through downtown by ~5 min cumulative before
@@ -492,9 +447,10 @@ exposed to LLM cost / latency / availability.
 
 ### Dependencies
 
-NOTES-57 (pipeline foundation). NOTES-56 is a soft prerequisite —
-the diagnosis text should note "this route is on WMATA's Frequent
-Service Map" when applicable, but the panel works without it.
+route_diagnostic_profile foundation (PR #107). NOTES-56 is a soft
+prerequisite — the diagnosis text should note "this route is on
+WMATA's Frequent Service Map" when applicable, but the panel works
+without it.
 
 ---
 
@@ -502,8 +458,9 @@ Service Map" when applicable, but the panel works without it.
 
 **Severity: low (highest-leverage novel output — V1 piece).**
 
-Aggregates per-segment slip from NOTES-57 across *all* routes to
-identify infrastructure-investment targets at the stop-pair level.
+Aggregates per-segment slip from the route_diagnostic_profile
+foundation (PR #107) across *all* routes to identify
+infrastructure-investment targets at the stop-pair level.
 V1 deliberately uses segment-identity matching only — same
 `(from_stop, to_stop)` across routes counts as the same segment —
 and defers shape-aware corridor rollup to NOTES-62 so V1 can ship
@@ -536,7 +493,7 @@ Use cases (V1):
 
 ### Dependencies
 
-NOTES-57.
+route_diagnostic_profile foundation (PR #107).
 
 ---
 
@@ -614,7 +571,7 @@ Use cases:
 
 ### Dependencies
 
-NOTES-57.
+route_diagnostic_profile foundation (PR #107).
 
 ---
 
@@ -646,9 +603,10 @@ Use cases:
 
 ### Dependencies
 
-NOTES-57. NOTES-56 is a soft prerequisite for "frequent route" filtering
-in the ranking (headway-based dispatching is the right intervention
-specifically for frequent routes).
+route_diagnostic_profile foundation (PR #107). NOTES-56 is a soft
+prerequisite for "frequent route" filtering in the ranking
+(headway-based dispatching is the right intervention specifically
+for frequent routes).
 
 ---
 
