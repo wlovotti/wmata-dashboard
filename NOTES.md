@@ -191,8 +191,9 @@ explicitly allowed this).
 
 ### Dependencies
 
-Independent. Pairs with NOTES-51 — either order works, but doing
-NOTES-51 first means less to throw away if this item slips.
+Independent. Pairs with the landing-page declutter (PR #101) —
+either order works, but doing the declutter first means less to
+throw away if this item slips.
 
 ---
 
@@ -285,10 +286,10 @@ ship as RouteList polish on its own track.
 
 ### Dependencies
 
-Independent. Best after NOTES-51 (density work is wasted if the
-table is rebuilt structurally first). Ordering with NOTES-52 doesn't
-matter — the `/routes` table benefits from this regardless of
-whether `/` is the table or the Overview.
+Independent. Best after the landing-page declutter (PR #101) —
+density work is wasted if the table is rebuilt structurally first.
+Ordering with NOTES-52 doesn't matter — the `/routes` table benefits
+from this regardless of whether `/` is the table or the Overview.
 
 ---
 
