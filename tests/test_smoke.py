@@ -2647,18 +2647,21 @@ def test_marginal_ewt_endpoint_returns_envelope(client):
 
 @pytest.mark.smoke
 def test_marginal_ewt_endpoint_ranks_by_swt_reduction(client, db_session):
-    """A route with 3 weekday trips in AM Peak produces a SWT-reduction row.
+    """A frequent-service route in AM Peak produces a SWT-reduction row.
 
     Verifies the closed-form arithmetic and the envelope ordering. AM Peak
-    is 6-9 (180 minutes); with N=3 trips the SWT reduction is
-    `180 / (2 * 3 * 4) = 7.5 minutes`.
+    is 6-9 (180 minutes); the frequent-service gate requires mean
+    scheduled headway ≤ 15 min, i.e. N ≥ 180/15 = 12 trips. Seed 12 trips
+    (4 per hour for 3 hours) so the cell clears the gate. With N=12 the
+    SWT reduction is `180 / (2 * 12 * 13) = 0.5769… min`, rounded to
+    0.577 min in the API contract.
     """
     from api import aggregations as _agg
     from src.models import Route, RouteServiceProfile
 
     _agg._marginal_ewt_cache.clear()
 
-    # Seed a route plus a few hourly profile rows that bucket into AM Peak.
+    # Seed a route plus hourly profile rows that bucket into AM Peak.
     db_session.add(
         Route(
             route_id="MB1",
@@ -2674,22 +2677,22 @@ def test_marginal_ewt_endpoint_ranks_by_swt_reduction(client, db_session):
                 route_id="MB1",
                 day_type="weekday",
                 hour=6,
-                scheduled_trips=1,
-                is_frequent=False,
+                scheduled_trips=4,
+                is_frequent=True,
             ),
             RouteServiceProfile(
                 route_id="MB1",
                 day_type="weekday",
                 hour=7,
-                scheduled_trips=1,
-                is_frequent=False,
+                scheduled_trips=4,
+                is_frequent=True,
             ),
             RouteServiceProfile(
                 route_id="MB1",
                 day_type="weekday",
                 hour=8,
-                scheduled_trips=1,
-                is_frequent=False,
+                scheduled_trips=4,
+                is_frequent=True,
             ),
         ]
     )
@@ -2709,14 +2712,97 @@ def test_marginal_ewt_endpoint_ranks_by_swt_reduction(client, db_session):
         None,
     )
     assert am_peak_row is not None
-    assert am_peak_row["current_trip_count"] == 3
+    assert am_peak_row["current_trip_count"] == 12
     assert am_peak_row["period_minutes"] == 180
-    # 180 / (2 * 3) = 30, but we round to 2dp.
-    assert am_peak_row["current_swt_minutes"] == 30.0
-    # 180 / (2 * 3 * 4) = 7.5
-    assert am_peak_row["marginal_swt_reduction_minutes"] == 7.5
-    # 1 / (3 + 1) = 0.25
-    assert am_peak_row["marginal_swt_reduction_pct"] == 0.25
+    # 180 / (2 * 12) = 7.5
+    assert am_peak_row["current_swt_minutes"] == 7.5
+    # 180 / (2 * 12 * 13) = 0.57692..., rounded to 3dp = 0.577
+    assert am_peak_row["marginal_swt_reduction_minutes"] == 0.577
+    # 1 / (12 + 1) = 0.07692..., rounded to 4dp = 0.0769
+    assert am_peak_row["marginal_swt_reduction_pct"] == 0.0769
+
+
+@pytest.mark.smoke
+def test_marginal_ewt_endpoint_filters_non_frequent_service(client, db_session):
+    """Non-frequent routes (mean headway > 15 min) are excluded from the ranking.
+
+    Random-arrival SWT only applies when riders aren't consulting the
+    schedule — operationally, when mean headway is ≤ 15 min. A route with
+    3 trips across the 180-min AM Peak has a 60-min mean headway and
+    should be dropped entirely, even though the formula is well-defined.
+    Same goes for N=1 (no headway at all) and N=0 (no service).
+    """
+    from api import aggregations as _agg
+    from src.models import Route, RouteServiceProfile
+
+    _agg._marginal_ewt_cache.clear()
+
+    db_session.add_all(
+        [
+            Route(
+                route_id="MBSPARSE",
+                route_short_name="MBSPARSE",
+                route_long_name="Marginal Bus Sparse Route",
+                route_type=3,
+                is_current=True,
+            ),
+            Route(
+                route_id="MBSINGLE",
+                route_short_name="MBSINGLE",
+                route_long_name="Marginal Bus N=1 Route",
+                route_type=3,
+                is_current=True,
+            ),
+        ]
+    )
+    # Sparse route: 3 trips in AM Peak → 60-min mean headway → must drop.
+    db_session.add_all(
+        [
+            RouteServiceProfile(
+                route_id="MBSPARSE",
+                day_type="weekday",
+                hour=6,
+                scheduled_trips=1,
+                is_frequent=False,
+            ),
+            RouteServiceProfile(
+                route_id="MBSPARSE",
+                day_type="weekday",
+                hour=7,
+                scheduled_trips=1,
+                is_frequent=False,
+            ),
+            RouteServiceProfile(
+                route_id="MBSPARSE",
+                day_type="weekday",
+                hour=8,
+                scheduled_trips=1,
+                is_frequent=False,
+            ),
+        ]
+    )
+    # N=1 route: a single trip in AM Peak → no headway at all → must drop.
+    db_session.add(
+        RouteServiceProfile(
+            route_id="MBSINGLE",
+            day_type="weekday",
+            hour=7,
+            scheduled_trips=1,
+            is_frequent=False,
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/api/marginal-ewt?day_type=weekday")
+    assert response.status_code == 200
+    body = response.json()
+
+    sparse_rows = [r for r in body["rankings"] if r["route_id"] == "MBSPARSE"]
+    assert sparse_rows == [], (
+        "Non-frequent (60-min mean headway) cells must be filtered out of ranking"
+    )
+    single_rows = [r for r in body["rankings"] if r["route_id"] == "MBSINGLE"]
+    assert single_rows == [], "N=1 cells must be filtered out of ranking"
 
 
 @pytest.mark.smoke

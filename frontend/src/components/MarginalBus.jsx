@@ -112,6 +112,9 @@ function MarginalBus() {
         upper-bound proxy.{' '}
         <strong>The relative ranking — which (route, period) cells gain the
         most — is the defensible artifact.</strong>{' '}
+        Ranking restricted to (route, period) cells with mean scheduled
+        headway ≤ 15 min — the regime where SWT under random-arrival
+        assumptions applies.{' '}
         Trip counts come from the per-route trunk-stop hourly buckets in
         <code style={{ background: 'rgba(0,0,0,0.06)', padding: '0 0.25rem', borderRadius: '0.25rem' }}>
           route_service_profile
@@ -191,7 +194,8 @@ function MarginalBus() {
 
       {!loading && !error && filteredRows.length === 0 && (
         <p style={{ color: '#64748b' }}>
-          No (route, period) cells with scheduled service for the selected filters.
+          No frequent-service (route, period) cells (mean scheduled
+          headway ≤ 15 min) for the selected filters.
         </p>
       )}
 

@@ -70,17 +70,43 @@ Per `(route_id, period_label)`:
 
 Periods with `N == 0` are skipped — adding a trip when no scheduled service
 exists is a service-launch decision, not a marginal-bus decision, and the
-formula degenerates (`SWT = ∞`). Periods with `N == 1` produce a finite
-reduction but should be flagged in the UI as "no current headway"; the
-formula still applies (going from 1 to 2 trips halves the SWT estimate).
+formula degenerates (`SWT = ∞`). Periods with `N == 1` are also skipped:
+they have no scheduled headway at all, so the random-arrival SWT premise
+the formula rests on is mathematically undefined.
+
+Frequent-service gate
+---------------------
+The closed-form `SWT = h / 2 = T / (2 N)` rests on the *random-arrival*
+assumption — riders show up uniformly across the headway without
+consulting a schedule. That assumption is only defensible when service is
+*frequent*: by the project convention (`src/service_profile.py`
+`FREQUENT_HEADWAY_MIN = 15.0` and `src/ewt.py`
+`_is_cell_hour_frequent` / `FREQUENT_HEADWAY_MAX_SEC = 15 * 60`), that
+means **mean scheduled headway ≤ 15 min**. On routes with a 30- or
+60-min headway, riders consult the schedule and time their arrival; SWT
+under uniform arrivals overstates rider-felt wait, and the marginal
+reduction the model reports is not a meaningful operator signal.
+
+Operationally, mean headway is `T / N` (period length / scheduled
+trips), so the gate is `T / N ≤ 15` i.e. `N ≥ T / 15`. We apply this
+per-cell — a route can be frequent in AM Peak and non-frequent in
+Evening — matching the cell-level convention `_is_cell_hour_frequent`
+already uses on the EWT side. (`route_service_profile.is_frequent` is a
+route-level rollup, too coarse for this purpose.)
 """
 
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from src.ewt import EWT_TIME_PERIODS, _day_type_for
+from src.ewt import EWT_TIME_PERIODS, FREQUENT_HEADWAY_MAX_SEC, _day_type_for
 from src.models import Route, RouteServiceProfile
+
+# Same threshold as src/ewt.py `_is_cell_hour_frequent` and
+# src/service_profile.py `FREQUENT_HEADWAY_MIN`, in minutes. 15 min mean
+# headway is the project-wide boundary above which random-arrival
+# assumptions stop applying.
+FREQUENT_HEADWAY_MAX_MIN = FREQUENT_HEADWAY_MAX_SEC / 60.0
 
 
 def _period_length_minutes(start_hour: int, end_hour: int) -> int:
@@ -118,10 +144,17 @@ def compute_marginal_ewt_for_routes(
     `marginal_swt_reduction_minutes` descending — "where adding one trip
     helps most" — with route metadata joined in for rendering.
 
-    Periods with `scheduled_trips == 0` are dropped. Periods with
-    `scheduled_trips == 1` are kept (the formula is well-defined and going
-    from 1→2 is the largest possible relative improvement); the UI flags
-    them so the absolute number isn't over-interpreted.
+    Periods are dropped if any of the following hold:
+      - `scheduled_trips == 0` (no service to model — a service-launch
+        decision, not a marginal one)
+      - `scheduled_trips == 1` (no scheduled headway — SWT under
+        random-arrival assumptions is undefined)
+      - mean scheduled headway > 15 min (i.e. `period_minutes / N > 15`):
+        non-frequent service, where riders consult the schedule and the
+        random-arrival SWT premise doesn't hold. Threshold matches the
+        cell-level convention in `src/ewt.py` (`FREQUENT_HEADWAY_MAX_SEC`
+        / `_is_cell_hour_frequent`) and the route-level convention in
+        `src/service_profile.py` (`FREQUENT_HEADWAY_MIN`).
 
     Args:
         db: Database session.
@@ -174,10 +207,21 @@ def compute_marginal_ewt_for_routes(
             n_trips = sum(
                 trips_by_route_hour.get((route_id, h), 0) for h in _hours_in_period(start_h, end_h)
             )
-            if n_trips <= 0:
-                # No scheduled service in this period for this route.
-                # Skip rather than emit an infinity row — adding a trip
-                # here is a service-launch decision, not a marginal one.
+            if n_trips <= 1:
+                # N == 0: no scheduled service to model (service-launch
+                # decision, not a marginal one). N == 1: no scheduled
+                # headway at all, so SWT under random-arrival
+                # assumptions is mathematically undefined. Skip either.
+                continue
+            # Frequent-service gate: random-arrival SWT only applies when
+            # mean scheduled headway is at most 15 min — i.e. service is
+            # frequent enough that riders don't consult the schedule.
+            # Equivalent to `N >= period_minutes / 15`. Matches the
+            # cell-level rule in src/ewt.py `_is_cell_hour_frequent` and
+            # the route-level threshold in src/service_profile.py
+            # `FREQUENT_HEADWAY_MIN`.
+            mean_headway_min = period_minutes / n_trips
+            if mean_headway_min > FREQUENT_HEADWAY_MAX_MIN:
                 continue
             current_swt_minutes = period_minutes / (2.0 * n_trips)
             marginal_reduction_minutes = period_minutes / (2.0 * n_trips * (n_trips + 1))
