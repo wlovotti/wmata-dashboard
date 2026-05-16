@@ -3332,3 +3332,109 @@ def get_route_blocks(db: Session, route_id: str, service_date: date_type) -> dic
         "service_date": service_date.isoformat(),
         "blocks": rows,
     }
+
+
+def get_active_blocks(db: Session, service_date: date_type, limit: int = 100) -> dict:
+    """List blocks active on `service_date`, ranked by trip count and worst observed deviation.
+
+    Powers the system-level `/blocks` index page (PR #105). Mirrors
+    `get_route_blocks` but unscoped to a single route — every block whose
+    GTFS trips run on `service_date` is returned, with `routes` (the list
+    of route_ids the block touches), `trip_count`, scheduled origin time,
+    and the worst per-trip absolute origin/destination deviation observed
+    across the chain.
+
+    Ordering is `trip_count` descending then `worst_deviation_seconds`
+    descending so the longest, most cascade-prone blocks land at the top
+    — the operator question this view answers is "which dispatched
+    chains are biggest or hurting most right now?" `limit` caps the
+    response size; default 100 is enough headroom for WMATA's ~600
+    weekday active blocks while keeping the table scannable.
+
+    Routes with no current trips on `service_date` (off-day variants)
+    are filtered out by the active-service-id intersection, matching the
+    per-route version's behavior.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    active_service_ids = _active_service_ids_for_date(db, service_date)
+    trips_q = db.query(Trip.trip_id, Trip.block_id, Trip.route_id).filter(
+        Trip.is_current, Trip.block_id.isnot(None)
+    )
+    if active_service_ids:
+        trips_q = trips_q.filter(Trip.service_id.in_(active_service_ids))
+    trips = trips_q.all()
+
+    if not trips:
+        return {
+            "service_date": service_date.isoformat(),
+            "blocks": [],
+        }
+
+    trips_by_block: dict[str, list[str]] = defaultdict(list)
+    routes_by_block: dict[str, set[str]] = defaultdict(set)
+    for tid, bid, rid in trips:
+        trips_by_block[bid].append(tid)
+        routes_by_block[bid].add(rid)
+
+    all_trip_ids = [tid for tids in trips_by_block.values() for tid in tids]
+    sched_endpoints = _scheduled_endpoints_for_trips(db, all_trip_ids)
+    runs_by_trip = _runs_by_trip_for_block(db, all_trip_ids, service_date.isoformat())
+
+    rows = []
+    for bid, tids in trips_by_block.items():
+        starts = [
+            sched_endpoints.get(tid, (None, None))[0]
+            for tid in tids
+            if sched_endpoints.get(tid, (None, None))[0] is not None
+        ]
+        block_start_sec = min(starts) if starts else None
+
+        worst_dev_abs = None
+        for tid in tids:
+            runs_for_trip = runs_by_trip.get(tid, {})
+            prox = runs_for_trip.get("proximity")
+            tu = runs_for_trip.get("trip_update")
+            candidates = []
+            if prox is not None and prox.origin_dev_sec is not None:
+                candidates.append(abs(prox.origin_dev_sec))
+            if tu is not None and tu.destination_dev_sec is not None:
+                candidates.append(abs(tu.destination_dev_sec))
+            if candidates:
+                trip_worst = max(candidates)
+                if worst_dev_abs is None or trip_worst > worst_dev_abs:
+                    worst_dev_abs = trip_worst
+
+        any_observed = any(tid in runs_by_trip and runs_by_trip[tid] for tid in tids)
+
+        rows.append(
+            {
+                "block_id": bid,
+                "trip_count": len(tids),
+                "routes": sorted(routes_by_block[bid]),
+                "scheduled_start": _gtfs_seconds_to_eastern_iso(block_start_sec, service_date),
+                "scheduled_start_sec": block_start_sec,
+                "worst_deviation_seconds": worst_dev_abs,
+                "any_observed": any_observed,
+            }
+        )
+
+    # Rank by trip_count desc, then worst observed deviation desc — the
+    # twin "biggest" / "worst" sort surfaces dispatch chains that have
+    # the largest cascade footprint. Tie-breaks on block_id so output is
+    # stable across calls.
+    rows.sort(
+        key=lambda r: (
+            -r["trip_count"],
+            -(r["worst_deviation_seconds"] or 0),
+            r["block_id"],
+        )
+    )
+
+    return {
+        "service_date": service_date.isoformat(),
+        "blocks": rows[:limit],
+    }
