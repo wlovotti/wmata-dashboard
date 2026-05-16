@@ -52,6 +52,11 @@ from src.models import (
 )
 from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
 from src.otp_metrics import compute_otp_split, compute_otp_split_for_routes
+from src.route_targets import (
+    get_system_targets,
+    get_target,
+    get_targets_for_route,
+)
 from src.service_delivered import (
     compute_service_delivered,
     compute_service_delivered_for_routes,
@@ -926,6 +931,12 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
                     live_fields["service_delivered_ratio"],
                     live_fields["ewt_seconds"],
                 ),
+                # Per-route targets (NOTES-47). Keyed by canonical metric
+                # name; values are in the same units as the corresponding
+                # live fields (OTP %, service_delivered fraction, EWT
+                # seconds, bunching fraction). `None` when no target is
+                # configured in `config/route_targets.yaml`.
+                "targets": get_targets_for_route(route.route_id),
                 **live_fields,
             }
         )
@@ -1063,6 +1074,10 @@ def get_route_detail_metrics(
             live_fields["service_delivered_ratio"],
             live_fields["ewt_seconds"],
         ),
+        # Per-route targets (NOTES-47). See `get_all_routes_scorecard`
+        # for the shape — keyed by canonical metric name in canonical
+        # units. The frontend renders them next to each KPI card.
+        "targets": get_targets_for_route(route_id),
         **live_fields,
         **excess_fields,
     }
@@ -1657,11 +1672,18 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
     ]
     prior_window_value = _mean_skip_null([history.get(d.isoformat()) for d in prior_dates])
 
+    # System-default target for this metric (NOTES-47). Surfaces as a
+    # reference line / "vs target" badge on the system trend strip.
+    # `None` when the YAML omits the metric — the frontend hides the
+    # badge in that case rather than rendering a placeholder.
+    target_value = get_system_targets().get(metric)
+
     return {
         "metric": metric,
         "days": days,
         "trend_data": trend_data,
         "prior_window_value": prior_window_value,
+        "target_value": target_value,
     }
 
 
@@ -1714,11 +1736,10 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 # lower-is-better metrics (EWT, bunching) so a positive score always means
 # "this route is dragging the system down."
 #
-# Baseline is the system's window-mean from `system_metrics_daily`. Per-route
-# targets do not yet exist; NOTES-47 is the open item that adds them. When
-# they land, the same formula applies with `target` substituted for
-# `baseline` — this module does not need to change shape, only swap the
-# baseline source.
+# Reference value is the route's configured target from
+# `config/route_targets.yaml` when set (PR #99), otherwise the system's
+# window-mean from `system_metrics_daily` (`baseline_value`). Each row
+# reports `reference_source` so the frontend can disclose which was used.
 #
 # `scheduled_trips_in_window` is computed from GTFS `trips` joined to
 # `calendar` for the route's day_type, then weighted by the count of days of
@@ -1907,8 +1928,8 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
 
     end_date = eastern_today()
 
-    # Baseline: window-mean over `days`. Used as the comparison target until
-    # NOTES-47 (per-route targets) lands.
+    # System window-mean baseline. Per-row reference comes from either
+    # the route's configured target (PR #99) or this baseline as fallback.
     baseline_value = _system_baseline_for_window(db, metric_column, end_date, days)
 
     # Volume proxy: total scheduled trips per route over the window.
@@ -1939,44 +1960,71 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
             elif metric == "bunching":
                 route_values[r.route_id] = fields.get("bunching_rate")
 
+    # NOTES-47: per-route target replaces the system baseline as the
+    # comparison reference whenever one is configured. The `reference_value`
+    # field on each row is the value actually used to compute the gap —
+    # equal to the route's target if set, otherwise the system baseline.
+    # `baseline_value` on the envelope stays the system window mean so the
+    # frontend can still render the "system baseline" annotation.
     contributors: list[dict] = []
-    if baseline_value is not None:
-        for route_id, route_value in route_values.items():
-            if route_value is None:
-                continue
-            scheduled_trips = sched_trips_by_route.get(route_id, 0)
-            if scheduled_trips <= 0:
-                # No GTFS schedule for the window → no volume to weight by.
-                # Drop rather than list with a 0 score; surfacing it would
-                # rank it dead-last for every metric and add visual noise.
-                continue
-            gap = baseline_value - route_value
-            # Sign convention: positive `contribution_score` = "dragging the
-            # system down." For higher-is-better metrics, that's when route
-            # is below baseline (gap > 0). For lower-is-better metrics,
-            # that's when route is above baseline (gap < 0), so we flip.
-            score = gap * scheduled_trips if higher_is_better else (-gap) * scheduled_trips
-            contributors.append(
-                {
-                    "route_id": route_id,
-                    "route_short_name": route_short_names.get(route_id),
-                    "route_long_name": route_long_names.get(route_id),
-                    "metric": metric,
-                    "baseline_value": baseline_value,
-                    "route_value": route_value,
-                    "scheduled_trips": scheduled_trips,
-                    "contribution_score": score,
-                }
-            )
+    # Score against a row's effective reference (target or baseline). If
+    # neither is available we drop the row — there's nothing to compare to.
+    for route_id, route_value in route_values.items():
+        if route_value is None:
+            continue
+        scheduled_trips = sched_trips_by_route.get(route_id, 0)
+        if scheduled_trips <= 0:
+            # No GTFS schedule for the window → no volume to weight by.
+            # Drop rather than list with a 0 score; surfacing it would
+            # rank it dead-last for every metric and add visual noise.
+            continue
+        per_route_target = get_target(route_id, metric)
+        if per_route_target is not None:
+            reference_value = per_route_target
+            reference_source = "target"
+        elif baseline_value is not None:
+            reference_value = baseline_value
+            reference_source = "baseline"
+        else:
+            # Neither a target nor a baseline — skip rather than score
+            # against nothing.
+            continue
+        gap = reference_value - route_value
+        # Sign convention: positive `contribution_score` = "dragging the
+        # system down." For higher-is-better metrics, that's when route
+        # is below the reference (gap > 0). For lower-is-better metrics,
+        # that's when route is above the reference (gap < 0), so we flip.
+        score = gap * scheduled_trips if higher_is_better else (-gap) * scheduled_trips
+        contributors.append(
+            {
+                "route_id": route_id,
+                "route_short_name": route_short_names.get(route_id),
+                "route_long_name": route_long_names.get(route_id),
+                "metric": metric,
+                "baseline_value": baseline_value,
+                "target_value": per_route_target,
+                "reference_value": reference_value,
+                "reference_source": reference_source,
+                "route_value": route_value,
+                "scheduled_trips": scheduled_trips,
+                "contribution_score": score,
+            }
+        )
 
     # Sort by contribution_score desc — biggest draggers first. Negative
     # scores (route is *better* than baseline) sort below zero-volume drops.
     contributors.sort(key=lambda c: c["contribution_score"], reverse=True)
 
+    # System-default target (NOTES-47) for this metric — the frontend
+    # surfaces it as the reference annotation alongside `baseline_value`.
+    # Per-row `target_value` may differ if a route has an override.
+    system_target_value = get_system_targets().get(metric)
+
     return {
         "metric": metric,
         "days": days,
         "baseline_value": baseline_value,
+        "system_target_value": system_target_value,
         "higher_is_better": higher_is_better,
         "contributors": contributors,
     }

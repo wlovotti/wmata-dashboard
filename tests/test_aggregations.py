@@ -12,6 +12,8 @@ Run with: pytest tests/test_aggregations.py
 
 from datetime import timedelta
 
+import pytest
+
 from api.aggregations import (
     EWT_SCORE_FLOOR_SEC,
     EWT_SCORE_TARGET_SEC,
@@ -659,6 +661,24 @@ class TestGetRouteContributors:
 
         agg._contributors_cache.clear()
 
+    @pytest.fixture(autouse=True)
+    def _isolate_route_targets(self, tmp_path, monkeypatch):
+        """Point the route_targets loader at a missing file for every test in this class.
+
+        These tests exercise the baseline-fallback path (no per-route
+        target configured), so we need the loader to return None for
+        every metric. NOTES-47 added a dedicated test class for the
+        target-override path; this fixture keeps the baseline tests
+        deterministic against future YAML edits.
+        """
+        from src import route_targets as _rt
+
+        missing = tmp_path / "absent.yaml"
+        monkeypatch.setenv("WMATA_ROUTE_TARGETS_PATH", str(missing))
+        _rt.reset_cache_for_tests()
+        yield
+        _rt.reset_cache_for_tests()
+
     def _seed_system_baseline(self, db_session, otp=80.0, days_back=5):
         """Seed N days of `system_metrics_daily` rows ending `days_back` ago.
 
@@ -950,3 +970,53 @@ class TestGetRouteContributors:
         first = get_route_contributors(db_session, metric="otp", days=30)
         second = get_route_contributors(db_session, metric="otp", days=30)
         assert first is second
+
+    def test_contributors_per_route_target_overrides_baseline(
+        self, db_session, sample_routes, tmp_path, monkeypatch
+    ):
+        """When a route's target is configured (NOTES-47) it overrides the system baseline.
+
+        Seed: system baseline OTP 80 %, TEST1 route OTP 60 %, scheduled
+        trips 10 (weekday × 5). With no target, contribution would be
+        (80 − 60) × N. With a per-route target of 90 %, contribution
+        becomes (90 − 60) × N — bigger gap, bigger score. The row's
+        `reference_source` reports "target" and `target_value` carries
+        the configured number.
+        """
+        from src import route_targets as _rt
+
+        # Override the autouse fixture's missing-file pointer with a
+        # populated YAML that sets TEST1's OTP target to 90 %.
+        yaml_path = tmp_path / "with_target.yaml"
+        yaml_path.write_text(
+            """
+system_default:
+  otp: 78
+routes:
+  "TEST1":
+    otp: 90
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("WMATA_ROUTE_TARGETS_PATH", str(yaml_path))
+        _rt.reset_cache_for_tests()
+
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        self._seed_route_otp(db_session, "TEST1", 60.0)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        ours = next((c for c in result["contributors"] if c["route_id"] == "TEST1"), None)
+        assert ours is not None
+        assert ours["reference_source"] == "target"
+        assert ours["target_value"] == 90.0
+        assert ours["reference_value"] == 90.0
+        assert ours["route_value"] == 60.0
+        # Score = (target − route_value) × scheduled_trips → larger than
+        # the baseline-only counterfactual.
+        assert ours["contribution_score"] == (90.0 - 60.0) * ours["scheduled_trips"]
+        # The envelope still carries the system_target_value from the YAML.
+        assert result["system_target_value"] == 78.0

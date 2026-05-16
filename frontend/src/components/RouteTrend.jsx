@@ -52,6 +52,53 @@ function computeWindowDelta(series) {
 }
 
 /**
+ * Render a "vs target" badge for one metric (NOTES-47).
+ *
+ * Compares a current `value` against a `target`, formats both via the
+ * caller-provided `format` (so units stay consistent), and shows a small
+ * inline pill colored green when the metric meets or beats its target,
+ * red when it misses. `higherIsBetter` flips the comparison for
+ * lower-is-better metrics (EWT, bunching).
+ *
+ * Returns null when either side is null/undefined — the rest of the KPI
+ * card renders unchanged, so the target line is purely additive.
+ */
+function TargetIndicator({
+  value,
+  target,
+  format,
+  higherIsBetter = true,
+  label = 'Target',
+  flatThreshold = 0,
+}) {
+  if (value == null || target == null) return null
+  const gap = higherIsBetter ? value - target : target - value
+  let color = '#64748b'
+  let arrow = '→'
+  if (gap > flatThreshold) {
+    color = '#0E8A6F'
+    arrow = '✓'
+  } else if (gap < -flatThreshold) {
+    color = '#C8102E'
+    arrow = '✗'
+  }
+  return (
+    <span
+      className="trend-target"
+      style={{
+        color,
+        fontSize: '0.7rem',
+        fontWeight: 600,
+        marginLeft: '0.4rem',
+      }}
+      title={`Current vs ${label.toLowerCase()}`}
+    >
+      {arrow} {label} {format(target)}
+    </span>
+  )
+}
+
+/**
  * Render an inline up/down/flat indicator for a precomputed delta.
  *
  * `format` turns the raw delta into display text (e.g. percentage points).
@@ -160,6 +207,17 @@ function RouteTrend({
   otpDelta,
   sdDelta,
   excessDelta,
+  // Per-route targets (NOTES-47). `null` (or missing) hides the target
+  // pill on that card. OTP target is in 0-100, sd target in 0-1 (we
+  // render *100 below). Excess-trip-time has no target — operators
+  // commit to OTP/SD/EWT/bunching only.
+  otpTarget,
+  sdTarget,
+  // The most-recent observed value for each KPI so we can color the
+  // target pill (green = meets, red = misses). Same units as the
+  // matching series rows.
+  otpCurrent,
+  sdCurrent,
   loading,
   error,
 }) {
@@ -194,6 +252,12 @@ function RouteTrend({
                 format={(d) => `${d.toFixed(1)} pp`}
               />
             )}
+            <TargetIndicator
+              value={otpCurrent}
+              target={otpTarget}
+              higherIsBetter
+              format={(t) => `${t.toFixed(0)}%`}
+            />
           </div>
           <Sparkline
             data={otpSeries}
@@ -216,6 +280,12 @@ function RouteTrend({
                 format={(d) => `${d.toFixed(1)} pp`}
               />
             )}
+            <TargetIndicator
+              value={sdCurrent}
+              target={sdTarget != null ? sdTarget * 100 : null}
+              higherIsBetter
+              format={(t) => `${t.toFixed(0)}%`}
+            />
           </div>
           <Sparkline
             data={sdSeries}
@@ -256,5 +326,5 @@ function RouteTrend({
   )
 }
 
-export { computeWindowDelta, DeltaIndicator, Sparkline }
+export { computeWindowDelta, DeltaIndicator, Sparkline, TargetIndicator }
 export default RouteTrend

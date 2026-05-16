@@ -240,15 +240,17 @@ async def get_routes_contributors(metric: str = "otp", days: int = 30):
     """
     Routes ranked by their contribution to system underperformance (NOTES-39).
 
-    For each route, contribution is `(baseline - route_value) * scheduled_trips`
+    For each route, contribution is `(reference - route_value) * scheduled_trips`
     for higher-is-better metrics (OTP, service-delivered) — sign-flipped for
     lower-is-better metrics (EWT, bunching) so a positive score always means
-    "this route is dragging the system down." Baseline is the system's
-    window-mean from `system_metrics_daily` (no per-route targets exist yet;
-    NOTES-47 will swap `baseline` for `target` once they do). Scheduled-trip
-    count over the window is the only volume proxy in the data — ridership
-    is not available — so the score answers "where would moving the needle
-    move the system most?" rather than just "which route looks worst."
+    "this route is dragging the system down." The reference is the route's
+    configured target from `config/route_targets.yaml` when set (PR #99),
+    otherwise the system 30-day window mean from `system_metrics_daily`
+    (`baseline_value`). Each row reports `reference_source` so the frontend
+    can disclose which was used. Scheduled-trip count over the window is
+    the only volume proxy in the data — ridership is not available — so
+    the score answers "where would moving the needle move the system
+    most?" rather than just "which route looks worst."
 
     For OTP, `route_value` is the window mean computed live from
     `stop_events`. For service-delivered, EWT, and bunching, `route_value`
