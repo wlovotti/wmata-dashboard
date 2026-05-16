@@ -1,0 +1,119 @@
+# WMATA-designated frequent-service Metrobus routes (NOTES-56).
+#
+# This is the authoritative *route-level* list of routes WMATA publishes
+# as frequent service. It drives UI choices like "which metric is the
+# headline KPI on RouteDetail?" — EWT is the rider-relevant headline
+# for frequent service; OTP remains headline for standard service.
+#
+# Source
+# ------
+# WMATA High-Frequency Metrobus Service Maps (June 29, 2025 — the
+# Better Bus network redesign), pulled 2026-05-16:
+#   - DC:       https://www.wmata.com/initiatives/plans/Better-Bus/upload/DC-High-Freq-Service-Map_06-16-2025_FINAL.pdf
+#   - Maryland: https://www.wmata.com/initiatives/plans/Better-Bus/upload/MD-High-Freq-Service-Map_06-16-2025_FINAL.pdf
+#   - Virginia: https://www.wmata.com/initiatives/plans/Better-Bus/upload/VA-High-Freq-Service-Map_06-16-2025_FINAL.pdf
+# Index: https://www.wmata.com/schedules/maps/index.cfm
+#
+# Criteria (per the published map legend)
+# ---------------------------------------
+# A route is on the map if it meets WMATA's frequent-service standard,
+# which the legend defines as either:
+#   - "High-Frequency Route" — service every 12 minutes or better
+#   - "Medium-Frequency Route" — service every 20 minutes or better
+# Frequency window: all-day, all-week service, 7:00 a.m. to 9:00 p.m.
+# (i.e., not just peak — the headway has to hold across the daytime span
+# every day of the week to qualify).
+#
+# We treat both tiers as `is_frequent: true` for the headline-KPI flip
+# (EWT is the rider-relevant headline whenever scheduled service is
+# frequent enough that riders show up without consulting a schedule;
+# the 20-min medium-freq tier still qualifies for that). If a future
+# UI distinction is needed between high-freq and medium-freq, split
+# this list then.
+#
+# Distinction from the data-driven check
+# --------------------------------------
+# `src/ewt.py:FREQUENT_HEADWAY_MAX_SEC` (15 min) is the per-cell-hour
+# gate for EWT *computation*. It answers "is this (direction, stop,
+# hour) cell frequent right now?" — a per-cell question that decides
+# what feeds into AWT/SWT. The list here answers the *route-level*
+# question "did WMATA publish this route as a frequent-service route?"
+# — which decides headline-metric choice in the UI, regardless of
+# whether any particular cell-hour is currently dense.
+#
+# Schema
+# ------
+# routes:
+#   - <route_id>   # exact GTFS route_id; one per line
+#
+# Loader: `src/frequent_routes.py:load_frequent_route_ids()`. Reload is
+# lazy on file mtime — edits take effect without restart.
+#
+# Refresh policy
+# --------------
+# WMATA's frequent-service map is published as part of network-redesign
+# milestones (the June 2025 map is the first since the Better Bus
+# rollout). Re-pull this list when WMATA publishes an updated map or
+# when the cross-validation script (`analysis/frequent_routes_audit.py`)
+# surfaces ≥3 routes whose data-driven frequent-cell-hour share has
+# drifted significantly out of step with the published list.
+
+routes:
+  # DC map (https://www.wmata.com/initiatives/plans/Better-Bus/upload/DC-High-Freq-Service-Map_06-16-2025_FINAL.pdf)
+  - A58
+  - C11
+  - C13
+  - C15
+  - C21
+  - C29
+  - C31
+  - C37
+  - C41
+  - C51
+  - C53
+  - C61
+  - C75
+  - C81
+  - D10
+  - D1X
+  - D20
+  - D30
+  - D32
+  - D36
+  - D40
+  - D44
+  - D4X
+  - D50
+  - D5X
+  - D60
+  - D6X
+  - D70
+  - D72
+  - D74
+  - D80
+  - M60
+  - P1X
+  - P40
+  # Maryland map (https://www.wmata.com/initiatives/plans/Better-Bus/upload/MD-High-Freq-Service-Map_06-16-2025_FINAL.pdf)
+  - M12
+  - M20
+  - M42
+  - M44
+  - M52
+  - M54
+  - M70
+  - P30
+  - P41
+  - P60
+  - P93
+  - P94
+  # Virginia map (https://www.wmata.com/initiatives/plans/Better-Bus/upload/VA-High-Freq-Service-Map_06-16-2025_FINAL.pdf)
+  - A1X
+  - A40
+  - A70
+  - F1X
+  - F20
+  - F23
+  - F24
+  - F60
+  - F61

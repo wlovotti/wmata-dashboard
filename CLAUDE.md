@@ -83,13 +83,18 @@ without asking. See `NOTES.md` for the active punch list.
   `timepoint_times` uses the same internal IDs). Direct stop_id joins
   silently return zero matches.
 
-- **`src/otp_constants.py` docstring lists illustrative headway-based
-  routes** (70, 79, X2, 90, 92, 16Y, Metroway) — this is NOT WMATA's
-  Frequent Service Map. D80, for example, has 7-10 min daytime
-  headways and is on WMATA's frequent map but absent from this list.
-  Until NOTES-56 persists the authoritative list, determine frequency
-  from data: `src/ewt.py:FREQUENT_HEADWAY_MAX_SEC = 15 min` at the
-  cell-hour level.
+- **Two notions of "frequent" — keep them straight.** Route-level
+  WMATA designation lives in `config/frequent_routes.yaml`, loaded
+  via `src/frequent_routes.py:load_frequent_route_ids()`; pulled
+  from WMATA's High-Frequency Metrobus Service Maps (Better Bus,
+  June 2025). Drives headline-KPI choice on the UI (EWT vs OTP) and
+  any "frequent route" filter in API / analysis code. The
+  per-cell-hour data-driven gate `src/ewt.py:FREQUENT_HEADWAY_MAX_SEC
+  = 15 min` is internal to EWT computation only — don't use it as a
+  route-level "is this a frequent route?" check. The historical
+  illustrative list in `src/otp_constants.py`'s docstring
+  (70, 79, X2, 90, 92, 16Y, Metroway) is preserved as pre-Better-Bus
+  context only — not authoritative.
 
 - **`stop_events.source` is dual ('proximity' | 'trip_update')** with
   nearly inverse blind spots at trip endpoints (see StopEvent / Run

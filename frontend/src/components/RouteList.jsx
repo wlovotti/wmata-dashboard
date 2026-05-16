@@ -685,6 +685,28 @@ function RouteList() {
                   >
                     {route.route_name}
                   </span>
+                  {/* NOTES-56: WMATA-designated frequent-service routes get
+                      EWT as the rider-relevant headline. A subtle "Freq"
+                      pill on the badge cell signals "look at EWT, not OTP,
+                      for this row" without restructuring the column order. */}
+                  {route.is_frequent && (
+                    <span
+                      className="frequent-badge"
+                      title="WMATA frequent-service route — EWT is the rider-relevant headline metric (config/frequent_routes.yaml)"
+                      style={{
+                        marginLeft: '0.4rem',
+                        fontSize: '0.65rem',
+                        padding: '0.1rem 0.35rem',
+                        borderRadius: '4px',
+                        background: '#dbeafe',
+                        color: '#1e40af',
+                        fontWeight: 600,
+                        verticalAlign: 'middle',
+                      }}
+                    >
+                      Freq
+                    </span>
+                  )}
                 </td>
                 <td className="route-name">{route.route_long_name || 'N/A'}</td>
                 <td className="metric">
@@ -736,9 +758,13 @@ function RouteList() {
                   />
                 </td>
                 <td className="metric">
-                  {route.ewt_seconds != null
-                    ? `${Math.round(route.ewt_seconds)}s`
-                    : '—'}
+                  {/* NOTES-56: bold the EWT value for WMATA-frequent routes
+                      so the eye lands on the headline metric for those rows. */}
+                  <span style={{ fontWeight: route.is_frequent ? 700 : 'inherit' }}>
+                    {route.ewt_seconds != null
+                      ? `${Math.round(route.ewt_seconds)}s`
+                      : '—'}
+                  </span>
                   {route.ewt_coverage_ratio != null && route.ewt_coverage_ratio < 0.5 && (
                     <span
                       className="data-thin-badge"
