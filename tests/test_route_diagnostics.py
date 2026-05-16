@@ -16,10 +16,11 @@ the hold-down candidates list (NOTES-61). Tests cover:
     Python helpers; the SQL path is exercised in integration).
 """
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
+from src.models import Route, StopEvent
 from src.route_diagnostics import (
     ASYMMETRY_MARGIN_PCT,
     EARLY_THRESHOLD_SEC,
@@ -29,7 +30,9 @@ from src.route_diagnostics import (
     NEUTRAL_MEDIAN_BAND_SEC,
     RECOVERY_MEDIAN_DROP_SEC,
     UNDERPOWERED_ENTERING_MEDIAN_SEC,
+    _assemble_segment_slip_output,
     classify_timepoint,
+    compute_canonical_stop_mapping,
     default_service_date_range,
 )
 
@@ -245,3 +248,296 @@ def test_classify_handles_skewed_sample_with_distinct_percentiles():
     assert stats["p10_dev_entering"] is not None
     assert stats["median_dev_entering"] is not None
     assert stats["p10_dev_entering"] < stats["median_dev_entering"]
+
+
+# ---------------------------------------------------------------------------
+# Canonical-pattern collapse (NOTES-57 fast-follow)
+#
+# Route variants (express+local splits, mid-route detours) legitimately
+# produce multiple stop_ids at the same (direction_id, stop_sequence) over
+# the 30-day window. Without filtering, the slip aggregation emits multiple
+# rows per (direction_id, from_seq, to_seq), which both violates the
+# `route_diagnostic_segment` unique constraint (PR #107 fast-follow bug
+# mode A — 24 routes failed to load) and inflates `cum_slip_sec` on the
+# cumsum walk (bug mode B — 8 routes loaded with wrong cum slip).
+#
+# Tests here exercise the SQL path on the in-memory SQLite test DB; the
+# canonical CTE deliberately avoids Postgres-only `EXTRACT` / `AT TIME
+# ZONE` so it runs under both dialects (the slip SQL itself remains
+# Postgres-only — its cumsum is unit-tested via `_assemble_segment_slip_output`).
+# ---------------------------------------------------------------------------
+
+
+def _make_stop_event(
+    *,
+    service_date: str,
+    trip_id: str,
+    route_id: str,
+    direction_id: int,
+    stop_sequence: int,
+    stop_id: str,
+    base_ts: datetime,
+    minutes_offset: int = 0,
+) -> StopEvent:
+    """Build one `StopEvent` row shaped for the canonical-mapping SQL filters.
+
+    All required filters (`source='proximity'`, `schedule_relationship='SCHEDULED'`,
+    `observed_arrival_ts` non-null, `scheduled_arrival_ts` non-null) are
+    satisfied by construction so the test data sees the same predicate
+    set as production.
+    """
+    from datetime import timedelta as _td
+
+    obs_ts = base_ts + _td(minutes=minutes_offset)
+    return StopEvent(
+        service_date=service_date,
+        trip_id=trip_id,
+        route_id=route_id,
+        direction_id=direction_id,
+        stop_id=stop_id,
+        stop_sequence=stop_sequence,
+        scheduled_arrival_ts=obs_ts,
+        observed_arrival_ts=obs_ts,
+        deviation_sec=0,
+        source="proximity",
+        schedule_relationship="SCHEDULED",
+    )
+
+
+def _seed_variant_route(db_session, route_id: str = "VRTEST") -> None:
+    """Seed a two-pattern route used by the canonical-mapping tests.
+
+    Pattern A (majority — 10 trips): seq 1 → stop_A1, seq 2 → stop_A2,
+    seq 3 → stop_A3. Pattern B (minority — 3 trips): seq 1 → stop_A1
+    (shared origin), seq 2 → stop_B2, seq 3 → stop_A3 (shared terminus).
+    The mid-route divergence at seq 2 is the variant pattern that breaks
+    the slip table's unique constraint on real routes (e.g., P93 seq 3-4).
+    """
+    db_session.add(
+        Route(
+            route_id=route_id,
+            route_short_name=route_id,
+            route_long_name=f"Variant test route {route_id}",
+            route_type=3,
+            is_current=True,
+        )
+    )
+    base_ts = datetime(2026, 5, 1, 14, 0, 0)
+    events: list[StopEvent] = []
+    # Majority pattern (10 trips): stop_A1 -> stop_A2 -> stop_A3
+    for i in range(10):
+        trip_id = f"TRIP_A_{i}"
+        for seq, stop_id in [(1, "stop_A1"), (2, "stop_A2"), (3, "stop_A3")]:
+            events.append(
+                _make_stop_event(
+                    service_date="2026-05-01",
+                    trip_id=trip_id,
+                    route_id=route_id,
+                    direction_id=0,
+                    stop_sequence=seq,
+                    stop_id=stop_id,
+                    base_ts=base_ts,
+                    minutes_offset=seq,
+                )
+            )
+    # Minority pattern (3 trips): stop_A1 -> stop_B2 -> stop_A3
+    for i in range(3):
+        trip_id = f"TRIP_B_{i}"
+        for seq, stop_id in [(1, "stop_A1"), (2, "stop_B2"), (3, "stop_A3")]:
+            events.append(
+                _make_stop_event(
+                    service_date="2026-05-01",
+                    trip_id=trip_id,
+                    route_id=route_id,
+                    direction_id=0,
+                    stop_sequence=seq,
+                    stop_id=stop_id,
+                    base_ts=base_ts,
+                    minutes_offset=seq,
+                )
+            )
+    db_session.add_all(events)
+    db_session.commit()
+
+
+def test_canonical_mapping_picks_most_served_stop(db_session):
+    """Majority-pattern stop_id wins at every (direction_id, stop_sequence)."""
+    _seed_variant_route(db_session, route_id="VRMAJ")
+    mapping = compute_canonical_stop_mapping(
+        db_session,
+        route_id="VRMAJ",
+        service_date_range=(date(2026, 5, 1), date(2026, 5, 1)),
+    )
+    # All three positions should map to the majority-pattern stop.
+    assert mapping[(0, 1)] == "stop_A1"
+    assert mapping[(0, 2)] == "stop_A2"  # the divergence point: A wins
+    assert mapping[(0, 3)] == "stop_A3"
+
+
+def test_canonical_mapping_lexical_tiebreak(db_session):
+    """Equal trip counts → lexically smaller stop_id wins (deterministic)."""
+    db_session.add(
+        Route(
+            route_id="VRTIE",
+            route_short_name="VRTIE",
+            route_long_name="Variant tiebreak test",
+            route_type=3,
+            is_current=True,
+        )
+    )
+    base_ts = datetime(2026, 5, 1, 14, 0, 0)
+    events: list[StopEvent] = []
+    # Five trips through stop_alpha at seq 2, five trips through stop_beta.
+    # Lexical tiebreak ("alpha" < "beta") should pick stop_alpha.
+    for i in range(5):
+        for tag, stop_id_seq2 in [("ALPHA", "stop_alpha"), ("BETA", "stop_beta")]:
+            trip_id = f"TRIP_{tag}_{i}"
+            events.append(
+                _make_stop_event(
+                    service_date="2026-05-01",
+                    trip_id=trip_id,
+                    route_id="VRTIE",
+                    direction_id=0,
+                    stop_sequence=2,
+                    stop_id=stop_id_seq2,
+                    base_ts=base_ts,
+                )
+            )
+    db_session.add_all(events)
+    db_session.commit()
+
+    mapping = compute_canonical_stop_mapping(
+        db_session,
+        route_id="VRTIE",
+        service_date_range=(date(2026, 5, 1), date(2026, 5, 1)),
+    )
+    assert mapping[(0, 2)] == "stop_alpha"
+
+
+def test_segment_slip_excludes_minority_variant_observations(db_session):
+    """Canonical filter drops the minority pattern from the slip aggregation.
+
+    The slip SQL itself is Postgres-only, but the canonical CTE that
+    powers its filter runs under SQLite via
+    :func:`compute_canonical_stop_mapping`. Verifying the mapping
+    excludes the variant `stop_id` at the divergence sequence is the
+    load-bearing invariant — the slip SQL's twin JOIN to ``canonical``
+    will then exclude any observation whose endpoint isn't the canonical
+    stop, leaving exactly one row per ``(direction_id, from_seq, to_seq)``.
+    """
+    _seed_variant_route(db_session, route_id="VRSEG")
+    mapping = compute_canonical_stop_mapping(
+        db_session,
+        route_id="VRSEG",
+        service_date_range=(date(2026, 5, 1), date(2026, 5, 1)),
+    )
+    # The minority pattern's distinctive stop ("stop_B2") must NOT appear
+    # as the canonical mapping for any position.
+    canonical_stop_ids = set(mapping.values())
+    assert "stop_B2" not in canonical_stop_ids
+    # And the canonical mapping for seq 2 must be the majority's stop.
+    assert mapping[(0, 2)] == "stop_A2"
+
+
+def test_cumulative_slip_unaffected_by_variant_observations():
+    """Cumsum walks one row per (direction_id, from_seq) once canonical-filtered.
+
+    Pre-fix, duplicate rows at the same ``(direction_id, from_seq, to_seq)``
+    (one per variant) would each contribute to the cumsum, double-counting
+    the slip at that position. Post-fix, the canonical filter inside the
+    slip SQL guarantees one row per position, so the cumsum walk produces
+    the simple running total of per-segment mean slips.
+
+    This test exercises :func:`_assemble_segment_slip_output` (the post-
+    SQL stage) with synthetic canonical-shape rows to confirm the cumsum
+    arithmetic. If a variant slipped through the canonical filter the
+    invariant would break — that's tested separately via the canonical
+    mapping tests.
+    """
+    canonical_rows = [
+        # direction 0: three segments, mean slips 10, 20, 30
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 2,
+            "to_stop_id": "S2",
+            "n_observations": 100,
+            "mean_slip_sec": 10.0,
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 100,
+            "mean_slip_sec": 20.0,
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 3,
+            "from_stop_id": "S3",
+            "to_seq": 4,
+            "to_stop_id": "S4",
+            "n_observations": 100,
+            "mean_slip_sec": 30.0,
+        },
+    ]
+    out = _assemble_segment_slip_output(canonical_rows, period="all")
+    # Origin segment (from_seq=1) dropped per the module-docstring rule.
+    assert [r["from_seq"] for r in out] == [2, 3]
+    # cum_slip_sec is the running sum from the first kept segment.
+    assert out[0]["cum_slip_sec"] == 20.0
+    assert out[1]["cum_slip_sec"] == 50.0  # 20 + 30; NOT 60 (which would
+    # indicate the cumsum double-walked a duplicate row)
+    assert all(r["period"] == "all" for r in out)
+
+
+def test_cumulative_slip_would_inflate_if_duplicates_were_present():
+    """Pin the bug surface: duplicate-row input inflates cum_slip_sec.
+
+    The pre-fix bug: when route variants produced two rows at the same
+    (direction_id, from_seq, to_seq) (different stop_id pairs), the
+    cumsum loop walked both and added each mean_slip_sec to the running
+    total. This test reproduces that input shape and confirms the helper
+    really does inflate — locking the contract that the canonical filter
+    upstream is what prevents the bug, not any clever dedup in the helper.
+    """
+    duplicated_rows = [
+        # Two rows at (dir 0, from_seq=2, to_seq=3): the pre-fix bug shape.
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2_majority",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 100,
+            "mean_slip_sec": 20.0,
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2_minority",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 30,
+            "mean_slip_sec": 50.0,
+        },
+        # Origin segment to be dropped.
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 2,
+            "to_stop_id": "S2_majority",
+            "n_observations": 100,
+            "mean_slip_sec": 5.0,
+        },
+    ]
+    out = _assemble_segment_slip_output(duplicated_rows, period="all")
+    # Both duplicate rows are kept (the helper doesn't dedup); the cum
+    # values bake in the inflation that NOTES-57 fast-follow fixes
+    # upstream by canonical-filtering the SQL inputs.
+    assert len(out) == 2  # both duplicates survive — inflation is visible
+    assert {r["cum_slip_sec"] for r in out} == {20.0, 70.0}  # 20, then 20+50
