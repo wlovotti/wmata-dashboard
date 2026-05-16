@@ -58,6 +58,50 @@ proxies instead).
   NOTES-38 + ≥14d data)*. Week-over-week movers split into
   improvements / degradations.
 
+**Diagnostic outputs (route-level + system-wide)**
+
+A new initiative — the dashboard today surfaces metrics; these items
+surface *why* metrics are what they are and *where* operational
+intervention has the highest leverage. Outputs target both the user
+and a transit-interested public audience (the eventual public-site
+goal in NOTES-50). Pure deterministic Python/SQL — no LLM in the
+pipeline; the structured artifacts feed dashboard panels and ranked
+target lists directly.
+
+- **NOTES-56 Confirm + persist WMATA's frequent route list.** The
+  hardcoded example list in `src/otp_constants.py`'s docstring is
+  illustrative only and doesn't match WMATA's published Frequent
+  Service Map (D80, 7-10 min daytime headways, is frequent but not
+  listed). Establishes the authoritative list and wires it into
+  headline-metric selection (EWT for frequent, OTP for standard).
+- **NOTES-57 Per-route diagnostic pipeline (foundation).**
+  Materialize per-(route, direction, stop_sequence, period) slip
+  statistics and per-timepoint behavior classification (recovery /
+  leaky / underpowered / neutral). Foundation for 58-61.
+- **NOTES-58 RouteDetail per-route diagnosis panel.** Renders
+  NOTES-57 — slip trajectory chart (both directions, timepoint
+  markers) + timepoint behavior table + LLM-generated diagnosis
+  narrative (generated batch / on-demand by the user, persisted;
+  public reads from cache). The D80 deep-dive shape, productized.
+- **NOTES-59 Cross-route segment diagnostic (V1, stop-pair).**
+  Aggregate slip across all routes per `(from_stop, to_stop)`
+  segment → ranked infrastructure-investment candidates (TSP /
+  queue-jumps / dedicated lanes). Segment-identity matching only;
+  no geometric corridor rollup.
+- **NOTES-62 Cross-route corridor diagnostic (V2, geometric rollup).**
+  Roll NOTES-59's segment-level slip up to corridor / intersection
+  level via shape-aware matching, so "the M St NW corridor from
+  Wisconsin to Penn Ave" reads as one investment target rather
+  than N stop-pairs. The framing that makes the output
+  decision-useful for infrastructure planning.
+- **NOTES-60 Schedule audit page.** System-wide under-padded and
+  over-padded segments, sortable, filterable by time-of-day. Direct
+  input to schedule-revision work.
+- **NOTES-61 Hold-down policy / dispatching candidates page.**
+  Ranked timepoint-leakage table (% of buses departing > N seconds
+  early per timepoint per period) → operational fix targets, no
+  capital required.
+
 ### P5 — Cleanup
 
 - **NOTES-20 Tighter rider-experience OTP.** A stricter window alongside
@@ -300,6 +344,311 @@ Concrete steps:
 
 Out of scope: scaling beyond a single API instance, real auth
 (SSO/OAuth), CDN configuration beyond what Pages provides by default.
+
+---
+
+## NOTES-56. Confirm + persist WMATA's frequent route list
+
+**Severity: low (analytical correctness — affects headline-metric choice).**
+
+The docstring in `src/otp_constants.py` names (70, 79, X2, 90, 92, 16Y,
+Metroway) as headway-based routes; this is illustrative of where the
+historical WMATA `scheduled_headway + 3 min` rule would apply, not an
+authoritative list of WMATA's published Frequent Service Map. D80 has
+7-10 min daytime headways and appears on WMATA's frequent-service map
+but isn't in the otp_constants list — Claude was misled by this exact
+gap during a route deep-dive in May 2026.
+
+The data-driven definition in `src/ewt.py`
+(`FREQUENT_HEADWAY_MAX_SEC = 15 min`, evaluated at the cell-hour level)
+operates independently and is fine as the per-cell gate for EWT
+computation. The missing piece is a *route-level* designation: "is
+route X a frequent-service route per WMATA's publication?" — which
+drives UI choices like "which metric is the headline KPI?" and
+"which routes appear on the Frequent Routes overview slice?"
+
+Concrete steps:
+1. Pull WMATA's current Frequent Service Map (PDF or web page); record
+   the route list and the criteria WMATA uses (typically headway and
+   span-of-service thresholds).
+2. Persist as `config/frequent_routes.yaml` with the source URL and
+   pull date in a header comment, similar to `config/route_targets.yaml`.
+3. Wire into route metadata: add `is_frequent: bool` to the `/api/routes`
+   payload, populated from the config.
+4. Update the docstring in `src/otp_constants.py` to point at this
+   config rather than the illustrative list, and clarify the
+   distinction between WMATA's designation (route-level) and the EWT
+   data-driven check (cell-hour level).
+5. On the frontend, surface EWT as the headline KPI for frequent
+   routes (currently OTP is headline everywhere).
+6. Cross-validate: emit a one-shot analysis (`analysis/` script) that
+   compares WMATA's designation against the data-driven check. Routes
+   designated frequent but with sparse frequent cell-hours, or vice
+   versa, are interesting either way (data drift vs WMATA list staleness).
+
+Out of scope: scraping WMATA's map automatically (one-time manual pull
+is fine until WMATA changes the map; revisit if it changes more than
+once a year).
+
+---
+
+## NOTES-57. Per-route diagnostic pipeline (foundation)
+
+**Severity: medium (blocks NOTES-58/59/60/61).**
+
+Materialize per-route diagnostic primitives so dashboard panels and
+ranked target lists are O(1) renders rather than ad-hoc queries.
+Codifies the analytical pattern from the D80 deep-dive (May 2026 session).
+
+Per-route, per-direction, per-period (am_peak / midday / pm_peak /
+evening / late / all):
+- **Per-segment slip:** for each consecutive `(arrive_seq, stop_id)`
+  pair on the route, mean and count of `observed_gap - scheduled_gap`
+  across all observed trips. Excludes the origin-departure segment
+  (dominated by layover artifact, not real slip). Reference impl:
+  `visualizations/slip_trajectory.py:fetch_slip`.
+- **Cumulative slip:** running sum of mean per-segment slip from
+  first non-origin segment. Equals the typical schedule deviation at
+  each stop for a bus that left origin on time.
+- **Timepoint behavior classification:** for each WMATA timepoint on
+  the route (joined via 50m haversine match between `timepoints` and
+  `stops` — the GTFS-Plus internal stop_ids don't match public GTFS),
+  classify behavior based on deviation distribution shift across the
+  timepoint:
+  - *recovery* — median deviation drops by ≥120s
+  - *leaky* — p10 drops by ≥180s downstream (early-departure bleed)
+  - *underpowered* — median deviation does not drop materially
+    (≥+120s entering, no compression)
+  - *neutral* — median within ±60s, low variance change
+- **Direction asymmetry signature:** early-dominant / late-dominant /
+  balanced based on the early% vs late% split (D80 dir 0 is
+  early-dominant at 26% early; dir 1 is late-dominant at 26% late).
+
+Persistence: materialized table `route_diagnostic_profile` refreshed
+nightly via a new entry in `pipelines/run_daily_batch.py`. Keep the
+raw computation in `src/route_diagnostics.py` so it's testable
+independently.
+
+### Dependencies
+
+Stop_events + runs foundation (already landed). No dependency on
+NOTES-56 — frequent-route designation doesn't change diagnostic
+computation, only what the headline metric is in the UI surface.
+
+---
+
+## NOTES-58. RouteDetail per-route diagnosis panel
+
+**Severity: low.**
+
+Surfaces the NOTES-57 materialized profile on RouteDetail as a new
+"Diagnosis" tab or panel. Two-direction layout (matching how slip
+trajectory naturally splits):
+
+- **Slip trajectory chart** — per-direction line chart of cumulative
+  slip vs stop sequence with timepoint markers and labels. Bar overlay
+  for per-segment slip (red = late, green = recovery). Period selector
+  reuses the existing `period=` filter from RouteDetail.
+  Reference visual: `visualizations/slip_trajectory.py` output.
+- **Timepoint behavior table** — one row per timepoint on the route
+  with: name, stop_sequence, classification badge (recovery / leaky /
+  underpowered / neutral), median dev entering, median dev leaving,
+  p10/p90 spread change. Per-period breakdown via the period selector.
+- **LLM-generated diagnosis narrative** — 200-300 word interpretation
+  of the route's diagnostic profile (NOTES-57): direction asymmetry,
+  key delay zones, timepoint behavior (recovery / leaky / underpowered),
+  2-3 ranked hypotheses with evidence, suggested intervention class.
+  Generated in a batch / on-demand workflow, never in the request
+  path, since the public site will eventually serve this content
+  uncached:
+  - New CLI `scripts/generate_route_diagnosis.py` invoked by the user
+    (per route or `--all`). Reads the materialized profile from
+    NOTES-57, calls Claude with a structured prompt + the profile as
+    context, writes the result to a new `route_diagnosis_narrative`
+    table keyed by `(route_id, period)` with `generated_at`,
+    `model_id`, `prompt_version`, `profile_snapshot_hash` columns.
+  - API endpoint `GET /api/routes/{id}/diagnosis?period=...` reads
+    from the cache table; never invokes Claude. Returns
+    `is_stale=true` when `profile_snapshot_hash` differs from the
+    current NOTES-57 profile so the panel can show a "diagnosis is
+    out of date" badge — regeneration stays manual.
+  - Example narrative (from the D80 May 2026 deep-dive): "Direction 0
+    (Union Station → Friendship Heights): schedule under-budgets
+    running time through downtown by ~5 min cumulative before
+    recovering at Farragut Square (I St NW + 17 St NW). The recovery
+    wedge appears over-sized for off-peak traffic — 26% of buses
+    leave the timepoint early, consistent with non-enforced
+    hold-downs. The PM-peak EWT (4.5 min) is largely attributable to
+    this leakage. Suggested intervention: tighten hold-down
+    enforcement at Farragut; consider headway-based dispatching for
+    this route."
+
+Audience: both the user (research deep-dive) and transit-interested
+public. Public-facing copy should explain "slip" and "timepoint"
+inline on first use; consider a "?" tooltip glossary linking to a
+brief explainer page. The LLM is a build-time tool here, not a
+runtime dependency — the public site doesn't call Anthropic and isn't
+exposed to LLM cost / latency / availability.
+
+### Dependencies
+
+NOTES-57 (pipeline foundation). NOTES-56 is a soft prerequisite —
+the diagnosis text should note "this route is on WMATA's Frequent
+Service Map" when applicable, but the panel works without it.
+
+---
+
+## NOTES-59. Cross-route segment diagnostic (V1, stop-pair)
+
+**Severity: low (highest-leverage novel output — V1 piece).**
+
+Aggregates per-segment slip from NOTES-57 across *all* routes to
+identify infrastructure-investment targets at the stop-pair level.
+V1 deliberately uses segment-identity matching only — same
+`(from_stop, to_stop)` across routes counts as the same segment —
+and defers shape-aware corridor rollup to NOTES-62 so V1 can ship
+without geometric matching infrastructure.
+
+Computation:
+- For each unique stop-pair `(from_stop, to_stop)` traversed by ≥2
+  routes, aggregate total slip-seconds across all routes weighted by
+  observed trip volume.
+- Per time-of-day cuts; PM peak typically dominates for downtown.
+- "Contributing routes" list with per-route breakdown for drilldown.
+
+New page `/segments` (new top-level nav alongside Overview / Routes /
+Blocks / Targets per PR #105's IA). Ranked list with columns: segment
+description (from-stop → to-stop, distance), contributing routes
+(count + names), total slip-min/hour, peak hour. Click-through shows
+per-route contribution.
+
+Caveat: stop-pair identity misses cases where two routes traverse the
+same street segment using different stop_ids (NB and SB stops at
+different intersections, or alternative spacing). V1 systematically
+underestimates total corridor slip for those cases — NOTES-62
+addresses this with shape-aware matching.
+
+Use cases (V1):
+- "Which intersections / short segments lose the most time
+  system-wide?" — first cut at infrastructure-investment ranking.
+- "Where do bus routes share a chokepoint?" — direct visibility into
+  shared pain.
+
+### Dependencies
+
+NOTES-57.
+
+---
+
+## NOTES-62. Cross-route corridor diagnostic (V2, geometric rollup)
+
+**Severity: low (decision-useful framing — V2 follow-up to NOTES-59).**
+
+Rolls NOTES-59's stop-pair slip up to the corridor / intersection
+level via shape-aware matching, so "the M St NW corridor from
+Wisconsin Ave to Pennsylvania Ave" reads as a single investment
+target rather than N stop-pairs. The framing transit planners,
+advocates, and the public actually use — TSP and dedicated-lane
+decisions are made at the corridor level, not the stop-pair level.
+
+Computation requirements beyond V1:
+- **Stop → corridor mapping.** Project each stop onto the route's
+  GTFS shape; group stops within ~150 m of the same shape segment
+  into a "corridor" identified by street + endpoints. Handle
+  multi-street corridors (e.g., Wisconsin Ave NW from Friendship
+  Heights to M St) via shape connectivity, not stop-name parsing.
+- **Cross-route corridor identity.** Two routes traverse "the same"
+  corridor if their shapes overlap for ≥N meters along the same
+  street centerline. May require an external street-network dataset
+  (OpenStreetMap road network) for robust matching — GTFS shapes
+  alone may not give consistent corridor identity across routes that
+  use slightly different alignments.
+- **Aggregation.** Sum per-segment slip × trip volume across all
+  stop-pairs that fall within a corridor, across all routes that
+  traverse it.
+
+UI: extend the `/segments` page (NOTES-59) with a corridor view
+toggle, or new tab. Corridor cards: name, length, contributing
+routes, total system-wide slip-hours/day, peak periods, drill-down
+to constituent stop-pairs (NOTES-59 view).
+
+Out of scope for V2: cost-of-intervention estimates (TSP install
+cost, bus-lane construction cost — those are WMATA / DDOT planning
+inputs, not derivable from operational data). The output ranks
+candidates by *benefit* (system-wide delay reduction); pairing with
+cost data is a separate exercise.
+
+### Dependencies
+
+NOTES-59 (segment-level aggregation). May benefit from any future
+work on stop-to-shape projection or OSM road-network ingestion if
+that lands independently.
+
+---
+
+
+---
+
+## NOTES-60. Schedule audit page
+
+**Severity: low.**
+
+System-wide table of under-padded and over-padded segments —
+direct input to schedule-revision work. Per-segment, per-time-of-day.
+
+New page `/schedule-audit` (or a tab on the existing RoutesList page,
+depending on IA preference). Default sort by absolute slip magnitude
+weighted by trip volume. Filter by route, direction, time-of-day, and
+slip sign (only under-padded / only over-padded / all).
+
+Columns: route, direction, segment (from-stop → to-stop), period,
+mean slip (signed), trip-count, "would save X min/day for the
+average bus" estimate.
+
+Use cases:
+- "What schedule changes would best reduce delay?" — top under-padded
+  segments.
+- "Where is the schedule wasting service-hours on excess padding?" —
+  top over-padded segments (these are operational cost without
+  rider benefit).
+
+### Dependencies
+
+NOTES-57.
+
+---
+
+## NOTES-61. Hold-down policy / dispatching candidates page
+
+**Severity: low.**
+
+Ranked timepoint-leakage table — which WMATA timepoints would benefit
+most from enforced hold-downs (AVL alerting on early departures, or
+operator-policy reminders). The operational complement to NOTES-60's
+schedule-revision lever: zero capital, only policy.
+
+For each timepoint on each route, per period:
+- **Leakage rate** — % of buses departing > 60s ahead of scheduled
+  departure
+- **Estimated downstream EWT impact** — expected reduction in
+  next-bus headway variance at the first 2-3 downstream stops if
+  early departures were eliminated
+- **Affected daily trips** — count
+
+Ranked descending by estimated EWT-savings × trip volume. Per-route
+drill-down shows the full distribution at the timepoint.
+
+Use cases:
+- "Which timepoints should AVL flag early departures most aggressively?"
+- "Where would headway-based dispatching (vs schedule adherence) most
+  improve rider experience?" — the leakiest timepoints on frequent
+  routes are also the best candidates for policy change.
+
+### Dependencies
+
+NOTES-57. NOTES-56 is a soft prerequisite for "frequent route" filtering
+in the ranking (headway-based dispatching is the right intervention
+specifically for frequent routes).
 
 ---
 
