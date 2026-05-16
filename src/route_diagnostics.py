@@ -143,6 +143,78 @@ def default_service_date_range(today: date_type, days: int = 30) -> tuple[date_t
 # ---------------------------------------------------------------------------
 
 
+def compute_canonical_stop_mapping(
+    db: Session,
+    route_id: str,
+    service_date_range: tuple[date_type, date_type],
+) -> dict[tuple[int, int], str]:
+    """Most-served stop_id per (direction_id, stop_sequence) for one route.
+
+    Determines the canonical stop pattern by trip frequency. Used by
+    ``compute_segment_slip`` to filter out minority-variant trips so per-
+    segment slip and cumulative slip are mathematically well-defined.
+
+    Route variants (express/local splits, mid-route detours) legitimately
+    produce multiple stop_ids at the same ``(direction_id, stop_sequence)``
+    over a 30-day window. Without filtering, the slip aggregation emits
+    one row per (from_stop_id, to_stop_id) pair at each
+    ``(direction_id, from_seq, to_seq)``, which violates the
+    ``route_diagnostic_segment`` unique constraint and silently inflates
+    ``cum_slip_sec`` when the cumsum loop walks the duplicates.
+
+    Selection rule: pick the stop_id with the most ``stop_events`` rows
+    (proximity / SCHEDULED / observed-non-null) at each
+    ``(direction_id, stop_sequence)``. Ties are broken by lexically
+    smaller stop_id for determinism — without a deterministic tiebreak
+    the canonical mapping could flip between runs and silently change
+    which trips count.
+
+    Uses the same source / schedule_relationship / observed-arrival
+    filters as ``compute_segment_slip`` so the two are anchored to the
+    same observation set.
+
+    Returns ``{(direction_id, stop_sequence): stop_id}`` for every
+    (direction_id, stop_sequence) the route has observed in the window.
+    Returns an empty dict for a route with no eligible observations.
+    """
+    start, end = service_date_range
+    sql = text(
+        """
+        WITH ranked AS (
+          SELECT
+            se.direction_id,
+            se.stop_sequence,
+            se.stop_id,
+            COUNT(*) AS n,
+            ROW_NUMBER() OVER (
+              PARTITION BY se.direction_id, se.stop_sequence
+              ORDER BY COUNT(*) DESC, se.stop_id ASC
+            ) AS rk
+          FROM stop_events se
+          WHERE se.route_id = :route_id
+            AND se.source = 'proximity'
+            AND se.observed_arrival_ts IS NOT NULL
+            AND se.scheduled_arrival_ts IS NOT NULL
+            AND se.schedule_relationship = 'SCHEDULED'
+            AND se.service_date BETWEEN :start AND :end
+          GROUP BY se.direction_id, se.stop_sequence, se.stop_id
+        )
+        SELECT direction_id, stop_sequence, stop_id
+        FROM ranked
+        WHERE rk = 1;
+        """
+    )
+    rows = db.execute(
+        sql,
+        {
+            "route_id": route_id,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+    ).fetchall()
+    return {(int(r.direction_id), int(r.stop_sequence)): r.stop_id for r in rows}
+
+
 def compute_segment_slip(
     db: Session,
     route_id: str,
@@ -162,6 +234,14 @@ def compute_segment_slip(
     slip from the first non-origin segment, in direction-order — so the
     materialization stores both the per-segment value and its cumulative
     counterpart in one pass.
+
+    Route variants (express+local splits, mid-route detours) are collapsed
+    to a single canonical pattern via :func:`compute_canonical_stop_mapping`
+    — observations are kept only when both endpoint ``stop_id``s match
+    the most-served stop at their ``(direction_id, stop_sequence)``
+    position. Without this filter, multiple stop_id pairs land at the same
+    ``(direction_id, from_seq, to_seq)`` and produce both a constraint
+    violation on insert and an inflated cumsum on safe routes.
     """
     if period not in PERIOD_HOURS:
         raise ValueError(f"unknown period: {period}")
@@ -173,11 +253,19 @@ def compute_segment_slip(
     # to measure for the *scheduled* period.
     period_clause = ""
     if period == "late":
-        period_clause = "AND (sched_et_hr >= 22 OR sched_et_hr < 6)"
+        period_clause = "AND (o.sched_et_hr >= 22 OR o.sched_et_hr < 6)"
     elif period != "all":
         lo, hi = PERIOD_HOURS[period]  # type: ignore[misc]
-        period_clause = f"AND sched_et_hr >= {lo} AND sched_et_hr < {hi}"
+        period_clause = f"AND o.sched_et_hr >= {lo} AND o.sched_et_hr < {hi}"
 
+    # The `canonical` CTE selects the most-served stop_id per
+    # (direction_id, stop_sequence) — the dominant route pattern. The `seg`
+    # CTE joins each event row + its LEAD-next row to canonical twice, once
+    # on each endpoint, so any observation that diverges from the canonical
+    # pattern at either end is dropped. Without this filter, route variants
+    # produce multiple rows per (direction_id, from_seq, to_seq) which
+    # violates the segment table's unique constraint and inflates the
+    # downstream cumsum walk.
     sql = text(
         f"""
         WITH ordered AS (
@@ -207,20 +295,45 @@ def compute_segment_slip(
             ORDER BY se.stop_sequence
           )
         ),
-        seg AS (
+        canonical_ranked AS (
           SELECT
             direction_id,
-            stop_sequence AS from_seq,
-            stop_id AS from_stop_id,
-            next_seq AS to_seq,
-            next_stop_id AS to_stop_id,
-            EXTRACT(EPOCH FROM (next_obs - observed_arrival_ts)) AS obs_gap,
-            EXTRACT(EPOCH FROM (next_sched - scheduled_arrival_ts)) AS sched_gap
+            stop_sequence,
+            stop_id,
+            ROW_NUMBER() OVER (
+              PARTITION BY direction_id, stop_sequence
+              ORDER BY COUNT(*) DESC, stop_id ASC
+            ) AS rk
           FROM ordered
-          WHERE next_obs IS NOT NULL
-            AND next_sched IS NOT NULL
+          GROUP BY direction_id, stop_sequence, stop_id
+        ),
+        canonical AS (
+          SELECT direction_id, stop_sequence, stop_id
+          FROM canonical_ranked
+          WHERE rk = 1
+        ),
+        seg AS (
+          SELECT
+            o.direction_id,
+            o.stop_sequence AS from_seq,
+            o.stop_id AS from_stop_id,
+            o.next_seq AS to_seq,
+            o.next_stop_id AS to_stop_id,
+            EXTRACT(EPOCH FROM (o.next_obs - o.observed_arrival_ts)) AS obs_gap,
+            EXTRACT(EPOCH FROM (o.next_sched - o.scheduled_arrival_ts)) AS sched_gap
+          FROM ordered o
+          JOIN canonical c_from
+            ON c_from.direction_id = o.direction_id
+           AND c_from.stop_sequence = o.stop_sequence
+           AND c_from.stop_id = o.stop_id
+          JOIN canonical c_to
+            ON c_to.direction_id = o.direction_id
+           AND c_to.stop_sequence = o.next_seq
+           AND c_to.stop_id = o.next_stop_id
+          WHERE o.next_obs IS NOT NULL
+            AND o.next_sched IS NOT NULL
             {period_clause}
-            AND EXTRACT(EPOCH FROM (next_obs - observed_arrival_ts)) BETWEEN 0 AND 1800
+            AND EXTRACT(EPOCH FROM (o.next_obs - o.observed_arrival_ts)) BETWEEN 0 AND 1800
         )
         SELECT
           direction_id,
@@ -247,22 +360,38 @@ def compute_segment_slip(
         },
     ).fetchall()
 
-    # Drop the origin-departure segment per direction. The segment whose
-    # `from_seq` is the minimum observed `from_seq` for the direction is the
-    # origin-departure leg (see module docstring).
+    raw_rows = [
+        {
+            "direction_id": int(r.direction_id),
+            "from_seq": int(r.from_seq),
+            "from_stop_id": r.from_stop_id,
+            "to_seq": int(r.to_seq),
+            "to_stop_id": r.to_stop_id,
+            "n_observations": int(r.n),
+            "mean_slip_sec": float(r.mean_slip_sec),
+        }
+        for r in rows
+    ]
+    return _assemble_segment_slip_output(raw_rows, period)
+
+
+def _assemble_segment_slip_output(
+    raw_rows: list[dict[str, Any]],
+    period: str,
+) -> list[dict[str, Any]]:
+    """Drop the origin-departure segment per direction and attach cum_slip_sec.
+
+    Splits from :func:`compute_segment_slip` so the cumsum walk is unit-
+    testable without standing up the Postgres-only slip SQL. Assumes
+    ``raw_rows`` already has exactly one row per
+    ``(direction_id, from_seq, to_seq)`` — the canonical-pattern filter
+    inside the SQL is what guarantees that invariant; if it ever fails
+    upstream (e.g., the canonical CTE breaks), this helper will silently
+    double-count, which is precisely the bug NOTES-57 fast-follow fixes.
+    """
     by_dir: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for r in rows:
-        by_dir[r.direction_id].append(
-            {
-                "direction_id": r.direction_id,
-                "from_seq": r.from_seq,
-                "from_stop_id": r.from_stop_id,
-                "to_seq": r.to_seq,
-                "to_stop_id": r.to_stop_id,
-                "n_observations": int(r.n),
-                "mean_slip_sec": float(r.mean_slip_sec),
-            }
-        )
+    for r in raw_rows:
+        by_dir[r["direction_id"]].append(dict(r))
 
     out: list[dict[str, Any]] = []
     for direction_id, segs in by_dir.items():
