@@ -309,10 +309,13 @@ main {
   font-size: 1.5rem;
 }
 
-/* When a window-range note follows the h2, drop the h2's bottom border so
-   the heading and its subtitle read as one block — the note then carries
-   the divider into the filter row. */
-.table-container h2:has(+ .scorecard-window-note) {
+/* When a subtitle note follows the h2, drop the h2's bottom border so the
+   heading and its subtitle read as one block — the note then carries the
+   divider into the filter row. Applies to .scorecard-window-note and to
+   .drilldown-anchor (the latter has a -0.5rem top margin and would
+   otherwise render its text on top of the h2's bottom border). */
+.table-container h2:has(+ .scorecard-window-note),
+.table-container h2:has(+ .drilldown-anchor) {
   padding-bottom: 0.25rem;
   border-bottom: none;
 }
