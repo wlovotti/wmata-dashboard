@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { computeSpectrumBar } from '../utils/spectrumBar'
-import SystemTrend from './SystemTrend'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -332,7 +331,6 @@ function RouteList() {
   if (loading) {
     return (
       <main>
-        <SystemTrend />
         <div className="table-container">
           <h2>Route Performance Scorecard</h2>
           <div className="loading-spinner">
@@ -360,7 +358,6 @@ function RouteList() {
         </div>
       )}
 
-      <SystemTrend />
 
       <div className="table-container">
         <h2>Route Performance Scorecard</h2>

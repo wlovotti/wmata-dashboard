@@ -90,6 +90,84 @@ header h1 {
   opacity: 0.8;
 }
 
+/* Primary navigation bar (NOTES-52). Sits inside the dark header so the
+   nav links read as one with the brand block; light underline marks the
+   active route to mirror conventional top-of-app navigation. */
+.primary-nav {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 1.25rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.nav-link {
+  color: rgba(255, 255, 255, 0.85);
+  text-decoration: none;
+  font-size: 0.95rem;
+  font-weight: 500;
+  padding: 0.5rem 0;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.nav-link:hover {
+  color: white;
+}
+
+.nav-link.active {
+  color: white;
+  border-bottom-color: white;
+}
+
+/* Health-pulse banner (NOTES-52). Single-line system status above the
+   trend strip on Overview. Color tint tracks worst-of-{OTP, SD, EWT,
+   bunching} gap to target — green when meeting all four, yellow within
+   10% of target, red beyond. Neutral grey when no system metrics
+   have a target / current value pair. */
+.health-pulse {
+  padding: 0.85rem 1.25rem;
+  margin-bottom: 1.25rem;
+  border-radius: 6px;
+  font-size: 1.05rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+
+.health-pulse-green {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #065f46;
+}
+
+.health-pulse-yellow {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #92400e;
+}
+
+.health-pulse-red {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.health-pulse-neutral {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
+.see-all-link {
+  color: #002F6C;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.see-all-link:hover {
+  text-decoration: underline;
+}
+
 main {
   max-width: 1400px;
   margin: 0 auto;
@@ -231,12 +309,31 @@ main {
   font-size: 1.5rem;
 }
 
-/* When a window-range note follows the h2, drop the h2's bottom border so
-   the heading and its subtitle read as one block — the note then carries
-   the divider into the filter row. */
+/* When a window-range note follows the h2, drop the h2's bottom border and
+   tighten the padding so the heading and its subtitle read as one block —
+   the note then carries the divider into the filter row. */
 .table-container h2:has(+ .scorecard-window-note) {
   padding-bottom: 0.25rem;
   border-bottom: none;
+}
+
+/* When a .drilldown-anchor subtitle follows the h2, drop the h2's bottom
+   border so the annotation's -0.5rem top margin doesn't render its text
+   onto the border line. Keep the h2's default 1.5rem padding-bottom —
+   combined with the annotation's negative top margin it yields the same
+   1rem gap that the .chart-container surfaces have. */
+.table-container h2:has(+ .drilldown-anchor) {
+  border-bottom: none;
+}
+
+/* .drilldown-anchor's base rule has no horizontal padding because its
+   intended host (.chart-container) provides 1.5rem container padding.
+   .table-container has no padding of its own — its h2, filters, and
+   .scorecard-window-note each carry their own 1.5rem horizontal padding —
+   so the annotation needs the same to line up under the h2 instead of
+   sitting flush against the container's left edge. */
+.table-container .drilldown-anchor {
+  padding: 0 1.5rem;
 }
 
 .scorecard-window-note {

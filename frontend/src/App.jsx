@@ -1,14 +1,16 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
 import { useState } from 'react'
+import Overview from './components/Overview'
 import RouteList from './components/RouteList'
 import RouteDetail from './components/RouteDetail'
 import RunDetail from './components/RunDetail'
 import BlockTimeline from './components/BlockTimeline'
+import ActiveBlocks from './components/ActiveBlocks'
+import Targets from './components/Targets'
 import './App.css'
 
 function App() {
   const [refreshing, setRefreshing] = useState(false)
-  const [lastUpdated, setLastUpdated] = useState(null)
 
   const handleRefresh = () => {
     setRefreshing(true)
@@ -37,13 +39,30 @@ function App() {
               </button>
             </div>
           </div>
+          <nav className="primary-nav" aria-label="Primary">
+            <NavLink to="/" end className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Overview
+            </NavLink>
+            <NavLink to="/routes" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Routes
+            </NavLink>
+            <NavLink to="/blocks" end className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Blocks
+            </NavLink>
+            <NavLink to="/targets" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Targets
+            </NavLink>
+          </nav>
         </header>
 
         <Routes>
-          <Route path="/" element={<RouteList />} />
+          <Route path="/" element={<Overview />} />
+          <Route path="/routes" element={<RouteList />} />
           <Route path="/route/:routeId" element={<RouteDetail />} />
           <Route path="/runs/:runId" element={<RunDetail />} />
+          <Route path="/blocks" element={<ActiveBlocks />} />
           <Route path="/blocks/:blockId" element={<BlockTimeline />} />
+          <Route path="/targets" element={<Targets />} />
         </Routes>
       </div>
     </Router>

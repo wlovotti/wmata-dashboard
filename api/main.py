@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.aggregations import (
     _latest_service_date_with_stop_events,
     compute_block_timeline,
+    get_active_blocks,
     get_all_routes_scorecard,
     get_live_metrics_for_window,
     get_route_blocks,
@@ -805,6 +806,58 @@ async def get_route_blocks_endpoint(route_id: str, service_date: str | None = No
         return result
     finally:
         db.close()
+
+
+@app.get("/api/blocks/active")
+async def get_active_blocks_endpoint(service_date: str | None = None, limit: int = 100):
+    """
+    System-level list of active blocks for one service date (PR #105).
+
+    Powers the `/blocks` index page in the dashboard. Returns every block
+    whose GTFS trips run on `service_date`, ranked by trip count desc
+    then worst observed origin/destination deviation desc — the longest,
+    most cascade-prone dispatch chains land at the top. Each row carries
+    the block_id, the trips chained on it, the routes the block touches,
+    its scheduled origin time in Eastern, and the worst absolute
+    deviation observed across the chain.
+
+    Args:
+        service_date: YYYY-MM-DD Eastern date. Defaults to today (Eastern).
+        limit: Cap on the number of returned blocks (default 100, max 500).
+
+    Returns:
+        Dict with `service_date` and `blocks` (ranked list).
+    """
+    sd = _parse_service_date_param(service_date)
+    db = get_session()
+    try:
+        return get_active_blocks(db, sd, limit=limit)
+    finally:
+        db.close()
+
+
+@app.get("/api/targets")
+async def get_targets_endpoint():
+    """
+    Return the full per-route + system-default targets payload (PR #105).
+
+    Reads `config/route_targets.yaml` via `src/route_targets.py` (which
+    reloads lazily on file mtime change). Powers the `/targets` page in
+    the dashboard, which renders the system defaults plus per-route
+    overrides read-only — editing stays git-only.
+
+    Returns:
+        Dict with `system_default` (mapping of metric -> canonical-units
+        value), `routes` (mapping of route_id -> per-metric overrides),
+        and `metrics` (the list of canonical metric keys the schema knows
+        about). Canonical units are OTP percent, service_delivered
+        fraction, EWT seconds, bunching fraction. Missing per-route
+        metrics inherit the system default — the frontend can compute
+        the effective value with `route_value ?? system_default`.
+    """
+    from src.route_targets import get_all_targets
+
+    return get_all_targets()
 
 
 @app.get("/api/blocks/{block_id}")

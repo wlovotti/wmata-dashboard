@@ -210,6 +210,48 @@ def get_system_targets() -> dict[str, float | None]:
     return {metric: get_system_target(metric) for metric in VALID_METRICS}
 
 
+def get_all_targets() -> dict[str, Any]:
+    """Return the full targets payload in canonical units.
+
+    Powers the read-only `/targets` page (PR #105). Shape:
+
+        {
+            "system_default": {<metric>: <canonical-units float>, ...},
+            "routes": {<route_id>: {<metric>: <float>, ...}, ...},
+            "metrics": [<metric>, ...],
+        }
+
+    Per-route metric blocks omit metrics that aren't overridden — the
+    caller renders the inherited system default for those slots. Values
+    that fail to coerce to floats are dropped silently (the loader
+    already prints a parse warning to stdout).
+    """
+    payload = _CACHE.get_payload(_config_path_for_env())
+    raw_default = payload.get("system_default", {}) or {}
+    raw_routes = payload.get("routes", {}) or {}
+
+    def _canonicalize(block: Any) -> dict[str, float]:
+        out: dict[str, float] = {}
+        if not isinstance(block, dict):
+            return out
+        for metric, (yaml_key, multiplier) in _METRIC_KEY_MAP.items():
+            value = _coerce_float(block.get(yaml_key))
+            if value is None:
+                continue
+            out[metric] = value * multiplier
+        return out
+
+    return {
+        "system_default": _canonicalize(raw_default),
+        "routes": {
+            rid: _canonicalize(block)
+            for rid, block in raw_routes.items()
+            if isinstance(block, dict)
+        },
+        "metrics": list(VALID_METRICS),
+    }
+
+
 def reset_cache_for_tests() -> None:
     """Drop the in-memory cache. Tests call this between fixture swaps."""
     global _CACHE

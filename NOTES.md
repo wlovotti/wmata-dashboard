@@ -6,18 +6,14 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-15. Dropped NOTES-44 — marginal-bus EWT model
-— from the punch list in this PR. A prototype (closed PR #103)
-implemented the closed-form `period_minutes / (2·N·(N+1))` SWT
-reduction under a frequent-service gate. Review concluded the
-SWT-only ranking collapses to "routes with smallest N in a
-frequent-service period," equivalent to sorting by trips-per-period
-ascending — no real signal beyond the input. The interesting
-variation lives in AWT (observed headway variance), which the
-NOTES item itself flagged but the prototype didn't deliver. Rather
-than re-scoping to AWT, dropping the item — closed PR #103's
-diff remains retrievable via `gh pr diff 103` if the direction
-gets revived later.
+Last edited 2026-05-15. Closed NOTES-52 — Overview page + primary
+navigation — in this PR (#105). Header now carries Overview /
+Routes / Blocks / Targets nav; `/` is a new Overview page anchored
+on a system health-pulse banner, the existing 30-day system trend
+strip, and a top-5 contributors panel; `/routes` hosts the legacy
+scorecard table; `/blocks` lists active blocks system-wide ranked
+by trip count; `/targets` renders `config/route_targets.yaml`
+read-only.
 
 ---
 
@@ -54,14 +50,10 @@ proxies instead).
 
 **Information architecture & navigation**
 
-- **NOTES-52 Overview page + primary navigation.** Add top-level
-  nav (Overview / Routes / Blocks / Targets); make `/` an Overview
-  page anchored by a health-pulse banner, the existing system
-  trend strip, and a contributors top-5.
-- **NOTES-53 "Off target" panel on Overview** *(needs NOTES-52)*.
-  Rank routes by gap to their configured per-route target —
-  complements the volume-weighted contributors view with a
-  target-relative cut.
+- **NOTES-53 "Off target" panel on Overview.** Rank routes by gap
+  to their configured per-route target — complements the
+  volume-weighted contributors view with a target-relative cut.
+  Slots into the Overview shell delivered by PR #105.
 - **NOTES-54 "What changed" panel on Overview** *(deferred — needs
   NOTES-38 + ≥14d data)*. Week-over-week movers split into
   improvements / degradations.
@@ -131,59 +123,18 @@ PR's commits remain retrievable via `gh pr diff 81` for re-use.
 
 ---
 
-## NOTES-52. Overview page + primary navigation
-
-**Severity: low.**
-
-The app has no top-level navigation today — `/` is the route table,
-and `RouteDetail` / `BlockTimeline` / `RunDetail` are only reachable
-by clicking into rows. There's no place to land that answers "are we
-OK right now, and where should I look?" without parsing a table.
-
-Add a real navigation bar across the header: **Overview · Routes ·
-Blocks · Targets**. Move the current `RouteList` (table view) to
-`/routes`. Make `/` a new `Overview` component that answers operator
-questions in order:
-
-1. **System health pulse** — a single-line status banner at top.
-   "OTP 76% (▼ 2pp wk) · 14 routes below target". Background tint
-   red / yellow / green based on worst-of-{OTP, SD, EWT, bunching}
-   target gap.
-2. **30-day system trend** — reuse `<SystemTrend>` unchanged.
-3. **Where to look (top contributors)** — reuse the
-   `/api/routes/contributors` endpoint and render the top 5 for the
-   selected metric (default OTP), metric selector inline. One click
-   → `RouteDetail`. Effectively promotes the existing
-   "contributors" mode from a buried toggle to the primary
-   attention-direction widget.
-4. Footer link "See all routes →" to `/routes`.
-
-Also add a `/blocks` index page (today blocks are only reachable
-from the `RouteDetail` Blocks tab) that lists active blocks ranked
-by trip count or cascade lateness. The Targets tab reads
-`config/route_targets.yaml` and renders system defaults + per-route
-overrides; editing stays git-only for now (NOTES-47's design
-explicitly allowed this).
-
-### Dependencies
-
-Independent. Pairs with the landing-page declutter (PR #101) —
-either order works, but doing the declutter first means less to
-throw away if this item slips.
-
----
-
 ## NOTES-53. "Off target" panel on Overview
 
 **Severity: low.**
 
-Augments the Overview page (NOTES-52) with an additional panel
-ranking routes by their **gap to per-route target** for the selected
-metric. Distinct from "Where to look" (volume-weighted contribution):
-this one is target-relative percentage gap, which a manager
-monitoring SLA commitments wants to see independently from
-system-wide blast radius — a small-volume route can be far off
-target without showing up as a big contributor, and vice versa.
+Augments the Overview page (delivered by PR #105) with an
+additional panel ranking routes by their **gap to per-route
+target** for the selected metric. Distinct from "Where to look"
+(volume-weighted contribution): this one is target-relative
+percentage gap, which a manager monitoring SLA commitments wants
+to see independently from system-wide blast radius — a
+small-volume route can be far off target without showing up as a
+big contributor, and vice versa.
 
 Render: ranked list of "Route 30N · OTP 62% · -13 pp below target"
 with the metric selector shared with the contributors panel. Show
@@ -199,8 +150,8 @@ on `/api/routes/contributors` both land via PR #99.
 
 ### Dependencies
 
-NOTES-52 (Overview shell). NOTES-47 (per-route targets — closed
-PR #99) already provides the data plumbing.
+Overview shell delivered by PR #105. NOTES-47 (per-route targets
+— closed PR #99) already provides the data plumbing.
 
 ---
 
@@ -208,11 +159,11 @@ PR #99) already provides the data plumbing.
 
 **Severity: low (deferred — needs ≥14 days of data).**
 
-Augments the Overview page (NOTES-52) with a panel showing
-week-over-week movers: the top routes whose OTP / SD / EWT /
-bunching changed most vs the prior 7-day window. Split into two
-sub-lists — "Improvements" and "Degradations" — so positive movement
-is celebrated alongside negative.
+Augments the Overview page (delivered by PR #105) with a panel
+showing week-over-week movers: the top routes whose OTP / SD /
+EWT / bunching changed most vs the prior 7-day window. Split
+into two sub-lists — "Improvements" and "Degradations" — so
+positive movement is celebrated alongside negative.
 
 **Deferred** until NOTES-38 (period-over-period deltas on every KPI)
 lands. This panel is a thin renderer over that endpoint and has no
@@ -225,8 +176,8 @@ item becomes implementable).
 
 ### Dependencies
 
-NOTES-52 (Overview shell). NOTES-38 (period-over-period deltas —
-deferred).
+Overview shell delivered by PR #105. NOTES-38 (period-over-period
+deltas — deferred).
 
 ---
 
