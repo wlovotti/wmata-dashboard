@@ -6,16 +6,18 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-16. Closed NOTES-57 — Per-route diagnostic
-pipeline (foundation) — in this PR (#107). New
-`src/route_diagnostics.py` computes per-(route, direction, period)
-segment slip + cumulative slip, per-timepoint behavior
-classification (recovery / leaky / underpowered / neutral), and
-direction asymmetry signatures. Persisted to three sibling tables
-(`route_diagnostic_segment`, `_timepoint`, `_direction`) refreshed
-nightly via `pipelines/refresh_route_diagnostic_profile.py`,
-wired into `pipelines/run_daily_batch.py`'s housekeeping pass.
-Foundation for NOTES-58/59/60/61/62.
+Last edited 2026-05-16. Closed NOTES-56 — WMATA frequent-route list
+persisted and wired through. New `config/frequent_routes.yaml`
+(authoritative list pulled from WMATA's High-Frequency Metrobus
+Service Maps, June 29, 2025 Better Bus redesign), new
+`src/frequent_routes.py` loader (mtime-cached), `is_frequent: bool`
+on `/api/routes` and `/api/routes/{id}` payloads, EWT promoted to
+the headline KPI on RouteDetail / RouteList for frequent routes
+(OTP remains visible), `src/otp_constants.py` docstring rewritten
+to distinguish the route-level WMATA designation from the
+per-cell-hour `FREQUENT_HEADWAY_MAX_SEC` gate in `src/ewt.py`, and
+`analysis/frequent_routes_audit.py` cross-validation script for
+list-vs-data drift.
 
 ---
 
@@ -70,12 +72,6 @@ goal in NOTES-50). Pure deterministic Python/SQL — no LLM in the
 pipeline; the structured artifacts feed dashboard panels and ranked
 target lists directly.
 
-- **NOTES-56 Confirm + persist WMATA's frequent route list.** The
-  hardcoded example list in `src/otp_constants.py`'s docstring is
-  illustrative only and doesn't match WMATA's published Frequent
-  Service Map (D80, 7-10 min daytime headways, is frequent but not
-  listed). Establishes the authoritative list and wires it into
-  headline-metric selection (EWT for frequent, OTP for standard).
 - **NOTES-58 RouteDetail per-route diagnosis panel.** Renders the
   route_diagnostic_profile foundation (PR #107) — slip trajectory
   chart (both directions, timepoint markers) + timepoint behavior
@@ -346,51 +342,6 @@ Out of scope: scaling beyond a single API instance, real auth
 
 ---
 
-## NOTES-56. Confirm + persist WMATA's frequent route list
-
-**Severity: low (analytical correctness — affects headline-metric choice).**
-
-The docstring in `src/otp_constants.py` names (70, 79, X2, 90, 92, 16Y,
-Metroway) as headway-based routes; this is illustrative of where the
-historical WMATA `scheduled_headway + 3 min` rule would apply, not an
-authoritative list of WMATA's published Frequent Service Map. D80 has
-7-10 min daytime headways and appears on WMATA's frequent-service map
-but isn't in the otp_constants list — Claude was misled by this exact
-gap during a route deep-dive in May 2026.
-
-The data-driven definition in `src/ewt.py`
-(`FREQUENT_HEADWAY_MAX_SEC = 15 min`, evaluated at the cell-hour level)
-operates independently and is fine as the per-cell gate for EWT
-computation. The missing piece is a *route-level* designation: "is
-route X a frequent-service route per WMATA's publication?" — which
-drives UI choices like "which metric is the headline KPI?" and
-"which routes appear on the Frequent Routes overview slice?"
-
-Concrete steps:
-1. Pull WMATA's current Frequent Service Map (PDF or web page); record
-   the route list and the criteria WMATA uses (typically headway and
-   span-of-service thresholds).
-2. Persist as `config/frequent_routes.yaml` with the source URL and
-   pull date in a header comment, similar to `config/route_targets.yaml`.
-3. Wire into route metadata: add `is_frequent: bool` to the `/api/routes`
-   payload, populated from the config.
-4. Update the docstring in `src/otp_constants.py` to point at this
-   config rather than the illustrative list, and clarify the
-   distinction between WMATA's designation (route-level) and the EWT
-   data-driven check (cell-hour level).
-5. On the frontend, surface EWT as the headline KPI for frequent
-   routes (currently OTP is headline everywhere).
-6. Cross-validate: emit a one-shot analysis (`analysis/` script) that
-   compares WMATA's designation against the data-driven check. Routes
-   designated frequent but with sparse frequent cell-hours, or vice
-   versa, are interesting either way (data drift vs WMATA list staleness).
-
-Out of scope: scraping WMATA's map automatically (one-time manual pull
-is fine until WMATA changes the map; revisit if it changes more than
-once a year).
-
----
-
 ## NOTES-58. RouteDetail per-route diagnosis panel
 
 **Severity: low.**
@@ -447,10 +398,11 @@ exposed to LLM cost / latency / availability.
 
 ### Dependencies
 
-route_diagnostic_profile foundation (PR #107). NOTES-56 is a soft
-prerequisite — the diagnosis text should note "this route is on
-WMATA's Frequent Service Map" when applicable, but the panel works
-without it.
+route_diagnostic_profile foundation (PR #107). The WMATA-designated
+frequent-route list (`config/frequent_routes.yaml`, loaded via
+`src/frequent_routes.py`) is available for the diagnosis text to
+note "this route is on WMATA's Frequent Service Map" when
+applicable; not a hard dependency.
 
 ---
 
@@ -603,10 +555,11 @@ Use cases:
 
 ### Dependencies
 
-route_diagnostic_profile foundation (PR #107). NOTES-56 is a soft
-prerequisite for "frequent route" filtering in the ranking
-(headway-based dispatching is the right intervention specifically
-for frequent routes).
+route_diagnostic_profile foundation (PR #107). "Frequent route"
+filtering in the ranking (headway-based dispatching is the right
+intervention specifically for frequent routes) uses the
+WMATA-designated list in `config/frequent_routes.yaml`, loaded via
+`src/frequent_routes.py`.
 
 ---
 

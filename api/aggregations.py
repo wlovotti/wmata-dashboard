@@ -38,6 +38,7 @@ from src.ewt import (
     fetch_scheduled_cell_hours_for_routes,
 )
 from src.excess_trip_time import compute_excess_trip_time
+from src.frequent_routes import load_frequent_route_ids
 from src.models import (
     Calendar,
     Route,
@@ -917,6 +918,10 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
     # Frequency class per route (GTFS-derived, ~2ms — no caching needed).
     freq_classes = compute_route_frequency_classes(db)
 
+    # WMATA-designated frequent-service routes (NOTES-56). One mtime-cached
+    # read of the YAML; the set membership check below is constant-time.
+    frequent_route_ids = load_frequent_route_ids()
+
     scorecard: list[dict] = []
     for route in routes:
         live_fields = _live_metric_fields(live.get(route.route_id))
@@ -926,6 +931,13 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
                 "route_name": route.route_short_name,
                 "route_long_name": route.route_long_name,
                 "frequency_class": freq_classes.get(route.route_id),
+                # NOTES-56: route-level WMATA designation (config/
+                # frequent_routes.yaml). Drives headline-KPI choice on the
+                # frontend — EWT becomes the headline for `True`, OTP for
+                # `False`. Distinct from `frequency_class` (data-derived,
+                # rough bin) and `src/ewt.py:FREQUENT_HEADWAY_MAX_SEC`
+                # (per-cell-hour gate inside EWT computation).
+                "is_frequent": route.route_id in frequent_route_ids,
                 "grade": compute_route_grade(
                     live_fields["otp_all_pct"],
                     live_fields["service_delivered_ratio"],
@@ -1069,6 +1081,10 @@ def get_route_detail_metrics(
         "day_type_filter": day_type_filter,
         "period_key": period_key,
         "frequency_class": frequency_class,
+        # NOTES-56: WMATA-designated frequent-service routes get EWT as
+        # the headline KPI on the frontend; standard routes keep OTP.
+        # Same source-of-truth as the all-routes scorecard.
+        "is_frequent": route_id in load_frequent_route_ids(),
         "grade": compute_route_grade(
             live_fields["otp_all_pct"],
             live_fields["service_delivered_ratio"],
