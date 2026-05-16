@@ -6,17 +6,18 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-15 (closed NOTES-47 — per-route targets /
-commitments config — in PR #99. Adds `config/route_targets.yaml`
-(checked-in defaults + per-route overrides), `src/route_targets.py`
-(mtime-cached loader), and threads `target_value` / `targets` into
-the system-trend, scorecard, route-detail, and contributors payloads.
-The contributors view now scores each route against its own target
-when set, falling back to the system 30-day baseline when not.
-Frontend renders inline target pills on system trend cards,
-RouteList scorecard rows, RouteDetail KPI cards, and a Reference
-column on the contributors table with a per-row "route target" /
-"system baseline" annotation.
+Last edited 2026-05-15. Closed NOTES-47 — per-route targets /
+commitments config — in PR #99 (adds `config/route_targets.yaml`,
+`src/route_targets.py`, and threads `targets` / `target_value` into
+the system-trend, scorecard, route-detail, and contributors API
+payloads; frontend renders inline target pills on all four
+surfaces). Also added NOTES-51 through NOTES-55 capturing a phased
+information-architecture redesign of the landing page and primary
+nav — the dashboard currently leads with weak aggregate stat-cards
+and a 100-row alphabetic table, with the action-oriented "Biggest
+contributors" view hidden behind a toggle; these items reorient the
+landing flow around the operator questions "are we OK?", "where
+should I look?", and "what changed?".
 
 ---
 
@@ -55,6 +56,27 @@ proxies instead).
 
 - **NOTES-44 Marginal-bus EWT model.** Per (route, period) ranking
   of where adding one trip would most reduce EWT.
+
+**Information architecture & navigation**
+
+- **NOTES-51 Landing-page declutter.** Drop the three weak stat
+  cards, flip the route-table default to "Biggest contributors,"
+  collapse the full table behind a disclosure. Minimum-viable
+  clarity win; no new pages.
+- **NOTES-52 Overview page + primary navigation.** Add top-level
+  nav (Overview / Routes / Blocks / Targets); make `/` an Overview
+  page anchored by a health-pulse banner, the existing system
+  trend strip, and a contributors top-5.
+- **NOTES-53 "Off target" panel on Overview** *(needs NOTES-52)*.
+  Rank routes by gap to their configured per-route target —
+  complements the volume-weighted contributors view with a
+  target-relative cut.
+- **NOTES-54 "What changed" panel on Overview** *(deferred — needs
+  NOTES-38 + ≥14d data)*. Week-over-week movers split into
+  improvements / degradations.
+- **NOTES-55 Route table information density.** Spectrum bars per
+  cell or sparkline-per-row, to make the scorecard scannable
+  without parsing digits.
 
 ### P5 — Cleanup
 
@@ -136,6 +158,181 @@ direct answer to "where should my next dollar go?"
 Most ambitious item in this set. Document modeling assumptions
 visibly in the UI; the absolute number is less reliable than the
 relative ranking.
+
+---
+
+## NOTES-51. Landing-page declutter
+
+**Severity: low.**
+
+Today `/` is `RouteList`: a `<SystemTrend>` strip (four sparkline
+cards with 30-vs-prior-30 deltas) → a three-card `.stats-summary`
+block → the full scorecard table with a "Default vs Biggest
+contributors" mode toggle. The three stat cards are weak: "Total
+Routes" is a constant, "Routes with Data" is data-pipeline plumbing
+the operator shouldn't see, and "System-wide OTP" duplicates the OTP
+card in `<SystemTrend>` directly above it. Below them, the ~100-row
+alphabetic table makes every route look equally important on first
+load; the action-oriented "Biggest contributors" view (which
+actually answers "where should I look?") is hidden behind a toggle
+most users won't find.
+
+Concrete cleanup (minimum-viable redesign, no new pages):
+1. Delete the three `.stats-summary` `stat-card`s and the associated
+   CSS in `frontend/src/App.css`.
+2. Flip the mode toggle default to `contributors`
+   (`useState('default')` → `useState('contributors')` in
+   `frontend/src/components/RouteList.jsx`).
+3. Collapse the full route table behind a `<details>` / "See all 98
+   routes" disclosure below the contributors view. Always-visible
+   search box stays above so name lookup remains one-keystroke.
+4. Cap the contributors table at top 10 by default with a "Show
+   all" expander.
+
+Low risk, fully reversible, one PR. Doesn't depend on any new data —
+all components already exist. Buys most of the clarity win without
+committing to the bigger nav / Overview redesign in NOTES-52.
+
+### Dependencies
+
+Independent.
+
+---
+
+## NOTES-52. Overview page + primary navigation
+
+**Severity: low.**
+
+The app has no top-level navigation today — `/` is the route table,
+and `RouteDetail` / `BlockTimeline` / `RunDetail` are only reachable
+by clicking into rows. There's no place to land that answers "are we
+OK right now, and where should I look?" without parsing a table.
+
+Add a real navigation bar across the header: **Overview · Routes ·
+Blocks · Targets**. Move the current `RouteList` (table view) to
+`/routes`. Make `/` a new `Overview` component that answers operator
+questions in order:
+
+1. **System health pulse** — a single-line status banner at top.
+   "OTP 76% (▼ 2pp wk) · 14 routes below target". Background tint
+   red / yellow / green based on worst-of-{OTP, SD, EWT, bunching}
+   target gap.
+2. **30-day system trend** — reuse `<SystemTrend>` unchanged.
+3. **Where to look (top contributors)** — reuse the
+   `/api/routes/contributors` endpoint and render the top 5 for the
+   selected metric (default OTP), metric selector inline. One click
+   → `RouteDetail`. Effectively promotes the existing
+   "contributors" mode from a buried toggle to the primary
+   attention-direction widget.
+4. Footer link "See all routes →" to `/routes`.
+
+Also add a `/blocks` index page (today blocks are only reachable
+from the `RouteDetail` Blocks tab) that lists active blocks ranked
+by trip count or cascade lateness. The Targets tab reads
+`config/route_targets.yaml` and renders system defaults + per-route
+overrides; editing stays git-only for now (NOTES-47's design
+explicitly allowed this).
+
+### Dependencies
+
+Independent. Pairs with NOTES-51 — either order works, but doing
+NOTES-51 first means less to throw away if this item slips.
+
+---
+
+## NOTES-53. "Off target" panel on Overview
+
+**Severity: low.**
+
+Augments the Overview page (NOTES-52) with an additional panel
+ranking routes by their **gap to per-route target** for the selected
+metric. Distinct from "Where to look" (volume-weighted contribution):
+this one is target-relative percentage gap, which a manager
+monitoring SLA commitments wants to see independently from
+system-wide blast radius — a small-volume route can be far off
+target without showing up as a big contributor, and vice versa.
+
+Render: ranked list of "Route 30N · OTP 62% · -13 pp below target"
+with the metric selector shared with the contributors panel. Show
+only routes with a configured per-route override (not those falling
+through to the system default) — otherwise the panel ranks the same
+routes the contributors panel does. If no per-route overrides are
+set, the panel collapses to an empty state: "Set per-route targets
+in `config/route_targets.yaml` to populate this view."
+
+Backend already exposes the needed data: the `targets` block on
+`/api/routes` and the `reference_value` / `reference_source` fields
+on `/api/routes/contributors` both land via PR #99.
+
+### Dependencies
+
+NOTES-52 (Overview shell). NOTES-47 (per-route targets — closed
+PR #99) already provides the data plumbing.
+
+---
+
+## NOTES-54. "What changed" panel on Overview
+
+**Severity: low (deferred — needs ≥14 days of data).**
+
+Augments the Overview page (NOTES-52) with a panel showing
+week-over-week movers: the top routes whose OTP / SD / EWT /
+bunching changed most vs the prior 7-day window. Split into two
+sub-lists — "Improvements" and "Degradations" — so positive movement
+is celebrated alongside negative.
+
+**Deferred** until NOTES-38 (period-over-period deltas on every KPI)
+lands. This panel is a thin renderer over that endpoint and has no
+useful content without it. NOTES-38 itself is deferred for a
+data-window reason: 7-vs-prior-7 needs ≥14 days of stop_events /
+runs data before deltas survive thin-data suppression on most
+routes. Production data started 2026-05-02; today is day 13 (so
+tomorrow is the earliest possible landfall for NOTES-38, then this
+item becomes implementable).
+
+### Dependencies
+
+NOTES-52 (Overview shell). NOTES-38 (period-over-period deltas —
+deferred).
+
+---
+
+## NOTES-55. Route table information density
+
+**Severity: low.**
+
+The current scorecard table cells stack a number plus a small `tgt
+X` subline (NOTES-47, PR #99). For an operator scanning 50+ rows,
+raw numbers don't tell the "good or bad?" story at a glance — the
+eye has to parse digits, then compare to the target subline, on
+every cell.
+
+Two alternatives, in increasing ambition:
+
+(a) **Spectrum bars per cell.** A thin horizontal bar colored
+    red→yellow→green relative to that route's target, with the
+    numeric value small to the right. Reference: Stripe Sigma,
+    Datadog cost cards. Lets the eye pre-classify "needs attention"
+    before parsing digits.
+(b) **Sparkline-per-row.** A tiny 7-day trend in a sparkline column
+    so each row tells its own time-series story (is this route
+    drifting, recovering, or stable?). Requires extending
+    `/api/routes` to include a compact per-route trend series, or
+    fan-out to the existing `/api/routes/{id}/trend` with batching.
+    Reference: GitHub repo cards, Linear issue rows.
+
+Both are pure rendering / payload work — no new metrics. (b) is
+bigger because of the payload extension and the per-route fetch
+budget. Either makes the table itself scannable even without the
+Overview redesign, so this item is independent of NOTES-52 — it can
+ship as RouteList polish on its own track.
+
+### Dependencies
+
+Independent. Best after NOTES-51 (density work is wasted if the
+table is rebuilt structurally first). Ordering with NOTES-52 doesn't
+matter — the `/routes` table benefits from this regardless of
+whether `/` is the table or the Overview.
 
 ---
 
