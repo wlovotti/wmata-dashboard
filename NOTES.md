@@ -6,13 +6,18 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-15. Closed NOTES-55 — route table information
-density — in this PR. Each scorecard metric cell now renders a
-thin red/yellow/green spectrum bar beneath the numeric value,
-classified against the route's target with a uniform ±10% yellow
-band. The eye can pre-classify "needs attention" before parsing
-digits across a 50+ row table. Variant (b) sparklines deferred —
-that's a payload extension on `/api/routes` and a separate scope.
+Last edited 2026-05-15. Dropped NOTES-44 — marginal-bus EWT model
+— from the punch list in this PR. A prototype (closed PR #103)
+implemented the closed-form `period_minutes / (2·N·(N+1))` SWT
+reduction under a frequent-service gate. Review concluded the
+SWT-only ranking collapses to "routes with smallest N in a
+frequent-service period," equivalent to sorting by trips-per-period
+ascending — no real signal beyond the input. The interesting
+variation lives in AWT (observed headway variance), which the
+NOTES item itself flagged but the prototype didn't deliver. Rather
+than re-scoping to AWT, dropping the item — closed PR #103's
+diff remains retrievable via `gh pr diff 103` if the direction
+gets revived later.
 
 ---
 
@@ -46,11 +51,6 @@ proxies instead).
 - **NOTES-38 Period-over-period deltas on every KPI** *(deferred — needs ≥14 days of data; closed PR #81)*. Augment the
   scorecard payload with deltas; add up/down/flat indicators
   throughout.
-
-**Decision support & operator-side proxies**
-
-- **NOTES-44 Marginal-bus EWT model.** Per (route, period) ranking
-  of where adding one trip would most reduce EWT.
 
 **Information architecture & navigation**
 
@@ -128,24 +128,6 @@ on most routes. Production data currently starts 2026-05-02; revisit
 once the collector has accumulated ≥14 days of continuous data so the
 feature is interpretable rather than "mostly suppressed." The closed
 PR's commits remain retrievable via `gh pr diff 81` for re-use.
-
----
-
-## NOTES-44. Marginal-bus EWT model
-
-**Severity: low (modeling).**
-
-Per (route, period), estimate the EWT reduction from adding one
-scheduled trip. Closed-form approximation: SWT scales as half the
-scheduled headway, so adding a trip in a period with N existing trips
-reduces SWT by roughly `period_minutes / (2N(N+1))`; AWT impact
-depends on how the new trip lands relative to existing variance.
-Render as a ranked "where would the next bus help most" list — the
-direct answer to "where should my next dollar go?"
-
-Most ambitious item in this set. Document modeling assumptions
-visibly in the UI; the absolute number is less reliable than the
-relative ranking.
 
 ---
 
