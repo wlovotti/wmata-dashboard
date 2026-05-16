@@ -117,6 +117,16 @@ HOUSEKEEPING_PIPELINES: list[dict] = [
         "name": "archive_trip_update_snapshots",
         "module": "pipelines.archive_trip_update_snapshots",
     },
+    {
+        # Refresh `route_diagnostic_segment/_timepoint/_direction` from the
+        # last 30 days of stop_events (NOTES-57). The diagnostic surfaces
+        # are windowed pooled samples — re-running them per service date
+        # would re-compute the same window N times. Once per batch is
+        # right; runs after the per-date pipelines have committed so the
+        # latest day is included.
+        "name": "refresh_route_diagnostic_profile",
+        "module": "pipelines.refresh_route_diagnostic_profile",
+    },
 ]
 
 
