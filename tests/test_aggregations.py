@@ -21,6 +21,7 @@ from api.aggregations import (
     _aggregate_ewt_window,
     _aggregate_otp_split_window,
     _aggregate_service_delivered_window,
+    _make_otp_block,
     compute_route_grade,
     get_all_routes_scorecard,
     get_route_detail_metrics,
@@ -196,6 +197,82 @@ class TestGetAllRoutesScorecard:
         """`days < 1` clamps to 1 — match endpoint validation."""
         result = get_all_routes_scorecard(db_session, days=0)
         assert result["window"]["days"] == 1
+
+
+class TestMakeOtpBlock:
+    """Shape contract for the shared `_make_otp_block` factory (NOTES-66).
+
+    Locks the on-the-wire OTP sub-block shape so future drift between the
+    live-compute and overlay-hydration paths gets caught here rather than
+    at integration time — the original motivation for extracting this
+    helper was the PR #115 near-miss bug between exactly those paths.
+    """
+
+    @pytest.mark.parametrize(
+        "early,on_time,late,total,source,expected",
+        [
+            # Empty case: total_count == 0 emits the "no data" sentinel
+            # carrying source through so consumers can still label it.
+            (
+                0,
+                0,
+                0,
+                0,
+                "proximity",
+                {"source": "proximity", "n": 0},
+            ),
+            # Typical mixed case: 1 early + 8 on-time + 1 late of 10.
+            (
+                1,
+                8,
+                1,
+                10,
+                "proximity",
+                {
+                    "source": "proximity",
+                    "n": 10,
+                    "early": 1,
+                    "on_time": 8,
+                    "late": 1,
+                    "early_pct": 10.0,
+                    "on_time_pct": 80.0,
+                    "late_pct": 10.0,
+                },
+            ),
+            # Source threading: trip_update populated block keeps its
+            # source string unmodified.
+            (
+                0,
+                2,
+                1,
+                3,
+                "trip_update",
+                {
+                    "source": "trip_update",
+                    "n": 3,
+                    "early": 0,
+                    "on_time": 2,
+                    "late": 1,
+                    "early_pct": 0.0,
+                    "on_time_pct": round(200 / 3, 2),
+                    "late_pct": round(100 / 3, 2),
+                },
+            ),
+            # Source threading on the empty sentinel — trip_update path
+            # must round-trip its source label even with no observations.
+            (
+                0,
+                0,
+                0,
+                0,
+                "trip_update",
+                {"source": "trip_update", "n": 0},
+            ),
+        ],
+    )
+    def test_shape_contract(self, early, on_time, late, total, source, expected):
+        """Helper returns byte-identical dicts to the pre-refactor inline builders."""
+        assert _make_otp_block(early, on_time, late, total, source) == expected
 
 
 class TestAggregateOtpSplitWindow:

@@ -109,6 +109,7 @@ uv sync --extra dev                                       # install
 uv sync --extra viz --extra postgres                      # add for matplotlib / psycopg2-using scripts
 uv run uvicorn api.main:app --reload                      # API on :8000
 cd frontend && npm run dev                                # frontend on :5173
+cd frontend && npm run lint && npm run build              # frontend verification (no tests yet)
 uv run python scripts/continuous_collector.py             # 60 s collector
 uv run python pipelines/run_daily_batch.py                # nightly batch (derive + aggregate + system rollup)
 psql -d wmata_dashboard                                   # ad-hoc DB queries
@@ -119,6 +120,12 @@ uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
 ## Working agreements
 
 - Run `ruff check` before committing — CI will fail otherwise.
+- Frontend lint has pre-existing errors on main that don't fail CI; if
+  yours overlap, `git stash; cd frontend && npm run lint; cd ..;
+  git stash pop` confirms which ones you actually introduced.
+- Project Claude tooling: auto-triggering skills go in
+  `.claude/skills/<name>/SKILL.md`, explicit slash commands go in
+  `.claude/commands/<name>.md`. Both are checked in.
 - The user is not in build-more mode. For ambiguous requests, prefer
   cleanup / verification / "delete unused code" over new features. Ask
   before adding.
