@@ -92,6 +92,7 @@ jobs:
     - name: Run full test suite with coverage
       env:
         DATABASE_URL: "sqlite:///:memory:"
+        PG_TEST_DATABASE_URL: "postgresql://wmata:wmata@localhost:5432/wmata_test"
         WMATA_API_KEY: test_api_key
       run: |
         uv run pytest -v --tb=short --cov=src --cov=api --cov-report=term-missing
