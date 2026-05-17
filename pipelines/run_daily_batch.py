@@ -139,6 +139,15 @@ HOUSEKEEPING_PIPELINES: list[dict] = [
         "name": "refresh_route_diagnostic_profile",
         "module": "pipelines.refresh_route_diagnostic_profile",
     },
+    {
+        # Two-pass cleanup of trip_update_state: deletes rows that were
+        # derived more than 2 days ago (normal lifecycle), and as a
+        # safety net deletes any un-derived rows older than 7 days.
+        # Keeps the state table bounded so it can't grow unbounded
+        # if a trip is never anchored to a service_date.
+        "name": "cleanup_trip_update_state",
+        "module": "pipelines.cleanup_trip_update_state",
+    },
 ]
 
 

@@ -165,10 +165,6 @@ def derive_for_route_date(
         )
         derived_keys.append((state.trip_id, state.stop_sequence))
 
-    # UPSERT and the derived_at UPDATE share the caller's transaction.
-    # If the UPDATE fails (e.g., serialization conflict), the UPSERT is
-    # rolled back too — preventing stop_events without derived_at marks
-    # on their source state rows.
     rows_written = 0
     if rows:
         constraint_name = (
@@ -199,15 +195,23 @@ def derive_for_route_date(
 
         # Mark source state rows as derived. tuple_().in_() is
         # Postgres-specific (most other dialects don't support tuple-IN
-        # filters); we are Postgres-only by construction.
-        # Using tuple-IN matches exact (trip_id, stop_sequence) pairs —
-        # the Cartesian form (trip_id.in_(set) AND stop_sequence.in_(set))
-        # would mark cross-product rows as derived.
+        # filters); we are Postgres-only by construction. Using tuple-IN
+        # matches exact (trip_id, stop_sequence) pairs — the Cartesian
+        # form (trip_id.in_(set) AND stop_sequence.in_(set)) would mark
+        # cross-product rows as derived.
+        #
+        # Transaction semantics: upsert_rows() above already committed
+        # the stop_events writes. This UPDATE runs in a new transaction
+        # that we must commit explicitly, otherwise the session's
+        # auto-begin transaction is rolled back at db.close() in main()
+        # and every derived_at mark is silently lost — leaving cleanup
+        # pass 1 (derived-older-than-2-days) with nothing to delete.
         db.execute(
             update(TripUpdateState)
             .where(tuple_(TripUpdateState.trip_id, TripUpdateState.stop_sequence).in_(derived_keys))
             .values(derived_at=derived_at)
         )
+        db.commit()
 
     return {
         "route_id": route_id,
