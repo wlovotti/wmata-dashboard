@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from src.bunching import compute_bunching_for_route_date
 from src.database import get_session
+from src.date_ranges import iter_eastern_dates, iter_recent_eastern_dates
 from src.models import Route, RouteHeadwayMetrics
 from src.timezones import eastern_today, utcnow_naive
 
@@ -155,14 +156,14 @@ def main():
         end = datetime.strptime(args.end_date, "%Y-%m-%d").date()
         if start > end:
             parser.error("--start-date must be <= --end-date")
-        service_dates: list[date_type] = []
-        cur = start
-        while cur <= end:
-            service_dates.append(cur)
-            cur += timedelta(days=1)
+        service_dates: list[date_type] = list(iter_eastern_dates(start, end))
     elif args.days is not None:
-        end = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else eastern_today()
-        service_dates = [end - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
+        if args.date:
+            end = datetime.strptime(args.date, "%Y-%m-%d").date()
+            start = end - timedelta(days=args.days - 1)
+            service_dates = list(iter_eastern_dates(start, end))
+        else:
+            service_dates = list(iter_recent_eastern_dates(args.days))
     elif args.date:
         service_dates = [datetime.strptime(args.date, "%Y-%m-%d").date()]
     else:
