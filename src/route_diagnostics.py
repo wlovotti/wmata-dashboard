@@ -129,9 +129,9 @@ ASYMMETRY_MARGIN_PCT = 5.0
 def default_service_date_range(today: date_type, days: int = 30) -> tuple[date_type, date_type]:
     """Return (start, end) inclusive — last `days` Eastern service dates.
 
-    Default window of 30 days matches the production data depth (NOTES-38
-    deferral) and gives a stable per-segment / per-timepoint sample without
-    over-pooling stale schedule revisions.
+    Default window of 30 days matches the production data depth and gives
+    a stable per-segment / per-timepoint sample without over-pooling stale
+    schedule revisions.
     """
     end = today - timedelta(days=1)  # yesterday is the latest complete day
     start = end - timedelta(days=days - 1)

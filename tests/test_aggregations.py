@@ -1097,3 +1097,310 @@ routes:
         assert ours["contribution_score"] == (90.0 - 60.0) * ours["scheduled_trips"]
         # The envelope still carries the system_target_value from the YAML.
         assert result["system_target_value"] == 78.0
+
+
+class TestComputeRouteDeltas:
+    """Tests for `compute_route_deltas` (NOTES-38).
+
+    Deltas are computed from `route_metrics_daily_overlay` (OTP / SD / EWT /
+    bunching) and from `compute_excess_trip_time` live (excess_trip_time_pct).
+    The excess live-compute is stubbed so tests stay fast.
+    """
+
+    @staticmethod
+    def _clear_cache():
+        """Drop module-level deltas cache between tests."""
+        from api import aggregations as agg
+
+        agg._deltas_cache.clear()
+
+    @staticmethod
+    def _stub_excess_trip_time(monkeypatch, pct_by_route_date=None):
+        """Replace `compute_excess_trip_time` with a caller-provided lookup.
+
+        `pct_by_route_date` is `{route_id: {iso_date: pct}}` (or None).
+        Returns `n_trips=0` for any missing entry so the live-compute path
+        emits None for those (route, date) pairs — matching thin-data.
+        """
+        from api import aggregations as agg
+
+        pct_by_route_date = pct_by_route_date or {}
+
+        def fake(db, route_id, service_date):
+            """Stub for compute_excess_trip_time."""
+            ds = service_date.isoformat()
+            pct = pct_by_route_date.get(route_id, {}).get(ds)
+            if pct is not None:
+                return {
+                    "pct_over_110": pct,
+                    "n_trips": 10,
+                    "median_actual_sec": 1800,
+                    "median_scheduled_sec": 1600,
+                }
+            return {
+                "pct_over_110": None,
+                "n_trips": 0,
+                "median_actual_sec": None,
+                "median_scheduled_sec": None,
+            }
+
+        monkeypatch.setattr(agg, "compute_excess_trip_time", fake)
+
+    def _seed_overlay_window(
+        self,
+        db_session,
+        route_id,
+        current_otp,
+        prior_otp,
+        n_each=7,
+    ):
+        """Seed `n_each` overlay rows in each window with the given OTP levels.
+
+        OTP counts are set so `on_time_pct ≈ current_otp / 100 * all_n`.
+        All other sufficient statistics default to zero so the other metrics
+        (SD, EWT, bunching) return None for those days.
+        """
+        from src.models import RouteMetricsDailyOverlay
+
+        rows = []
+        for i in range(n_each):
+            d = eastern_today() - timedelta(days=i)
+            on_time = int(current_otp)
+            rows.append(
+                RouteMetricsDailyOverlay(
+                    route_id=route_id,
+                    service_date=d.isoformat(),
+                    day_type="weekday",
+                    otp_all_early=0,
+                    otp_all_on_time=on_time,
+                    otp_all_late=100 - on_time,
+                    otp_origin_early=0,
+                    otp_origin_on_time=on_time,
+                    otp_origin_late=100 - on_time,
+                    otp_destination_early=0,
+                    otp_destination_on_time=on_time,
+                    otp_destination_late=100 - on_time,
+                    scheduled_trips=10,
+                    delivered_trips=10,
+                )
+            )
+        for i in range(n_each):
+            d = eastern_today() - timedelta(days=n_each + i)
+            on_time = int(prior_otp)
+            rows.append(
+                RouteMetricsDailyOverlay(
+                    route_id=route_id,
+                    service_date=d.isoformat(),
+                    day_type="weekday",
+                    otp_all_early=0,
+                    otp_all_on_time=on_time,
+                    otp_all_late=100 - on_time,
+                    otp_origin_early=0,
+                    otp_origin_on_time=on_time,
+                    otp_origin_late=100 - on_time,
+                    otp_destination_early=0,
+                    otp_destination_on_time=on_time,
+                    otp_destination_late=100 - on_time,
+                    scheduled_trips=10,
+                    delivered_trips=10,
+                )
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+
+    def test_deltas_returns_all_five_metrics(self, db_session, sample_route, monkeypatch):
+        """The deltas dict carries one entry per scorecard metric."""
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        self._stub_excess_trip_time(monkeypatch)
+        deltas = compute_route_deltas(db_session, "TEST1")
+        assert set(deltas.keys()) == {
+            "otp",
+            "service_delivered",
+            "ewt",
+            "bunching",
+            "excess_trip_time_pct",
+        }
+        for metric_block in deltas.values():
+            assert set(metric_block.keys()) >= {"value", "valid", "current_n", "prior_n"}
+
+    def test_deltas_otp_sign_convention(self, db_session, sample_route, monkeypatch):
+        """`value = current - prior`, no flip for higher-is-better OTP.
+
+        Current 7 days at 80% OTP, prior 7 at 70%. Delta should be ~+10
+        (positive: current window's mean is higher than prior).
+        """
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        self._stub_excess_trip_time(monkeypatch)
+        self._seed_overlay_window(db_session, "TEST1", current_otp=80.0, prior_otp=70.0)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        otp = deltas["otp"]
+        assert otp["valid"] is True
+        # 80 on_time out of 100 total = 80.0%; 70 on_time = 70.0%
+        assert abs(otp["value"] - 10.0) < 0.01
+        assert otp["current_n"] == 7
+        assert otp["prior_n"] == 7
+
+    def test_deltas_thin_data_suppresses_when_under_three_valid_days(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """Fewer than 3 valid days in either window → `valid=False`, `value=None`."""
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+        from src.models import RouteMetricsDailyOverlay
+
+        # Only 2 days of overlay data in the current window, none in prior.
+        rows = []
+        for i in range(2):
+            d = eastern_today() - timedelta(days=i)
+            rows.append(
+                RouteMetricsDailyOverlay(
+                    route_id="TEST1",
+                    service_date=d.isoformat(),
+                    day_type="weekday",
+                    otp_all_early=5,
+                    otp_all_on_time=82,
+                    otp_all_late=13,
+                    otp_origin_early=0,
+                    otp_origin_on_time=82,
+                    otp_origin_late=18,
+                    otp_destination_early=0,
+                    otp_destination_on_time=82,
+                    otp_destination_late=18,
+                    scheduled_trips=10,
+                    delivered_trips=9,
+                )
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+        self._stub_excess_trip_time(monkeypatch)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        assert deltas["otp"]["valid"] is False
+        assert deltas["otp"]["value"] is None
+        assert deltas["otp"]["current_n"] == 2
+        assert deltas["otp"]["prior_n"] == 0
+
+    def test_deltas_ewt_coverage_floor_suppresses_low_observed_headways(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """EWT-specific coverage gate: insufficient observed headways suppresses.
+
+        Three valid days of EWT but only a few observed headways per day in
+        each window — below the EWT_MIN_OBS_HEADWAYS floor. The delta should
+        suppress even though the day-count rule passes.
+        """
+        self._clear_cache()
+        from api.aggregations import (
+            DELTA_MIN_VALID_DAYS,
+            EWT_MIN_OBS_HEADWAYS,
+            compute_route_deltas,
+        )
+        from src.models import RouteMetricsDailyOverlay
+
+        # Seed enough days (>= DELTA_MIN_VALID_DAYS) but sparse EWT headways.
+        rows = []
+        # Use a sum_h / sum_h_sq pair that yields a non-null EWT per day
+        # but with n_observed far below EWT_MIN_OBS_HEADWAYS per window.
+        obs_per_day = max(1, (EWT_MIN_OBS_HEADWAYS // DELTA_MIN_VALID_DAYS) - 1)
+        sum_h = 300.0 * obs_per_day  # representative observed headway sum
+        sum_h_sq = sum_h**2 / obs_per_day  # AWT = sum_h / (2n) ~ 150s
+        sched_sum_h = sum_h * 0.9
+        sched_sum_h_sq = sched_sum_h**2 / obs_per_day
+        for window_offset in (0, 7):
+            for i in range(DELTA_MIN_VALID_DAYS):
+                d = eastern_today() - timedelta(days=window_offset + i)
+                rows.append(
+                    RouteMetricsDailyOverlay(
+                        route_id="TEST1",
+                        service_date=d.isoformat(),
+                        day_type="weekday",
+                        otp_all_early=0,
+                        otp_all_on_time=80,
+                        otp_all_late=20,
+                        otp_origin_early=0,
+                        otp_origin_on_time=80,
+                        otp_origin_late=20,
+                        otp_destination_early=0,
+                        otp_destination_on_time=80,
+                        otp_destination_late=20,
+                        scheduled_trips=10,
+                        delivered_trips=9,
+                        ewt_obs_sum_h=sum_h,
+                        ewt_obs_sum_h_sq=sum_h_sq,
+                        ewt_n_observed_headways=obs_per_day,
+                        ewt_sched_sum_h=sched_sum_h,
+                        ewt_sched_sum_h_sq=sched_sum_h_sq,
+                        ewt_n_scheduled_headways=obs_per_day,
+                    )
+                )
+        db_session.add_all(rows)
+        db_session.commit()
+        self._stub_excess_trip_time(monkeypatch)
+
+        deltas = compute_route_deltas(db_session, "TEST1")
+        # Pooled observed headways per window < EWT_MIN_OBS_HEADWAYS → suppressed.
+        assert deltas["ewt"]["valid"] is False
+        assert deltas["ewt"]["value"] is None
+        # Day counts are still surfaced for tooltip/debugging.
+        assert deltas["ewt"]["current_n"] == DELTA_MIN_VALID_DAYS
+        assert deltas["ewt"]["prior_n"] == DELTA_MIN_VALID_DAYS
+
+    def test_deltas_unknown_route_returns_suppressed_block(self, db_session, monkeypatch):
+        """A route absent from every source returns a fully-suppressed shape."""
+        self._clear_cache()
+        from api.aggregations import compute_route_deltas
+
+        self._stub_excess_trip_time(monkeypatch)
+        deltas = compute_route_deltas(db_session, "DOES_NOT_EXIST")
+        for metric_block in deltas.values():
+            assert metric_block["valid"] is False
+            assert metric_block["value"] is None
+            assert metric_block["current_n"] == 0
+            assert metric_block["prior_n"] == 0
+
+    def test_scorecard_payload_includes_deltas_block(self, db_session, sample_route, monkeypatch):
+        """`get_all_routes_scorecard` carries a `deltas` block per route."""
+        self._clear_cache()
+        from api.aggregations import get_all_routes_scorecard
+
+        self._stub_excess_trip_time(monkeypatch)
+        result = get_all_routes_scorecard(db_session, days=7)
+
+        assert "routes" in result
+        assert len(result["routes"]) == 1
+        deltas = result["routes"][0]["deltas"]
+        assert set(deltas.keys()) == {
+            "otp",
+            "service_delivered",
+            "ewt",
+            "bunching",
+            "excess_trip_time_pct",
+        }
+
+    def test_route_detail_payload_includes_deltas_block(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """`get_route_detail_metrics` carries a `deltas` block."""
+        self._clear_cache()
+        from api.aggregations import get_route_detail_metrics
+
+        self._stub_excess_trip_time(monkeypatch)
+        result = get_route_detail_metrics(db_session, "TEST1", days=7)
+
+        assert "deltas" in result
+        deltas = result["deltas"]
+        assert set(deltas.keys()) == {
+            "otp",
+            "service_delivered",
+            "ewt",
+            "bunching",
+            "excess_trip_time_pct",
+        }
+        # No overlay data seeded → all metrics suppressed.
+        for metric_block in deltas.values():
+            assert metric_block["valid"] is False
