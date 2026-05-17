@@ -3,11 +3,13 @@ Shared pytest fixtures for WMATA Dashboard tests
 
 Provides fixtures for:
 - Database setup/teardown with in-memory SQLite
+- Postgres-backed fixtures for integration tests that need Postgres-specific SQL
 - FastAPI test client
 - Mock data generators
 - Environment variable mocking
 """
 
+import os
 from collections.abc import Generator
 from datetime import timedelta
 
@@ -60,6 +62,51 @@ def db_session(test_engine) -> Generator[Session, None, None]:
     connection = test_engine.connect()
     transaction = connection.begin()
     SessionLocal = sessionmaker(bind=connection)
+    session = SessionLocal()
+
+    yield session
+
+    session.close()
+    transaction.rollback()
+    connection.close()
+
+
+@pytest.fixture(scope="session")
+def pg_engine():
+    """Engine pointing to a real Postgres DB for integration tests that
+    need Postgres-specific SQL (pg_insert / ON CONFLICT / DDL features
+    SQLite can't represent).
+
+    Reads ``PG_TEST_DATABASE_URL`` if set, otherwise falls back to
+    the local dev DB ``postgresql:///wmata_dashboard``. The dev DB is
+    safe because per-test transactions roll back.
+    """
+    url = os.environ.get("PG_TEST_DATABASE_URL", "postgresql:///wmata_dashboard")
+    engine = create_engine(url, echo=False)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture(scope="function")
+def pg_session(pg_engine):
+    """Function-scoped Postgres session with transaction rollback.
+
+    The dev DB schema is assumed to already exist (created via migrations
+    on the developer's machine). Each test runs inside an outer transaction
+    that rolls back on teardown, so tests don't pollute the dev DB.
+
+    ``join_transaction_mode="create_savepoint"`` (SQLAlchemy 2.0+) makes
+    the session open a SAVEPOINT when it auto-begins inside the already-open
+    connection-level transaction. ``session.commit()`` in test bodies then
+    releases the SAVEPOINT rather than committing the outer transaction, so
+    ``transaction.rollback()`` in teardown still rolls back all test writes.
+    Without this, ``session.commit()`` would promote and commit the outer
+    transaction, turning ``transaction.rollback()`` into a no-op and leaking
+    rows into the dev DB on every test run.
+    """
+    connection = pg_engine.connect()
+    transaction = connection.begin()
+    SessionLocal = sessionmaker(bind=connection, join_transaction_mode="create_savepoint")
     session = SessionLocal()
 
     yield session

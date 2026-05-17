@@ -86,6 +86,8 @@ def main():
     except KeyboardInterrupt:
         print("\n\nStopping continuous collection...")
         print("Trip updates collection stopped successfully!")
+    finally:
+        collector.close()
 
 
 if __name__ == "__main__":

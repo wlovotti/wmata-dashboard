@@ -3,7 +3,7 @@ Daily metrics batch with catch-up. The launchd-scheduled entry point that
 keeps `stop_events`, `runs`, and `route_bunching_periods` populated for
 every active route on every recent service date.
 
-Closes NOTES-28. Before this, the four metrics-redesign pipelines —
+Closes NOTES-28. Before this, the metrics-redesign pipelines —
 `derive_stop_events`, `derive_stop_events_trip_updates`, `aggregate_runs`,
 `compute_bunching` — were manual CLIs with no orchestrator. NOTES-26
 showed the failure mode: only 6 routes had been aggregated for
@@ -15,7 +15,7 @@ for everything else. This wrapper closes that gap by:
 2. Looking back ~7 days and re-processing any service date that has
    zero rows in `runs`. Catches scheduler outages without manual
    intervention.
-3. Running the four pipelines in dependency order:
+3. Running all per-date pipelines in dependency order:
    derive_stop_events + derive_stop_events_trip_updates first (both
    write `stop_events`, both independent), then aggregate_runs (reads
    stop_events → writes runs), then compute_bunching (reads runs).
@@ -74,6 +74,17 @@ PIPELINES: list[dict] = [
         "depends_on": None,
     },
     {
+        # Phase D side-by-side validation: same logic as
+        # derive_stop_events_trip_updates but reads trip_update_state
+        # directly and writes to stop_events_v2. The comparison script
+        # (pipelines/compare_old_vs_new_derivation.py) diffs the two
+        # tables nightly. Remove after Phase E cutover.
+        "name": "derive_stop_events_from_state_v2",
+        "module": "pipelines.derive_stop_events_from_state",
+        "depends_on": None,
+        "extra_args": ["--target-table", "stop_events_v2"],
+    },
+    {
         "name": "aggregate_runs",
         "module": "pipelines.aggregate_runs",
         # Either of the two derivation pipelines is sufficient — aggregate_runs
@@ -127,6 +138,15 @@ HOUSEKEEPING_PIPELINES: list[dict] = [
         # latest day is included.
         "name": "refresh_route_diagnostic_profile",
         "module": "pipelines.refresh_route_diagnostic_profile",
+    },
+    {
+        # Two-pass cleanup of trip_update_state: deletes rows that were
+        # derived more than 2 days ago (normal lifecycle), and as a
+        # safety net deletes any un-derived rows older than 7 days.
+        # Keeps the state table bounded so it can't grow unbounded
+        # if a trip is never anchored to a service_date.
+        "name": "cleanup_trip_update_state",
+        "module": "pipelines.cleanup_trip_update_state",
     },
 ]
 
@@ -209,12 +229,17 @@ def run_pipeline(
     module: str,
     service_date: date_type,
     log_handle,
+    extra_args: list[str] | None = None,
 ) -> tuple[int, float]:
     """Run a single pipeline module via `python -m ...` for one service date.
 
     Uses `--all-routes` (the wrapper's design contract is "cover everything")
     and `--date YYYY-MM-DD`. Pipeline stdout/stderr is appended to
     `log_handle`; the return code and elapsed wall time are returned.
+
+    ``extra_args`` is appended after ``--all-routes --date X`` for pipelines
+    that need additional flags (e.g., derive_stop_events_from_state's
+    ``--target-table stop_events_v2`` for Phase D validation).
 
     Subprocess is the chosen integration mechanism: the four pipelines are
     already CLI scripts and the user's manual workflow is `uv run python
@@ -235,6 +260,8 @@ def run_pipeline(
         "--date",
         service_date.isoformat(),
     ]
+    if extra_args:
+        cmd.extend(extra_args)
     log_handle.write(f"\n$ {' '.join(cmd)}\n")
     log_handle.flush()
     start = time.time()
@@ -256,7 +283,7 @@ def run_batch(
     log_handle,
     dry_run: bool = False,
 ) -> int:
-    """Drive the four pipelines across every (pipeline, target_date) cell.
+    """Drive all per-date pipelines across every (pipeline, target_date) cell.
 
     Returns the number of (pipeline, date) combinations that failed —
     callers turn a non-zero into a non-zero process exit so launchd can
@@ -285,14 +312,22 @@ def run_batch(
                 continue
 
             if dry_run:
+                extra_args = pipeline.get("extra_args", []) or []
+                extra_str = " ".join(extra_args)
                 log_handle.write(
                     f"DRY-RUN would run {pipeline['module']} "
-                    f"--all-routes --date {service_date.isoformat()}\n"
+                    f"--all-routes --date {service_date.isoformat()}"
+                    f"{(' ' + extra_str) if extra_str else ''}\n"
                 )
                 results[service_date][pipeline["name"]] = 0
                 continue
 
-            rc, elapsed = run_pipeline(pipeline["module"], service_date, log_handle)
+            rc, elapsed = run_pipeline(
+                pipeline["module"],
+                service_date,
+                log_handle,
+                extra_args=pipeline.get("extra_args"),
+            )
             results[service_date][pipeline["name"]] = rc
             if rc != 0:
                 failure_count += 1
@@ -336,7 +371,7 @@ def main() -> int:
     """CLI entry point — opens the day's log file and drives the batch."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run the four metrics-redesign pipelines for yesterday plus any "
+            "Run all per-date metrics pipelines for yesterday plus any "
             "recent service date that's missing from `runs`."
         )
     )

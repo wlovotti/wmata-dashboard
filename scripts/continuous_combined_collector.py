@@ -122,6 +122,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n\nStopping continuous collection...")
         print("Combined collector stopped successfully!")
+    finally:
+        collector.close()
 
 
 if __name__ == "__main__":

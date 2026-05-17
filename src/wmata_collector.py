@@ -4,15 +4,18 @@ import os
 import sys
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from google.transit import gtfs_realtime_pb2
 from sqlalchemy.orm import Session
 
+from src.archive_writer import JsonlArchiveWriter
 from src.database import get_session, init_db
 from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
 from src.timezones import from_epoch_naive_utc, utcnow_naive
+from src.upsert_helpers import upsert_trip_update_state
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,6 +42,17 @@ class WMATADataCollector:
         # (bus has passed). Restart cost: one full snapshot stored before
         # dedup resumes.
         self._tu_dedup_cache: dict[tuple[str, str], tuple] = {}
+
+        # Cold archive: raw rows go to compressed JSONL daily files.
+        # Path matches the existing archive_trip_update_snapshots.py
+        # convention (REPO_ROOT / "archive" / ...).
+        archive_root = Path(__file__).resolve().parent.parent / "archive" / "raw_snapshots"
+        self._archive_writer = JsonlArchiveWriter(archive_dir=archive_root)
+
+    def close(self) -> None:
+        """Flush and close the archive writer. Idempotent."""
+        if hasattr(self, "_archive_writer") and self._archive_writer is not None:
+            self._archive_writer.close()
 
     def download_gtfs_static(self, save_to_db=True, timeout=30):
         """Download and parse GTFS static data"""
@@ -589,6 +603,10 @@ class WMATADataCollector:
         new_objects = []
         seen_keys: set[tuple[str, str]] = set()
         for row in rows:
+            # Archive EVERY raw row, even ones the dedup will skip — the
+            # archive is the complete evidence trail.
+            self._archive_writer.append(row, snapshot_ts=row["snapshot_ts"])
+
             key = (row["trip_id"], row["stop_id"])
             seen_keys.add(key)
             value = (
@@ -607,11 +625,47 @@ class WMATADataCollector:
 
         if new_objects:
             self.db.bulk_save_objects(new_objects)
+
+        # NEW: dual-write to trip_update_state. We UPSERT one row per
+        # (trip_id, stop_sequence) holding the latest predictions. The
+        # derivation pipeline reads this table directly after cutover.
+        # We pass ALL rows (not just state-changed ones) so the
+        # final_snapshot_ts always reflects the latest poll, even when
+        # state hasn't changed.
+        #
+        # Atomicity note: this UPSERT shares a transaction with the
+        # snapshot bulk_save above. The single self.db.commit() below
+        # commits both writes together, so the two tables can't diverge
+        # on partial failure.
+        upsert_payload = [
+            {
+                "trip_id": r["trip_id"],
+                "stop_sequence": r["stop_sequence"],
+                "stop_id": r["stop_id"],
+                "vehicle_id": r.get("vehicle_id"),
+                "snapshot_ts": r["snapshot_ts"],
+                "predicted_arrival_ts": r.get("predicted_arrival_ts"),
+                "schedule_relationship": r.get("schedule_relationship"),
+            }
+            for r in rows
+            # stop_sequence is part of the trip_update_state PK; rows
+            # missing it can't be keyed in state, so we drop them from
+            # the UPSERT. They still land in trip_update_snapshots above
+            # (which has its own auto-PK), so no data is lost — they're
+            # only invisible to the new derivation pipeline.
+            if r.get("stop_sequence") is not None
+        ]
+        if upsert_payload:
+            upsert_trip_update_state(self.db, upsert_payload)
+
+        # Single commit covers both the snapshot bulk_save and the upsert.
+        if new_objects or upsert_payload:
             self.db.commit()
 
         print(
             f"  Saved {len(new_objects)} of {len(rows)} trip update rows "
-            f"(cache={len(self._tu_dedup_cache):,})"
+            f"(cache={len(self._tu_dedup_cache):,}); "
+            f"upserted {len(upsert_payload)} into trip_update_state"
         )
         return len(new_objects)
 
