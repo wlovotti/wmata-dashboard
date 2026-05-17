@@ -205,6 +205,49 @@ def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]
     }
 
 
+def _make_otp_block(
+    early_count: int,
+    on_time_count: int,
+    late_count: int,
+    total_count: int,
+    source: str | None,
+) -> dict:
+    """Build one OTP sub-block (origin / destination / all_timepoints).
+
+    Single source of truth for the on-the-wire OTP block shape used by
+    both the live-compute path (`_compute_live_metrics_uncached` via
+    `_aggregate_otp_split_window`) and the materialized-overlay hydration
+    path (`_hydrate_overlay_row`). Extracting this collapses what used to
+    be two inline builders and removes the drift surface that caused the
+    PR #115 near-miss bug.
+
+    Contract:
+    - When `total_count == 0`: returns `{"source": source, "n": 0}` —
+      the "no data" sentinel that consumers distinguish from a real 0%
+      on-time. Caller must still pass `source` so downstream consumers
+      can label the empty block correctly.
+    - When `total_count > 0`: returns the full shape with the three
+      counts, their percentages (rounded to 2 dp), `n`, and `source`.
+
+    `total_count` is taken from the caller (matches the NOTES-66
+    signature spec) and is the authority for the empty-vs-populated
+    branch — callers always compute it as `early + on_time + late`,
+    so the two are interchangeable in practice.
+    """
+    if total_count == 0:
+        return {"source": source, "n": 0}
+    return {
+        "source": source,
+        "n": total_count,
+        "early": early_count,
+        "on_time": on_time_count,
+        "late": late_count,
+        "early_pct": round(early_count * 100 / total_count, 2),
+        "on_time_pct": round(on_time_count * 100 / total_count, 2),
+        "late_pct": round(late_count * 100 / total_count, 2),
+    }
+
+
 def _aggregate_otp_split_window(daily_otp: list[dict]) -> dict | None:
     """Pool OTP split sub-blocks across days by summing raw deviation counts.
 
@@ -230,19 +273,7 @@ def _aggregate_otp_split_window(daily_otp: list[dict]) -> dict | None:
             early += block.get("early", 0)
             on_time += block.get("on_time", 0)
             late += block.get("late", 0)
-        n = early + on_time + late
-        if n == 0:
-            return {"source": source, "n": 0}
-        return {
-            "source": source,
-            "n": n,
-            "early": early,
-            "on_time": on_time,
-            "late": late,
-            "early_pct": round(early * 100 / n, 2),
-            "on_time_pct": round(on_time * 100 / n, 2),
-            "late_pct": round(late * 100 / n, 2),
-        }
+        return _make_otp_block(early, on_time, late, early + on_time + late, source)
 
     first = daily_otp[0]
     return {
@@ -410,19 +441,8 @@ def _hydrate_overlay_row(row: RouteMetricsDailyOverlay) -> dict:
     """
 
     def _otp_block(early: int, on_time: int, late: int, source: str) -> dict:
-        n = early + on_time + late
-        if n == 0:
-            return {"source": source, "n": 0}
-        return {
-            "source": source,
-            "n": n,
-            "early": early,
-            "on_time": on_time,
-            "late": late,
-            "early_pct": round(early * 100 / n, 2),
-            "on_time_pct": round(on_time * 100 / n, 2),
-            "late_pct": round(late * 100 / n, 2),
-        }
+        """Thin wrapper around the module-level factory; computes total locally."""
+        return _make_otp_block(early, on_time, late, early + on_time + late, source)
 
     return {
         "service_delivered": {

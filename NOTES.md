@@ -6,23 +6,20 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-16. Closed NOTES-60 — schedule audit page
-shipped (PR #113). New `/schedule-audit` top-level page renders a
-system-wide ranked table of under-padded and over-padded segments
-from the `route_diagnostic_segment` rows that PR #107's pipeline
-materializes nightly. Columns: route, direction, segment
-(from-stop → to-stop), period, mean slip (signed), trips/day, and
-"min/day for the average bus" leverage. Default sort is absolute
-slip × daily trip volume — biggest leverage first regardless of
-sign. Filter by route, direction, time-of-day period
-(am_peak/midday/pm_peak/evening/late/all), and slip sign
-(under-padded only / over-padded only / all). New
-`GET /api/schedule-audit` endpoint (`api/aggregations.py:get_schedule_audit`)
-reads the pre-aggregated rows and joins route_short_name and
-stop_name from current GTFS (`is_current=True`); no new tables, no
-new schema fields. Sign convention: positive `mean_slip_sec` =
-observed > scheduled = under-padded; negative = over-padded
-(matches `src/route_diagnostics.py:compute_segment_slip`).
+Last edited 2026-05-17. Closed NOTES-66 by extracting
+`_make_otp_block(early_count, on_time_count, late_count,
+total_count, source)` in `api/aggregations.py` and routing both
+`_aggregate_otp_split_window` (live path) and `_hydrate_overlay_row`
+(materialized-overlay path) through it. The two inline builders had
+been identical-but-duplicated and were the exact drift surface that
+caused the PR #115 near-miss bug; a parametrized
+`TestMakeOtpBlock.test_shape_contract` now locks the on-the-wire
+shape so future divergence gets caught at the unit level. Pure
+refactor — output is byte-identical to before. PR rides on the
+earlier same-day addition of NOTES-63..68 (six code-quality
+items grouped under the new `Code-quality / DRY cleanup`
+subsection) and the corresponding CLAUDE.md working-agreement
+updates (frontend-lint command + Claude tooling file locations).
 
 ---
 
@@ -94,6 +91,36 @@ target lists directly.
   Ranked timepoint-leakage table (% of buses departing > N seconds
   early per timepoint per period) → operational fix targets, no
   capital required.
+
+### Code-quality / DRY cleanup
+
+Code-quality follow-ups from a codebase simplification scan
+(2026-05-17). Each is a small-to-medium refactor with no
+user-visible behavior change; the win is maintainability and
+divergence prevention. Independent of each other — sequence to
+taste.
+
+- **NOTES-63 Consolidate `_aggregate_*_window` functions in
+  `api/aggregations.py`.** Four near-identical per-metric
+  aggregator helpers (OTP-split, service-delivered, EWT, bunching)
+  collapse into one generic `aggregate_metric_window` plus four
+  small per-metric reducers.
+- **NOTES-64 Custom `useMultiFetch` hook for the frontend.** Several
+  pages hand-roll `useEffect` + `Promise.all` + manual
+  error/cancellation handling. A shared hook removes the repetition
+  and fixes latent race conditions on fast route switches.
+- **NOTES-65 Shared `upsert_rows` helper for pipelines.** Each
+  pipeline reconstructs
+  `pg_insert(...).on_conflict_do_update(constraint=..., set_=...)`
+  by hand; a `src/upsert_helpers.py` shim standardizes the pattern
+  and centralizes error/conflict handling.
+- **NOTES-67 Generic `batch_iterator` for daily-batch
+  orchestration.** `pipelines/run_daily_batch.py` hand-rolls the
+  per-route × per-date loop and other pipelines copy the pattern.
+  Shared helper enables uniform parallelization later.
+- **NOTES-68 `iter_eastern_dates` helper in `src/date_ranges.py`.**
+  6+ pipelines reimport `eastern_today` and reconstruct date-range
+  loops manually. A small helper module dedupes the pattern.
 
 ### P5 — Cleanup
 
@@ -498,6 +525,113 @@ filtering in the ranking (headway-based dispatching is the right
 intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
+
+---
+
+## NOTES-63. Consolidate `_aggregate_*_window` functions in `api/aggregations.py`
+
+**Severity: low** (works correctly today; refactor for maintainability).
+**Effort: medium** (four functions to merge, test surface to preserve).
+
+`api/aggregations.py:208-365` defines four nearly-identical helpers —
+`_aggregate_otp_split_window`, `_aggregate_service_delivered_window`,
+`_aggregate_ewt_window`, `_aggregate_bunching_window` — each following
+the same pattern: filter null daily values, pool the raw sums across
+the window, derive the metric, return a dict. The per-metric logic
+(OTP block builder, bunched-ratio division, etc.) is small;
+everything else is boilerplate.
+
+Refactor to a single `aggregate_metric_window(daily_values,
+reducer_fn)` helper plus four small per-metric reducer functions.
+The reducers are the only metric-specific code; null-filtering and
+route-id threading become shared. Net ~120 lines collapse to ~40
+plus 4 small reducers. Tests in `tests/api/test_aggregations.py`
+should need minimal updates if the public function signatures stay
+stable.
+
+---
+
+## NOTES-64. Custom `useMultiFetch` hook for the frontend
+
+**Severity: low** (works, but latent race conditions on fast nav).
+**Effort: medium** (touches 5+ components; cancellation needs care).
+
+`RouteDetail.jsx:66-102`, `SystemTrend.jsx:62-91`, `RouteTrend.jsx`,
+and several other components hand-roll the same `useEffect` →
+`Promise.all([fetch, fetch, ...])` → `.then(setData)` →
+`.catch(setError)` pattern, each with its own loading-state
+management. Beyond the repetition, none of the implementations wire
+up AbortController cancellation — fast route switches can race a
+stale fetch's completion against the new route's render,
+occasionally showing wrong-route data for a frame before the second
+response wins.
+
+Build `useMultiFetch(urls, transform)` in
+`frontend/src/hooks/useMultiFetch.js` that returns
+`{ data, loading, error }`, wires AbortController to the effect's
+cleanup, and collapses the call sites to a single line. Migrate
+components one at a time; the hook is opt-in per call-site, so the
+refactor can land incrementally.
+
+---
+
+## NOTES-65. Shared `upsert_rows` helper for pipelines
+
+**Severity: low** (works; each pipeline reimplements the same pattern).
+**Effort: medium** (3+ pipelines to migrate; constraint names to track).
+
+`pipelines/compute_bunching.py:62-78`,
+`pipelines/aggregate_runs.py:260-280`,
+`pipelines/derive_stop_events_trip_updates.py:315+`, and others each
+hand-build `pg_insert(...).on_conflict_do_update(constraint=...,
+set_={...})` with row dicts assembled inline. The boilerplate is
+nearly identical; only the table, the constraint name, and the
+update columns vary.
+
+Build `src/upsert_helpers.py:upsert_rows(db, Model, rows,
+constraint_name, update_cols)` to abstract away constraint-name
+hardcoding and `set_=` dict construction. Adds a single seam to
+standardize error handling and batching later. Migrate pipelines
+one at a time; each is independent.
+
+---
+
+## NOTES-67. Generic `batch_iterator` for daily-batch orchestration
+
+**Severity: low** (works; refactor enables future parallelization).
+**Effort: medium** (touches `run_daily_batch.py` plus 2-3 pipelines).
+
+`pipelines/run_daily_batch.py:153-267` hand-rolls the per-route ×
+per-date loop with `range(2, lookback_days + 1)` and per-pipeline
+function calls; other pipelines (`compute_bunching.py`,
+`derive_stop_events.py`, `derive_stop_events_trip_updates.py`) copy
+the pattern with small variations.
+
+Extract `batch_iterator(route_ids, service_dates, process_func,
+pool_workers=1)` into a shared helper. Calls converge on one
+implementation; setting `pool_workers > 1` later becomes a one-line
+change for any pipeline that wants it, rather than per-pipeline
+retrofitting. Honor the existing single-threaded behavior by default
+— parallelism is a separate decision per pipeline.
+
+---
+
+## NOTES-68. `iter_eastern_dates` helper in `src/date_ranges.py`
+
+**Severity: low** (works; dedup for clarity).
+**Effort: low** (small new module + grep-replace in pipelines).
+
+Several pipelines (`compute_bunching.py`, `derive_stop_events.py`,
+`derive_stop_events_trip_updates.py`, `aggregate_runs.py`,
+`run_daily_batch.py`, plus scripts) reimport `eastern_today` from
+`src/timezones.py` and reconstruct date-range loops manually
+(`for i in range(lookback_days): date = eastern_today() -
+timedelta(days=i)`).
+
+Add `src/date_ranges.py` with `iter_eastern_dates(start, end)` and
+`iter_recent_eastern_dates(lookback_days)` helpers. Replace the
+hand-rolled loops across 6+ call-sites. Pure consolidation — no
+behavior change.
 
 ---
 
