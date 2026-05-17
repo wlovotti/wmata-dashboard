@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from src.database import get_session, init_db
 from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
 from src.timezones import from_epoch_naive_utc, utcnow_naive
+from src.upsert_helpers import upsert_trip_update_state
 
 # Load environment variables from .env file
 load_dotenv()
@@ -607,7 +608,6 @@ class WMATADataCollector:
 
         if new_objects:
             self.db.bulk_save_objects(new_objects)
-            self.db.commit()
 
         # NEW: dual-write to trip_update_state. We UPSERT one row per
         # (trip_id, stop_sequence) holding the latest predictions. The
@@ -615,8 +615,11 @@ class WMATADataCollector:
         # We pass ALL rows (not just state-changed ones) so the
         # final_snapshot_ts always reflects the latest poll, even when
         # state hasn't changed.
-        from src.upsert_helpers import upsert_trip_update_state
-
+        #
+        # Atomicity note: this UPSERT shares a transaction with the
+        # snapshot bulk_save above. The single self.db.commit() below
+        # commits both writes together, so the two tables can't diverge
+        # on partial failure.
         upsert_payload = [
             {
                 "trip_id": r["trip_id"],
@@ -628,10 +631,18 @@ class WMATADataCollector:
                 "schedule_relationship": r.get("schedule_relationship"),
             }
             for r in rows
-            if r.get("stop_sequence") is not None  # skip rows missing the PK part
+            # stop_sequence is part of the trip_update_state PK; rows
+            # missing it can't be keyed in state, so we drop them from
+            # the UPSERT. They still land in trip_update_snapshots above
+            # (which has its own auto-PK), so no data is lost — they're
+            # only invisible to the new derivation pipeline.
+            if r.get("stop_sequence") is not None
         ]
         if upsert_payload:
             upsert_trip_update_state(self.db, upsert_payload)
+
+        # Single commit covers both the snapshot bulk_save and the upsert.
+        if new_objects or upsert_payload:
             self.db.commit()
 
         print(
