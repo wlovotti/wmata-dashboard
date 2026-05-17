@@ -6,18 +6,23 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-16. Closed NOTES-53 — "Off target" panel added
-to the Overview page (PR #112). Ranks routes by their gap to a
-configured per-route target on the metric selected via the shared
-contributors metric selector. Pulls overrides from `/api/targets`
-and joins against the `targets` block on `/api/routes` plus the
-matching live per-route value; routes that fall through to the
-system default are intentionally excluded so the panel doesn't
-re-rank the same routes the volume-weighted "Where to look" panel
-does. Empty state prompts the operator to edit
-`config/route_targets.yaml` when no overrides are configured.
-Pure frontend change — no new backend endpoints (PR #99's data
-plumbing was already sufficient).
+Last edited 2026-05-16. Closed NOTES-60 — schedule audit page
+shipped (PR #113). New `/schedule-audit` top-level page renders a
+system-wide ranked table of under-padded and over-padded segments
+from the `route_diagnostic_segment` rows that PR #107's pipeline
+materializes nightly. Columns: route, direction, segment
+(from-stop → to-stop), period, mean slip (signed), trips/day, and
+"min/day for the average bus" leverage. Default sort is absolute
+slip × daily trip volume — biggest leverage first regardless of
+sign. Filter by route, direction, time-of-day period
+(am_peak/midday/pm_peak/evening/late/all), and slip sign
+(under-padded only / over-padded only / all). New
+`GET /api/schedule-audit` endpoint (`api/aggregations.py:get_schedule_audit`)
+reads the pre-aggregated rows and joins route_short_name and
+stop_name from current GTFS (`is_current=True`); no new tables, no
+new schema fields. Sign convention: positive `mean_slip_sec` =
+observed > scheduled = under-padded; negative = over-padded
+(matches `src/route_diagnostics.py:compute_segment_slip`).
 
 ---
 
@@ -85,9 +90,6 @@ target lists directly.
   Wisconsin to Penn Ave" reads as one investment target rather
   than N stop-pairs. The framing that makes the output
   decision-useful for infrastructure planning.
-- **NOTES-60 Schedule audit page.** System-wide under-padded and
-  over-padded segments, sortable, filterable by time-of-day. Direct
-  input to schedule-revision work.
 - **NOTES-61 Hold-down policy / dispatching candidates page.**
   Ranked timepoint-leakage table (% of buses departing > N seconds
   early per timepoint per period) → operational fix targets, no
@@ -462,43 +464,15 @@ that lands independently.
 
 ---
 
-## NOTES-60. Schedule audit page
-
-**Severity: low.**
-
-System-wide table of under-padded and over-padded segments —
-direct input to schedule-revision work. Per-segment, per-time-of-day.
-
-New page `/schedule-audit` (or a tab on the existing RoutesList page,
-depending on IA preference). Default sort by absolute slip magnitude
-weighted by trip volume. Filter by route, direction, time-of-day, and
-slip sign (only under-padded / only over-padded / all).
-
-Columns: route, direction, segment (from-stop → to-stop), period,
-mean slip (signed), trip-count, "would save X min/day for the
-average bus" estimate.
-
-Use cases:
-- "What schedule changes would best reduce delay?" — top under-padded
-  segments.
-- "Where is the schedule wasting service-hours on excess padding?" —
-  top over-padded segments (these are operational cost without
-  rider benefit).
-
-### Dependencies
-
-route_diagnostic_profile foundation (PR #107).
-
----
-
 ## NOTES-61. Hold-down policy / dispatching candidates page
 
 **Severity: low.**
 
 Ranked timepoint-leakage table — which WMATA timepoints would benefit
 most from enforced hold-downs (AVL alerting on early departures, or
-operator-policy reminders). The operational complement to NOTES-60's
-schedule-revision lever: zero capital, only policy.
+operator-policy reminders). The operational complement to the
+schedule-audit page's schedule-revision lever: zero capital, only
+policy.
 
 For each timepoint on each route, per period:
 - **Leakage rate** — % of buses departing > 60s ahead of scheduled

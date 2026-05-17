@@ -29,10 +29,12 @@ from api.aggregations import (
     get_route_time_period_summary,
     get_route_trend_data,
     get_run_deviations,
+    get_schedule_audit,
     get_system_trend_data,
 )
 from src.database import get_session
 from src.models import GTFSSnapshot, VehiclePosition
+from src.route_diagnostics import ALL_PERIODS as DIAGNOSTIC_PERIODS
 from src.time_periods import (
     ALL_DAY_TYPES,
     ALL_HOURS,
@@ -891,6 +893,83 @@ async def get_block_timeline_endpoint(block_id: str, service_date: str | None = 
                 detail=f"Block {block_id} not found in current GTFS",
             )
         return result
+    finally:
+        db.close()
+
+
+_SCHEDULE_AUDIT_SIGNS: tuple[str, ...] = ("all", "under", "over")
+
+
+@app.get("/api/schedule-audit")
+async def get_schedule_audit_endpoint(
+    route_id: str | None = None,
+    direction_id: int | None = None,
+    period: str = "all",
+    sign: str = "all",
+    limit: int = 100,
+):
+    """
+    System-wide under-/over-padded segment audit (NOTES-60).
+
+    Reads `route_diagnostic_segment` rows materialized nightly by
+    `pipelines/refresh_route_diagnostic_profile.py` (PR #107) and returns
+    one row per (route, direction, period, from-stop, to-stop) segment
+    ranked by absolute slip magnitude × daily trip volume — the schedule
+    planner's "biggest leverage first" cut. Filter by route, direction,
+    time-of-day period, and slip sign (under-padded / over-padded / all).
+
+    Sign convention (mirrors `src/route_diagnostics.py`):
+
+    - `mean_slip_sec > 0`: observed segment travel time exceeds the
+      schedule's segment travel time on average → the schedule is
+      UNDER-padded for the segment (bus arrives late at the next stop).
+    - `mean_slip_sec < 0`: observed time is faster than scheduled →
+      OVER-padded (recoverable service-hours).
+
+    `minutes_per_day` is `mean_slip_sec × n_observations / lookback_days
+    / 60` — the per-day minutes that would be saved (or recovered) if
+    the segment's mean slip were eliminated. Signed: positive = delay
+    that revisions could shave, negative = excess padding revisions
+    could trim. Lookback days mirror the materialization default (30).
+
+    Args:
+        route_id: If set, restrict to one route_id.
+        direction_id: If set (0 or 1), restrict to one direction.
+        period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
+            `evening`, `late` — must match the materialized period set.
+        sign: One of `all` (default), `under`, `over`.
+        limit: Max rows to return (default 100, max 500).
+
+    Returns:
+        Dict with `period`, `sign`, `lookback_days`, `n_rows`, and
+        `segments` (ranked list of per-segment audit rows).
+    """
+    if period not in DIAGNOSTIC_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
+        )
+    if sign not in _SCHEDULE_AUDIT_SIGNS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sign. Must be one of: {', '.join(_SCHEDULE_AUDIT_SIGNS)}",
+        )
+    if direction_id is not None and direction_id not in (0, 1):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid direction_id. Must be 0 or 1 if provided.",
+        )
+
+    db = get_session()
+    try:
+        return get_schedule_audit(
+            db,
+            route_id=route_id,
+            direction_id=direction_id,
+            period=period,
+            sign=sign,
+            limit=limit,
+        )
     finally:
         db.close()
 

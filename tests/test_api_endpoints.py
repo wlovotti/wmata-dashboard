@@ -12,7 +12,7 @@ Run with: pytest -m api
 
 import pytest
 
-from src.models import Shape, Trip
+from src.models import Route, RouteDiagnosticSegment, Shape, Stop, Trip
 
 
 @pytest.mark.api
@@ -331,3 +331,267 @@ def test_get_route_shapes_multiple_shapes(client, db_session, sample_route):
     data = response.json()
     assert len(data["shapes"]) == 2
     assert data["shapes"][0]["shape_id"] in ["SHAPE_TEST1", "SHAPE_TEST2"]
+
+
+# ---------------------------------------------------------------------------
+# /api/schedule-audit (NOTES-60)
+# ---------------------------------------------------------------------------
+
+
+def _seed_schedule_audit_fixture(db_session):
+    """Seed two routes + four segments spanning under-/over-padded slip.
+
+    Layout:
+      ROUTE_A (direction 0), period=all:
+        - SEG1 (stop1 -> stop2): mean_slip_sec=+120, n=300  (under-padded, high vol)
+        - SEG2 (stop2 -> stop3): mean_slip_sec=-30,  n=300  (over-padded, low magnitude)
+      ROUTE_B (direction 1), period=all:
+        - SEG3 (stop4 -> stop5): mean_slip_sec=+60,  n=600  (under-padded, biggest leverage)
+        - SEG4 (stop5 -> stop6): mean_slip_sec=-90,  n=200  (over-padded)
+      ROUTE_A (direction 0), period=am_peak:
+        - SEG5 (stop1 -> stop2): mean_slip_sec=+200, n=100  (peak-only row)
+    """
+    # Routes
+    db_session.add_all(
+        [
+            Route(
+                route_id="ROUTE_A",
+                route_short_name="A1",
+                route_long_name="Test Route A",
+                route_type=3,
+                is_current=True,
+            ),
+            Route(
+                route_id="ROUTE_B",
+                route_short_name="B1",
+                route_long_name="Test Route B",
+                route_type=3,
+                is_current=True,
+            ),
+        ]
+    )
+    # Stops
+    for i in range(1, 7):
+        db_session.add(
+            Stop(
+                stop_id=f"stop{i}",
+                stop_name=f"Stop {i}",
+                stop_lat=38.9 + 0.001 * i,
+                stop_lon=-77.0 - 0.001 * i,
+                is_current=True,
+            )
+        )
+    # Diagnostic segment rows
+    db_session.add_all(
+        [
+            # ROUTE_A direction 0 — all-day
+            RouteDiagnosticSegment(
+                route_id="ROUTE_A",
+                direction_id=0,
+                period="all",
+                from_seq=1,
+                from_stop_id="stop1",
+                to_seq=2,
+                to_stop_id="stop2",
+                mean_slip_sec=120.0,
+                cum_slip_sec=120.0,
+                n_observations=300,
+                is_timepoint=False,
+            ),
+            RouteDiagnosticSegment(
+                route_id="ROUTE_A",
+                direction_id=0,
+                period="all",
+                from_seq=2,
+                from_stop_id="stop2",
+                to_seq=3,
+                to_stop_id="stop3",
+                mean_slip_sec=-30.0,
+                cum_slip_sec=90.0,
+                n_observations=300,
+                is_timepoint=False,
+            ),
+            # ROUTE_B direction 1 — all-day
+            RouteDiagnosticSegment(
+                route_id="ROUTE_B",
+                direction_id=1,
+                period="all",
+                from_seq=1,
+                from_stop_id="stop4",
+                to_seq=2,
+                to_stop_id="stop5",
+                mean_slip_sec=60.0,
+                cum_slip_sec=60.0,
+                n_observations=600,
+                is_timepoint=False,
+            ),
+            RouteDiagnosticSegment(
+                route_id="ROUTE_B",
+                direction_id=1,
+                period="all",
+                from_seq=2,
+                from_stop_id="stop5",
+                to_seq=3,
+                to_stop_id="stop6",
+                mean_slip_sec=-90.0,
+                cum_slip_sec=-30.0,
+                n_observations=200,
+                is_timepoint=False,
+            ),
+            # ROUTE_A direction 0 — am_peak only
+            RouteDiagnosticSegment(
+                route_id="ROUTE_A",
+                direction_id=0,
+                period="am_peak",
+                from_seq=1,
+                from_stop_id="stop1",
+                to_seq=2,
+                to_stop_id="stop2",
+                mean_slip_sec=200.0,
+                cum_slip_sec=200.0,
+                n_observations=100,
+                is_timepoint=False,
+            ),
+        ]
+    )
+    db_session.commit()
+
+
+@pytest.mark.api
+def test_schedule_audit_empty_database(client):
+    """Empty DB returns the documented shape with zero segments."""
+    response = client.get("/api/schedule-audit")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["period"] == "all"
+    assert data["sign"] == "all"
+    assert data["lookback_days"] == 30
+    assert data["n_rows"] == 0
+    assert data["segments"] == []
+
+
+@pytest.mark.api
+def test_schedule_audit_default_sort_by_abs_minutes_per_day(client, db_session):
+    """Default sort is absolute slip × daily trips. Biggest leverage first.
+
+    ROUTE_B SEG3: 60s × 600/30 / 60 = 20.0 min/day  (largest |minutes_per_day|)
+    ROUTE_A SEG1: 120s × 300/30 / 60 = 20.0 min/day (tie — second by route_id)
+    ROUTE_B SEG4: 90s × 200/30 / 60 = 10.0 min/day
+    ROUTE_A SEG2: 30s × 300/30 / 60 = 5.0 min/day
+    """
+    _seed_schedule_audit_fixture(db_session)
+    response = client.get("/api/schedule-audit")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["n_rows"] == 4
+    segments = data["segments"]
+    assert len(segments) == 4
+    # First two tied at |20.0|; tie-break is route_id ascending, so ROUTE_A first
+    assert abs(segments[0]["minutes_per_day"]) == pytest.approx(20.0)
+    assert abs(segments[1]["minutes_per_day"]) == pytest.approx(20.0)
+    assert segments[0]["route_id"] == "ROUTE_A"
+    assert segments[1]["route_id"] == "ROUTE_B"
+    assert abs(segments[2]["minutes_per_day"]) == pytest.approx(10.0)
+    assert abs(segments[3]["minutes_per_day"]) == pytest.approx(5.0)
+    # Joined names propagate
+    assert segments[0]["from_stop_name"] == "Stop 1"
+    assert segments[0]["to_stop_name"] == "Stop 2"
+    assert segments[0]["route_short_name"] == "A1"
+
+
+@pytest.mark.api
+def test_schedule_audit_sign_filter_under(client, db_session):
+    """`sign=under` returns only positive-slip rows (under-padded)."""
+    _seed_schedule_audit_fixture(db_session)
+    response = client.get("/api/schedule-audit?sign=under")
+    assert response.status_code == 200
+    segments = response.json()["segments"]
+    assert len(segments) == 2  # ROUTE_A SEG1 and ROUTE_B SEG3
+    for s in segments:
+        assert s["mean_slip_sec"] > 0
+        assert s["minutes_per_day"] > 0
+
+
+@pytest.mark.api
+def test_schedule_audit_sign_filter_over(client, db_session):
+    """`sign=over` returns only negative-slip rows (over-padded)."""
+    _seed_schedule_audit_fixture(db_session)
+    response = client.get("/api/schedule-audit?sign=over")
+    assert response.status_code == 200
+    segments = response.json()["segments"]
+    assert len(segments) == 2  # ROUTE_A SEG2 and ROUTE_B SEG4
+    for s in segments:
+        assert s["mean_slip_sec"] < 0
+        assert s["minutes_per_day"] < 0
+
+
+@pytest.mark.api
+def test_schedule_audit_route_filter(client, db_session):
+    """`route_id` filter restricts to one route."""
+    _seed_schedule_audit_fixture(db_session)
+    response = client.get("/api/schedule-audit?route_id=ROUTE_A")
+    assert response.status_code == 200
+    segments = response.json()["segments"]
+    assert len(segments) == 2  # SEG1 + SEG2 (am_peak SEG5 excluded by default period=all)
+    assert all(s["route_id"] == "ROUTE_A" for s in segments)
+
+
+@pytest.mark.api
+def test_schedule_audit_period_filter(client, db_session):
+    """`period=am_peak` returns only the peak-tagged row."""
+    _seed_schedule_audit_fixture(db_session)
+    response = client.get("/api/schedule-audit?period=am_peak")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["period"] == "am_peak"
+    segments = data["segments"]
+    assert len(segments) == 1
+    assert segments[0]["route_id"] == "ROUTE_A"
+    assert segments[0]["mean_slip_sec"] == 200.0
+    assert segments[0]["period"] == "am_peak"
+
+
+@pytest.mark.api
+def test_schedule_audit_direction_filter(client, db_session):
+    """`direction_id=1` returns only direction 1 rows."""
+    _seed_schedule_audit_fixture(db_session)
+    response = client.get("/api/schedule-audit?direction_id=1")
+    assert response.status_code == 200
+    segments = response.json()["segments"]
+    assert all(s["direction_id"] == 1 for s in segments)
+    assert {s["route_id"] for s in segments} == {"ROUTE_B"}
+
+
+@pytest.mark.api
+def test_schedule_audit_limit(client, db_session):
+    """`limit` caps the segments list."""
+    _seed_schedule_audit_fixture(db_session)
+    response = client.get("/api/schedule-audit?limit=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["n_rows"] == 4  # totals reflect pre-limit count
+    assert len(data["segments"]) == 2
+
+
+@pytest.mark.api
+def test_schedule_audit_invalid_period(client):
+    """Invalid period returns 400."""
+    response = client.get("/api/schedule-audit?period=funkytime")
+    assert response.status_code == 400
+    assert "period" in response.json()["detail"].lower()
+
+
+@pytest.mark.api
+def test_schedule_audit_invalid_sign(client):
+    """Invalid sign returns 400."""
+    response = client.get("/api/schedule-audit?sign=sideways")
+    assert response.status_code == 400
+    assert "sign" in response.json()["detail"].lower()
+
+
+@pytest.mark.api
+def test_schedule_audit_invalid_direction(client):
+    """Invalid direction_id returns 400."""
+    response = client.get("/api/schedule-audit?direction_id=2")
+    assert response.status_code == 400
+    assert "direction" in response.json()["detail"].lower()
