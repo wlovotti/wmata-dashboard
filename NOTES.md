@@ -6,19 +6,15 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-68 by extracting
-`iter_eastern_dates(start, end)` and
-`iter_recent_eastern_dates(lookback_days)` into a new
-`src/date_ranges.py` module and routing the two real date-iteration
-call-sites (`pipelines/compute_bunching.py`'s `--start-date/--end-date`
-and `--days` branches, and `pipelines/run_daily_batch.py:determine_target_dates`)
-through it. Service-date iteration semantics now live in one place,
-removing the drift surface where each pipeline reconstructed
-`for i in range(...) + timedelta(days=...)` loops by hand and giving
-future changes (weekday filters, holiday skips) a single seam to land
-on. Pure consolidation — no behavior change beyond standardizing
-`--days` ordering to ascending (matches `--start-date/--end-date`
-branch; idempotent upserts make ordering irrelevant to output).
+Last edited 2026-05-17. Closed NOTES-63 by consolidating four
+near-identical per-metric window aggregators
+(`_aggregate_otp_split_window`, `_aggregate_service_delivered_window`,
+`_aggregate_ewt_window`, `_aggregate_bunching_window`) in
+`api/aggregations.py` into a single `aggregate_metric_window` generic
+helper plus four small per-metric reducer functions. Null-filtering and
+route-id threading are now shared; only the metric-specific accumulation
+logic lives in each reducer. Net ~120 lines collapsed to ~40 plus 4
+small reducers. No behavior change; all 462 tests pass.
 
 ---
 
@@ -99,11 +95,6 @@ user-visible behavior change; the win is maintainability and
 divergence prevention. Independent of each other — sequence to
 taste.
 
-- **NOTES-63 Consolidate `_aggregate_*_window` functions in
-  `api/aggregations.py`.** Four near-identical per-metric
-  aggregator helpers (OTP-split, service-delivered, EWT, bunching)
-  collapse into one generic `aggregate_metric_window` plus four
-  small per-metric reducers.
 - **NOTES-64 Custom `useMultiFetch` hook for the frontend.** Several
   pages hand-roll `useEffect` + `Promise.all` + manual
   error/cancellation handling. A shared hook removes the repetition
@@ -521,29 +512,6 @@ filtering in the ranking (headway-based dispatching is the right
 intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
-
----
-
-## NOTES-63. Consolidate `_aggregate_*_window` functions in `api/aggregations.py`
-
-**Severity: low** (works correctly today; refactor for maintainability).
-**Effort: medium** (four functions to merge, test surface to preserve).
-
-`api/aggregations.py:208-365` defines four nearly-identical helpers —
-`_aggregate_otp_split_window`, `_aggregate_service_delivered_window`,
-`_aggregate_ewt_window`, `_aggregate_bunching_window` — each following
-the same pattern: filter null daily values, pool the raw sums across
-the window, derive the metric, return a dict. The per-metric logic
-(OTP block builder, bunched-ratio division, etc.) is small;
-everything else is boilerplate.
-
-Refactor to a single `aggregate_metric_window(daily_values,
-reducer_fn)` helper plus four small per-metric reducer functions.
-The reducers are the only metric-specific code; null-filtering and
-route-id threading become shared. Net ~120 lines collapse to ~40
-plus 4 small reducers. Tests in `tests/api/test_aggregations.py`
-should need minimal updates if the public function signatures stay
-stable.
 
 ---
 

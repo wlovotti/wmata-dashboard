@@ -8,6 +8,7 @@ optimized for fast API responses and dashboard visualization.
 import math
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from threading import Event, Lock
@@ -248,22 +249,54 @@ def _make_otp_block(
     }
 
 
-def _aggregate_otp_split_window(daily_otp: list[dict]) -> dict | None:
-    """Pool OTP split sub-blocks across days by summing raw deviation counts.
+def aggregate_metric_window(
+    daily_values: list[dict | None],
+    reducer_fn: Callable[[list[dict]], dict],
+) -> dict | None:
+    """Shared boilerplate for per-metric window aggregators.
 
-    Each per-day result has `origin`/`destination`/`all_timepoints` blocks with
-    `early`/`on_time`/`late`/`n` counts (when `n > 0`) — sum them across days
-    and recompute the percentages. Empty/missing days contribute nothing.
-    Returns None if no day in the window has data for any sub-block.
+    Handles the three steps common to every per-metric aggregator:
+    1. Filter out `None` entries (days with no data for this route).
+    2. Return `None` when every day in the window was null.
+    3. Call `reducer_fn` with the filtered list and inject `route_id`
+       from the first entry so reducers don't repeat that threading.
+
+    `reducer_fn` receives the non-empty, non-null list and must return a
+    `dict` containing all metric-specific fields.  The `route_id` key is
+    injected by this function after the reducer returns — reducers must
+    NOT include `route_id` in their output (it would be silently
+    overwritten).
+
+    Usage::
+
+        def _reduce_my_metric(daily: list[dict]) -> dict:
+            total = sum(d.get("count", 0) for d in daily)
+            return {"count": total}
+
+        result = aggregate_metric_window(daily_values, _reduce_my_metric)
     """
-    daily_otp = [d for d in daily_otp if d is not None]
-    if not daily_otp:
+    daily_values = [d for d in daily_values if d is not None]
+    if not daily_values:
         return None
+    result = reducer_fn(daily_values)
+    result["route_id"] = daily_values[0].get("route_id")
+    return result
+
+
+def _reduce_otp_split(daily_values: list[dict]) -> dict:
+    """OTP split reducer: pool origin/destination/all_timepoints sub-blocks.
+
+    Sums `early`/`on_time`/`late` counts for each sub-block key across
+    all days and recomputes percentages via `_make_otp_block`.  Days where
+    a sub-block has `n == 0` contribute nothing to that block's totals.
+    The `window` metadata is carried forward from the first day's entry.
+    """
 
     def _pool_block(block_key: str) -> dict:
+        """Sum one OTP sub-block (origin / destination / all_timepoints) across days."""
         early = on_time = late = 0
         source = None
-        for d in daily_otp:
+        for d in daily_values:
             block = d.get(block_key) or {}
             if source is None:
                 source = block.get("source")
@@ -275,14 +308,82 @@ def _aggregate_otp_split_window(daily_otp: list[dict]) -> dict | None:
             late += block.get("late", 0)
         return _make_otp_block(early, on_time, late, early + on_time + late, source)
 
-    first = daily_otp[0]
+    first = daily_values[0]
     return {
-        "route_id": first.get("route_id"),
         "window": first.get("window"),
         "origin": _pool_block("origin"),
         "destination": _pool_block("destination"),
         "all_timepoints": _pool_block("all_timepoints"),
     }
+
+
+def _reduce_service_delivered(daily_values: list[dict]) -> dict:
+    """Service-delivered reducer: sum trip counts and recompute ratio.
+
+    `ratio = delivered / scheduled`, or `None` when scheduled is zero
+    across the entire window (route never ran vs. wasn't supposed to run).
+    """
+    scheduled = sum(d.get("scheduled_trips", 0) for d in daily_values)
+    delivered = sum(d.get("delivered_trips", 0) for d in daily_values)
+    ratio = round(delivered / scheduled, 4) if scheduled else None
+    return {
+        "scheduled_trips": int(scheduled),
+        "delivered_trips": int(delivered),
+        "ratio": ratio,
+    }
+
+
+def _reduce_ewt(daily_values: list[dict]) -> dict:
+    """EWT reducer: pool sufficient statistics and recompute AWT/SWT/EWT.
+
+    Uses the algebraic identity `AWT = Σh² / (2·Σh)` so the daily
+    `obs_sum_h` / `obs_sum_h_sq` (and scheduled equivalents) sum cleanly
+    across the window without re-pulling raw headways.  The result is
+    mathematically identical to pooling every individual headway at once.
+    """
+    obs_sum_h = sum(d.get("obs_sum_h", 0.0) for d in daily_values)
+    obs_sum_h_sq = sum(d.get("obs_sum_h_sq", 0.0) for d in daily_values)
+    sched_sum_h = sum(d.get("sched_sum_h", 0.0) for d in daily_values)
+    sched_sum_h_sq = sum(d.get("sched_sum_h_sq", 0.0) for d in daily_values)
+    n_observed = sum(d.get("n_observed_headways", 0) for d in daily_values)
+    n_scheduled = sum(d.get("n_scheduled_headways", 0) for d in daily_values)
+    return {
+        **_derive_ewt_metrics(
+            obs_sum_h, obs_sum_h_sq, sched_sum_h, sched_sum_h_sq, n_observed, n_scheduled
+        ),
+        "n_observed_headways": int(n_observed),
+        "n_scheduled_headways": int(n_scheduled),
+    }
+
+
+def _reduce_bunching(daily_values: list[dict]) -> dict:
+    """Bunching reducer: sum counts and recompute the bunching rate.
+
+    `rate = bunched / total`, or `None` when no observed headway pairs
+    exist across the window.
+    """
+    bunched = sum(d.get("bunching_count", 0) for d in daily_values)
+    total = sum(d.get("total_headways", 0) for d in daily_values)
+    return {
+        "bunching_count": int(bunched),
+        "total_headways": int(total),
+        **_derive_bunching_metrics(int(bunched), int(total)),
+    }
+
+
+def _aggregate_otp_split_window(daily_otp: list[dict]) -> dict | None:
+    """Pool OTP split sub-blocks across days by summing raw deviation counts.
+
+    Each per-day result has `origin`/`destination`/`all_timepoints` blocks with
+    `early`/`on_time`/`late`/`n` counts (when `n > 0`) — sum them across days
+    and recompute the percentages. Empty/missing days contribute nothing.
+    Returns None if no day in the window has data for any sub-block.
+
+    Delegates shared null-filtering and route-id threading to
+    `aggregate_metric_window`; metric-specific logic lives in
+    `_reduce_otp_split`.
+    """
+    return aggregate_metric_window(daily_otp, _reduce_otp_split)
 
 
 def _aggregate_service_delivered_window(daily_sd: list[dict]) -> dict | None:
@@ -292,20 +393,12 @@ def _aggregate_service_delivered_window(daily_sd: list[dict]) -> dict | None:
     delivered / scheduled` (None if scheduled is zero across the window —
     same "didn't run any" vs "wasn't supposed to" distinction as the per-day
     function). Returns None if no day in the window had a result.
+
+    Delegates shared null-filtering and route-id threading to
+    `aggregate_metric_window`; metric-specific logic lives in
+    `_reduce_service_delivered`.
     """
-    daily_sd = [d for d in daily_sd if d is not None]
-    if not daily_sd:
-        return None
-    scheduled = sum(d.get("scheduled_trips", 0) for d in daily_sd)
-    delivered = sum(d.get("delivered_trips", 0) for d in daily_sd)
-    ratio = round(delivered / scheduled, 4) if scheduled else None
-    first = daily_sd[0]
-    return {
-        "route_id": first.get("route_id"),
-        "scheduled_trips": int(scheduled),
-        "delivered_trips": int(delivered),
-        "ratio": ratio,
-    }
+    return aggregate_metric_window(daily_sd, _reduce_service_delivered)
 
 
 def _derive_ewt_metrics(
@@ -354,26 +447,11 @@ def _aggregate_ewt_window(daily_ewt: list[dict]) -> dict | None:
     cleanly across the window without re-pulling raw headways. The result
     is mathematically identical to pooling every individual headway in
     one shot.
-    """
-    daily_ewt = [d for d in daily_ewt if d is not None]
-    if not daily_ewt:
-        return None
-    obs_sum_h = sum(d.get("obs_sum_h", 0.0) for d in daily_ewt)
-    obs_sum_h_sq = sum(d.get("obs_sum_h_sq", 0.0) for d in daily_ewt)
-    sched_sum_h = sum(d.get("sched_sum_h", 0.0) for d in daily_ewt)
-    sched_sum_h_sq = sum(d.get("sched_sum_h_sq", 0.0) for d in daily_ewt)
-    n_observed = sum(d.get("n_observed_headways", 0) for d in daily_ewt)
-    n_scheduled = sum(d.get("n_scheduled_headways", 0) for d in daily_ewt)
 
-    first = daily_ewt[0]
-    return {
-        "route_id": first.get("route_id"),
-        **_derive_ewt_metrics(
-            obs_sum_h, obs_sum_h_sq, sched_sum_h, sched_sum_h_sq, n_observed, n_scheduled
-        ),
-        "n_observed_headways": int(n_observed),
-        "n_scheduled_headways": int(n_scheduled),
-    }
+    Delegates shared null-filtering and route-id threading to
+    `aggregate_metric_window`; metric-specific logic lives in `_reduce_ewt`.
+    """
+    return aggregate_metric_window(daily_ewt, _reduce_ewt)
 
 
 def _aggregate_bunching_window(daily_bun: list[dict]) -> dict | None:
@@ -381,19 +459,12 @@ def _aggregate_bunching_window(daily_bun: list[dict]) -> dict | None:
 
     Sums `bunching_count` and `total_headways`, then `rate = bunched / total`.
     Returns None if no day had any observed pairs.
+
+    Delegates shared null-filtering and route-id threading to
+    `aggregate_metric_window`; metric-specific logic lives in
+    `_reduce_bunching`.
     """
-    daily_bun = [d for d in daily_bun if d is not None]
-    if not daily_bun:
-        return None
-    bunched = sum(d.get("bunching_count", 0) for d in daily_bun)
-    total = sum(d.get("total_headways", 0) for d in daily_bun)
-    first = daily_bun[0]
-    return {
-        "route_id": first.get("route_id"),
-        "bunching_count": int(bunched),
-        "total_headways": int(total),
-        **_derive_bunching_metrics(int(bunched), int(total)),
-    }
+    return aggregate_metric_window(daily_bun, _reduce_bunching)
 
 
 def _aggregate_live_metrics_window(
