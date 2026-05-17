@@ -23,6 +23,7 @@ from api.aggregations import (
     get_route_bunching_causes,
     get_route_contributors,
     get_route_detail_metrics,
+    get_route_diagnostic_profile,
     get_route_period_drilldown,
     get_route_recent_runs,
     get_route_stop_diagnostics,
@@ -893,6 +894,61 @@ async def get_block_timeline_endpoint(block_id: str, service_date: str | None = 
                 detail=f"Block {block_id} not found in current GTFS",
             )
         return result
+    finally:
+        db.close()
+
+
+@app.get("/api/routes/{route_id}/diagnostic_profile")
+async def get_route_diagnostic_profile_endpoint(
+    route_id: str,
+    period: str = "all",
+):
+    """
+    Pre-materialized diagnostic profile for one route and time-of-day period (PR #124).
+
+    Reads the three ``route_diagnostic_*`` tables materialized nightly by
+    ``pipelines/refresh_route_diagnostic_profile.py`` (PR #107) and returns
+    them in one response so the RouteDetail diagnosis panel can populate the
+    slip-trajectory chart and timepoint-behavior table in a single fetch.
+
+    Returns three parallel lists:
+
+    - ``segments`` — per-segment mean slip and cumulative slip ordered by
+      ``(direction_id, from_seq)``. Each row carries ``from_stop_name`` and
+      ``to_stop_name`` (joined from current GTFS) and ``is_timepoint`` so
+      the chart can mark schedule-checkpoints on the trajectory line without
+      a separate fetch. Slip sign convention: positive = bus ran slower than
+      scheduled (under-padded); negative = faster (over-padded / recovery).
+    - ``timepoints`` — per-timepoint behavior classification ordered by
+      ``(direction_id, timepoint_stop_id)``. Includes ``stop_name`` and the
+      four distribution summaries that justify the classification badge
+      (``median_dev_entering``, ``median_dev_leaving``, ``p10_dev_entering``,
+      ``p10_dev_leaving``).
+    - ``direction_asymmetry`` — per-direction early%/late%/signature ordered
+      by ``direction_id``.
+
+    Returns empty lists for each surface when no materialized data exists
+    for the route+period. This is the normal state before the pipeline has
+    run or for routes with insufficient stop_events coverage.
+
+    Args:
+        route_id: Route identifier (e.g., ``'D80'``).
+        period: One of ``all`` (default), ``am_peak``, ``midday``,
+            ``pm_peak``, ``evening``, ``late``.
+
+    Returns:
+        Dict with ``route_id``, ``period``, ``segments``, ``timepoints``,
+        and ``direction_asymmetry``.
+    """
+    if period not in DIAGNOSTIC_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
+        )
+
+    db = get_session()
+    try:
+        return get_route_diagnostic_profile(db, route_id, period=period)
     finally:
         db.close()
 

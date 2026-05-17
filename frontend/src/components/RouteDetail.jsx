@@ -11,6 +11,7 @@ import RouteTrend, {
   TargetIndicator,
 } from './RouteTrend'
 import StopDiagnostic from './StopDiagnostic'
+import RouteDiagnosisPanel from './RouteDiagnosisPanel'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 
 // Day-type / time-period filter options (NOTES-41). Keys must match the API's
@@ -572,6 +573,10 @@ function RouteDetail() {
 
       {hasMetrics && (
         <PeriodDrilldown routeId={routeId} dayType={dayType} period={period} />
+      )}
+
+      {hasMetrics && (
+        <RouteDiagnosisPanel routeId={routeId} period={period} />
       )}
 
       <div

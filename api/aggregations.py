@@ -43,7 +43,9 @@ from src.frequent_routes import get_cell_hour_gate_sec, load_frequent_route_ids
 from src.models import (
     Calendar,
     Route,
+    RouteDiagnosticDirection,
     RouteDiagnosticSegment,
+    RouteDiagnosticTimepoint,
     RouteMetricsDailyOverlay,
     RouteServiceProfile,
     Run,
@@ -3779,4 +3781,139 @@ def get_schedule_audit(
         "lookback_days": SCHEDULE_AUDIT_LOOKBACK_DAYS,
         "n_rows": len(out_rows),
         "segments": out_rows[:limit],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Route diagnostic profile (RouteDetail diagnosis panel, PR #124)
+# ---------------------------------------------------------------------------
+
+
+def get_route_diagnostic_profile(
+    db: Session,
+    route_id: str,
+    period: str = "all",
+) -> dict:
+    """Return the full diagnostic profile for one route and period.
+
+    Reads the three materialized diagnostic tables for one (route_id, period)
+    combination and returns them as three parallel lists: ``segments`` (per-
+    segment slip + cumulative slip), ``timepoints`` (per-timepoint behavior
+    classification), and ``direction_asymmetry`` (per-direction early%/late%).
+
+    Segment rows include ``from_stop_name`` and ``to_stop_name`` joined from
+    the current GTFS ``stops`` snapshot so the frontend can label axes and
+    timepoint markers without a separate fetch.
+
+    Timepoint rows include the stop name for display in the behavior table.
+
+    Args:
+        db: Active SQLAlchemy session.
+        route_id: Route identifier (e.g. ``'D80'``).
+        period: One of ``all`` / ``am_peak`` / ``midday`` / ``pm_peak`` /
+            ``evening`` / ``late``. Defaults to ``all``.
+
+    Returns:
+        Dict with ``route_id``, ``period``, ``segments``, ``timepoints``, and
+        ``direction_asymmetry``. Each list is ordered by
+        ``(direction_id, from_seq)`` / ``(direction_id, timepoint_stop_id)`` /
+        ``direction_id`` respectively. Returns empty lists when no
+        materialized data exists for the route+period combination.
+    """
+    seg_rows = (
+        db.query(RouteDiagnosticSegment)
+        .filter(
+            RouteDiagnosticSegment.route_id == route_id,
+            RouteDiagnosticSegment.period == period,
+        )
+        .order_by(RouteDiagnosticSegment.direction_id, RouteDiagnosticSegment.from_seq)
+        .all()
+    )
+
+    tp_rows = (
+        db.query(RouteDiagnosticTimepoint)
+        .filter(
+            RouteDiagnosticTimepoint.route_id == route_id,
+            RouteDiagnosticTimepoint.period == period,
+        )
+        .order_by(RouteDiagnosticTimepoint.direction_id, RouteDiagnosticTimepoint.timepoint_stop_id)
+        .all()
+    )
+
+    dir_rows = (
+        db.query(RouteDiagnosticDirection)
+        .filter(
+            RouteDiagnosticDirection.route_id == route_id,
+            RouteDiagnosticDirection.period == period,
+        )
+        .order_by(RouteDiagnosticDirection.direction_id)
+        .all()
+    )
+
+    # Bulk-load stop names so the frontend doesn't need a second trip.
+    # is_current=True per CLAUDE.md.
+    stop_ids: set[str] = set()
+    for r in seg_rows:
+        stop_ids.add(r.from_stop_id)
+        stop_ids.add(r.to_stop_id)
+    for r in tp_rows:
+        stop_ids.add(r.timepoint_stop_id)
+
+    stop_name_map: dict[str, str] = {}
+    if stop_ids:
+        stop_name_map = dict(
+            db.query(Stop.stop_id, Stop.stop_name)
+            .filter(Stop.stop_id.in_(stop_ids), Stop.is_current)
+            .all()
+        )
+
+    segments = [
+        {
+            "direction_id": r.direction_id,
+            "from_seq": r.from_seq,
+            "from_stop_id": r.from_stop_id,
+            "from_stop_name": stop_name_map.get(r.from_stop_id),
+            "to_seq": r.to_seq,
+            "to_stop_id": r.to_stop_id,
+            "to_stop_name": stop_name_map.get(r.to_stop_id),
+            "mean_slip_sec": r.mean_slip_sec,
+            "cum_slip_sec": r.cum_slip_sec,
+            "n_observations": r.n_observations,
+            "is_timepoint": r.is_timepoint,
+        }
+        for r in seg_rows
+    ]
+
+    timepoints = [
+        {
+            "direction_id": r.direction_id,
+            "timepoint_stop_id": r.timepoint_stop_id,
+            "stop_name": stop_name_map.get(r.timepoint_stop_id),
+            "classification": r.classification,
+            "median_dev_entering": r.median_dev_entering,
+            "median_dev_leaving": r.median_dev_leaving,
+            "p10_dev_entering": r.p10_dev_entering,
+            "p10_dev_leaving": r.p10_dev_leaving,
+            "n_observations": r.n_observations,
+        }
+        for r in tp_rows
+    ]
+
+    direction_asymmetry = [
+        {
+            "direction_id": r.direction_id,
+            "early_pct": r.early_pct,
+            "late_pct": r.late_pct,
+            "signature": r.signature,
+            "n_observations": r.n_observations,
+        }
+        for r in dir_rows
+    ]
+
+    return {
+        "route_id": route_id,
+        "period": period,
+        "segments": segments,
+        "timepoints": timepoints,
+        "direction_asymmetry": direction_asymmetry,
     }

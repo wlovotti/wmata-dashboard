@@ -3,7 +3,7 @@ Unit tests for `src/route_diagnostics.py` (NOTES-57).
 
 The classification logic is the load-bearing surface — thresholds for
 recovery / leaky / underpowered / neutral determine whether a
-timepoint shows up on RouteDetail's diagnosis panel (NOTES-58) and on
+timepoint shows up on RouteDetail's diagnosis panel (PR #124) and on
 the hold-down candidates list (NOTES-61). Tests cover:
 
   - The four classification labels each fire under their archetypal
