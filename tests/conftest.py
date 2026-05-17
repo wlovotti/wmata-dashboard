@@ -92,12 +92,21 @@ def pg_session(pg_engine):
     """Function-scoped Postgres session with transaction rollback.
 
     The dev DB schema is assumed to already exist (created via migrations
-    on the developer's machine). Each test runs inside a nested transaction
+    on the developer's machine). Each test runs inside an outer transaction
     that rolls back on teardown, so tests don't pollute the dev DB.
+
+    ``join_transaction_mode="create_savepoint"`` (SQLAlchemy 2.0+) makes
+    the session open a SAVEPOINT when it auto-begins inside the already-open
+    connection-level transaction. ``session.commit()`` in test bodies then
+    releases the SAVEPOINT rather than committing the outer transaction, so
+    ``transaction.rollback()`` in teardown still rolls back all test writes.
+    Without this, ``session.commit()`` would promote and commit the outer
+    transaction, turning ``transaction.rollback()`` into a no-op and leaking
+    rows into the dev DB on every test run.
     """
     connection = pg_engine.connect()
     transaction = connection.begin()
-    SessionLocal = sessionmaker(bind=connection)
+    SessionLocal = sessionmaker(bind=connection, join_transaction_mode="create_savepoint")
     session = SessionLocal()
 
     yield session
