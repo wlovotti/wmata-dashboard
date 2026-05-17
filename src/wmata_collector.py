@@ -49,6 +49,11 @@ class WMATADataCollector:
         archive_root = Path(__file__).resolve().parent.parent / "archive" / "raw_snapshots"
         self._archive_writer = JsonlArchiveWriter(archive_dir=archive_root)
 
+    def close(self) -> None:
+        """Flush and close the archive writer. Idempotent."""
+        if hasattr(self, "_archive_writer") and self._archive_writer is not None:
+            self._archive_writer.close()
+
     def download_gtfs_static(self, save_to_db=True, timeout=30):
         """Download and parse GTFS static data"""
         print("Downloading GTFS static data (~40MB, this may take 10-20 seconds)...")

@@ -45,7 +45,12 @@ def test_writer_appends_multiple_rows(tmp_path: Path):
 
 
 def test_writer_rotates_at_utc_midnight(tmp_path: Path):
-    """Crossing a UTC date boundary writes to a new file."""
+    """Crossing a UTC date boundary writes to a new file.
+
+    Also verifies each file contains exactly the expected row — guards
+    against the failure mode where rotation accidentally writes both rows
+    to one file.
+    """
     from src.archive_writer import JsonlArchiveWriter
 
     writer = JsonlArchiveWriter(archive_dir=tmp_path)
@@ -55,3 +60,19 @@ def test_writer_rotates_at_utc_midnight(tmp_path: Path):
 
     assert (tmp_path / "2026-05-17.jsonl.zst").exists()
     assert (tmp_path / "2026-05-18.jsonl.zst").exists()
+
+    dctx = zstd.ZstdDecompressor()
+
+    # 2026-05-17 file must contain exactly "T1" (not "T2")
+    with open(tmp_path / "2026-05-17.jsonl.zst", "rb") as f:
+        with dctx.stream_reader(f) as reader:
+            content_17 = reader.read().decode()
+    assert "T1" in content_17
+    assert "T2" not in content_17
+
+    # 2026-05-18 file must contain exactly "T2" (not "T1")
+    with open(tmp_path / "2026-05-18.jsonl.zst", "rb") as f:
+        with dctx.stream_reader(f) as reader:
+            content_18 = reader.read().decode()
+    assert "T2" in content_18
+    assert "T1" not in content_18

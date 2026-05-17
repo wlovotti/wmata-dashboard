@@ -4,9 +4,12 @@ The writer appends one JSON line per (trip, stop) per snapshot to a
 ZSTD-compressed file named by UTC date. Files rotate automatically when
 the snapshot timestamp crosses a UTC midnight boundary.
 
-Designed for the cold-archive path: writes are append-only and crash-safe
-(each line is flushed independently; a crash loses at most the in-progress
-line, not earlier lines).
+Designed for the cold-archive path: writes are append-only. Each call to
+``append()`` flushes the underlying file descriptor after the line write,
+so a crash loses at most the bytes still buffered inside zstd's current
+compression block (up to ~128 KiB worth of pending writes). Already-flushed
+blocks remain readable via ``zstandard.ZstdDecompressor().stream_reader``,
+which tolerates a missing zstd frame footer.
 """
 
 from __future__ import annotations
@@ -45,6 +48,10 @@ class JsonlArchiveWriter:
 
         ``snapshot_ts`` MUST be naive UTC (project-wide convention; see
         CLAUDE.md). Rotates the open file if the date has changed.
+
+        The underlying file is flushed after each line. A crash loses at
+        most the bytes still buffered inside zstd's in-progress block;
+        all earlier blocks are readable via ``ZstdDecompressor().stream_reader``.
         """
         target_date = snapshot_ts.date()
         if self._open_date != target_date:
@@ -52,6 +59,7 @@ class JsonlArchiveWriter:
 
         line = json.dumps(row, default=str) + "\n"
         self._open_fh.write(line.encode("utf-8"))
+        self._open_fh.flush()
 
     def _rotate_to(self, target_date: date) -> None:
         """Close any open file and open the file for ``target_date``."""
