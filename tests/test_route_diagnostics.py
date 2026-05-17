@@ -536,8 +536,226 @@ def test_cumulative_slip_would_inflate_if_duplicates_were_present():
         },
     ]
     out = _assemble_segment_slip_output(duplicated_rows, period="all")
-    # Both duplicate rows are kept (the helper doesn't dedup); the cum
-    # values bake in the inflation that NOTES-57 fast-follow fixes
-    # upstream by canonical-filtering the SQL inputs.
-    assert len(out) == 2  # both duplicates survive — inflation is visible
-    assert {r["cum_slip_sec"] for r in out} == {20.0, 70.0}  # 20, then 20+50
+    # Both duplicate rows survive (the helper doesn't dedup at the
+    # (from_seq, to_seq) level — canonical filtering upstream enforces
+    # that invariant). With the NOTES-57 fast-follow fix the cumsum
+    # walk visits each from_seq at most once: only the first row at
+    # (2, 3) advances the walk; subsequent rows with the same from_seq
+    # don't re-add their mean_slip_sec to the running total. Both rows
+    # match `consecutive_to_seq[2] == 3` (same to_seq), so both receive
+    # the post-walk arrival value (20.0). The pre-fix inflation
+    # ({20.0, 70.0}) no longer happens — that's the bug NOTES-57 fast-
+    # follow fixed at the cumsum layer. The contract that the canonical
+    # filter upstream guarantees one-row-per-(from_seq, to_seq) is
+    # unchanged.
+    assert len(out) == 2  # both duplicates survive
+    assert {r["cum_slip_sec"] for r in out} == {20.0}
+
+
+# ---------------------------------------------------------------------------
+# Consecutive-edge cumsum walk (NOTES-57 fast-follow, skip-N variant)
+#
+# When proximity observations are sparse the same `from_seq` can appear in
+# multiple rows with different `to_seq` values. Each per-edge mean_slip is
+# correct in isolation, but skip-N edges' means already include the
+# intermediate consecutive edges' slip implicitly, so walking them in the
+# cumsum double/triple-counts. The fix walks only the consecutive edge
+# (min to_seq per from_seq); skip-N rows still get a well-defined
+# cum_slip_sec (the cumsum at their from_seq's origin) to avoid a schema
+# migration.
+# ---------------------------------------------------------------------------
+
+
+def test_cumulative_slip_walks_only_consecutive_edges():
+    """Skip-N edges don't advance the cumsum; consecutive edges do.
+
+    Sparse-proximity synthetic: from_seq 2 and 3 each have one consecutive
+    and one skip-1 edge. The cumsum walk should follow only the
+    consecutive edges (2→3 and 3→4), and skip-N rows should carry the
+    cumsum value at their from_seq's origin (i.e., BEFORE adding the
+    from_seq's own consecutive edge).
+    """
+    rows = [
+        # Origin segment (dropped per the origin-departure rule).
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 2,
+            "to_stop_id": "S2",
+            "n_observations": 100,
+            "mean_slip_sec": 5.0,
+        },
+        # Consecutive edge from seq 2.
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 100,
+            "mean_slip_sec": 10.0,
+        },
+        # Skip-1 from seq 2 (D80-style — sparse ping at seq 3 on some trips).
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2",
+            "to_seq": 4,
+            "to_stop_id": "S4",
+            "n_observations": 40,
+            "mean_slip_sec": 25.0,
+        },
+        # Consecutive edge from seq 3.
+        {
+            "direction_id": 0,
+            "from_seq": 3,
+            "from_stop_id": "S3",
+            "to_seq": 4,
+            "to_stop_id": "S4",
+            "n_observations": 100,
+            "mean_slip_sec": 15.0,
+        },
+        # Skip-1 from seq 3.
+        {
+            "direction_id": 0,
+            "from_seq": 3,
+            "from_stop_id": "S3",
+            "to_seq": 5,
+            "to_stop_id": "S5",
+            "n_observations": 30,
+            "mean_slip_sec": 40.0,
+        },
+        # Consecutive edge from seq 4.
+        {
+            "direction_id": 0,
+            "from_seq": 4,
+            "from_stop_id": "S4",
+            "to_seq": 5,
+            "to_stop_id": "S5",
+            "n_observations": 100,
+            "mean_slip_sec": 20.0,
+        },
+    ]
+    out = _assemble_segment_slip_output(rows, period="all")
+
+    by_key = {(r["from_seq"], r["to_seq"]): r for r in out}
+
+    # Origin (1, 2) dropped.
+    assert (1, 2) not in by_key
+    assert len(out) == 5
+
+    # Consecutive edges: cumsum at to-stop, walking only consecutive edges.
+    assert by_key[(2, 3)]["cum_slip_sec"] == 10.0  # 0 + 10
+    assert by_key[(3, 4)]["cum_slip_sec"] == 25.0  # 10 + 15
+    assert by_key[(4, 5)]["cum_slip_sec"] == 45.0  # 25 + 20
+
+    # Skip-N edges: cumsum at from_seq's origin (BEFORE that from_seq's
+    # consecutive edge contributed).
+    assert by_key[(2, 4)]["cum_slip_sec"] == 0.0  # before any consecutive walk
+    assert by_key[(3, 5)]["cum_slip_sec"] == 10.0  # after seq 2's consecutive
+
+    # period carried through.
+    assert all(r["period"] == "all" for r in out)
+
+
+def test_cumulative_slip_no_skip_edges_unchanged():
+    """Dense-observation routes (only consecutive edges) are unaffected.
+
+    With no skip-N edges in the input the fix collapses to the pre-fix
+    behavior: a simple running sum of mean_slip_sec across the
+    direction-sorted segments.
+    """
+    rows = [
+        # Origin (dropped).
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 2,
+            "to_stop_id": "S2",
+            "n_observations": 100,
+            "mean_slip_sec": 5.0,
+        },
+        # Three consecutive edges, no skip-N siblings.
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 100,
+            "mean_slip_sec": 10.0,
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 3,
+            "from_stop_id": "S3",
+            "to_seq": 4,
+            "to_stop_id": "S4",
+            "n_observations": 100,
+            "mean_slip_sec": 20.0,
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 4,
+            "from_stop_id": "S4",
+            "to_seq": 5,
+            "to_stop_id": "S5",
+            "n_observations": 100,
+            "mean_slip_sec": 30.0,
+        },
+    ]
+    out = _assemble_segment_slip_output(rows, period="all")
+    assert [r["from_seq"] for r in out] == [2, 3, 4]
+    # Running sum matches pre-fix behavior on dense-observation input.
+    assert [r["cum_slip_sec"] for r in out] == [10.0, 30.0, 60.0]
+
+
+def test_origin_departure_segment_dropped_before_cumsum():
+    """Origin-departure exclusion happens before the consecutive filter.
+
+    Even when the origin from_seq has skip-N siblings, the entire
+    minimum-from_seq group is dropped before the consecutive walk
+    decides what advances the cumsum — so the origin's slip never
+    contributes, regardless of skip-N variants at that position.
+    """
+    rows = [
+        # Origin segment with both consecutive and skip-1 variants.
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 2,
+            "to_stop_id": "S2",
+            "n_observations": 100,
+            "mean_slip_sec": 50.0,  # large value — would dominate cumsum if kept
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 30,
+            "mean_slip_sec": 100.0,  # even larger skip-1 slip on origin
+        },
+        # Real consecutive edge starting from seq 2.
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 100,
+            "mean_slip_sec": 10.0,
+        },
+    ]
+    out = _assemble_segment_slip_output(rows, period="all")
+    # Both origin rows (consecutive + skip-1 at from_seq=1) dropped.
+    assert all(r["from_seq"] != 1 for r in out)
+    assert len(out) == 1
+    # The remaining consecutive edge starts the cumsum from zero —
+    # origin's 50.0 / 100.0 are nowhere in the running total.
+    assert out[0]["from_seq"] == 2
+    assert out[0]["cum_slip_sec"] == 10.0

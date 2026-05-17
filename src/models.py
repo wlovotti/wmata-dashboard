@@ -932,10 +932,26 @@ class RouteDiagnosticSegment(Base):
     (public GTFS). Stored on the to-stop so panels can mark timepoint
     arrivals on the slip trajectory chart in one pass.
 
-    `cum_slip_sec` is the running sum of `mean_slip_sec` in stop-sequence
-    order per (route_id, direction_id, period), with the origin-departure
-    segment already excluded. Stored so the renderer doesn't have to scan
-    every prior row to compute the running total.
+    `cum_slip_sec` carries dual semantics depending on the edge type
+    (NOTES-57 fast-follow). On sparse-proximity routes the same
+    `from_seq` can produce both a consecutive edge (min `to_seq`) and
+    skip-N edges (larger `to_seq`, where intermediate stops didn't ping
+    on every trip). Only consecutive edges advance the cumulative walk,
+    so:
+
+      - **Consecutive edges** (min `to_seq` per `from_seq`):
+        `cum_slip_sec` is the cumulative slip measured at this edge's
+        *to-stop*, walking only consecutive edges from origin. This is
+        the trajectory-line value the slip charts render.
+      - **Skip-N edges** (non-min `to_seq` for a given `from_seq`):
+        `cum_slip_sec` is the cumulative slip measured at this edge's
+        *from-stop* (the cumsum value just before this edge's origin
+        stop in the consecutive walk). The column stays non-nullable;
+        skip-N rows' per-edge `mean_slip_sec` remains the meaningful
+        quantity for cross-route segment ranking (NOTES-59).
+
+    Origin-departure segment is excluded; see
+    `src/route_diagnostics.py:_assemble_segment_slip_output`.
     """
 
     __tablename__ = "route_diagnostic_segment"
