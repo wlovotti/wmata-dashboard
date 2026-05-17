@@ -3,7 +3,7 @@ Daily metrics batch with catch-up. The launchd-scheduled entry point that
 keeps `stop_events`, `runs`, and `route_bunching_periods` populated for
 every active route on every recent service date.
 
-Closes NOTES-28. Before this, the four metrics-redesign pipelines —
+Closes NOTES-28. Before this, the metrics-redesign pipelines —
 `derive_stop_events`, `derive_stop_events_trip_updates`, `aggregate_runs`,
 `compute_bunching` — were manual CLIs with no orchestrator. NOTES-26
 showed the failure mode: only 6 routes had been aggregated for
@@ -15,7 +15,7 @@ for everything else. This wrapper closes that gap by:
 2. Looking back ~7 days and re-processing any service date that has
    zero rows in `runs`. Catches scheduler outages without manual
    intervention.
-3. Running the four pipelines in dependency order:
+3. Running all per-date pipelines in dependency order:
    derive_stop_events + derive_stop_events_trip_updates first (both
    write `stop_events`, both independent), then aggregate_runs (reads
    stop_events → writes runs), then compute_bunching (reads runs).
@@ -274,7 +274,7 @@ def run_batch(
     log_handle,
     dry_run: bool = False,
 ) -> int:
-    """Drive the four pipelines across every (pipeline, target_date) cell.
+    """Drive all per-date pipelines across every (pipeline, target_date) cell.
 
     Returns the number of (pipeline, date) combinations that failed —
     callers turn a non-zero into a non-zero process exit so launchd can
@@ -303,9 +303,12 @@ def run_batch(
                 continue
 
             if dry_run:
+                extra_args = pipeline.get("extra_args", []) or []
+                extra_str = " ".join(extra_args)
                 log_handle.write(
                     f"DRY-RUN would run {pipeline['module']} "
-                    f"--all-routes --date {service_date.isoformat()}\n"
+                    f"--all-routes --date {service_date.isoformat()}"
+                    f"{(' ' + extra_str) if extra_str else ''}\n"
                 )
                 results[service_date][pipeline["name"]] = 0
                 continue
@@ -359,7 +362,7 @@ def main() -> int:
     """CLI entry point — opens the day's log file and drives the batch."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run the four metrics-redesign pipelines for yesterday plus any "
+            "Run all per-date metrics pipelines for yesterday plus any "
             "recent service date that's missing from `runs`."
         )
     )

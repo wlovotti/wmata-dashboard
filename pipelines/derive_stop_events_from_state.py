@@ -227,6 +227,11 @@ def derive_for_route_date(
     }
 
 
+# Module-level cache for side-table model classes. Used by _resolve_side_table
+# to avoid recreating the class on every call. Keyed by table name.
+_side_table_registry: dict[str, type] = {}
+
+
 def _resolve_side_table(name: str):
     """Return a model bound to the side table (same schema as StopEvent).
 
@@ -234,28 +239,39 @@ def _resolve_side_table(name: str):
     The side table must already exist with identical schema (see
     scripts/migrate_create_stop_events_v2.py).
 
-    The resulting class is cached in module globals so repeated calls
-    within the same process return the same object without re-creating
-    the Table mapping each time.
+    The cloned table lives on an isolated MetaData() — NOT Base.metadata —
+    so it never participates in ``Base.metadata.create_all()``. That's
+    important because the SQLite test fixture creates all tables in
+    Base.metadata at session setup; without isolation, the side table
+    would be added to the SQLite schema (and worse, the migration's
+    Postgres-only DDL would never run there).
     """
     if name != "stop_events_v2":
         raise ValueError(f"Unknown target table: {name}")
 
-    cached = globals().get("_SideStopEvent")
+    cached = _side_table_registry.get(name)
     if cached is not None:
         return cached
 
-    from src.models import Base, StopEvent
+    from sqlalchemy import MetaData
 
-    side_table = StopEvent.__table__.to_metadata(Base.metadata, name=name)
+    from src.models import StopEvent
+
+    isolated_meta = MetaData()
+    side_table = StopEvent.__table__.to_metadata(isolated_meta, name=name)
 
     class _SideStopEvent:
-        """Lightweight model wrapper pointing at the stop_events_v2 side table."""
+        """Lightweight model wrapper pointing at the stop_events_v2 side table.
+
+        Not a Base-derived ORM class — just enough surface (``__table__``,
+        ``__tablename__``) to satisfy ``upsert_rows`` which only reads
+        ``model.__table__``.
+        """
 
         __table__ = side_table
         __tablename__ = name
 
-    globals()["_SideStopEvent"] = _SideStopEvent
+    _side_table_registry[name] = _SideStopEvent
     return _SideStopEvent
 
 
