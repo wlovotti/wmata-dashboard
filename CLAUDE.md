@@ -132,8 +132,16 @@ uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
 - Frontend lint is enforced in CI as of PR #126 (kept at zero errors).
   Run `cd frontend && npm run lint` before pushing.
 - Frontend unit tests run in CI as of PR #126: `cd frontend && npm test`
-  (Vitest). Playwright visual regression also runs but is currently
-  `continue-on-error: true` until Linux baselines are generated in CI.
+  (Vitest). Playwright visual regression is a blocking CI gate as of
+  PR #127 — baselines are platform-specific (`*-chromium-linux.png` for
+  CI, `*-chromium-darwin.png` for local macOS). When you change a
+  baselined page (Overview / RouteList / RouteDetail-D72), regenerate
+  BOTH sets or CI will fail on stale Linux PNGs:
+  - macOS (local): `cd frontend && npx playwright test --update-snapshots`
+  - Linux (Docker): `cd frontend && docker run --rm -v "$(pwd):/work"
+    -v /work/node_modules -w /work mcr.microsoft.com/playwright:v1.60.0-noble
+    bash -c "npm ci --silent && npx playwright test --update-snapshots"`
+  See `frontend/README.md` for full details.
 - Project Claude tooling: auto-triggering skills go in
   `.claude/skills/<name>/SKILL.md`, explicit slash commands go in
   `.claude/commands/<name>.md`. Both are checked in.
