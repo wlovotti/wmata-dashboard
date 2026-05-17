@@ -9,7 +9,11 @@ def test_migration_creates_table_and_indexes(db_session):
     """Migration creates the table with the spec'd indexes; re-running is a no-op."""
     from scripts.migrate_create_trip_update_state import run_migration
 
-    inspector = inspect(db_session.bind)
+    # db_session.bind is a Connection inside an outer transaction; we want the
+    # underlying Engine so run_migration can open its own transaction via engine.begin().
+    engine = db_session.bind.engine
+
+    inspector = inspect(engine)
 
     # Drop the table first to ensure a clean slate (idempotent test).
     db_session.execute(text("DROP TABLE IF EXISTS trip_update_state"))
@@ -17,12 +21,12 @@ def test_migration_creates_table_and_indexes(db_session):
     assert "trip_update_state" not in inspector.get_table_names()
 
     # First run creates everything.
-    run_migration(db_session.bind)
-    inspector = inspect(db_session.bind)
+    run_migration(engine)
+    inspector = inspect(engine)
     assert "trip_update_state" in inspector.get_table_names()
     indexes = {idx["name"] for idx in inspector.get_indexes("trip_update_state")}
     assert "idx_tus_final_snapshot_ts" in indexes
     assert "idx_tus_trip_id" in indexes
 
     # Second run is a no-op (idempotent).
-    run_migration(db_session.bind)  # Must not raise.
+    run_migration(engine)  # Must not raise.

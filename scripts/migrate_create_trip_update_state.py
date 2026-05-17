@@ -11,7 +11,6 @@ import sys
 
 from dotenv import load_dotenv
 from sqlalchemy import text
-from sqlalchemy.engine import Connection
 
 from src.database import get_engine
 
@@ -40,24 +39,13 @@ CREATE INDEX IF NOT EXISTS idx_tus_trip_id
     ON trip_update_state (trip_id);
 """
 
-_DDL_STATEMENTS = [CREATE_TABLE_SQL, CREATE_INDEX_FINAL_SNAPSHOT_TS, CREATE_INDEX_TRIP_ID]
-
 
 def run_migration(engine) -> None:
-    """Apply the migration.  Safe to re-run.
-
-    Accepts either a SQLAlchemy ``Engine`` or an already-open ``Connection``.
-    When a ``Connection`` is passed (e.g. from a test fixture that wraps the
-    connection in an outer transaction), the DDL is executed directly on it
-    rather than opening a nested transaction via ``engine.begin()``.
-    """
-    if isinstance(engine, Connection):
-        for stmt in _DDL_STATEMENTS:
-            engine.execute(text(stmt))
-    else:
-        with engine.begin() as conn:
-            for stmt in _DDL_STATEMENTS:
-                conn.execute(text(stmt))
+    """Apply the migration. Safe to re-run."""
+    with engine.begin() as conn:
+        conn.execute(text(CREATE_TABLE_SQL))
+        conn.execute(text(CREATE_INDEX_FINAL_SNAPSHOT_TS))
+        conn.execute(text(CREATE_INDEX_TRIP_ID))
 
 
 def main() -> int:
