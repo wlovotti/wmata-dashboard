@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from src.models import TripUpdateState
+from src.timezones import utcnow_naive
 
 
 def _make_state_row(
@@ -45,7 +46,7 @@ def test_cleanup_deletes_derived_rows_older_than_two_days(pg_session):
     """Derived rows with derived_at older than 2 days are deleted."""
     from pipelines.cleanup_trip_update_state import run_cleanup
 
-    now = datetime.utcnow()
+    now = utcnow_naive()
     pg_session.add_all(
         [
             _make_state_row(
@@ -65,9 +66,10 @@ def test_cleanup_deletes_derived_rows_older_than_two_days(pg_session):
     )
     pg_session.commit()
 
-    run_cleanup(pg_session)
+    counts = run_cleanup(pg_session)
     pg_session.commit()
 
+    assert counts == {"derived_deleted": 1, "safety_deleted": 0}
     remaining = {r.trip_id for r in pg_session.execute(select(TripUpdateState)).scalars()}
     assert remaining == {"T_recent", "T_unfinished"}  # T_old gone
 
@@ -77,7 +79,7 @@ def test_cleanup_safety_net_deletes_underived_rows_older_than_seven_days(pg_sess
     """Un-derived rows older than 7 days are deleted as safety net."""
     from pipelines.cleanup_trip_update_state import run_cleanup
 
-    now = datetime.utcnow()
+    now = utcnow_naive()
     pg_session.add_all(
         [
             _make_state_row("T_stale", 1, final_snapshot_ts=now - timedelta(days=8)),
@@ -86,8 +88,9 @@ def test_cleanup_safety_net_deletes_underived_rows_older_than_seven_days(pg_sess
     )
     pg_session.commit()
 
-    run_cleanup(pg_session)
+    counts = run_cleanup(pg_session)
     pg_session.commit()
 
+    assert counts == {"derived_deleted": 0, "safety_deleted": 1}
     remaining = {r.trip_id for r in pg_session.execute(select(TripUpdateState)).scalars()}
     assert remaining == {"T_fresh"}

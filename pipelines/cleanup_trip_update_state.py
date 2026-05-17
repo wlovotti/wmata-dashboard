@@ -31,7 +31,7 @@ from src.models import TripUpdateState
 from src.timezones import utcnow_naive
 
 
-def run_cleanup(db: Session) -> dict:
+def run_cleanup(db: Session) -> dict[str, int]:
     """Run both cleanup passes against the given session.
 
     Pass 1 — Normal lifecycle: delete rows with ``derived_at`` older than
@@ -60,6 +60,7 @@ def run_cleanup(db: Session) -> dict:
     derived_result = db.execute(derived_stmt)
 
     safety_stmt = delete(TripUpdateState).where(
+        TripUpdateState.derived_at.is_(None),
         TripUpdateState.final_snapshot_ts < safety_cutoff,
     )
     safety_result = db.execute(safety_stmt)
