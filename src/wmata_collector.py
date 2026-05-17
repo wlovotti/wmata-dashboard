@@ -4,12 +4,14 @@ import os
 import sys
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from google.transit import gtfs_realtime_pb2
 from sqlalchemy.orm import Session
 
+from src.archive_writer import JsonlArchiveWriter
 from src.database import get_session, init_db
 from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
 from src.timezones import from_epoch_naive_utc, utcnow_naive
@@ -40,6 +42,12 @@ class WMATADataCollector:
         # (bus has passed). Restart cost: one full snapshot stored before
         # dedup resumes.
         self._tu_dedup_cache: dict[tuple[str, str], tuple] = {}
+
+        # Cold archive: raw rows go to compressed JSONL daily files.
+        # Path matches the existing archive_trip_update_snapshots.py
+        # convention (REPO_ROOT / "archive" / ...).
+        archive_root = Path(__file__).resolve().parent.parent / "archive" / "raw_snapshots"
+        self._archive_writer = JsonlArchiveWriter(archive_dir=archive_root)
 
     def download_gtfs_static(self, save_to_db=True, timeout=30):
         """Download and parse GTFS static data"""
@@ -590,6 +598,10 @@ class WMATADataCollector:
         new_objects = []
         seen_keys: set[tuple[str, str]] = set()
         for row in rows:
+            # Archive EVERY raw row, even ones the dedup will skip — the
+            # archive is the complete evidence trail.
+            self._archive_writer.append(row, snapshot_ts=row["snapshot_ts"])
+
             key = (row["trip_id"], row["stop_id"])
             seen_keys.add(key)
             value = (
