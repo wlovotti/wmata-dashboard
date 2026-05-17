@@ -40,6 +40,7 @@ from pipelines.stop_events_common import (
     parse_trip_start_date,
     resolve_stop_time,
 )
+from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.models import Route, Stop, StopEvent, StopTime, Trip, VehiclePosition
 from src.timezones import eastern_today, utcnow_naive
@@ -276,13 +277,14 @@ def derive_for_routes(
     proximity_m: float = PROXIMITY_THRESHOLD_M,
 ) -> list[dict]:
     """Drive `derive_proximity_stop_events` over a list of routes, one date."""
-    results = []
-    for route_id in route_ids:
-        result = derive_proximity_stop_events(
-            db, route_id, service_date, proximity_m=proximity_m, verbose=True
-        )
-        results.append(result)
-    return results
+    return run_route_date_grid(
+        derive_proximity_stop_events,
+        db,
+        route_ids,
+        [service_date],
+        proximity_m=proximity_m,
+        verbose=True,
+    )
 
 
 def main():

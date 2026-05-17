@@ -40,6 +40,7 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.models import Route, Run, StopEvent, StopTime
 from src.timezones import eastern_today, utcnow_naive
@@ -297,7 +298,13 @@ def aggregate_for_routes(
     service_date: date_type,
 ) -> list[dict]:
     """Drive `aggregate_runs_for_route_date` over a list of routes, one date."""
-    return [aggregate_runs_for_route_date(db, r, service_date, verbose=True) for r in route_ids]
+    return run_route_date_grid(
+        aggregate_runs_for_route_date,
+        db,
+        route_ids,
+        [service_date],
+        verbose=True,
+    )
 
 
 def main():
