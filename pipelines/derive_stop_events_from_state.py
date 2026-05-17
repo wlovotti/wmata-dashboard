@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from pipelines.stop_events_common import parse_gtfs_time_to_dt
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
-from src.models import Route, StopTime, Trip, TripUpdateState, VehiclePosition
+from src.models import Route, StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
 from src.timezones import eastern_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
@@ -40,6 +40,7 @@ def derive_for_route_date(
     route_id: str,
     service_date: date_type,
     target_table_name: str = "stop_events",
+    verbose: bool = False,
 ) -> dict:
     """Materialize stop_events for one (route, service_date) from trip_update_state.
 
@@ -53,6 +54,9 @@ def derive_for_route_date(
     start_ts = time.time()
     service_date_str = service_date.isoformat()
     trip_start_date_str = service_date.strftime("%Y%m%d")
+
+    if verbose:
+        print(f"  → {route_id} {service_date_str} (from trip_update_state)")
 
     trips = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
     trip_direction = {t.trip_id: t.direction_id for t in trips}
@@ -103,8 +107,6 @@ def derive_for_route_date(
     skipped_count = 0
     no_prediction_count = 0
     derived_keys: list[tuple[str, int]] = []
-
-    from src.models import StopEvent
 
     target_model = (
         StopEvent if target_table_name == "stop_events" else _resolve_side_table(target_table_name)
@@ -163,6 +165,10 @@ def derive_for_route_date(
         )
         derived_keys.append((state.trip_id, state.stop_sequence))
 
+    # UPSERT and the derived_at UPDATE share the caller's transaction.
+    # If the UPDATE fails (e.g., serialization conflict), the UPSERT is
+    # rolled back too — preventing stop_events without derived_at marks
+    # on their source state rows.
     rows_written = 0
     if rows:
         upsert_rows(
@@ -186,9 +192,12 @@ def derive_for_route_date(
         )
         rows_written = len(rows)
 
-        # Mark source state rows as derived using tuple-IN so we update only
-        # the exact (trip_id, stop_sequence) pairs we derived, not the
-        # Cartesian product of the trip_id and stop_sequence sets.
+        # Mark source state rows as derived. tuple_().in_() is
+        # Postgres-specific (most other dialects don't support tuple-IN
+        # filters); we are Postgres-only by construction.
+        # Using tuple-IN matches exact (trip_id, stop_sequence) pairs —
+        # the Cartesian form (trip_id.in_(set) AND stop_sequence.in_(set))
+        # would mark cross-product rows as derived.
         db.execute(
             update(TripUpdateState)
             .where(tuple_(TripUpdateState.trip_id, TripUpdateState.stop_sequence).in_(derived_keys))
@@ -200,6 +209,12 @@ def derive_for_route_date(
         "service_date": service_date_str,
         "active_trips": len(active_trip_ids),
         "state_rows_scanned": len(state_rows),
+        # Aliases for parity with the old pipeline's counter shape.
+        # The new pipeline doesn't "scan" snapshots — it reads final-state
+        # rows. snapshots_scanned == state_rows_scanned for downstream
+        # comparison purposes.
+        "snapshots_scanned": len(state_rows),
+        "stop_keys": len(rows),
         "skipped_emitted": skipped_count,
         "dropped_no_prediction": no_prediction_count,
         "rows_written": rows_written,
@@ -227,6 +242,8 @@ def _empty(route_id: str, service_date_str: str, start_ts: float, note: str) -> 
         "service_date": service_date_str,
         "active_trips": 0,
         "state_rows_scanned": 0,
+        "snapshots_scanned": 0,
+        "stop_keys": 0,
         "skipped_emitted": 0,
         "dropped_no_prediction": 0,
         "rows_written": 0,
@@ -243,6 +260,8 @@ def main() -> int:
     parser.add_argument("--date", help="YYYY-MM-DD; defaults to today (Eastern)")
     args = parser.parse_args()
 
+    if args.route and args.all_routes:
+        parser.error("pass --route OR --all-routes, not both")
     if not args.route and not args.all_routes:
         parser.error("pass --route or --all-routes")
 
