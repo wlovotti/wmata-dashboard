@@ -13,6 +13,10 @@ dist-ssr
 *.local
 .vite
 
+# Playwright test artifacts (failure screenshots, traces)
+test-results/
+playwright-report/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
