@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
+import { formatContribMetricValue } from '../utils/formatters'
 import SystemTrend from './SystemTrend'
 
 // Available metrics for the "Where to look" contributors panel. Mirrors the
@@ -15,19 +16,6 @@ const CONTRIB_METRICS = [
 ]
 
 const CONTRIB_TOP_N = 5
-
-/**
- * Format a metric value for the contributors panel — same units mapping as
- * RouteList's contributors table so the rows read identically across surfaces.
- */
-function formatContribMetricValue(metric, value) {
-  if (value == null) return '—'
-  if (metric === 'otp') return `${Math.round(value)}%`
-  if (metric === 'service_delivered') return `${Math.round(value * 100)}%`
-  if (metric === 'ewt') return `${Math.round(value)}s`
-  if (metric === 'bunching') return `${(value * 100).toFixed(1)}%`
-  return String(value)
-}
 
 // Off-target panel (NOTES-53). The panel ranks routes by their gap to a
 // configured per-route target — distinct from "Where to look," which is
