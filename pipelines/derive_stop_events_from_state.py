@@ -171,11 +171,16 @@ def derive_for_route_date(
     # on their source state rows.
     rows_written = 0
     if rows:
+        constraint_name = (
+            "uq_stop_events_run_stop_source"
+            if target_table_name == "stop_events"
+            else f"uq_{target_table_name}_run_stop_source"
+        )
         upsert_rows(
             db,
             target_model,
             rows,
-            constraint_name="uq_stop_events_run_stop_source",
+            constraint_name=constraint_name,
             update_cols=[
                 "route_id",
                 "direction_id",
@@ -223,16 +228,35 @@ def derive_for_route_date(
 
 
 def _resolve_side_table(name: str):
-    """Stub: Task 10 fleshes out the side-table model for Phase D validation.
+    """Return a model bound to the side table (same schema as StopEvent).
 
-    For now, Task 9 only supports target_table_name='stop_events'.
-    Calling with any other name raises NotImplementedError. Task 10 will
-    add real support for ``stop_events_v2``.
+    Used for Phase D validation where we write to ``stop_events_v2``.
+    The side table must already exist with identical schema (see
+    scripts/migrate_create_stop_events_v2.py).
+
+    The resulting class is cached in module globals so repeated calls
+    within the same process return the same object without re-creating
+    the Table mapping each time.
     """
-    raise NotImplementedError(
-        f"Side-table writes ({name}) are introduced in Task 10. For now, "
-        "call this function with target_table_name='stop_events'."
-    )
+    if name != "stop_events_v2":
+        raise ValueError(f"Unknown target table: {name}")
+
+    cached = globals().get("_SideStopEvent")
+    if cached is not None:
+        return cached
+
+    from src.models import Base, StopEvent
+
+    side_table = StopEvent.__table__.to_metadata(Base.metadata, name=name)
+
+    class _SideStopEvent:
+        """Lightweight model wrapper pointing at the stop_events_v2 side table."""
+
+        __table__ = side_table
+        __tablename__ = name
+
+    globals()["_SideStopEvent"] = _SideStopEvent
+    return _SideStopEvent
 
 
 def _empty(route_id: str, service_date_str: str, start_ts: float, note: str) -> dict:
@@ -258,6 +282,15 @@ def main() -> int:
     parser.add_argument("--route", help="Single route_id")
     parser.add_argument("--all-routes", action="store_true")
     parser.add_argument("--date", help="YYYY-MM-DD; defaults to today (Eastern)")
+    parser.add_argument(
+        "--target-table",
+        default="stop_events",
+        choices=["stop_events", "stop_events_v2"],
+        help=(
+            "Output table. Default: stop_events (production). "
+            "Use stop_events_v2 for Phase D side-by-side validation."
+        ),
+    )
     args = parser.parse_args()
 
     if args.route and args.all_routes:
@@ -279,6 +312,7 @@ def main() -> int:
             route_ids,
             [service_date],
             verbose=True,
+            target_table_name=args.target_table,
         )
         for r in results:
             print(r)

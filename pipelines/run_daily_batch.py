@@ -74,6 +74,17 @@ PIPELINES: list[dict] = [
         "depends_on": None,
     },
     {
+        # Phase D side-by-side validation: same logic as
+        # derive_stop_events_trip_updates but reads trip_update_state
+        # directly and writes to stop_events_v2. The comparison script
+        # (pipelines/compare_old_vs_new_derivation.py) diffs the two
+        # tables nightly. Remove after Phase E cutover.
+        "name": "derive_stop_events_from_state_v2",
+        "module": "pipelines.derive_stop_events_from_state",
+        "depends_on": None,
+        "extra_args": ["--target-table", "stop_events_v2"],
+    },
+    {
         "name": "aggregate_runs",
         "module": "pipelines.aggregate_runs",
         # Either of the two derivation pipelines is sufficient — aggregate_runs
@@ -209,12 +220,17 @@ def run_pipeline(
     module: str,
     service_date: date_type,
     log_handle,
+    extra_args: list[str] | None = None,
 ) -> tuple[int, float]:
     """Run a single pipeline module via `python -m ...` for one service date.
 
     Uses `--all-routes` (the wrapper's design contract is "cover everything")
     and `--date YYYY-MM-DD`. Pipeline stdout/stderr is appended to
     `log_handle`; the return code and elapsed wall time are returned.
+
+    ``extra_args`` is appended after ``--all-routes --date X`` for pipelines
+    that need additional flags (e.g., derive_stop_events_from_state's
+    ``--target-table stop_events_v2`` for Phase D validation).
 
     Subprocess is the chosen integration mechanism: the four pipelines are
     already CLI scripts and the user's manual workflow is `uv run python
@@ -235,6 +251,8 @@ def run_pipeline(
         "--date",
         service_date.isoformat(),
     ]
+    if extra_args:
+        cmd.extend(extra_args)
     log_handle.write(f"\n$ {' '.join(cmd)}\n")
     log_handle.flush()
     start = time.time()
@@ -292,7 +310,12 @@ def run_batch(
                 results[service_date][pipeline["name"]] = 0
                 continue
 
-            rc, elapsed = run_pipeline(pipeline["module"], service_date, log_handle)
+            rc, elapsed = run_pipeline(
+                pipeline["module"],
+                service_date,
+                log_handle,
+                extra_args=pipeline.get("extra_args"),
+            )
             results[service_date][pipeline["name"]] = rc
             if rc != 0:
                 failure_count += 1
