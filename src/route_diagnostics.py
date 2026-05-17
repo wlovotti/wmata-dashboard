@@ -398,12 +398,40 @@ def _assemble_segment_slip_output(
     """Drop the origin-departure segment per direction and attach cum_slip_sec.
 
     Splits from :func:`compute_segment_slip` so the cumsum walk is unit-
-    testable without standing up the Postgres-only slip SQL. Assumes
-    ``raw_rows`` already has exactly one row per
-    ``(direction_id, from_seq, to_seq)`` — the canonical-pattern filter
-    inside the SQL is what guarantees that invariant; if it ever fails
-    upstream (e.g., the canonical CTE breaks), this helper will silently
-    double-count, which is precisely the bug NOTES-57 fast-follow fixes.
+    testable without standing up the Postgres-only slip SQL.
+
+    Skip-N edges (NOTES-57 fast-follow)
+    -----------------------------------
+    On routes with sparse proximity observations the same ``from_seq``
+    can appear in multiple rows with different ``to_seq`` values — the
+    bus's *next observed* stop varies trip-to-trip depending on which
+    intermediate stops happened to log a proximity ping. These "skip-N"
+    edges are correct in isolation (slip 3→5 measures the actual A→B→C
+    slip for trips that traversed it), but their per-edge mean already
+    includes the intermediate consecutive edges' slip implicitly, so
+    walking them in the cumsum would double/triple-count.
+
+    The fix: for each ``from_seq`` only the minimum-``to_seq`` row (the
+    consecutive edge — densest, shortest-skip) contributes to the
+    cumulative walk. Skip-N rows remain in the output (they're useful
+    for cross-route segment-level analysis — NOTES-59) but receive a
+    different ``cum_slip_sec`` value:
+
+    - **Consecutive edges** (min ``to_seq`` per ``from_seq``):
+      ``cum_slip_sec`` is the cumulative slip measured at this edge's
+      *to-stop*, walking only consecutive edges from origin.
+    - **Skip-N edges** (non-min ``to_seq`` for a given ``from_seq``):
+      ``cum_slip_sec`` is the cumulative slip measured at this edge's
+      *from-stop* (well-defined, but the column's stop-of-measurement
+      differs from consecutive edges). Skip-N rows don't participate in
+      the cumulative walk; their per-row ``mean_slip_sec`` remains the
+      meaningful quantity for cross-route segment ranking (NOTES-59).
+
+    The dual semantics keep the column non-nullable (no schema
+    migration) while preserving the cross-route ranking value of skip-N
+    rows. Callers that need the headline trajectory line should filter
+    to consecutive-edge rows; the canonical filter that runs upstream
+    no longer enforces "one row per (direction_id, from_seq)".
     """
     by_dir: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
@@ -413,14 +441,58 @@ def _assemble_segment_slip_output(
     for direction_id, segs in by_dir.items():
         if not segs:
             continue
-        segs.sort(key=lambda d: d["from_seq"])
+        # Sort by (from_seq, to_seq) so the consecutive edge (min to_seq
+        # per from_seq) is visited before any of its skip-N siblings.
+        segs.sort(key=lambda d: (d["from_seq"], d["to_seq"]))
         # Drop origin-departure (minimum from_seq for this direction).
         min_from = segs[0]["from_seq"]
         kept = [s for s in segs if s["from_seq"] != min_from]
-        cum = 0.0
+        if not kept:
+            continue
+
+        # For each from_seq, identify the consecutive edge (min to_seq).
+        # That's the only edge that contributes to the cumulative walk;
+        # skip-N edges store a from_seq-origin cumsum value but don't
+        # walk.
+        consecutive_to_seq: dict[int, int] = {}
         for s in kept:
-            cum += s["mean_slip_sec"]
-            s["cum_slip_sec"] = cum
+            fs = s["from_seq"]
+            if fs not in consecutive_to_seq or s["to_seq"] < consecutive_to_seq[fs]:
+                consecutive_to_seq[fs] = s["to_seq"]
+
+        # Walk consecutive edges in from_seq order, recording both:
+        #   cumsum_at_arrival_of[fs] — cumsum AFTER walking the
+        #     consecutive edge originating at fs (i.e., at the to-stop
+        #     of that edge). This is what consecutive-edge rows store.
+        #   cumsum_at_origin_of[fs]  — cumsum BEFORE the from_seq's own
+        #     consecutive edge (i.e., at the from-stop). This is what
+        #     skip-N rows store.
+        cumsum_at_arrival_of: dict[int, float] = {}
+        cumsum_at_origin_of: dict[int, float] = {}
+        prior_cum = 0.0
+        for s in kept:
+            fs = s["from_seq"]
+            if fs in cumsum_at_origin_of:
+                # Already visited this from_seq via its consecutive edge
+                # (sort order puts consecutive edge first). Skip-N rows
+                # for the same from_seq don't advance the walk.
+                continue
+            cumsum_at_origin_of[fs] = prior_cum
+            # The first row encountered for this from_seq is its
+            # consecutive edge by sort order; advance the walk by its
+            # mean_slip_sec.
+            cumsum_at_arrival_of[fs] = prior_cum + s["mean_slip_sec"]
+            prior_cum = cumsum_at_arrival_of[fs]
+
+        # Assign cum_slip_sec to every row.
+        for s in kept:
+            fs = s["from_seq"]
+            if s["to_seq"] == consecutive_to_seq[fs]:
+                s["cum_slip_sec"] = cumsum_at_arrival_of[fs]
+            else:
+                # skip-N edge: store the cumsum at this from_seq's
+                # origin (well-defined; documented semantics above).
+                s["cum_slip_sec"] = cumsum_at_origin_of[fs]
             s["period"] = period
             s["direction_id"] = direction_id
         out.extend(kept)
