@@ -37,7 +37,13 @@ WITH joined AS (
         old.schedule_relationship AS old_sr,
         v2.schedule_relationship  AS new_sr,
         old.deviation_sec         AS old_dev,
-        v2.deviation_sec          AS new_dev
+        v2.deviation_sec          AS new_dev,
+        -- v2.trip_id is the join's PK presence signal: NULL ONLY when the
+        -- LEFT JOIN found no matching v2 row. Bare NULL comparisons on
+        -- new_ts/new_sr/new_dev can't distinguish "no v2 row" from
+        -- "matched v2 row that legitimately has NULL value" (e.g.,
+        -- SKIPPED stops have NULL observed_arrival_ts).
+        v2.trip_id                AS v2_trip_id
     FROM stop_events old
     LEFT JOIN stop_events_v2 v2
         ON v2.trip_id = old.trip_id
@@ -49,8 +55,18 @@ WITH joined AS (
 SELECT
     route_id,
     COUNT(*) AS total,
-    SUM(CASE WHEN new_ts IS NULL THEN 1 ELSE 0 END) AS missing_in_v2,
-    SUM(CASE WHEN old_ts = new_ts AND old_sr = new_sr AND old_dev IS NOT DISTINCT FROM new_dev THEN 1 ELSE 0 END) AS matched
+    SUM(CASE WHEN v2_trip_id IS NULL THEN 1 ELSE 0 END) AS missing_in_v2,
+    -- IS NOT DISTINCT FROM treats NULL = NULL as TRUE, which is required
+    -- for SKIPPED stops (observed_arrival_ts and deviation_sec are both
+    -- NULL on SKIPPED). Bare `=` would always return NULL and count
+    -- every SKIPPED row as mismatched.
+    SUM(
+        CASE WHEN
+            old_ts IS NOT DISTINCT FROM new_ts
+            AND old_sr IS NOT DISTINCT FROM new_sr
+            AND old_dev IS NOT DISTINCT FROM new_dev
+        THEN 1 ELSE 0 END
+    ) AS matched
 FROM joined
 GROUP BY route_id
 """
@@ -64,6 +80,12 @@ def compare_one_day(db: Session, target_date: date_type) -> dict:
     checks field-level agreement on observed_arrival_ts, schedule_relationship,
     and deviation_sec.
 
+    NULL handling: SKIPPED stops have NULL observed_arrival_ts and deviation_sec
+    in both tables. IS NOT DISTINCT FROM is used for all three compared columns
+    so that NULL = NULL evaluates to TRUE (matched) rather than NULL (mismatched).
+    The missing_in_v2 count uses v2.trip_id IS NULL as the join-presence sentinel
+    to avoid false positives from legitimately NULL fields in matched SKIPPED rows.
+
     Args:
         db: Active SQLAlchemy session pointing at a Postgres database.
         target_date: The service_date (Eastern operational day) to evaluate.
@@ -74,7 +96,8 @@ def compare_one_day(db: Session, target_date: date_type) -> dict:
             total_rows: int    rows in stop_events for the date
             matched_rows: int  rows with identical fields in v2
             agreement_pct: float  (0-100)
-            diverging_routes: list[dict]  routes with > 1% disagreement
+            v2_only_rows: int  rows in v2 with no counterpart in old (soft regression signal)
+            diverging_routes: list[dict]  routes with > 1% disagreement, sorted by route_id
             per_route: dict[route_id -> {total, matched, missing_in_v2, agreement_pct}]
     """
     rows = db.execute(
@@ -100,13 +123,40 @@ def compare_one_day(db: Session, target_date: date_type) -> dict:
         if total and (total - matched) / total > 0.01:
             diverging.append({"route_id": route_id, **per_route[route_id]})
 
+    # Detect v2-only rows: rows the new derivation produced that have no
+    # counterpart in the old. The primary LEFT JOIN above is FROM old, so
+    # it can't see them. Phase D treats v2-only rows as a soft signal —
+    # the new pipeline may have legitimate new coverage, but truly
+    # invented rows (no old counterpart for a date when the old pipeline
+    # also ran) deserve scrutiny.
+    v2_only_count = (
+        db.execute(
+            text(
+                """
+            SELECT COUNT(*)
+            FROM stop_events_v2 v2
+            LEFT JOIN stop_events old
+                ON old.trip_id = v2.trip_id
+               AND old.stop_sequence = v2.stop_sequence
+               AND old.service_date = v2.service_date
+               AND old.source = 'trip_update'
+            WHERE v2.service_date = :service_date
+              AND old.trip_id IS NULL
+            """
+            ),
+            {"service_date": target_date.isoformat()},
+        ).scalar()
+        or 0
+    )
+
     overall = (matched_all / total_all * 100) if total_all else 100.0
     return {
         "service_date": target_date.isoformat(),
         "total_rows": total_all,
         "matched_rows": matched_all,
         "agreement_pct": round(overall, 2),
-        "diverging_routes": diverging,
+        "v2_only_rows": v2_only_count,
+        "diverging_routes": sorted(diverging, key=lambda r: r["route_id"]),
         "per_route": per_route,
     }
 
@@ -145,6 +195,7 @@ def main() -> int:
                 f"{result['service_date']}: "
                 f"{result['agreement_pct']}% agreement "
                 f"({result['matched_rows']:,}/{result['total_rows']:,}), "
+                f"{result['v2_only_rows']:,} v2-only rows, "
                 f"{len(result['diverging_routes'])} routes with >1% disagreement"
             )
             for d_route in result["diverging_routes"]:

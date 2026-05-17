@@ -73,3 +73,30 @@ def test_observed_arrival_mismatch_lowers_agreement(pg_session):
 
     result = compare_one_day(pg_session, target_date=date(2026, 5, 17))
     assert result["agreement_pct"] < 100.0
+
+
+@pytest.mark.integration
+def test_skipped_stops_with_agreeing_nulls_report_match(pg_session):
+    """SKIPPED rows (observed_arrival_ts=NULL, deviation_sec=NULL) in both
+    tables must be counted as matched. Bare `=` comparison on NULL columns
+    would silently misreport these as mismatched, capping agreement at
+    ~91% even when the pipelines fully agree."""
+    from pipelines.compare_old_vs_new_derivation import compare_one_day
+
+    pg_session.execute(
+        text("CREATE TABLE IF NOT EXISTS stop_events_v2 (LIKE stop_events INCLUDING ALL)")
+    )
+    pg_session.add(
+        _make_event(
+            schedule_relationship="SKIPPED",
+            observed_arrival_ts=None,
+            deviation_sec=None,
+        )
+    )
+    pg_session.execute(text("INSERT INTO stop_events_v2 SELECT * FROM stop_events"))
+    pg_session.commit()
+
+    result = compare_one_day(pg_session, target_date=date(2026, 5, 17))
+    assert result["agreement_pct"] == 100.0
+    assert result["diverging_routes"] == []
+    assert result["v2_only_rows"] == 0
