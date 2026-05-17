@@ -390,6 +390,44 @@ class VehiclePosition(Base):
     )
 
 
+class TripUpdateState(Base):
+    """Final-state-only mirror of WMATA TripUpdate predictions per (trip, stop).
+
+    Unlike the append-only ``trip_update_snapshots``, this table holds
+    exactly one row per ``(trip_id, stop_sequence)``: the final state
+    observed before the (trip, stop) drops out of WMATA's feed. The
+    collector UPSERTs into this table on every poll. The derivation
+    pipeline reads it directly, avoiding the ~21M-row/day snapshot scan.
+
+    Lifecycle:
+        1. Trip starts -> rows inserted for upcoming stops.
+        2. Bus moves -> rows update as predictions refine.
+        3. Bus passes -> row's final state captured.
+        4. End of service day -> ``derive_stop_events_from_state.py``
+           materializes the corresponding ``stop_event`` and sets
+           ``derived_at``.
+        5. Cleanup cron deletes derived rows >2 days old, and any rows
+           (derived or not) >7 days old, so the table can't grow
+           unbounded.
+    """
+
+    __tablename__ = "trip_update_state"
+
+    trip_id = Column(String, primary_key=True)
+    stop_sequence = Column(Integer, primary_key=True)
+
+    stop_id = Column(String, nullable=False)
+    vehicle_id = Column(String, nullable=True)
+
+    final_snapshot_ts = Column(DateTime, nullable=False)
+    final_schedule_relationship = Column(String, nullable=True)
+
+    last_pred_snapshot_ts = Column(DateTime, nullable=True)
+    last_predicted_arrival_ts = Column(DateTime, nullable=True)
+
+    derived_at = Column(DateTime, nullable=True)
+
+
 class TripUpdateSnapshot(Base):
     """
     Append-only rows from the WMATA GTFS-RT TripUpdates feed.

@@ -133,3 +133,26 @@ def test_query_vehicle_positions_by_route(db_session, sample_route, sample_vehic
 
     assert len(positions) == 5
     assert all(p.route_id == sample_route.route_id for p in positions)
+
+
+def test_trip_update_state_schema(db_session):
+    """TripUpdateState has the columns the refactor design requires."""
+    from src.models import TripUpdateState
+
+    columns = {c.name for c in TripUpdateState.__table__.columns}
+    expected = {
+        "trip_id",
+        "stop_sequence",
+        "stop_id",
+        "vehicle_id",
+        "final_snapshot_ts",
+        "final_schedule_relationship",
+        "last_pred_snapshot_ts",
+        "last_predicted_arrival_ts",
+        "derived_at",
+    }
+    assert columns == expected, f"unexpected columns: {columns ^ expected}"
+
+    # Composite PK on (trip_id, stop_sequence)
+    pk_cols = {c.name for c in TripUpdateState.__table__.primary_key.columns}
+    assert pk_cols == {"trip_id", "stop_sequence"}
