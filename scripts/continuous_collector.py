@@ -3,6 +3,7 @@ Continuous data collector that runs every 60 seconds to collect vehicle position
 """
 
 import os
+import signal
 import time
 from datetime import datetime
 
@@ -47,6 +48,13 @@ def collect_vehicle_positions_only():
 
 
 def main():
+    """Run the polling loop until interrupted."""
+    # Force-install graceful-shutdown handlers (see continuous_combined_collector.py
+    # for full rationale): when the parent shell has SIGINT/SIGTERM set to SIG_IGN,
+    # the script would silently ignore them without these explicit installs.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
     print("WMATA Continuous Data Collector")
     print("=" * 50)
     print("This script will collect vehicle positions every 60 seconds")

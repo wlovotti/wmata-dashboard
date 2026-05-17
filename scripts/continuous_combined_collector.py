@@ -21,6 +21,7 @@ Keeping it running with the lid closed (macOS):
 """
 
 import os
+import signal
 import time
 from datetime import datetime
 
@@ -83,6 +84,17 @@ def run_one_tick(tick_idx: int, collector: WMATADataCollector) -> None:
 
 def main() -> None:
     """Run the combined polling loop until interrupted."""
+    # Force-install handlers regardless of inherited disposition. Python only
+    # auto-installs default_int_handler for SIGINT when the inherited handler
+    # is SIG_DFL; if the parent shell (CI, launchd, some IDEs) starts the
+    # process with SIG_IGN, the script would silently ignore Ctrl+C / kill -INT
+    # and skip the try/except KeyboardInterrupt cleanup (which calls
+    # collector.close() to flush the JSONL archive's zstd footer). Installing
+    # default_int_handler for SIGTERM gives the same graceful path for the
+    # standard "kill <pid>" signal.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
     print("WMATA Combined Continuous Collector")
     print("=" * 50)
     print(f"Trip updates:      every {TICK_SEC}s")

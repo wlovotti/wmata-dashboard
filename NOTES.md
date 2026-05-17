@@ -86,6 +86,17 @@ target lists directly.
 
 ### Independent of the redesign
 
+- **NOTES-70 Filter `select(StopEvent)` in derive-from-state tests.**
+  `tests/test_derive_stop_events_from_state.py` does
+  `pg_session.execute(select(StopEvent)).scalar_one()` (and equivalent
+  for `select(TripUpdateState)`) without a filter. Passes in CI's
+  empty `wmata_test` DB but raises `MultipleResultsFound` on any
+  populated DB (e.g. local dev). Add a `where(StopEvent.trip_id == 'T1')`
+  filter — or use `scalar_one()` after `where(...)` with the seed row's
+  natural key — so the tests are portable. Caught locally during the
+  trip_update_state refactor verification; didn't block the merge
+  because CI runs against an empty DB.
+
 - **NOTES-34 service_delivered ceiling on 2-stop routes (TU structural
   exclusion).** Side effect of the NOTES-30 closing PR (proportional
   threshold). The new threshold is `max(2, stops_observable // 3)`; on a

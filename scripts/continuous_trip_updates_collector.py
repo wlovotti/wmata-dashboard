@@ -12,6 +12,7 @@ Run with: uv run python scripts/continuous_trip_updates_collector.py
 """
 
 import os
+import signal
 import time
 from datetime import datetime
 
@@ -64,6 +65,12 @@ def collect_trip_updates_once(collector: WMATADataCollector) -> None:
 
 def main():
     """Run the polling loop until interrupted."""
+    # Force-install graceful-shutdown handlers (see continuous_combined_collector.py
+    # for full rationale): when the parent shell has SIGINT/SIGTERM set to SIG_IGN,
+    # the script would silently ignore them without these explicit installs.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
     print("WMATA Continuous TripUpdates Collector")
     print("=" * 50)
     print(f"Polling every {POLL_INTERVAL_SEC} seconds")
