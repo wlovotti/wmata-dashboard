@@ -5,6 +5,26 @@
 # headline KPI on RouteDetail?" — EWT is the rider-relevant headline
 # for frequent service; OTP remains headline for standard service.
 #
+# Tier schema
+# -----------
+# WMATA's High-Frequency Metrobus Service Maps distinguish two tiers,
+# and the EWT cell-hour gate (`src/ewt.py:FREQUENT_HEADWAY_MAX_SEC`,
+# resolved per-route via `src/frequent_routes.py:get_cell_hour_gate_sec`)
+# matches each tier's headline frequency:
+#
+#   - `high_freq`   — WMATA "High-Frequency Route"   (≤ 12 min headway)
+#                     EWT cell-hour gate: 15 min   (legacy default)
+#   - `medium_freq` — WMATA "Medium-Frequency Route" (≤ 20 min headway)
+#                     EWT cell-hour gate: 20 min   (matches the tier)
+#
+# Both tiers are `is_frequent: true` for the headline-KPI flip (EWT
+# becomes the headline whenever scheduled service is frequent enough
+# that riders show up without a schedule; 20-min still qualifies).
+# The split exists so the cell-hour gate matches the tier's actual
+# scheduled headway — pooling 20-min cells into a 15-min gate
+# excluded almost every medium-freq route from EWT entirely
+# (`analysis/frequent_routes_audit_detail.py`).
+#
 # Source
 # ------
 # WMATA High-Frequency Metrobus Service Maps (June 29, 2025 — the
@@ -14,106 +34,89 @@
 #   - Virginia: https://www.wmata.com/initiatives/plans/Better-Bus/upload/VA-High-Freq-Service-Map_06-16-2025_FINAL.pdf
 # Index: https://www.wmata.com/schedules/maps/index.cfm
 #
-# Criteria (per the published map legend)
-# ---------------------------------------
-# A route is on the map if it meets WMATA's frequent-service standard,
-# which the legend defines as either:
-#   - "High-Frequency Route" — service every 12 minutes or better
-#   - "Medium-Frequency Route" — service every 20 minutes or better
-# Frequency window: all-day, all-week service, 7:00 a.m. to 9:00 p.m.
-# (i.e., not just peak — the headway has to hold across the daytime span
-# every day of the week to qualify).
-#
-# We treat both tiers as `is_frequent: true` for the headline-KPI flip
-# (EWT is the rider-relevant headline whenever scheduled service is
-# frequent enough that riders show up without consulting a schedule;
-# the 20-min medium-freq tier still qualifies for that). If a future
-# UI distinction is needed between high-freq and medium-freq, split
-# this list then.
-#
-# Distinction from the data-driven check
-# --------------------------------------
-# `src/ewt.py:FREQUENT_HEADWAY_MAX_SEC` (15 min) is the per-cell-hour
-# gate for EWT *computation*. It answers "is this (direction, stop,
-# hour) cell frequent right now?" — a per-cell question that decides
-# what feeds into AWT/SWT. The list here answers the *route-level*
-# question "did WMATA publish this route as a frequent-service route?"
-# — which decides headline-metric choice in the UI, regardless of
-# whether any particular cell-hour is currently dense.
-#
-# Schema
-# ------
-# routes:
-#   - <route_id>   # exact GTFS route_id; one per line
-#
-# Loader: `src/frequent_routes.py:load_frequent_route_ids()`. Reload is
-# lazy on file mtime — edits take effect without restart.
+# Initial tier assignment was data-driven (2026-05-17) from the
+# per-route share of weekday daytime cell-hours that clear each
+# candidate gate — see `analysis/frequent_routes_audit_detail.py`.
+# Routes that cleared the 15-min gate on ≥ 50% of their daytime
+# cell-hours went into `high_freq`; routes that only cleared the
+# 20-min gate (but not 15-min) went into `medium_freq`. Twelve
+# original entries had no cell-hours clearing the 20-min gate
+# either — these were dropped as corridor-frequency rather than
+# route-frequency (the published map shows corridors; multiple
+# overlapping branch/limited routes can make a corridor frequent
+# without any one route being individually frequent).
 #
 # Refresh policy
 # --------------
 # WMATA's frequent-service map is published as part of network-redesign
 # milestones (the June 2025 map is the first since the Better Bus
 # rollout). Re-pull this list when WMATA publishes an updated map or
-# when the cross-validation script (`analysis/frequent_routes_audit.py`)
-# surfaces ≥3 routes whose data-driven frequent-cell-hour share has
-# drifted significantly out of step with the published list.
+# when `analysis/frequent_routes_audit.py` /
+# `analysis/frequent_routes_audit_detail.py` surface significant
+# drift between published designation and data-driven gating.
+#
+# Schema
+# ------
+# high_freq:
+#   - <route_id>   # exact GTFS route_id; one per line
+# medium_freq:
+#   - <route_id>
+#
+# Loader: `src/frequent_routes.py:load_frequent_route_ids()` returns
+# the union of both tiers (backward-compat for callers asking "is
+# this frequent at all?"). Per-tier loaders and the per-route gate
+# helper are also in that module. Reload is lazy on file mtime —
+# edits take effect without restart.
 
-routes:
-  # DC map (https://www.wmata.com/initiatives/plans/Better-Bus/upload/DC-High-Freq-Service-Map_06-16-2025_FINAL.pdf)
-  - A58
-  - C11
+high_freq:
+  # DC
   - C13
-  - C15
   - C21
-  - C29
   - C31
-  - C37
   - C41
-  - C51
   - C53
   - C61
-  - C75
-  - C81
-  - D10
-  - D1X
   - D20
   - D30
-  - D32
-  - D36
   - D40
-  - D44
   - D4X
   - D50
   - D5X
   - D60
   - D6X
-  - D70
   - D72
-  - D74
   - D80
   - M60
-  - P1X
   - P40
-  # Maryland map (https://www.wmata.com/initiatives/plans/Better-Bus/upload/MD-High-Freq-Service-Map_06-16-2025_FINAL.pdf)
-  - M12
-  - M20
-  - M42
-  - M44
-  - M52
-  - M54
+  # Maryland
   - M70
   - P30
-  - P41
   - P60
-  - P93
-  - P94
-  # Virginia map (https://www.wmata.com/initiatives/plans/Better-Bus/upload/VA-High-Freq-Service-Map_06-16-2025_FINAL.pdf)
+  # Virginia
   - A1X
   - A40
-  - A70
-  - F1X
   - F20
-  - F23
-  - F24
-  - F60
-  - F61
+
+medium_freq:
+  # DC
+  - A58
+  - C11
+  - C15
+  - C29
+  - C37
+  - C51
+  - C75
+  - C81
+  - D10
+  - D1X
+  - D32
+  - D36
+  - D44
+  - D70
+  - D74
+  - P1X
+  # Maryland
+  - M12
+  - P41
+  # Virginia
+  - F1X
