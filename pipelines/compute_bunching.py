@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from src.batch_iterator import run_route_date_grid
 from src.bunching import compute_bunching_for_route_date
 from src.database import get_session
 from src.date_ranges import iter_eastern_dates, iter_recent_eastern_dates
@@ -109,11 +110,13 @@ def materialize_for_routes(
     service_dates: list[date_type],
 ) -> list[dict]:
     """Drive `materialize_bunching_for_route_date` over a (routes × dates) grid."""
-    out: list[dict] = []
-    for d in service_dates:
-        for r in route_ids:
-            out.append(materialize_bunching_for_route_date(db, r, d, verbose=True))
-    return out
+    return run_route_date_grid(
+        materialize_bunching_for_route_date,
+        db,
+        route_ids,
+        service_dates,
+        verbose=True,
+    )
 
 
 def main():

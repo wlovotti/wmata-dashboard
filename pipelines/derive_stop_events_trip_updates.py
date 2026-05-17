@@ -49,6 +49,7 @@ from pipelines.stop_events_common import (
     build_stop_time_seq_index,
     parse_gtfs_time_to_dt,
 )
+from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.models import Route, StopEvent, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
 from src.timezones import eastern_today, utcnow_naive
@@ -365,10 +366,13 @@ def derive_for_routes(
     service_date: date_type,
 ) -> list[dict]:
     """Drive `derive_trip_update_stop_events` over a list of routes, one date."""
-    results = []
-    for route_id in route_ids:
-        results.append(derive_trip_update_stop_events(db, route_id, service_date, verbose=True))
-    return results
+    return run_route_date_grid(
+        derive_trip_update_stop_events,
+        db,
+        route_ids,
+        [service_date],
+        verbose=True,
+    )
 
 
 def main():

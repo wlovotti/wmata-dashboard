@@ -6,15 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-63 by consolidating four
-near-identical per-metric window aggregators
-(`_aggregate_otp_split_window`, `_aggregate_service_delivered_window`,
-`_aggregate_ewt_window`, `_aggregate_bunching_window`) in
-`api/aggregations.py` into a single `aggregate_metric_window` generic
-helper plus four small per-metric reducer functions. Null-filtering and
-route-id threading are now shared; only the metric-specific accumulation
-logic lives in each reducer. Net ~120 lines collapsed to ~40 plus 4
-small reducers. No behavior change; all 462 tests pass.
+Last edited 2026-05-17. Closed NOTES-67 by extracting
+`run_route_date_grid` into `src/batch_iterator.py` and migrating all
+four per-route pipelines (`derive_stop_events`, `derive_stop_events_trip_updates`,
+`aggregate_runs`, `compute_bunching`) to use it. The helper encapsulates
+the dates-outer / routes-inner loop and accepts a `pool_workers` parameter
+as a reserved seam for future parallelisation (raises `NotImplementedError`
+today). No behaviour change; all 462 tests pass.
 
 ---
 
@@ -104,10 +102,6 @@ taste.
   `pg_insert(...).on_conflict_do_update(constraint=..., set_=...)`
   by hand; a `src/upsert_helpers.py` shim standardizes the pattern
   and centralizes error/conflict handling.
-- **NOTES-67 Generic `batch_iterator` for daily-batch
-  orchestration.** `pipelines/run_daily_batch.py` hand-rolls the
-  per-route × per-date loop and other pipelines copy the pattern.
-  Shared helper enables uniform parallelization later.
 
 ### P5 — Cleanup
 
@@ -558,25 +552,4 @@ hardcoding and `set_=` dict construction. Adds a single seam to
 standardize error handling and batching later. Migrate pipelines
 one at a time; each is independent.
 
----
-
-## NOTES-67. Generic `batch_iterator` for daily-batch orchestration
-
-**Severity: low** (works; refactor enables future parallelization).
-**Effort: medium** (touches `run_daily_batch.py` plus 2-3 pipelines).
-
-`pipelines/run_daily_batch.py:153-267` hand-rolls the per-route ×
-per-date loop with `range(2, lookback_days + 1)` and per-pipeline
-function calls; other pipelines (`compute_bunching.py`,
-`derive_stop_events.py`, `derive_stop_events_trip_updates.py`) copy
-the pattern with small variations.
-
-Extract `batch_iterator(route_ids, service_dates, process_func,
-pool_workers=1)` into a shared helper. Calls converge on one
-implementation; setting `pool_workers > 1` later becomes a one-line
-change for any pipeline that wants it, rather than per-pipeline
-retrofitting. Honor the existing single-threaded behavior by default
-— parallelism is a separate decision per pipeline.
-
----
 
