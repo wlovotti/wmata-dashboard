@@ -42,6 +42,7 @@ from src.frequent_routes import load_frequent_route_ids
 from src.models import (
     Calendar,
     Route,
+    RouteDiagnosticSegment,
     RouteMetricsDailyOverlay,
     RouteServiceProfile,
     Run,
@@ -3453,4 +3454,190 @@ def get_active_blocks(db: Session, service_date: date_type, limit: int = 100) ->
     return {
         "service_date": service_date.isoformat(),
         "blocks": rows[:limit],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Schedule audit (NOTES-60)
+# ---------------------------------------------------------------------------
+#
+# System-wide table of under-padded / over-padded segments — direct input
+# to schedule-revision work. Reads `route_diagnostic_segment` rows
+# materialized nightly by `pipelines/refresh_route_diagnostic_profile.py`
+# (PR #107), so this endpoint is an O(1) read of pre-aggregated rows
+# rather than an ad-hoc scan of `stop_events`.
+#
+# Sign convention (mirrors `src/route_diagnostics.py:compute_segment_slip`):
+#   mean_slip_sec = AVG(observed_gap_sec − scheduled_gap_sec)
+#   positive  → observed > scheduled → bus took longer than the schedule
+#               allots → schedule is UNDER-padded for the segment
+#   negative  → observed < scheduled → bus ran faster than the schedule
+#               allots → schedule is OVER-padded for the segment
+#
+# Lookback window used by the materialization is hard-coded to 30 days
+# in `pipelines/refresh_route_diagnostic_profile.py:main`; we mirror it
+# here so the daily-trip-count estimate (n_observations / lookback_days)
+# stays calibrated. If the pipeline default ever changes, update both.
+
+# Default lookback window for the diagnostic materialization. Matches
+# `pipelines/refresh_route_diagnostic_profile.py:main` default. Used to
+# convert `n_observations` (sum across the window) into a daily-trip
+# estimate so the "would save X min/day" column reads as a per-day value.
+SCHEDULE_AUDIT_LOOKBACK_DAYS = 30
+
+
+def get_schedule_audit(
+    db: Session,
+    *,
+    route_id: str | None = None,
+    direction_id: int | None = None,
+    period: str = "all",
+    sign: str = "all",
+    limit: int = 100,
+) -> dict:
+    """Return ranked under-/over-padded segments from the diagnostic table.
+
+    Reads `route_diagnostic_segment` rows for the requested filters and
+    returns one row per (route_id, direction_id, period, from_stop_id,
+    to_stop_id) segment, with the from-/to-stop names joined via the
+    current GTFS `stops` snapshot (`is_current=True`). Ranking is by
+    absolute mean slip weighted by daily trip count — the same
+    "biggest leverage first" sort schedule planners want when triaging
+    where to add or recover padding.
+
+    Per CLAUDE.md:
+      - Segment aggregation already groups by `(route_id, direction_id,
+        from_stop_id, to_stop_id)` via the diagnostic table's unique
+        constraint — we preserve that grouping by reading the rows
+        unchanged.
+      - The `stops` join filters `is_current=True`.
+
+    Args:
+        route_id: If set, restrict to one route_id.
+        direction_id: If set (0 or 1), restrict to one direction.
+        period: One of `all` / `am_peak` / `midday` / `pm_peak` /
+            `evening` / `late` — matches the period values in the
+            diagnostic table.
+        sign: One of `all` / `under` / `over`. `under` returns only
+            segments where `mean_slip_sec > 0` (bus is slower than
+            scheduled — under-padded); `over` returns only
+            `mean_slip_sec < 0` (bus is faster than scheduled —
+            over-padded).
+        limit: Cap on returned rows (default 100, max 500).
+
+    Returns:
+        Dict with `period`, `sign`, `lookback_days`, `n_rows`, and
+        `segments` (ranked list, each row carries route_id,
+        route_short_name, direction_id, from_stop_id, from_stop_name,
+        to_stop_id, to_stop_name, mean_slip_sec, daily_trip_count,
+        and minutes_per_day).
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    # Read every segment row for the requested filter. The table is bounded
+    # (one row per route × direction × period × segment ≈ a few hundred per
+    # route × six periods), so an unfiltered scan stays in the tens of
+    # thousands of rows even at full WMATA scale — cheap to pull and sort
+    # in Python. Heavier filtering happens at row-emission time after the
+    # join with stops + routes so column-projection stays simple.
+    q = db.query(RouteDiagnosticSegment).filter(
+        RouteDiagnosticSegment.period == period,
+    )
+    if route_id is not None:
+        q = q.filter(RouteDiagnosticSegment.route_id == route_id)
+    if direction_id is not None:
+        q = q.filter(RouteDiagnosticSegment.direction_id == direction_id)
+    if sign == "under":
+        q = q.filter(RouteDiagnosticSegment.mean_slip_sec > 0)
+    elif sign == "over":
+        q = q.filter(RouteDiagnosticSegment.mean_slip_sec < 0)
+
+    seg_rows = q.all()
+    if not seg_rows:
+        return {
+            "period": period,
+            "sign": sign,
+            "lookback_days": SCHEDULE_AUDIT_LOOKBACK_DAYS,
+            "n_rows": 0,
+            "segments": [],
+        }
+
+    # Bulk-load the route_short_name and stop_name maps so per-row joins
+    # don't N+1 the DB. `is_current=True` per CLAUDE.md.
+    route_ids = {r.route_id for r in seg_rows}
+    stop_ids = {r.from_stop_id for r in seg_rows} | {r.to_stop_id for r in seg_rows}
+
+    route_name_map = {
+        rid: (rsn, rln)
+        for rid, rsn, rln in (
+            db.query(Route.route_id, Route.route_short_name, Route.route_long_name)
+            .filter(Route.route_id.in_(route_ids), Route.is_current)
+            .all()
+        )
+    }
+    stop_name_map = dict(
+        db.query(Stop.stop_id, Stop.stop_name)
+        .filter(Stop.stop_id.in_(stop_ids), Stop.is_current)
+        .all()
+    )
+
+    out_rows: list[dict] = []
+    for r in seg_rows:
+        # Daily trip count estimate — n_observations is the count across
+        # the materialization lookback window, so divide by the window
+        # length to get a per-day trip count. Float math (not integer)
+        # because routes that don't run every weekday still produce
+        # fractional daily averages.
+        daily_trip_count = r.n_observations / SCHEDULE_AUDIT_LOOKBACK_DAYS
+        # Minutes saved per day if the segment's mean slip were eliminated:
+        # per-trip saving (sec) × trips/day ÷ 60. Signed — under-padded
+        # rows save positive minutes (eliminating positive slip = less
+        # delay); over-padded rows save negative minutes (eliminating
+        # negative slip = less excess padding, i.e., recoverable
+        # service-hours).
+        minutes_per_day = r.mean_slip_sec * daily_trip_count / 60.0
+        rsn, rln = route_name_map.get(r.route_id, (None, None))
+        out_rows.append(
+            {
+                "route_id": r.route_id,
+                "route_short_name": rsn,
+                "route_long_name": rln,
+                "direction_id": r.direction_id,
+                "from_stop_id": r.from_stop_id,
+                "from_stop_name": stop_name_map.get(r.from_stop_id),
+                "to_stop_id": r.to_stop_id,
+                "to_stop_name": stop_name_map.get(r.to_stop_id),
+                "from_seq": r.from_seq,
+                "to_seq": r.to_seq,
+                "period": r.period,
+                "mean_slip_sec": r.mean_slip_sec,
+                "n_observations": r.n_observations,
+                "daily_trip_count": daily_trip_count,
+                "minutes_per_day": minutes_per_day,
+                "is_timepoint": r.is_timepoint,
+            }
+        )
+
+    # Default sort: absolute slip magnitude weighted by trip volume — i.e.,
+    # the absolute value of `minutes_per_day`. This puts the biggest
+    # leverage segments first regardless of sign; the `sign` filter is the
+    # mechanism for picking only over- or under-padded.
+    out_rows.sort(
+        key=lambda r: (
+            -abs(r["minutes_per_day"]),
+            r["route_id"],
+            r["direction_id"],
+            r["from_seq"],
+        )
+    )
+
+    return {
+        "period": period,
+        "sign": sign,
+        "lookback_days": SCHEDULE_AUDIT_LOOKBACK_DAYS,
+        "n_rows": len(out_rows),
+        "segments": out_rows[:limit],
     }

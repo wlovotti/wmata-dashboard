@@ -7,6 +7,7 @@ import RunDetail from './components/RunDetail'
 import BlockTimeline from './components/BlockTimeline'
 import ActiveBlocks from './components/ActiveBlocks'
 import Targets from './components/Targets'
+import ScheduleAudit from './components/ScheduleAudit'
 import './App.css'
 
 function App() {
@@ -52,6 +53,9 @@ function App() {
             <NavLink to="/targets" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
               Targets
             </NavLink>
+            <NavLink to="/schedule-audit" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Schedule audit
+            </NavLink>
           </nav>
         </header>
 
@@ -63,6 +67,7 @@ function App() {
           <Route path="/blocks" element={<ActiveBlocks />} />
           <Route path="/blocks/:blockId" element={<BlockTimeline />} />
           <Route path="/targets" element={<Targets />} />
+          <Route path="/schedule-audit" element={<ScheduleAudit />} />
         </Routes>
       </div>
     </Router>
