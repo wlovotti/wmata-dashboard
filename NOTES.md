@@ -6,14 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-65 by building
-`src/upsert_helpers.py:upsert_rows` and migrating all four per-route
-pipelines (`derive_stop_events`, `derive_stop_events_trip_updates`,
-`aggregate_runs`, `compute_bunching`) to call it. The helper wraps the
-`pg_insert(...).on_conflict_do_update(constraint=..., set_=...)` boilerplate
-behind a single call that takes the model, constraint name, and update-column
-list as arguments. Postgres-only by design; callers guard with `if rows:`
-before invoking. No behaviour change; all 462 tests pass.
+Last edited 2026-05-17. Closed NOTES-64 by building
+`frontend/src/hooks/useMultiFetch.js` and migrating `SystemTrend.jsx`,
+`RouteDetail.jsx` (trend block), and `Overview.jsx` (system-trend fan-out).
+The hook wires AbortController cancellation so fast route switches no longer
+race stale fetches against new renders. The `cancelled`-flag pattern in all
+three migrated sites is replaced by a single hook call. No behaviour change;
+97 smoke tests pass and the frontend build succeeds.
 
 ---
 
@@ -85,19 +84,6 @@ target lists directly.
   Ranked timepoint-leakage table (% of buses departing > N seconds
   early per timepoint per period) → operational fix targets, no
   capital required.
-
-### Code-quality / DRY cleanup
-
-Code-quality follow-ups from a codebase simplification scan
-(2026-05-17). Each is a small-to-medium refactor with no
-user-visible behavior change; the win is maintainability and
-divergence prevention. Independent of each other — sequence to
-taste.
-
-- **NOTES-64 Custom `useMultiFetch` hook for the frontend.** Several
-  pages hand-roll `useEffect` + `Promise.all` + manual
-  error/cancellation handling. A shared hook removes the repetition
-  and fixes latent race conditions on fast route switches.
 
 ### P5 — Cleanup
 
@@ -502,29 +488,3 @@ filtering in the ranking (headway-based dispatching is the right
 intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
-
----
-
-## NOTES-64. Custom `useMultiFetch` hook for the frontend
-
-**Severity: low** (works, but latent race conditions on fast nav).
-**Effort: medium** (touches 5+ components; cancellation needs care).
-
-`RouteDetail.jsx:66-102`, `SystemTrend.jsx:62-91`, `RouteTrend.jsx`,
-and several other components hand-roll the same `useEffect` →
-`Promise.all([fetch, fetch, ...])` → `.then(setData)` →
-`.catch(setError)` pattern, each with its own loading-state
-management. Beyond the repetition, none of the implementations wire
-up AbortController cancellation — fast route switches can race a
-stale fetch's completion against the new route's render,
-occasionally showing wrong-route data for a frame before the second
-response wins.
-
-Build `useMultiFetch(urls, transform)` in
-`frontend/src/hooks/useMultiFetch.js` that returns
-`{ data, loading, error }`, wires AbortController to the effect's
-cleanup, and collapses the call sites to a single line. Migrate
-components one at a time; the hook is opt-in per call-site, so the
-refactor can land incrementally.
-
-

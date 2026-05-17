@@ -102,6 +102,15 @@ without asking. See `NOTES.md` for the active punch list.
   pick `trip_update` for headways / EWT / bunching. Mixing or
   wrong-source picks silently double-count or miss data.
 
+- **Pipeline upserts go through `src/upsert_helpers.py:upsert_rows`**
+  (`upsert_rows(db, model, rows, constraint_name, update_cols)`). All
+  four per-route pipelines (`derive_stop_events*`, `aggregate_runs`,
+  `compute_bunching`) use it — don't hand-roll
+  `pg_insert(...).on_conflict_do_update(...)` in a new pipeline.
+  Postgres-only by construction; tests still pass on SQLite because
+  the helper is invoked only inside pipeline code that the smoke
+  suite doesn't exercise against SQLite.
+
 ## Commands
 
 ```bash
