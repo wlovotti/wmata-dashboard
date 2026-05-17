@@ -6,14 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-58 (PR #124) — RouteDetail diagnosis
-panel: slip trajectory chart + timepoint behavior table. LLM narrative
-deferred to NOTES-69. Backend: new `get_route_diagnostic_profile` aggregation
-function + `GET /api/routes/{id}/diagnostic_profile?period=` endpoint reading
-the three `route_diagnostic_*` tables (PR #107 foundation). Frontend: new
-`RouteDiagnosisPanel.jsx` component wired into RouteDetail after
-PeriodDrilldown; period= filter reused from existing RouteDetail state. 97
-smoke tests pass and the frontend build succeeds.
+Last edited 2026-05-17. Closed NOTES-38 (PR #125) — server-side 7-day-vs-prior-7-day
+deltas on every scorecard metric. API carries a `deltas` block per route (shape:
+`{value, valid, current_n, prior_n}` per metric) on both `/api/routes` and
+`/api/routes/{id}`; thin-data suppression generic (<3 valid days) plus
+EWT-specific (<20 observed headways per window). RouteList and RouteDetail KPI
+cards render up/down/flat arrows via an extended `DeltaIndicator` (`lowerIsBetter`
+prop). NOTES-54 ("What changed" panel) is now unblocked.
 
 ---
 
@@ -44,15 +43,11 @@ proxies instead).
 
 **Trend & comparison (the "are we improving?" question)**
 
-- **NOTES-38 Period-over-period deltas on every KPI** *(deferred — needs ≥14 days of data; closed PR #81)*. Augment the
-  scorecard payload with deltas; add up/down/flat indicators
-  throughout.
-
 **Information architecture & navigation**
 
-- **NOTES-54 "What changed" panel on Overview** *(deferred — needs
-  NOTES-38 + ≥14d data)*. Week-over-week movers split into
-  improvements / degradations.
+- **NOTES-54 "What changed" panel on Overview** *(deferred — period-over-period
+  deltas now shipped in PR #125; NOTES-54 is next)*. Week-over-week movers split
+  into improvements / degradations.
 
 **Diagnostic outputs (route-level + system-wide)**
 
@@ -124,33 +119,9 @@ change — could even be a query-parameter toggle on the API.
 
 ---
 
-## NOTES-38. Period-over-period deltas on every KPI
-
-**Severity: low (deferred — needs ≥14 days of data).**
-
-Augment the scorecard payload from `/api/routes` (built in
-`api/aggregations.py`) so every metric carries a 7-day-vs-prior-7-day
-delta. Render up/down/flat indicators on the `RouteList` table and the
-`RouteDetail` KPI cards. The RouteDetail OTP / service-delivered cards
-already carry deltas client-side from the 30-day trend payload (PR #77);
-this item generalizes the pattern to every KPI on every surface, with
-the delta computed server-side so RouteList can show them too. Pay
-attention to thin-data cases — if either window is below the EWT
-coverage threshold, the delta should suppress rather than show a
-misleading number.
-
-**Deferred** (closed PR #81): the 7-vs-prior-7 windows require 14 days
-of stop_events / runs data before deltas survive thin-data suppression
-on most routes. Production data currently starts 2026-05-02; revisit
-once the collector has accumulated ≥14 days of continuous data so the
-feature is interpretable rather than "mostly suppressed." The closed
-PR's commits remain retrievable via `gh pr diff 81` for re-use.
-
----
-
 ## NOTES-54. "What changed" panel on Overview
 
-**Severity: low (deferred — needs ≥14 days of data).**
+**Severity: low.**
 
 Augments the Overview page (delivered by PR #105) with a panel
 showing week-over-week movers: the top routes whose OTP / SD /
@@ -158,19 +129,16 @@ EWT / bunching changed most vs the prior 7-day window. Split
 into two sub-lists — "Improvements" and "Degradations" — so
 positive movement is celebrated alongside negative.
 
-**Deferred** until NOTES-38 (period-over-period deltas on every KPI)
-lands. This panel is a thin renderer over that endpoint and has no
-useful content without it. NOTES-38 itself is deferred for a
-data-window reason: 7-vs-prior-7 needs ≥14 days of stop_events /
-runs data before deltas survive thin-data suppression on most
-routes. Production data started 2026-05-02; today is day 13 (so
-tomorrow is the earliest possible landfall for NOTES-38, then this
-item becomes implementable).
+Now implementable: the period-over-period deltas blocker landed in PR #125
+(NOTES-38). The `deltas` block is already on both `/api/routes` and
+`/api/routes/{id}`; this panel reads `/api/routes`, ranks by
+`|deltas.otp.value|` (or whichever metric the user selects), and splits
+into improvements / degradations. No new endpoint needed.
 
 ### Dependencies
 
-Overview shell delivered by PR #105. NOTES-38 (period-over-period
-deltas — deferred).
+Overview shell delivered by PR #105. Period-over-period deltas delivered by
+PR #125 (NOTES-38 closed).
 
 ---
 

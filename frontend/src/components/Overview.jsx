@@ -127,9 +127,9 @@ function gapFraction({ current, target, higherIsBetter }) {
  * across OTP, service-delivered, EWT, bunching. The "X routes below
  * target" piece counts routes whose any metric is on the wrong side of
  * its configured/inherited target. Period-over-period deltas are
- * intentionally omitted — NOTES-38 is deferred until ≥14 days of data
- * accumulate, and fabricating a delta would be worse than showing only
- * the level.
+ * intentionally omitted from this banner — the `deltas` block on the
+ * scorecard payload (PR #125) carries them per-route for RouteList /
+ * RouteDetail; surfacing them here is NOTES-54.
  */
 function HealthPulse({ systemMetrics, scorecard }) {
   // Pick the worst metric — the one with the largest positive gapFraction.

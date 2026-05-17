@@ -345,6 +345,25 @@ function RouteDetail() {
         // order in the grid — every other card on the row is unchanged.
         // Falls back to OTP-first if the API didn't return is_frequent
         // (older snapshots, or the config-load failed open).
+        //
+        // Server-side period-over-period deltas (NOTES-38). KPI cards
+        // consume the `deltas` block from `/api/routes/{id}` so RouteList
+        // and RouteDetail show the same numbers. `renderServerDelta` returns
+        // null when `valid=false` (thin data) — no misleading arrow shown.
+        // The trend block above keeps its own client-side deltas because
+        // they pair with the sparkline render (different code path, same window).
+        const serverDeltas = routeData.deltas || {}
+        const renderServerDelta = (block, unitFormat, lowerIsBetter = false) => {
+          if (!block || !block.valid || block.value == null) return null
+          return (
+            <DeltaIndicator
+              delta={block.value}
+              format={unitFormat}
+              lowerIsBetter={lowerIsBetter}
+              title={`Last 7 days vs prior 7 days (${block.current_n}/${block.prior_n} valid days)`}
+            />
+          )
+        }
         const otpCard = (
           <div className="stat-card" key="otp">
             <div className="stat-value">
@@ -354,13 +373,7 @@ function RouteDetail() {
             </div>
             <div className="stat-label">
               On-Time Performance
-              {otpDelta && (
-                <DeltaIndicator
-                  delta={otpDelta.delta}
-                  format={(d) => `${d.toFixed(1)} pp`}
-                  title={`7-day mean ${otpDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${otpDelta.priorMean.toFixed(1)}%`}
-                />
-              )}
+              {renderServerDelta(serverDeltas.otp, (d) => `${d.toFixed(1)} pp`)}
               <TargetIndicator
                 value={routeData.otp_all_pct}
                 target={routeData.targets?.otp}
@@ -390,6 +403,7 @@ function RouteDetail() {
             </div>
             <div className="stat-label">
               Excess Wait Time
+              {renderServerDelta(serverDeltas.ewt, (d) => `${Math.round(d)}s`, true)}
               {routeData.is_frequent && (
                 <span
                   className="headline-kpi-tag"
@@ -443,12 +457,10 @@ function RouteDetail() {
               </div>
               <div className="stat-label">
                 Service Delivered
-                {sdDelta && (
-                  <DeltaIndicator
-                    delta={sdDelta.delta}
-                    format={(d) => `${d.toFixed(1)} pp`}
-                    title={`7-day mean ${sdDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${sdDelta.priorMean.toFixed(1)}%`}
-                  />
+                {/* SD ratio is 0..1; the server delta is also 0..1 so scale to pp. */}
+                {renderServerDelta(
+                  serverDeltas.service_delivered,
+                  (d) => `${(d * 100).toFixed(1)} pp`,
                 )}
                 <TargetIndicator
                   value={
@@ -495,6 +507,11 @@ function RouteDetail() {
               </div>
               <div className="stat-label">
                 Bunching Rate
+                {renderServerDelta(
+                  serverDeltas.bunching,
+                  (d) => `${(d * 100).toFixed(1)} pp`,
+                  true,
+                )}
                 <TargetIndicator
                   value={
                     routeData.bunching_rate != null
@@ -521,15 +538,15 @@ function RouteDetail() {
                 {routeData.excess_trip_time_pct != null
                   ? `${Math.round(routeData.excess_trip_time_pct)}%`
                   : 'N/A'}
-                {excessDelta && (
-                  <DeltaIndicator
-                    delta={excessDelta.delta}
-                    format={(d) => `${d.toFixed(1)} pp`}
-                    title={`7-day mean ${excessDelta.recentMean.toFixed(1)}% vs prior 7-day mean ${excessDelta.priorMean.toFixed(1)}%`}
-                  />
+              </div>
+              <div className="stat-label">
+                % of Trips Running Long
+                {renderServerDelta(
+                  serverDeltas.excess_trip_time_pct,
+                  (d) => `${d.toFixed(1)} pp`,
+                  true,
                 )}
               </div>
-              <div className="stat-label">% of Trips Running Long</div>
               {excessActualMin != null && excessSchedMin != null && (
                 <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
                   median trip {excessActualMin} min, schedule {excessSchedMin} min

@@ -103,18 +103,31 @@ function TargetIndicator({
  *
  * `format` turns the raw delta into display text (e.g. percentage points).
  * Anything within ±`flatThreshold` shows as flat — avoids arrow flicker on
- * essentially-unchanged metrics.
+ * essentially-unchanged metrics. `lowerIsBetter=true` flips the color mapping
+ * (up = bad, down = good) for metrics like EWT, bunching, and excess-trip-time
+ * where a higher value means worse service. The arrow direction always reflects
+ * the raw sign of the delta — only the color encodes "good vs bad" — so a
+ * tooltip-readable "+5s" EWT delta still points up while the arrow color
+ * signals "worse."
  */
-function DeltaIndicator({ delta, format, flatThreshold = 0.5, title }) {
+function DeltaIndicator({
+  delta,
+  format,
+  flatThreshold = 0.5,
+  title,
+  lowerIsBetter = false,
+}) {
   if (delta == null) return null
   let arrow = '→'
   let color = '#64748b'
+  const goodColor = '#0E8A6F'
+  const badColor = '#C8102E'
   if (delta > flatThreshold) {
     arrow = '▲'
-    color = '#0E8A6F'
+    color = lowerIsBetter ? badColor : goodColor
   } else if (delta < -flatThreshold) {
     arrow = '▼'
-    color = '#C8102E'
+    color = lowerIsBetter ? goodColor : badColor
   }
   const sign = delta > 0 ? '+' : ''
   return (

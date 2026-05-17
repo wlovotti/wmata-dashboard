@@ -1004,6 +1004,382 @@ def _live_metric_fields(metrics: dict | None) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Period-over-period deltas (NOTES-38): every scorecard metric carries a
+# 7-day-vs-prior-7-day delta so RouteList and RouteDetail can render
+# direction-of-travel arrows server-side.
+#
+# Sign convention (deliberate): `delta = current_window_mean - prior_window_mean`
+# without flipping for lower-is-better metrics. The frontend already knows
+# which direction is "good" per metric (OTP up = good, EWT up = bad), so
+# flipping on the server would mean every consumer has to *un*-flip to
+# recover the raw mean diff. Keeping the raw signed delta keeps the wire
+# value interpretable independently of any "is this good?" lookup.
+#
+# Thin-data rules (suppressed via `valid: false`):
+#   1. Generic: either window has fewer than DELTA_MIN_VALID_DAYS valid days.
+#      A delta computed from one or two daily samples is more about which
+#      days happened to land in which window than any real change in
+#      service quality, and an up/down arrow on it would mislead.
+#   2. EWT-specific coverage floor: the sum of observed headways across
+#      the valid days in the window must reach EWT_MIN_OBS_HEADWAYS.
+#      EWT itself is only meaningful where a non-trivial pool of observed
+#      headways exists; without it the AWT underlying each daily value is
+#      statistically thin even when the daily count passes the generic rule.
+#
+# Data source: `route_metrics_daily_overlay` for OTP / SD / EWT / bunching
+# (one SQL pass for the 14-day window). `excess_trip_time_pct` is computed
+# live from `runs` per-route per-day (not in the overlay); the 14-day set
+# is cached for the same TTL as the deltas block itself.
+# ---------------------------------------------------------------------------
+
+DELTA_WINDOW_DAYS = 7
+DELTA_MIN_VALID_DAYS = 3
+EWT_MIN_OBS_HEADWAYS = 20  # minimum pooled observed headways per window
+
+_DELTAS_TTL_SEC = 60.0
+_deltas_cache: dict[str, tuple[float, dict[str, dict]]] = {}
+_deltas_lock = Lock()
+
+
+def _mean(values: list[float]) -> float:
+    """Mean of a non-empty list of floats."""
+    return sum(values) / len(values)
+
+
+def _build_metric_delta(
+    current_values: list[float | None],
+    prior_values: list[float | None],
+) -> dict:
+    """Compute one delta dict from a current-window list and a prior-window list.
+
+    Both inputs may contain None for days with no observation; nulls are
+    skipped when computing each window's mean. The shape is:
+
+        {"value": float | None, "valid": bool, "current_n": int, "prior_n": int}
+
+    `valid` is `False` whenever either window has fewer than
+    `DELTA_MIN_VALID_DAYS` non-null entries — the delta would be too noisy
+    to render an arrow. EWT-specific coverage gating happens in
+    `_compute_ewt_delta`, not here.
+    """
+    current_valid = [v for v in current_values if v is not None]
+    prior_valid = [v for v in prior_values if v is not None]
+    current_n = len(current_valid)
+    prior_n = len(prior_valid)
+    if current_n < DELTA_MIN_VALID_DAYS or prior_n < DELTA_MIN_VALID_DAYS:
+        return {
+            "value": None,
+            "valid": False,
+            "current_n": current_n,
+            "prior_n": prior_n,
+        }
+    return {
+        "value": _mean(current_valid) - _mean(prior_valid),
+        "valid": True,
+        "current_n": current_n,
+        "prior_n": prior_n,
+    }
+
+
+def _compute_ewt_delta(
+    current_values: list[float | None],
+    prior_values: list[float | None],
+    current_obs_headways: list[int],
+    prior_obs_headways: list[int],
+) -> dict:
+    """EWT delta with an additional observed-headway coverage floor.
+
+    Layered on top of `_build_metric_delta`: even with three valid daily
+    EWT values, if the pooled observed-headway count is below
+    `EWT_MIN_OBS_HEADWAYS` in either window, the metric isn't operationally
+    meaningful and the delta gets `valid=False`. Sums headways only across
+    days that contributed an EWT value (so a day with zero observed headways
+    doesn't quietly double its weight).
+    """
+    base = _build_metric_delta(current_values, prior_values)
+    if not base["valid"]:
+        return base
+    current_obs = sum(
+        h
+        for value, h in zip(current_values, current_obs_headways, strict=False)
+        if value is not None
+    )
+    prior_obs = sum(
+        h for value, h in zip(prior_values, prior_obs_headways, strict=False) if value is not None
+    )
+    if current_obs < EWT_MIN_OBS_HEADWAYS or prior_obs < EWT_MIN_OBS_HEADWAYS:
+        return {
+            "value": None,
+            "valid": False,
+            "current_n": base["current_n"],
+            "prior_n": base["prior_n"],
+        }
+    return base
+
+
+def _overlay_per_route_per_day(
+    db: Session, all_dates: list[date_type]
+) -> tuple[
+    dict[str, dict[str, float | None]],  # otp_all_pct
+    dict[str, dict[str, float | None]],  # service_delivered ratio
+    dict[str, dict[str, float | None]],  # ewt_seconds
+    dict[str, dict[str, int]],  # ewt n_observed_headways
+    dict[str, dict[str, float | None]],  # bunching_rate
+]:
+    """Per-route per-day metric values derived from `route_metrics_daily_overlay`.
+
+    One SQL pass for the full 14-day window. Derives final metric values
+    from each row's sufficient statistics using the same helpers used by the
+    scorecard window aggregator, so results are consistent with what the
+    scorecard shows.
+
+    Returns five dicts (OTP pct, SD ratio, EWT seconds, EWT observed
+    headways, bunching rate) each keyed `{route_id: {iso_date: value}}`.
+    Only rows that exist in the overlay are included — dates not yet
+    materialized by the daily pipeline are simply absent. `n_observed_headways`
+    is the count of observed headway pairs, used downstream for the
+    EWT-specific coverage floor on deltas.
+    """
+    if not all_dates:
+        return {}, {}, {}, {}, {}
+    date_strs = [d.isoformat() for d in all_dates]
+    rows = (
+        db.query(RouteMetricsDailyOverlay)
+        .filter(RouteMetricsDailyOverlay.service_date.in_(date_strs))
+        .all()
+    )
+    otp_by_route: dict[str, dict[str, float | None]] = defaultdict(dict)
+    sd_by_route: dict[str, dict[str, float | None]] = defaultdict(dict)
+    ewt_by_route: dict[str, dict[str, float | None]] = defaultdict(dict)
+    ewt_obs_by_route: dict[str, dict[str, int]] = defaultdict(dict)
+    bun_by_route: dict[str, dict[str, float | None]] = defaultdict(dict)
+
+    for row in rows:
+        ds = row.service_date
+        rid = row.route_id
+
+        # OTP: pooled all-timepoints on_time percentage
+        all_n = row.otp_all_early + row.otp_all_on_time + row.otp_all_late
+        otp_by_route[rid][ds] = round(row.otp_all_on_time * 100 / all_n, 4) if all_n else None
+
+        # Service-delivered ratio
+        sd_by_route[rid][ds] = (
+            round(row.delivered_trips / row.scheduled_trips, 4) if row.scheduled_trips else None
+        )
+
+        # EWT seconds from sufficient statistics
+        ewt_derived = _derive_ewt_metrics(
+            row.ewt_obs_sum_h,
+            row.ewt_obs_sum_h_sq,
+            row.ewt_sched_sum_h,
+            row.ewt_sched_sum_h_sq,
+            row.ewt_n_observed_headways,
+            row.ewt_n_scheduled_headways,
+        )
+        ewt_by_route[rid][ds] = ewt_derived.get("ewt_seconds")
+        ewt_obs_by_route[rid][ds] = int(row.ewt_n_observed_headways)
+
+        # Bunching rate
+        bun_by_route[rid][ds] = _derive_bunching_metrics(
+            row.bunching_count, row.bunching_total_headways
+        ).get("bunching_rate")
+
+    return otp_by_route, sd_by_route, ewt_by_route, ewt_obs_by_route, bun_by_route
+
+
+def _excess_per_route_per_day(
+    db: Session, all_dates: list[date_type], all_route_ids: set[str]
+) -> dict[str, dict[str, float | None]]:
+    """Per-route per-day excess-trip-time percentages, computed live from `runs`.
+
+    `excess_trip_time_pct` is not materialized in `route_metrics_daily_overlay`
+    (it's a trip-level metric computed directly from `runs`, post NOTES-19).
+    For the delta window this is one `compute_excess_trip_time` call per
+    (route, date) combination — modest cost for a 14-day × N-route window
+    since each call is a single narrow SELECT against `runs`. Results are
+    rolled into the same deltas cache (60s TTL) so the cost is only paid
+    once per anchor date.
+
+    Returns `{route_id: {iso_date: pct_or_None}}`.
+    """
+    out: dict[str, dict[str, float | None]] = defaultdict(dict)
+    for service_date in all_dates:
+        ds = service_date.isoformat()
+        for route_id in all_route_ids:
+            result = compute_excess_trip_time(db, route_id, service_date)
+            pct = result.get("pct_over_110")
+            out[route_id][ds] = sanitize_float(pct) if result.get("n_trips", 0) > 0 else None
+    return out
+
+
+def _compute_route_deltas_uncached(db: Session) -> dict[str, dict]:
+    """Period-over-period deltas for every route, all five scorecard metrics.
+
+    Window: the past `DELTA_WINDOW_DAYS` days (current) and the
+    `DELTA_WINDOW_DAYS` days immediately preceding (prior). Today's Eastern
+    date anchors the current window's right edge.
+
+    Returns `{route_id: {metric_key: delta_dict}}`. Any route present in
+    the overlay for the window will appear; routes not in any source for
+    the window are absent (the scorecard caller defaults them to all-suppressed
+    deltas via `_empty_deltas()`).
+    """
+    from src.timezones import eastern_today
+
+    today = eastern_today()
+    end_current = today
+    start_current = end_current - timedelta(days=DELTA_WINDOW_DAYS - 1)
+    end_prior = start_current - timedelta(days=1)
+    start_prior = end_prior - timedelta(days=DELTA_WINDOW_DAYS - 1)
+
+    current_dates = [start_current + timedelta(days=i) for i in range(DELTA_WINDOW_DAYS)]
+    prior_dates = [start_prior + timedelta(days=i) for i in range(DELTA_WINDOW_DAYS)]
+    all_dates = prior_dates + current_dates
+
+    # One SQL pass for OTP / SD / EWT / bunching from the overlay.
+    otp_by_route, sd_by_route, ewt_by_route, ewt_obs_by_route, bun_by_route = (
+        _overlay_per_route_per_day(db, all_dates)
+    )
+
+    # Union of all route_ids that appear in any overlay row for the window.
+    route_ids = set(otp_by_route) | set(sd_by_route) | set(ewt_by_route) | set(bun_by_route)
+
+    # Excess trip time: live compute per (route, date). Only run for routes
+    # that appear in the overlay so we don't iterate the full route catalog.
+    excess_by_route = _excess_per_route_per_day(db, all_dates, route_ids)
+
+    out: dict[str, dict] = {}
+    for route_id in route_ids:
+        current_iso = [d.isoformat() for d in current_dates]
+        prior_iso = [d.isoformat() for d in prior_dates]
+
+        otp_map = otp_by_route.get(route_id, {})
+        sd_map = sd_by_route.get(route_id, {})
+        ewt_map = ewt_by_route.get(route_id, {})
+        ewt_obs_map = ewt_obs_by_route.get(route_id, {})
+        bun_map = bun_by_route.get(route_id, {})
+        excess_map = excess_by_route.get(route_id, {})
+
+        # SD ratio is stored 0..1 — the wire delta is also 0..1; the
+        # frontend already multiplies by 100 wherever it renders SD as a
+        # percentage. OTP pct and excess_trip_time_pct are in 0..100 units.
+        # Bunching rate is 0..1. Mixing scales is fine because each consumer
+        # knows each metric's units.
+        out[route_id] = {
+            "otp": _build_metric_delta(
+                [otp_map.get(d) for d in current_iso],
+                [otp_map.get(d) for d in prior_iso],
+            ),
+            "service_delivered": _build_metric_delta(
+                [sd_map.get(d) for d in current_iso],
+                [sd_map.get(d) for d in prior_iso],
+            ),
+            "ewt": _compute_ewt_delta(
+                [ewt_map.get(d) for d in current_iso],
+                [ewt_map.get(d) for d in prior_iso],
+                [ewt_obs_map.get(d, 0) for d in current_iso],
+                [ewt_obs_map.get(d, 0) for d in prior_iso],
+            ),
+            "bunching": _build_metric_delta(
+                [bun_map.get(d) for d in current_iso],
+                [bun_map.get(d) for d in prior_iso],
+            ),
+            "excess_trip_time_pct": _build_metric_delta(
+                [excess_map.get(d) for d in current_iso],
+                [excess_map.get(d) for d in prior_iso],
+            ),
+        }
+    return out
+
+
+def get_route_deltas_all(db: Session) -> dict[str, dict]:
+    """Cached-by-today wrapper for the all-routes deltas computation.
+
+    Cache key is today's Eastern service date so the cache rolls naturally
+    at the day boundary. TTL `_DELTAS_TTL_SEC` (60s) absorbs repeated
+    scorecard polls within the same minute. Thread-safe via `_deltas_lock`.
+    """
+    from src.timezones import eastern_today
+
+    cache_key = eastern_today().isoformat()
+    with _deltas_lock:
+        cached = _deltas_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _DELTAS_TTL_SEC:
+                return value
+
+    result = _compute_route_deltas_uncached(db)
+
+    with _deltas_lock:
+        _deltas_cache[cache_key] = (time.monotonic(), result)
+    return result
+
+
+def compute_route_deltas(db: Session, route_id: str) -> dict:
+    """Period-over-period deltas for one route across all five scorecard metrics.
+
+    Returns a dict shaped like::
+
+        {
+            "otp": {"value": 0.024, "valid": true, "current_n": 5, "prior_n": 6},
+            "service_delivered": {...},
+            "ewt": {...},
+            "bunching": {...},
+            "excess_trip_time_pct": {...},
+        }
+
+    Each per-metric block is `current_window_mean - prior_window_mean`
+    where each window is `DELTA_WINDOW_DAYS` days. The sign is *not*
+    flipped for lower-is-better metrics (EWT, bunching, excess_trip_time_pct);
+    the consumer interprets direction-of-good per metric.
+
+    `valid=False` means the delta should not be rendered as an arrow; both
+    `current_n` and `prior_n` are still populated for tooltips/debugging.
+    Suppression rules:
+      * Either window has fewer than `DELTA_MIN_VALID_DAYS` (3) non-null
+        daily samples.
+      * EWT additionally suppresses when the pooled observed headways fall
+        below `EWT_MIN_OBS_HEADWAYS` in either window.
+
+    A route absent from the overlay for the window returns the same shape
+    with all metrics suppressed (`valid=False`, `value=None`).
+    """
+    all_deltas = get_route_deltas_all(db)
+    if route_id in all_deltas:
+        return all_deltas[route_id]
+    suppressed = {
+        "value": None,
+        "valid": False,
+        "current_n": 0,
+        "prior_n": 0,
+    }
+    return {
+        "otp": dict(suppressed),
+        "service_delivered": dict(suppressed),
+        "ewt": dict(suppressed),
+        "bunching": dict(suppressed),
+        "excess_trip_time_pct": dict(suppressed),
+    }
+
+
+def _empty_deltas() -> dict:
+    """All-suppressed delta block for routes with no overlay data in the window.
+
+    Used as a default in the scorecard payload so every route row carries
+    a `deltas` key even when no data was available for the 14-day window.
+    """
+    suppressed = {"value": None, "valid": False, "current_n": 0, "prior_n": 0}
+    return {
+        "otp": dict(suppressed),
+        "service_delivered": dict(suppressed),
+        "ewt": dict(suppressed),
+        "bunching": dict(suppressed),
+        "excess_trip_time_pct": dict(suppressed),
+    }
+
+
 def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) -> dict:
     """
     Get performance scorecard for all routes, pooled over a rolling window.
@@ -1061,6 +1437,12 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
     # read of the YAML; the set membership check below is constant-time.
     frequent_route_ids = load_frequent_route_ids()
 
+    # Period-over-period deltas (NOTES-38) for every metric. Cached separately
+    # (60s TTL keyed by Eastern date) so cold-cache cost only hits once per
+    # anchor date; subsequent scorecard builds within the TTL pull straight
+    # from the cache.
+    deltas = get_route_deltas_all(db)
+
     scorecard: list[dict] = []
     for route in routes:
         live_fields = _live_metric_fields(live.get(route.route_id))
@@ -1088,6 +1470,11 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
                 # seconds, bunching fraction). `None` when no target is
                 # configured in `config/route_targets.yaml`.
                 "targets": get_targets_for_route(route.route_id),
+                # Period-over-period deltas (NOTES-38). Shape per metric:
+                # {value, valid, current_n, prior_n}. `valid=False` means
+                # thin data — don't render an arrow. Sign is raw
+                # (current_mean - prior_mean), not flipped for lower-is-better.
+                "deltas": deltas.get(route.route_id) or _empty_deltas(),
                 **live_fields,
             }
         )
@@ -1199,6 +1586,12 @@ def get_route_detail_metrics(
     # day_types in practice.
     excess_fields = _excess_trip_time_fields(db, route_id, days=days)
 
+    # Period-over-period deltas (NOTES-38). Server-computed so RouteList and
+    # RouteDetail see the same values. RouteDetail's KPI cards consume these
+    # directly; the trend block keeps its own client-side deltas because they
+    # pair with the sparkline render (different code path, same 7-day window).
+    route_deltas = compute_route_deltas(db, route_id)
+
     # Frequency class — single-route lookup against route_service_profile.
     headways = [
         h
@@ -1233,6 +1626,11 @@ def get_route_detail_metrics(
         # for the shape — keyed by canonical metric name in canonical
         # units. The frontend renders them next to each KPI card.
         "targets": get_targets_for_route(route_id),
+        # Period-over-period deltas (NOTES-38). Shape per metric:
+        # {value, valid, current_n, prior_n}. `valid=False` means
+        # thin data — don't render an arrow. Sign is raw
+        # (current_mean - prior_mean), not flipped for lower-is-better.
+        "deltas": route_deltas,
         **live_fields,
         **excess_fields,
     }
