@@ -18,15 +18,30 @@ and dies with it.
 Confirm the working tree is ready:
 
 ```bash
-git status --porcelain  # must be empty
-git branch --show-current  # must be `main`
+git status --porcelain         # see below — empty OR only allowlisted paths
+git branch --show-current      # must be `main`
 git pull --ff-only
 ```
 
-If any of these fail (dirty tree, on a feature branch, pull conflict):
-**STOP**. Tell the user what's wrong and let them resolve before
-re-running. Do not auto-stash or auto-checkout — those are destructive
-shortcuts for problems we should investigate.
+Pre-flight rule: the porcelain output may be empty, OR may contain
+**only** allowlisted paths — `CLAUDE.md` / `NOTES.md` at the repo
+root, or any file under `.claude/commands/`. Any other dirty path
+(including a staged file, a new untracked file, or a deletion) blocks
+the cycle. Capture the list of "riding-along" files for later steps —
+call this `RIDE_ALONG_FILES`.
+
+Concretely, if the porcelain output, after stripping the leading
+status bytes, contains any line outside the allowlist
+`{CLAUDE.md, NOTES.md, .claude/commands/*.md}`, **STOP**. Tell the user which path blocked it and let them resolve
+before re-running. Likewise STOP on a feature-branch checkout or a
+pull conflict. Do not auto-stash or auto-checkout — those are
+destructive shortcuts for problems we should investigate.
+
+The riding-along files travel onto the feature branch naturally:
+`git checkout -b` from main keeps unstaged changes in the working
+tree, so the subagent inherits them and will commit them in step 5
+(see Step 4 prompt). The user gets a confirmation chance in Step 3
+before any of that happens, in case they'd rather stash instead.
 
 # Step 2 — Read state (parent does this directly)
 
@@ -64,6 +79,13 @@ Ask via `AskUserQuestion`:
 The user may pick the recommended, an alternate, or "Other" with a
 different NOTES-N. Capture the chosen NOTES-N for the rest of the cycle.
 
+If `RIDE_ALONG_FILES` from Step 1 is non-empty, mention it in the
+question prose (not as a separate question), naming the exact files,
+e.g. *"Note: your uncommitted edits to `<paths>` will ride on this
+PR. Stash them first if that's not what you want."* This is the
+user's last chance to back out — once Step 4 dispatches, those files
+are committed on the feature branch.
+
 # Step 4 — Dispatch subagent for implementation
 
 Invoke the `Agent` tool with:
@@ -78,8 +100,9 @@ The subagent loads the project's `CLAUDE.md` automatically, so the
 prompt does NOT restate repo conventions — it just hands over the task
 and the closing-PR checklist.
 
-Subagent prompt template (fill in `{{N}}` and `{{section_summary}}`
-from what you read in step 2):
+Subagent prompt template (fill in `{{N}}`, `{{section_summary}}`,
+and `{{ride_along_files}}` — the last is either "none" or a
+comma-separated list of allowlisted paths from Step 1):
 
 ```
 Close NOTES-{{N}} from /Users/wlovotti/repos/wmata-dashboard/NOTES.md
@@ -87,11 +110,22 @@ in one PR. Item section verbatim:
 
 {{section_summary}}
 
+Pre-existing uncommitted edits in the working tree: {{ride_along_files}}.
+The parent already vetted these — they're intentional and should ride
+on this PR. They will appear as already-modified files when you start.
+Do NOT stash, revert, or `git checkout --` them. Commit them on the
+feature branch alongside your substantive change (either folded into
+the main commit if scope-related, or as a separate commit on the
+same branch with message `chore: roll up doc / tooling drafts`
+if unrelated).
+
 Execute this checklist top-to-bottom. Do not deviate.
 
 1. BRANCH. From `main`:
      git checkout -b <prefix>/notes-{{N}}-<short-slug>
    `<prefix>` ∈ {feature, fix, docs, refactor} per the item's nature.
+   The riding-along files (if any) will travel with the checkout —
+   verify with `git status` before proceeding.
 
 2. IMPLEMENT. Follow the item's "Implementation" / "Remaining work"
    section. Keep scope tight; do NOT refactor adjacent code.
@@ -235,11 +269,19 @@ session history but reduce context size.
   the highest-cost mistakes, so they're cheap to confirm.
 - **No auto-retry on CI failure.** A red CI is a signal to think, not
   to grind. The user decides whether to fix or abandon.
-- **No destructive recovery.** If the working tree is dirty, refuse to
-  start. If a merge conflict appears, surface and stop. Never
+- **No destructive recovery.** If the working tree has any dirty path
+  outside the riding-along allowlist (`CLAUDE.md`, `NOTES.md`,
+  `.claude/commands/*.md`), refuse to start. If a merge conflict appears, surface and stop. Never
   `git stash` / `git reset --hard` / `git checkout -f` as a shortcut.
 - **NOTES.md edits ride on the closing PR.** No standalone
   reconciliation PRs. The subagent folds the edit in alongside the
   substantive change.
+- **Pre-existing allowlist-file drafts also ride on the next PR.**
+  Uncommitted edits to allowlisted paths (`CLAUDE.md`, `NOTES.md`,
+  `.claude/commands/*.md`) at pre-flight are not a blocker — they
+  travel onto the feature branch via the `git checkout -b` and are
+  committed by the subagent. Edits to any other path still block the
+  cycle. Step 3 surfaces this to the user before dispatch so they can
+  stash if the timing is wrong.
 - **NOTES-N item numbers are stable.** When the subagent adds a new
   item, it uses the next unused number — never renumbers existing items.
