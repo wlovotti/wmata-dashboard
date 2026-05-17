@@ -22,6 +22,7 @@ def _seed_minimal_route(pg_session, *, route_id="R1", trip_id="T1"):
                 is_current=True,
             ),
             VehiclePosition(
+                vehicle_id="V1",
                 trip_id=trip_id,
                 route_id=route_id,
                 trip_start_date="20260517",

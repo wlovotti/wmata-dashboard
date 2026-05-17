@@ -40,6 +40,9 @@ def test_perfect_match_reports_100_percent_agreement(pg_session):
         text("CREATE TABLE IF NOT EXISTS stop_events_v2 (LIKE stop_events INCLUDING ALL)")
     )
     pg_session.add(_make_event())
+    # Explicit flush: Session.execute(text(...)) does NOT autoflush, so the
+    # raw INSERT...SELECT below would not see the pending stop_events row.
+    pg_session.flush()
     pg_session.execute(text("INSERT INTO stop_events_v2 SELECT * FROM stop_events"))
     pg_session.commit()
 
@@ -93,6 +96,8 @@ def test_skipped_stops_with_agreeing_nulls_report_match(pg_session):
             deviation_sec=None,
         )
     )
+    # Explicit flush: Session.execute(text(...)) does NOT autoflush.
+    pg_session.flush()
     pg_session.execute(text("INSERT INTO stop_events_v2 SELECT * FROM stop_events"))
     pg_session.commit()
 
