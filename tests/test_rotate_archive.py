@@ -53,22 +53,40 @@ def test_rotate_uploads_and_cleans_up(tmp_path: Path):
     )
 
     fake_s3 = MagicMock()
-    fake_s3.head_object.return_value = {"ContentLength": 9999}
+
+    # Capture the local file path that gets uploaded so we can report its
+    # actual size back via head_object. This avoids globally patching
+    # Path.stat (which would silently corrupt Path.exists() across the
+    # patch scope).
+    captured = {}
+
+    def capture_upload(local_path, bucket, key):
+        """Record upload arguments for later assertions."""
+        captured["local_path"] = local_path
+        captured["bucket"] = bucket
+        captured["key"] = key
+
+    def fake_head(Bucket, Key):
+        """Return the actual on-disk size of the uploaded parquet file."""
+        return {"ContentLength": Path(captured["local_path"]).stat().st_size}
+
+    fake_s3.upload_file.side_effect = capture_upload
+    fake_s3.head_object.side_effect = fake_head
 
     with patch.object(rotate_archive, "_make_s3_client", return_value=fake_s3):
-        with patch("pathlib.Path.stat") as stat_mock:
-            stat_mock.return_value = MagicMock(st_size=9999)
-            rotate_archive.rotate_one_day(
-                archive_dir=tmp_path,
-                target_date=date(2026, 5, 17),
-                bucket="test-bucket",
-                key_prefix="raw_snapshots",
-            )
+        rotate_archive.rotate_one_day(
+            archive_dir=tmp_path,
+            target_date=date(2026, 5, 17),
+            bucket="test-bucket",
+            key_prefix="raw_snapshots",
+        )
 
+    # Upload happened against the right key.
     fake_s3.upload_file.assert_called_once()
-    args, kwargs = fake_s3.upload_file.call_args
-    assert kwargs.get("Bucket") == "test-bucket" or args[1] == "test-bucket"
+    assert captured["bucket"] == "test-bucket"
+    assert captured["key"] == "raw_snapshots/2026-05-17.parquet"
 
+    # Local files deleted after successful upload + verification.
     assert not jsonl_path.exists()
     assert not (tmp_path / "2026-05-17.parquet").exists()
 
@@ -95,4 +113,23 @@ def test_rotate_keeps_local_on_upload_failure(tmp_path: Path):
                 key_prefix="raw_snapshots",
             )
 
+    # Files retained for retry.
     assert jsonl_path.exists()
+    assert (tmp_path / "2026-05-17.parquet").exists()
+
+
+def test_rotate_skips_when_jsonl_missing(tmp_path: Path):
+    """rotate_one_day exits cleanly when no JSONL exists for the date."""
+    from pipelines import rotate_archive
+
+    fake_s3 = MagicMock()
+    with patch.object(rotate_archive, "_make_s3_client", return_value=fake_s3):
+        rotate_archive.rotate_one_day(
+            archive_dir=tmp_path,
+            target_date=date(2026, 5, 17),
+            bucket="test-bucket",
+            key_prefix="raw_snapshots",
+        )
+
+    # No upload should happen — the function returns before touching S3.
+    fake_s3.upload_file.assert_not_called()

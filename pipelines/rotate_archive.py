@@ -28,6 +28,8 @@ import polars as pl
 import zstandard as zstd
 from dotenv import load_dotenv
 
+from src.timezones import utcnow_naive
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARCHIVE_DIR = REPO_ROOT / "archive" / "raw_snapshots"
 
@@ -59,8 +61,8 @@ def jsonl_to_parquet(jsonl_path: Path, parquet_path: Path) -> int:
     dctx = zstd.ZstdDecompressor()
     with open(jsonl_path, "rb") as f:
         with dctx.stream_reader(f) as reader:
-            decompressed = reader.read().decode("utf-8")
-    df = pl.read_ndjson(decompressed.encode("utf-8"))
+            decompressed = reader.read()
+    df = pl.read_ndjson(decompressed)
     df.write_parquet(parquet_path, compression="zstd")
     return df.height
 
@@ -128,7 +130,7 @@ def main() -> int:
     if args.date:
         target = datetime.strptime(args.date, "%Y-%m-%d").date()
     else:
-        target = (datetime.utcnow() - timedelta(days=1)).date()
+        target = (utcnow_naive() - timedelta(days=1)).date()
 
     rotate_one_day(
         archive_dir=args.archive_dir,
