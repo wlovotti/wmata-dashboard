@@ -1,0 +1,58 @@
+{
+  "metric": "otp",
+  "days": 30,
+  "baseline_value": 73.2,
+  "system_target_value": 75.0,
+  "contributors": [
+    {
+      "route_id": "D72",
+      "route_short_name": "D72",
+      "route_long_name": "Friendly Shores - Wheaton",
+      "route_value": 68.4,
+      "baseline_value": 73.2,
+      "reference_value": 75.0,
+      "contribution_score": 1120.4,
+      "scheduled_trips": 210
+    },
+    {
+      "route_id": "X2",
+      "route_short_name": "X2",
+      "route_long_name": "Benning Rd - H St Line",
+      "route_value": 65.1,
+      "baseline_value": 73.2,
+      "reference_value": 75.0,
+      "contribution_score": 980.2,
+      "scheduled_trips": 120
+    },
+    {
+      "route_id": "90",
+      "route_short_name": "90",
+      "route_long_name": "U St - Garfield",
+      "route_value": 70.3,
+      "baseline_value": 73.2,
+      "reference_value": 75.0,
+      "contribution_score": 735.8,
+      "scheduled_trips": 255
+    },
+    {
+      "route_id": "92",
+      "route_short_name": "92",
+      "route_long_name": "U St - Garfield Limited",
+      "route_value": 71.5,
+      "baseline_value": 73.2,
+      "reference_value": 75.0,
+      "contribution_score": 510.3,
+      "scheduled_trips": 300
+    },
+    {
+      "route_id": "70",
+      "route_short_name": "70",
+      "route_long_name": "Georgia Ave - Seventh St Line",
+      "route_value": 71.2,
+      "baseline_value": 73.2,
+      "reference_value": 75.0,
+      "contribution_score": 480.0,
+      "scheduled_trips": 240
+    }
+  ]
+}

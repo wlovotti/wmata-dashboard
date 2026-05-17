@@ -96,3 +96,39 @@ jobs:
       run: |
         uv run pytest -v --tb=short --cov=src --cov=api --cov-report=term-missing
         echo "✓ All tests passed"
+
+  frontend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install dependencies
+      working-directory: frontend
+      run: npm ci
+
+    - name: Lint
+      working-directory: frontend
+      run: npm run lint
+
+    - name: Unit tests (Vitest)
+      working-directory: frontend
+      run: npm test
+
+    - name: Install Playwright browsers
+      working-directory: frontend
+      run: npx playwright install --with-deps chromium
+
+    - name: Visual regression tests (Playwright)
+      working-directory: frontend
+      # continue-on-error: Linux baselines have not been generated yet.
+      # A maintainer must run `npx playwright test --update-snapshots` in CI
+      # (or via `act`), commit the resulting snapshots, and then remove this
+      # flag in a follow-up PR. See PR body for exact steps.
+      continue-on-error: true
+      run: npx playwright test

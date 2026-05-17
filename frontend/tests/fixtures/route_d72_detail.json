@@ -1,0 +1,26 @@
+{
+  "route_id": "D72",
+  "route_name": "D72",
+  "route_long_name": "Friendly Shores - Wheaton",
+  "frequency_class": "medium",
+  "otp_all_pct": 68.4,
+  "otp_early_pct": 12.3,
+  "otp_late_pct": 19.3,
+  "service_delivered_ratio": 0.91,
+  "ewt_seconds": 105.3,
+  "bunching_rate": 0.142,
+  "excess_trip_time_pct": 22.5,
+  "excess_trip_time_median_actual_sec": 2580,
+  "excess_trip_time_median_scheduled_sec": 2400,
+  "targets": {
+    "otp": 72,
+    "service_delivered": 0.88,
+    "ewt": 120,
+    "bunching": 0.15
+  },
+  "window_days": 30,
+  "window_start": "2026-04-17",
+  "window_end": "2026-05-16",
+  "stop_count": 18,
+  "direction_count": 2
+}

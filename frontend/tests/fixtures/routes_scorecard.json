@@ -1,0 +1,69 @@
+{
+  "routes": [
+    {
+      "route_id": "D72",
+      "route_name": "D72",
+      "route_long_name": "Friendly Shores - Wheaton",
+      "frequency_class": "medium",
+      "otp_all_pct": 68.4,
+      "service_delivered_ratio": 0.91,
+      "ewt_seconds": 105.3,
+      "bunching_rate": 0.142,
+      "targets": {
+        "otp": 75,
+        "service_delivered": 0.90,
+        "ewt": 120,
+        "bunching": 0.15
+      },
+      "deltas": {
+        "otp": { "value": -2.1, "valid": true, "current_n": 7, "prior_n": 7 },
+        "service_delivered": { "value": 0.01, "valid": true, "current_n": 7, "prior_n": 7 },
+        "ewt": { "value": 3.5, "valid": true, "current_n": 7, "prior_n": 7 },
+        "bunching": { "value": -0.005, "valid": true, "current_n": 7, "prior_n": 7 }
+      }
+    },
+    {
+      "route_id": "70",
+      "route_name": "70",
+      "route_long_name": "Georgia Ave - Seventh St Line",
+      "frequency_class": "high",
+      "otp_all_pct": 71.2,
+      "service_delivered_ratio": 0.93,
+      "ewt_seconds": 98.4,
+      "bunching_rate": 0.118,
+      "targets": {
+        "otp": 75,
+        "service_delivered": 0.90,
+        "ewt": 120,
+        "bunching": 0.15
+      },
+      "deltas": {
+        "otp": { "value": 1.3, "valid": true, "current_n": 7, "prior_n": 7 },
+        "service_delivered": { "value": 0.02, "valid": true, "current_n": 7, "prior_n": 7 },
+        "ewt": { "value": -5.2, "valid": true, "current_n": 7, "prior_n": 7 },
+        "bunching": { "value": -0.012, "valid": true, "current_n": 7, "prior_n": 7 }
+      }
+    },
+    {
+      "route_id": "79",
+      "route_name": "79",
+      "route_long_name": "Georgia Ave Limited",
+      "frequency_class": "high",
+      "otp_all_pct": 76.8,
+      "service_delivered_ratio": 0.88,
+      "ewt_seconds": 110.7,
+      "bunching_rate": 0.135,
+      "targets": {
+        "otp": 75,
+        "service_delivered": 0.90,
+        "ewt": 120,
+        "bunching": 0.15
+      },
+      "deltas": null
+    }
+  ],
+  "window_start": "2026-04-17",
+  "window_end": "2026-05-16",
+  "last_updated": "2026-05-17T04:00:00",
+  "gtfs_freshness": "2026-05-15T10:00:00"
+}
