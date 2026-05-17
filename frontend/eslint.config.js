@@ -26,4 +26,41 @@ export default defineConfig([
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
     },
   },
+  // Vitest unit test files — expose test runner globals (describe, test,
+  // expect, vi, beforeEach, afterEach, etc.) so ESLint doesn't flag them
+  // as undefined. The react-refresh rule is irrelevant in test files.
+  {
+    files: ['tests/unit/**/*.{js,jsx}'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        describe: 'readonly',
+        test: 'readonly',
+        expect: 'readonly',
+        vi: 'readonly',
+        beforeEach: 'readonly',
+        afterEach: 'readonly',
+        beforeAll: 'readonly',
+        afterAll: 'readonly',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]', argsIgnorePattern: '^_' }],
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+  // Playwright config and e2e specs — expose Node.js globals (process, etc.)
+  // and Playwright test globals. ESLint runs in the frontend/ root so both
+  // playwright.config.js and tests/e2e/** need Node context.
+  {
+    files: ['playwright.config.js', 'tests/e2e/**/*.{js,ts}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

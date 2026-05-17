@@ -1,0 +1,18 @@
+{
+  "defaults": {
+    "otp": 75,
+    "service_delivered": 0.90,
+    "ewt": 120,
+    "bunching": 0.15
+  },
+  "routes": {
+    "D72": {
+      "otp": 72,
+      "service_delivered": 0.88
+    },
+    "70": {
+      "otp": 78,
+      "ewt": 100
+    }
+  }
+}

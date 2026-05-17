@@ -129,9 +129,11 @@ uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
 ## Working agreements
 
 - Run `ruff check` before committing — CI will fail otherwise.
-- Frontend lint has pre-existing errors on main that don't fail CI; if
-  yours overlap, `git stash; cd frontend && npm run lint; cd ..;
-  git stash pop` confirms which ones you actually introduced.
+- Frontend lint is enforced in CI as of PR #126 (kept at zero errors).
+  Run `cd frontend && npm run lint` before pushing.
+- Frontend unit tests run in CI as of PR #126: `cd frontend && npm test`
+  (Vitest). Playwright visual regression also runs but is currently
+  `continue-on-error: true` until Linux baselines are generated in CI.
 - Project Claude tooling: auto-triggering skills go in
   `.claude/skills/<name>/SKILL.md`, explicit slash commands go in
   `.claude/commands/<name>.md`. Both are checked in.
