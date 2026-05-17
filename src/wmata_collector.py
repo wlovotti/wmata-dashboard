@@ -609,9 +609,35 @@ class WMATADataCollector:
             self.db.bulk_save_objects(new_objects)
             self.db.commit()
 
+        # NEW: dual-write to trip_update_state. We UPSERT one row per
+        # (trip_id, stop_sequence) holding the latest predictions. The
+        # derivation pipeline reads this table directly after cutover.
+        # We pass ALL rows (not just state-changed ones) so the
+        # final_snapshot_ts always reflects the latest poll, even when
+        # state hasn't changed.
+        from src.upsert_helpers import upsert_trip_update_state
+
+        upsert_payload = [
+            {
+                "trip_id": r["trip_id"],
+                "stop_sequence": r["stop_sequence"],
+                "stop_id": r["stop_id"],
+                "vehicle_id": r.get("vehicle_id"),
+                "snapshot_ts": r["snapshot_ts"],
+                "predicted_arrival_ts": r.get("predicted_arrival_ts"),
+                "schedule_relationship": r.get("schedule_relationship"),
+            }
+            for r in rows
+            if r.get("stop_sequence") is not None  # skip rows missing the PK part
+        ]
+        if upsert_payload:
+            upsert_trip_update_state(self.db, upsert_payload)
+            self.db.commit()
+
         print(
             f"  Saved {len(new_objects)} of {len(rows)} trip update rows "
-            f"(cache={len(self._tu_dedup_cache):,})"
+            f"(cache={len(self._tu_dedup_cache):,}); "
+            f"upserted {len(upsert_payload)} into trip_update_state"
         )
         return len(new_objects)
 
