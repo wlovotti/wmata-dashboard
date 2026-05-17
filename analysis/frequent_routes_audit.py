@@ -1,16 +1,23 @@
 """
 Cross-validation: WMATA-published frequent routes vs data-driven check.
 
-One-shot analysis comparing the route-level list in
+One-shot analysis comparing the tiered route list in
 `config/frequent_routes.yaml` (NOTES-56) against the per-cell-hour
-frequent classification computed live from GTFS schedule
-(`src/ewt.py:_is_cell_hour_frequent`, threshold 15 min).
+frequent classification computed live from GTFS schedule.
+
+Per-route gating: each designated route is checked under its own
+tier's gate (`src/frequent_routes.py:get_cell_hour_gate_sec` —
+15 min for high-freq, 20 min for medium-freq). Undesignated routes
+are checked against the default 15-min gate, since the question for
+them is "would this clear the high-freq bar?" not "what tier should
+we put it in?".
 
 Two cases are interesting either way:
 
-  (a) Routes WMATA publishes as frequent but with sparse frequent
-      cell-hours in our data -> WMATA list may be stale, or our
-      schedule snapshot lags WMATA's published map.
+  (a) Routes WMATA publishes as frequent but sparse under their
+      own tier gate -> WMATA list may be stale, the route's tier
+      assignment may be wrong, or our schedule snapshot lags
+      WMATA's published map.
 
   (b) Routes WMATA does NOT publish as frequent but with a high
       fraction of frequent cell-hours -> WMATA omission, or the
@@ -36,7 +43,7 @@ from src.ewt import (
     FREQUENT_HEADWAY_MAX_SEC,
     fetch_scheduled_cell_hours_for_routes,
 )
-from src.frequent_routes import load_frequent_route_ids
+from src.frequent_routes import get_cell_hour_gate_sec, load_frequent_route_ids
 from src.models import Route
 
 # A route is flagged as "data-driven frequent" when at least this
@@ -56,11 +63,13 @@ DAYTIME_HOURS = range(7, 21)
 
 def _daytime_frequent_share(
     cell_hour_to_headways: dict[tuple[int, str, int], list[float]],
+    gate_sec: int = FREQUENT_HEADWAY_MAX_SEC,
 ) -> tuple[int, int]:
     """Return (frequent_cell_hours, total_cell_hours) restricted to daytime.
 
     Only hours in `DAYTIME_HOURS` count. A cell-hour is "frequent" iff its
-    mean scheduled headway is at most `FREQUENT_HEADWAY_MAX_SEC`.
+    mean scheduled headway is at most `gate_sec`. The caller is expected
+    to pass the route's per-tier gate.
     """
     frequent = 0
     total = 0
@@ -71,7 +80,7 @@ def _daytime_frequent_share(
             continue
         total += 1
         mean_h = sum(headways) / len(headways)
-        if mean_h <= FREQUENT_HEADWAY_MAX_SEC:
+        if mean_h <= gate_sec:
             frequent += 1
     return frequent, total
 
@@ -99,14 +108,18 @@ def main() -> int:
         assert "weekday" in DAY_TYPE_REPRESENTATIVE_FIELD
         sched = fetch_scheduled_cell_hours_for_routes(db, day_type="weekday")
 
-        # Per-route share computation. Routes with zero cell-hours in
-        # daytime (likely school-day-only routes that don't run weekday
-        # off-peak) get share = None and drop into a separate "no
-        # weekday daytime service" bucket.
+        # Per-route share computation. Each route is gated under its own
+        # tier's threshold — designated routes use get_cell_hour_gate_sec;
+        # undesignated routes fall back to the default 15-min gate inside
+        # that helper. Routes with zero cell-hours in daytime (likely
+        # school-day-only routes that don't run weekday off-peak) get
+        # share = None and drop into a separate "no weekday daytime
+        # service" bucket.
         share_by_route: dict[str, float | None] = {}
         details: dict[str, tuple[int, int]] = {}
         for route_id in gtfs_route_ids:
-            frequent, total = _daytime_frequent_share(sched.get(route_id, {}))
+            gate_sec = get_cell_hour_gate_sec(route_id)
+            frequent, total = _daytime_frequent_share(sched.get(route_id, {}), gate_sec)
             details[route_id] = (frequent, total)
             share_by_route[route_id] = (frequent / total) if total > 0 else None
 
@@ -137,10 +150,12 @@ def main() -> int:
         )
         out.append(f"GTFS current routes: **{len(gtfs_route_ids)}**\n")
         out.append(
-            f"Threshold: a route counts as data-driven frequent when "
+            f"Threshold: a route passes the data-driven check when "
             f"≥ **{int(DATA_DRIVEN_FREQUENT_HOUR_RATIO * 100)}%** of its "
-            f"weekday daytime (7-21) cell-hours have a mean scheduled headway "
-            f"≤ **{FREQUENT_HEADWAY_MAX_SEC // 60} min**.\n"
+            f"weekday daytime (7-21) cell-hours have a mean scheduled "
+            f"headway ≤ its tier gate "
+            f"(15 min for high-freq / undesignated, 20 min for "
+            f"medium-freq — see `src/frequent_routes.py`).\n"
         )
         out.append("")
 

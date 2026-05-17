@@ -122,7 +122,7 @@ class TestEasternHour:
 
 
 class TestIsCellHourFrequent:
-    """Cell-hour frequent classifier — mean scheduled headway ≤ 15 min (= 900s)."""
+    """Cell-hour frequent classifier — mean scheduled headway ≤ gate_sec (default 900s)."""
 
     def test_empty_is_not_frequent(self):
         assert _is_cell_hour_frequent([]) is False
@@ -142,6 +142,20 @@ class TestIsCellHourFrequent:
     def test_short_uniform_headways_are_frequent(self):
         # 5-min headways — clearly frequent.
         assert _is_cell_hour_frequent([300.0, 300.0, 300.0]) is True
+
+    def test_custom_gate_includes_medium_freq_headways(self):
+        # 18-min mean is excluded by the 15-min default gate but included
+        # by the 20-min medium-freq gate. Mirrors the per-route gate
+        # lookup used in production.
+        eighteen_min_secs = [18 * 60]
+        assert _is_cell_hour_frequent(eighteen_min_secs) is False
+        assert _is_cell_hour_frequent(eighteen_min_secs, gate_sec=20 * 60) is True
+
+    def test_custom_gate_boundary_is_inclusive(self):
+        # 20-min headway under a 20-min gate is in (≤ is inclusive),
+        # 20-min-and-one-second is out.
+        assert _is_cell_hour_frequent([20 * 60], gate_sec=20 * 60) is True
+        assert _is_cell_hour_frequent([20 * 60 + 1], gate_sec=20 * 60) is False
 
 
 def _seed_route(db_session, route_id: str = ROUTE) -> Route:

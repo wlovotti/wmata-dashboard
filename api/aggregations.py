@@ -38,7 +38,7 @@ from src.ewt import (
     fetch_scheduled_cell_hours_for_routes,
 )
 from src.excess_trip_time import compute_excess_trip_time
-from src.frequent_routes import load_frequent_route_ids
+from src.frequent_routes import get_cell_hour_gate_sec, load_frequent_route_ids
 from src.models import (
     Calendar,
     Route,
@@ -1551,11 +1551,14 @@ def _system_ewt_and_bunching_for_date(
             prev_ts_bun = ts
 
     # System-level EWT: pool every frequent cell-hour across every route.
+    # Each route's cell-hour gate matches its tier (15-min for high-freq /
+    # undesignated, 20-min for medium-freq) — see src/frequent_routes.py.
     obs_pool: list[float] = []
     sched_pool: list[float] = []
     for route_id, sched_cells in sched_by_route.items():
+        gate_sec = get_cell_hour_gate_sec(route_id)
         for cell_hour, sched_headways in sched_cells.items():
-            if not _is_cell_hour_frequent(sched_headways):
+            if not _is_cell_hour_frequent(sched_headways, gate_sec):
                 continue
             sched_pool.extend(sched_headways)
             obs_key = (route_id, *cell_hour)

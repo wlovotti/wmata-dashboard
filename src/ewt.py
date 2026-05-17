@@ -87,18 +87,20 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from src.frequent_routes import DEFAULT_GATE_SEC, get_cell_hour_gate_sec
 from src.models import Calendar, GTFSSnapshot, StopEvent, StopTime, Trip
 from src.time_periods import is_hour_in_period
 
 EASTERN = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 
-# A cell-hour is "frequent" iff its mean scheduled headway is at most this
-# many seconds. 15 min matches the route-level threshold in service_profile.py
-# (FREQUENT_HEADWAY_MIN = 15.0), so cell-level and route-level definitions of
-# "frequent" agree on the same threshold — they just disagree on the unit
-# being classified.
-FREQUENT_HEADWAY_MAX_SEC = 15 * 60
+# Module-level default for callers that don't have a route_id in hand
+# (system-wide EWT, ad-hoc analysis). 15 min matches the route-level
+# threshold in service_profile.py (FREQUENT_HEADWAY_MIN = 15.0). The
+# per-route gate is resolved via `get_cell_hour_gate_sec` so medium-
+# frequency routes get a 20-min gate matching their tier (see
+# `src/frequent_routes.py` for the tier policy).
+FREQUENT_HEADWAY_MAX_SEC = DEFAULT_GATE_SEC
 
 # Eastern-hour boundaries for the period buckets surfaced in API/UI.
 # (label, start_hour_inclusive, end_hour_exclusive). Night wraps the day end
@@ -263,15 +265,23 @@ def _scheduled_headways_by_cell_hour(
     return by_cell_hour
 
 
-def _is_cell_hour_frequent(scheduled_headways: list[float]) -> bool:
-    """A cell-hour is frequent iff its mean scheduled headway ≤ FREQUENT_HEADWAY_MAX_SEC.
+def _is_cell_hour_frequent(
+    scheduled_headways: list[float],
+    gate_sec: int = FREQUENT_HEADWAY_MAX_SEC,
+) -> bool:
+    """A cell-hour is frequent iff its mean scheduled headway ≤ `gate_sec`.
+
+    `gate_sec` defaults to `FREQUENT_HEADWAY_MAX_SEC` (15 min) for callers
+    without route context. Per-route callers resolve their gate via
+    `src/frequent_routes.py:get_cell_hour_gate_sec` so medium-frequency
+    routes get a 20-min gate matching their tier.
 
     Excludes cell-hours with no scheduled headways (single-arrival cells, or
     cells with no service in this hour at all) — they can't be classified.
     """
     if not scheduled_headways:
         return False
-    return (sum(scheduled_headways) / len(scheduled_headways)) <= FREQUENT_HEADWAY_MAX_SEC
+    return (sum(scheduled_headways) / len(scheduled_headways)) <= gate_sec
 
 
 def compute_ewt_for_route_date(
@@ -293,13 +303,14 @@ def compute_ewt_for_route_date(
 
     sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
     obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str)
+    gate_sec = get_cell_hour_gate_sec(route_id)
 
     obs_pool: dict[str, list[float]] = defaultdict(list)
     sched_pool: dict[str, list[float]] = defaultdict(list)
     freq_cell_count: dict[str, int] = defaultdict(int)
 
     for cell_hour, sched_headways in sched_by_cell_hour.items():
-        if not _is_cell_hour_frequent(sched_headways):
+        if not _is_cell_hour_frequent(sched_headways, gate_sec):
             continue
         _direction, _stop, hour = cell_hour
         period = _period_for_hour(hour)
@@ -453,12 +464,13 @@ def compute_ewt_headline_for_route(
 
     sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
     obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str)
+    gate_sec = get_cell_hour_gate_sec(route_id)
 
     obs_pool: list[float] = []
     sched_pool: list[float] = []
     freq_cells = 0
     for cell_hour, sched_headways in sched_by_cell_hour.items():
-        if not _is_cell_hour_frequent(sched_headways):
+        if not _is_cell_hour_frequent(sched_headways, gate_sec):
             continue
         _direction, _stop, hour = cell_hour
         if not is_hour_in_period(hour, period_key):
@@ -639,11 +651,12 @@ def compute_ewt_headline_for_routes(
     for route_id in all_routes:
         sched_cells = sched_by_route_cell_hour.get(route_id, {})
         obs_cells = obs_by_route_cell_hour.get(route_id, {})
+        gate_sec = get_cell_hour_gate_sec(route_id)
         obs_pool: list[float] = []
         sched_pool: list[float] = []
         freq_cells = 0
         for cell_hour, sched_headways in sched_cells.items():
-            if not _is_cell_hour_frequent(sched_headways):
+            if not _is_cell_hour_frequent(sched_headways, gate_sec):
                 continue
             sched_pool.extend(sched_headways)
             obs_pool.extend(obs_cells.get(cell_hour, []))
@@ -766,11 +779,12 @@ def compute_ewt_headline_for_routes_multi_date(
         for route_id in all_routes:
             sched_cells = sched_by_route_cell_hour.get(route_id, {})
             obs_cells = obs_by_date_route_cell_hour.get((service_date_str, route_id), {})
+            gate_sec = get_cell_hour_gate_sec(route_id)
             obs_pool: list[float] = []
             sched_pool: list[float] = []
             freq_cells = 0
             for cell_hour, sched_headways in sched_cells.items():
-                if not _is_cell_hour_frequent(sched_headways):
+                if not _is_cell_hour_frequent(sched_headways, gate_sec):
                     continue
                 sched_pool.extend(sched_headways)
                 obs_pool.extend(obs_cells.get(cell_hour, []))
