@@ -889,19 +889,20 @@ class RouteMetricsDailyOverlay(Base):
 # Three sibling tables hold the diagnostic surfaces materialized by
 # `src/route_diagnostics.py` and refreshed nightly by
 # `pipelines/refresh_route_diagnostic_profile.py`. The split is deliberate —
-# each downstream panel (NOTES-58/59/60/61/62) reads exactly one shape:
+# each downstream panel reads exactly one shape:
 #
 #   route_diagnostic_segment   — per-segment slip + cumulative slip
-#                                drives slip-trajectory charts (NOTES-58),
-#                                stop-pair / corridor diagnostic
-#                                (NOTES-59/62), schedule audit (NOTES-60)
+#                                drives slip-trajectory charts (RouteDetail
+#                                diagnosis panel, PR #124), stop-pair /
+#                                corridor diagnostic (NOTES-59/62),
+#                                schedule audit (NOTES-60)
 #
 #   route_diagnostic_timepoint — per-timepoint behavior classification
-#                                drives timepoint behavior table (NOTES-58),
+#                                drives timepoint behavior table (PR #124),
 #                                hold-down candidates (NOTES-61)
 #
 #   route_diagnostic_direction — per-direction early%/late%/signature
-#                                drives direction-asymmetry summary (NOTES-58)
+#                                drives direction-asymmetry summary (PR #124)
 #
 # One denormalized table was considered; rejected because per-segment rows
 # are per-edge (~50 per direction per route), per-timepoint rows are
@@ -1014,7 +1015,7 @@ class RouteDiagnosticTimepoint(Base):
 
     The hold-down candidates page (NOTES-61) reads
     `classification = 'leaky'` over all routes and ranks by p10 drop;
-    the timepoint behavior table on RouteDetail (NOTES-58) reads one
+    the timepoint behavior table on RouteDetail (PR #124) reads one
     `route_id` at a time.
     """
 
@@ -1047,7 +1048,7 @@ class RouteDiagnosticTimepoint(Base):
             "timepoint_stop_id",
             name="uq_route_diag_timepoint_key",
         ),
-        # NOTES-58 RouteDetail read: one route, one period.
+        # RouteDetail diagnosis panel (PR #124) read: one route, one period.
         Index(
             "idx_route_diag_timepoint_route_period",
             "route_id",

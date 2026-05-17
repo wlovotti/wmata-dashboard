@@ -4,7 +4,7 @@ timepoint behavior classification, and direction asymmetry.
 
 Codifies the analytical pattern from the D80 deep-dive (May 2026
 session). Materialized nightly into the `route_diagnostic_*` tables
-so dashboard panels (NOTES-58/59/60/61/62) are O(1) reads of
+so dashboard panels (RouteDetail diagnosis panel PR #124, NOTES-59/60/61/62) are O(1) reads of
 pre-aggregated rows rather than ad-hoc scans of `stop_events`.
 
 Reference implementation: ``visualizations/slip_trajectory.py:fetch_slip``
