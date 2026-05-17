@@ -47,10 +47,23 @@ RouteList (`/routes`), and RouteDetail for route D72 (`/route/D72`). All
 `/api/**` calls are intercepted by `page.route()` and served from committed
 JSON fixtures in `tests/fixtures/` — no backend is required.
 
-**Baseline snapshots are platform-specific.** Baselines committed to this
-repo were generated on macOS. If CI (Linux) fails on snapshot mismatch, a
-maintainer must run `npx playwright test --update-snapshots` in the CI
-environment (or via `act`), commit the Linux snapshots, and then remove the
-`continue-on-error: true` flag from the Playwright step in
-`.github/workflows/test.yml`. See the PR body that introduced this scaffold
-for the exact steps.
+**Baseline snapshots are platform-specific.** Playwright stores one PNG per
+platform (`*-chromium-linux.png`, `*-chromium-darwin.png`). CI runs on Linux
+and validates against the `*-linux.png` baselines; macOS devs see `*-darwin.png`
+locally. Both are committed.
+
+When you change UI that affects a baselined page, regenerate **both** sets:
+
+```bash
+# macOS baselines (run locally on your Mac):
+npx playwright test --update-snapshots
+
+# Linux baselines (run via Docker so CI passes):
+docker run --rm -v "$(pwd):/work" -v /work/node_modules -w /work \
+  mcr.microsoft.com/playwright:v1.60.0-noble \
+  bash -c "npm ci --silent && npx playwright test --update-snapshots"
+```
+
+If you only regenerate the macOS set, CI will fail on the stale Linux baseline.
+If you skip Docker and only regenerate Linux via a CI-update PR, your local
+runs will diff against an outdated darwin snapshot.

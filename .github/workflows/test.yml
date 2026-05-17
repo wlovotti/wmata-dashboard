@@ -126,9 +126,4 @@ jobs:
 
     - name: Visual regression tests (Playwright)
       working-directory: frontend
-      # continue-on-error: Linux baselines have not been generated yet.
-      # A maintainer must run `npx playwright test --update-snapshots` in CI
-      # (or via `act`), commit the resulting snapshots, and then remove this
-      # flag in a follow-up PR. See PR body for exact steps.
-      continue-on-error: true
       run: npx playwright test
