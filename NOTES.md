@@ -6,18 +6,18 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-16. Closed NOTES-56 — WMATA frequent-route list
-persisted and wired through. New `config/frequent_routes.yaml`
-(authoritative list pulled from WMATA's High-Frequency Metrobus
-Service Maps, June 29, 2025 Better Bus redesign), new
-`src/frequent_routes.py` loader (mtime-cached), `is_frequent: bool`
-on `/api/routes` and `/api/routes/{id}` payloads, EWT promoted to
-the headline KPI on RouteDetail / RouteList for frequent routes
-(OTP remains visible), `src/otp_constants.py` docstring rewritten
-to distinguish the route-level WMATA designation from the
-per-cell-hour `FREQUENT_HEADWAY_MAX_SEC` gate in `src/ewt.py`, and
-`analysis/frequent_routes_audit.py` cross-validation script for
-list-vs-data drift.
+Last edited 2026-05-16. Closed NOTES-53 — "Off target" panel added
+to the Overview page (this PR). Ranks routes by their gap to a
+configured per-route target on the metric selected via the shared
+contributors metric selector. Pulls overrides from `/api/targets`
+and joins against the `targets` block on `/api/routes` plus the
+matching live per-route value; routes that fall through to the
+system default are intentionally excluded so the panel doesn't
+re-rank the same routes the volume-weighted "Where to look" panel
+does. Empty state prompts the operator to edit
+`config/route_targets.yaml` when no overrides are configured.
+Pure frontend change — no new backend endpoints (PR #99's data
+plumbing was already sufficient).
 
 ---
 
@@ -54,10 +54,6 @@ proxies instead).
 
 **Information architecture & navigation**
 
-- **NOTES-53 "Off target" panel on Overview.** Rank routes by gap
-  to their configured per-route target — complements the
-  volume-weighted contributors view with a target-relative cut.
-  Slots into the Overview shell delivered by PR #105.
 - **NOTES-54 "What changed" panel on Overview** *(deferred — needs
   NOTES-38 + ≥14d data)*. Week-over-week movers split into
   improvements / degradations.
@@ -159,38 +155,6 @@ on most routes. Production data currently starts 2026-05-02; revisit
 once the collector has accumulated ≥14 days of continuous data so the
 feature is interpretable rather than "mostly suppressed." The closed
 PR's commits remain retrievable via `gh pr diff 81` for re-use.
-
----
-
-## NOTES-53. "Off target" panel on Overview
-
-**Severity: low.**
-
-Augments the Overview page (delivered by PR #105) with an
-additional panel ranking routes by their **gap to per-route
-target** for the selected metric. Distinct from "Where to look"
-(volume-weighted contribution): this one is target-relative
-percentage gap, which a manager monitoring SLA commitments wants
-to see independently from system-wide blast radius — a
-small-volume route can be far off target without showing up as a
-big contributor, and vice versa.
-
-Render: ranked list of "Route 30N · OTP 62% · -13 pp below target"
-with the metric selector shared with the contributors panel. Show
-only routes with a configured per-route override (not those falling
-through to the system default) — otherwise the panel ranks the same
-routes the contributors panel does. If no per-route overrides are
-set, the panel collapses to an empty state: "Set per-route targets
-in `config/route_targets.yaml` to populate this view."
-
-Backend already exposes the needed data: the `targets` block on
-`/api/routes` and the `reference_value` / `reference_source` fields
-on `/api/routes/contributors` both land via PR #99.
-
-### Dependencies
-
-Overview shell delivered by PR #105. NOTES-47 (per-route targets
-— closed PR #99) already provides the data plumbing.
 
 ---
 
