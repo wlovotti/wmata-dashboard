@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import useMultiFetch from '../hooks/useMultiFetch'
 import { useParams, useNavigate } from 'react-router-dom'
 import RouteMap from './RouteMap'
 import PeriodDrilldown from './PeriodDrilldown'
@@ -51,18 +52,6 @@ function RouteDetail() {
   // surfaces cascade lateness.
   const [trailingTab, setTrailingTab] = useState('runs')
 
-  // Trend data is fetched here (rather than inside RouteTrend) so the same
-  // 30-day series can drive both the sparkline block and the per-KPI-card
-  // 7-vs-prior-7-day deltas above. Three fetches: OTP and excess_trip_time
-  // come from route_metrics_daily, service_delivered is computed live per
-  // service date (NOTES-37 / endpoint extension). NOTES-43 added the
-  // excess_trip_time trend.
-  const [otpTrend, setOtpTrend] = useState(null)
-  const [sdTrend, setSdTrend] = useState(null)
-  const [excessTrend, setExcessTrend] = useState(null)
-  const [trendLoading, setTrendLoading] = useState(true)
-  const [trendError, setTrendError] = useState(null)
-
   useEffect(() => {
     const params = new URLSearchParams()
     if (dayType !== 'all') params.set('day_type', dayType)
@@ -81,45 +70,41 @@ function RouteDetail() {
       })
   }, [routeId, dayType, period])
 
-  useEffect(() => {
-    let cancelled = false
-    setTrendLoading(true)
-    setTrendError(null)
-    // Build filter querystring fragment shared across the three trend fetches.
-    // Period is honored only for the OTP trend (the others are trip-level
-    // / daily aggregates that don't decompose by hour); pass it on every
-    // call anyway — the API silently ignores it for non-otp metrics.
+  // Trend data is fetched here (rather than inside RouteTrend) so the same
+  // 30-day series can drive both the sparkline block and the per-KPI-card
+  // 7-vs-prior-7-day deltas above. Three fetches: OTP and excess_trip_time
+  // come from route_metrics_daily, service_delivered is computed live per
+  // service date (NOTES-37 / endpoint extension). NOTES-43 added the
+  // excess_trip_time trend.
+  //
+  // Build filter querystring fragment shared across the three trend fetches.
+  // Period is honored only for the OTP trend (the others are trip-level
+  // / daily aggregates that don't decompose by hour); pass it on every
+  // call anyway — the API silently ignores it for non-otp metrics.
+  const trendUrls = useMemo(() => {
     const filterParams = []
     if (dayType !== 'all') filterParams.push(`day_type=${encodeURIComponent(dayType)}`)
     if (period !== 'all') filterParams.push(`period=${encodeURIComponent(period)}`)
     const filterQs = filterParams.length ? `&${filterParams.join('&')}` : ''
-    Promise.all([
-      fetch(`/api/routes/${routeId}/trend?metric=otp&days=30${filterQs}`).then((res) =>
-        res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`),
-      ),
-      fetch(`/api/routes/${routeId}/trend?metric=service_delivered&days=30${filterQs}`).then(
-        (res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)),
-      ),
-      fetch(`/api/routes/${routeId}/trend?metric=excess_trip_time&days=30${filterQs}`).then(
-        (res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)),
-      ),
-    ])
-      .then(([otp, sd, excess]) => {
-        if (cancelled) return
-        setOtpTrend(otp)
-        setSdTrend(sd)
-        setExcessTrend(excess)
-        setTrendLoading(false)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        setTrendError(err.message || err)
-        setTrendLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
+    return [
+      `/api/routes/${routeId}/trend?metric=otp&days=30${filterQs}`,
+      `/api/routes/${routeId}/trend?metric=service_delivered&days=30${filterQs}`,
+      `/api/routes/${routeId}/trend?metric=excess_trip_time&days=30${filterQs}`,
+    ]
   }, [routeId, dayType, period])
+
+  const {
+    data: trendData,
+    loading: trendLoading,
+    error: trendError,
+  } = useMultiFetch(trendUrls)
+
+  // Unpack the parallel responses into named variables for the downstream
+  // useMemo calls. trendData is null until the first successful fetch.
+  const otpTrend = trendData?.[0] ?? null
+  const sdTrend = trendData?.[1] ?? null
+  const excessTrend = trendData?.[2] ?? null
+
 
   // Memoized {date, value} series + deltas. Service-delivered is stored as a
   // 0..1 ratio in the payload but rendered as percentage points on the card,

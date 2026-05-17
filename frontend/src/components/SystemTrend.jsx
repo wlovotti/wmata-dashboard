@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import useMultiFetch from '../hooks/useMultiFetch'
 import { DeltaIndicator, Sparkline, TargetIndicator } from './RouteTrend'
 
 const OTP_LINE_COLOR = '#002F6C'
@@ -36,6 +36,15 @@ function computeSystemDelta(series, priorWindowValue) {
   }
 }
 
+// Static URL list — system trend never re-fetches on user interaction so
+// this can live outside the component and is stable across renders.
+const SYSTEM_TREND_URLS = [
+  '/api/system/trend?metric=otp&days=30',
+  '/api/system/trend?metric=service_delivered&days=30',
+  '/api/system/trend?metric=ewt&days=30',
+  '/api/system/trend?metric=bunching&days=30',
+]
+
 /**
  * Top-of-page system trend strip: four sparklines (OTP, service-delivered,
  * EWT, bunching) with a 30-vs-prior-30 delta on each.
@@ -50,45 +59,19 @@ function computeSystemDelta(series, priorWindowValue) {
  * trend block on RouteDetail.
  */
 function SystemTrend() {
-  const [data, setData] = useState({
-    otp: null,
-    service_delivered: null,
-    ewt: null,
-    bunching: null,
-  })
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const { data: rawData, loading, error } = useMultiFetch(
+    SYSTEM_TREND_URLS,
+    ([otp, sd, ewt, bun]) => ({
+      otp,
+      service_delivered: sd,
+      ewt,
+      bunching: bun,
+    }),
+  )
 
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    Promise.all(
-      ['otp', 'service_delivered', 'ewt', 'bunching'].map((metric) =>
-        fetch(`/api/system/trend?metric=${metric}&days=30`).then((res) =>
-          res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`),
-        ),
-      ),
-    )
-      .then(([otp, sd, ewt, bun]) => {
-        if (cancelled) return
-        setData({
-          otp,
-          service_delivered: sd,
-          ewt,
-          bunching: bun,
-        })
-        setLoading(false)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        setError(err.message || err)
-        setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // Use an empty sentinel object while rawData is null so downstream reads
+  // are safe without repeated null-guards.
+  const data = rawData ?? { otp: null, service_delivered: null, ewt: null, bunching: null }
 
   if (loading) {
     return (

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import useMultiFetch from '../hooks/useMultiFetch'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
@@ -227,6 +228,16 @@ function HealthPulse({ systemMetrics, scorecard }) {
   )
 }
 
+// Static URL list for the four system trend metrics. Defined outside Overview
+// so the array reference is stable and useMultiFetch doesn't re-fetch on
+// every render.
+const OVERVIEW_TREND_URLS = [
+  '/api/system/trend?metric=otp&days=30',
+  '/api/system/trend?metric=service_delivered&days=30',
+  '/api/system/trend?metric=ewt&days=30',
+  '/api/system/trend?metric=bunching&days=30',
+]
+
 /**
  * Overview landing page (PR #105). Single screen that answers "are we OK
  * right now, and where should I look?" without parsing the full route
@@ -244,7 +255,6 @@ function HealthPulse({ systemMetrics, scorecard }) {
 function Overview() {
   const navigate = useNavigate()
   const [scorecard, setScorecard] = useState(null)
-  const [systemTrendData, setSystemTrendData] = useState(null)
   const [contribMetric, setContribMetric] = useState('otp')
   const [contribData, setContribData] = useState(null)
   const [contribLoading, setContribLoading] = useState(false)
@@ -278,27 +288,12 @@ function Overview() {
   // and target_value for each metric. Same data <SystemTrend> reads, so
   // there's no extra network cost per metric beyond the parallel fan-out
   // that component already does — both calls hit the cached path.
-  useEffect(() => {
-    let cancelled = false
-    Promise.all(
-      ['otp', 'service_delivered', 'ewt', 'bunching'].map((metric) =>
-        fetch(`/api/system/trend?metric=${metric}&days=30`).then((res) =>
-          res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`),
-        ),
-      ),
-    )
-      .then(([otp, sd, ewt, bun]) => {
-        if (cancelled) return
-        setSystemTrendData({ otp, service_delivered: sd, ewt, bunching: bun })
-      })
-      .catch(() => {
-        // Degrade silently — the SystemTrend component below will show
-        // its own error if the fan-out fails identically there.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // AbortController cancellation is handled inside useMultiFetch.
+  const { data: rawSystemTrendData } = useMultiFetch(
+    OVERVIEW_TREND_URLS,
+    ([otp, sd, ewt, bun]) => ({ otp, service_delivered: sd, ewt, bunching: bun }),
+  )
+  const systemTrendData = rawSystemTrendData ?? null
 
   // One-shot fetch for the off-target panel's override set. The endpoint is
   // a static-ish YAML read on the backend (mtime-cached in
