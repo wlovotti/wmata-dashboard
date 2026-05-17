@@ -7,7 +7,7 @@ NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
 Last edited 2026-05-16. Closed NOTES-53 — "Off target" panel added
-to the Overview page (this PR). Ranks routes by their gap to a
+to the Overview page (PR #112). Ranks routes by their gap to a
 configured per-route target on the metric selected via the shared
 contributors metric selector. Pulls overrides from `/api/targets`
 and joins against the `targets` block on `/api/routes` plus the
