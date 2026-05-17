@@ -78,7 +78,13 @@ def test_overlay_upsert_is_idempotent(db_session):
 
 
 def test_hydrate_overlay_row_shape():
-    """The hydrated bundle matches what the windowed aggregator reads."""
+    """The hydrated bundle exposes both sufficient stats AND derived fields.
+
+    Derived fields (ewt_seconds, coverage_ratio, bunching_rate) must be
+    present so consumers of a single-date cached bundle (`/api/routes/{id}`
+    via `get_live_metrics_for_route_today`) don't see N/A. The window
+    aggregator pools the sufficient stats and ignores the derived keys.
+    """
     row = RouteMetricsDailyOverlay(
         route_id="R1",
         service_date="2026-05-05",
@@ -121,9 +127,59 @@ def test_hydrate_overlay_row_shape():
     # EWT sufficient stats round-trip
     assert bundle["ewt"]["obs_sum_h"] == 1200.0
     assert bundle["ewt"]["obs_sum_h_sq"] == 1440000.0
-    # Bunching counts
+    # EWT derived fields — what the detail endpoint reads.
+    # AWT = 1_440_000 / (2 * 1200) = 600.0
+    # SWT =   360_000 / (2 *  600) = 300.0
+    # EWT = AWT - SWT = 300.0; coverage = 2/2 = 1.0
+    assert bundle["ewt"]["awt_seconds"] == 600.0
+    assert bundle["ewt"]["swt_seconds"] == 300.0
+    assert bundle["ewt"]["ewt_seconds"] == 300.0
+    assert bundle["ewt"]["coverage_ratio"] == 1.0
+
+    # Bunching counts + derived rate
     assert bundle["bunching"]["bunching_count"] == 3
     assert bundle["bunching"]["total_headways"] == 100
+    assert bundle["bunching"]["bunching_rate"] == 0.03
+
+
+def test_hydrate_overlay_row_zero_stats_yields_none_metrics():
+    """A row with zero sufficient-stat sums emits `None` for every derived field.
+
+    Defends the "row exists but no headways observed/scheduled" case — the
+    detail endpoint should see explicit `None`, not a `KeyError`, and not
+    a NaN from a divide-by-zero.
+    """
+    row = RouteMetricsDailyOverlay(
+        route_id="R1",
+        service_date="2026-05-05",
+        day_type="weekday",
+        otp_origin_early=0,
+        otp_origin_on_time=0,
+        otp_origin_late=0,
+        otp_destination_early=0,
+        otp_destination_on_time=0,
+        otp_destination_late=0,
+        otp_all_early=0,
+        otp_all_on_time=0,
+        otp_all_late=0,
+        scheduled_trips=0,
+        delivered_trips=0,
+        ewt_obs_sum_h=0.0,
+        ewt_obs_sum_h_sq=0.0,
+        ewt_n_observed_headways=0,
+        ewt_sched_sum_h=0.0,
+        ewt_sched_sum_h_sq=0.0,
+        ewt_n_scheduled_headways=0,
+        bunching_count=0,
+        bunching_total_headways=0,
+    )
+    bundle = _hydrate_overlay_row(row)
+
+    assert bundle["ewt"]["awt_seconds"] is None
+    assert bundle["ewt"]["swt_seconds"] is None
+    assert bundle["ewt"]["ewt_seconds"] is None
+    assert bundle["ewt"]["coverage_ratio"] is None
+    assert bundle["bunching"]["bunching_rate"] is None
 
 
 @pytest.mark.smoke
@@ -205,3 +261,83 @@ def test_scorecard_reads_from_overlay_when_available(db_session, sample_route):
     # 9 / 10 = 90% on-time.
     assert test1["otp_all_pct"] == 90.0
     assert test1["service_delivered_ratio"] == 1.0
+
+
+@pytest.mark.smoke
+def test_detail_endpoint_sees_derived_fields_from_overlay_cache(db_session, sample_route):
+    """Regression: cached overlay bundles expose `ewt_seconds` to the detail endpoint.
+
+    Reproduces the cross-cache bug: a scorecard call (`/api/routes`) hydrates
+    overlay rows into `_live_metrics_cache` keyed by service_date. A
+    subsequent detail call (`/api/routes/{id}`) reads that cache via
+    `get_live_metrics_for_route_today` and returns whatever bundle is
+    there. Before the fix the cached bundle was sufficient-stats only,
+    so `ewt_seconds` was missing and the frontend rendered "N/A" — even
+    though the underlying overlay row had perfectly good stats.
+    """
+    from datetime import datetime
+
+    from api.aggregations import (
+        _live_metric_fields,
+        _live_metrics_cache,
+        _window_metrics_cache,
+        get_all_routes_scorecard,
+        get_live_metrics_for_route_today,
+    )
+    from src.models import StopEvent
+    from src.timezones import eastern_today
+
+    end_date = eastern_today() - timedelta(days=1)
+    db_session.add(
+        StopEvent(
+            service_date=end_date.isoformat(),
+            trip_id="T1",
+            route_id="TEST1",
+            direction_id=0,
+            stop_id="S1",
+            stop_sequence=1,
+            observed_arrival_ts=datetime(2026, 5, 5, 12, 0, 0),
+            scheduled_arrival_ts=datetime(2026, 5, 5, 12, 0, 0),
+            deviation_sec=0,
+            source="proximity",
+            schedule_relationship="SCHEDULED",
+        )
+    )
+    # Seed an overlay row with nonzero EWT and bunching stats so the
+    # derived fields have something to compute.
+    db_session.add(
+        RouteMetricsDailyOverlay(
+            route_id="TEST1",
+            service_date=end_date.isoformat(),
+            day_type="weekday",
+            otp_all_early=1,
+            otp_all_on_time=9,
+            otp_all_late=0,
+            scheduled_trips=10,
+            delivered_trips=10,
+            ewt_obs_sum_h=1200.0,
+            ewt_obs_sum_h_sq=1440000.0,
+            ewt_n_observed_headways=2,
+            ewt_sched_sum_h=600.0,
+            ewt_sched_sum_h_sq=360000.0,
+            ewt_n_scheduled_headways=2,
+            bunching_count=3,
+            bunching_total_headways=100,
+        )
+    )
+    db_session.commit()
+
+    _live_metrics_cache.clear()
+    _window_metrics_cache.clear()
+
+    # 1. Scorecard call — populates _live_metrics_cache via overlay path.
+    get_all_routes_scorecard(db_session, days=7)
+
+    # 2. Detail call — should now expose the derived fields, not N/A.
+    bundle = get_live_metrics_for_route_today(db_session, "TEST1")
+    assert bundle is not None
+    fields = _live_metric_fields(bundle)
+    assert fields["ewt_seconds"] == 300.0
+    assert fields["ewt_n_observed"] == 2
+    assert fields["ewt_coverage_ratio"] == 1.0
+    assert fields["bunching_rate"] == 0.03

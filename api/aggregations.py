@@ -277,6 +277,44 @@ def _aggregate_service_delivered_window(daily_sd: list[dict]) -> dict | None:
     }
 
 
+def _derive_ewt_metrics(
+    obs_sum_h: float,
+    obs_sum_h_sq: float,
+    sched_sum_h: float,
+    sched_sum_h_sq: float,
+    n_observed: int,
+    n_scheduled: int,
+) -> dict:
+    """Compute AWT / SWT / EWT / coverage_ratio from EWT sufficient statistics.
+
+    `AWT = Σh² / (2·Σh)` is exact under sums, so this works for both
+    single-date hydration and windowed aggregation. Each field is `None`
+    when its input sum is non-positive — matches the raw-pool convention
+    in `src/ewt.py`. EWT is unclamped (raw `awt - swt`) to match the
+    headline live-compute path; the per-period variant in `src/ewt.py`
+    clamps at 0 and is not relevant here.
+    """
+    awt = obs_sum_h_sq / (2.0 * obs_sum_h) if obs_sum_h > 0 else None
+    swt = sched_sum_h_sq / (2.0 * sched_sum_h) if sched_sum_h > 0 else None
+    ewt = (awt - swt) if (awt is not None and swt is not None) else None
+    coverage = (n_observed / n_scheduled) if n_scheduled > 0 else None
+    return {
+        "awt_seconds": round(awt, 2) if awt is not None else None,
+        "swt_seconds": round(swt, 2) if swt is not None else None,
+        "ewt_seconds": round(ewt, 2) if ewt is not None else None,
+        "coverage_ratio": round(coverage, 4) if coverage is not None else None,
+    }
+
+
+def _derive_bunching_metrics(bunching_count: int, total_headways: int) -> dict:
+    """Compute bunching_rate from bunching counts.
+
+    `rate = bunched / total`, or `None` when no observed pairs exist.
+    """
+    rate = round(bunching_count / total_headways, 4) if total_headways else None
+    return {"bunching_rate": rate}
+
+
 def _aggregate_ewt_window(daily_ewt: list[dict]) -> dict | None:
     """Pool EWT sufficient statistics across days; recompute AWT/SWT/EWT.
 
@@ -296,20 +334,14 @@ def _aggregate_ewt_window(daily_ewt: list[dict]) -> dict | None:
     n_observed = sum(d.get("n_observed_headways", 0) for d in daily_ewt)
     n_scheduled = sum(d.get("n_scheduled_headways", 0) for d in daily_ewt)
 
-    awt = obs_sum_h_sq / (2.0 * obs_sum_h) if obs_sum_h > 0 else None
-    swt = sched_sum_h_sq / (2.0 * sched_sum_h) if sched_sum_h > 0 else None
-    ewt = (awt - swt) if (awt is not None and swt is not None) else None
-    coverage = (n_observed / n_scheduled) if n_scheduled > 0 else None
-
     first = daily_ewt[0]
     return {
         "route_id": first.get("route_id"),
-        "awt_seconds": round(awt, 2) if awt is not None else None,
-        "swt_seconds": round(swt, 2) if swt is not None else None,
-        "ewt_seconds": round(ewt, 2) if ewt is not None else None,
+        **_derive_ewt_metrics(
+            obs_sum_h, obs_sum_h_sq, sched_sum_h, sched_sum_h_sq, n_observed, n_scheduled
+        ),
         "n_observed_headways": int(n_observed),
         "n_scheduled_headways": int(n_scheduled),
-        "coverage_ratio": round(coverage, 4) if coverage is not None else None,
     }
 
 
@@ -324,13 +356,12 @@ def _aggregate_bunching_window(daily_bun: list[dict]) -> dict | None:
         return None
     bunched = sum(d.get("bunching_count", 0) for d in daily_bun)
     total = sum(d.get("total_headways", 0) for d in daily_bun)
-    rate = round(bunched / total, 4) if total else None
     first = daily_bun[0]
     return {
         "route_id": first.get("route_id"),
         "bunching_count": int(bunched),
         "total_headways": int(total),
-        "bunching_rate": rate,
+        **_derive_bunching_metrics(int(bunched), int(total)),
     }
 
 
@@ -364,13 +395,18 @@ def _aggregate_live_metrics_window(
 
 
 def _hydrate_overlay_row(row: RouteMetricsDailyOverlay) -> dict:
-    """Reshape one `route_metrics_daily_overlay` row into the per-date bundle
-    shape `_aggregate_live_metrics_window` consumes.
+    """Reshape one `route_metrics_daily_overlay` row into a per-date bundle.
 
-    The aggregator reads sufficient statistics from each sub-dict and
-    finalizes the metric (OTP pcts, SD ratio, AWT/SWT/EWT, bunching rate)
-    at the window level. Empty OTP sub-blocks emit `{n: 0}` — same
-    distinction the live path uses between "no data" and "0% on-time."
+    Output shape matches what the live single-route compute path produces:
+    sufficient statistics PLUS the derived headline fields (AWT/SWT/EWT,
+    coverage_ratio, bunching_rate). The window aggregator pools the
+    sufficient stats across days and ignores the derived fields — those
+    are recomputed at the window level from the pooled sums. The detail
+    endpoint, which reads a single date from the same shared cache,
+    needs the derived fields directly.
+
+    Empty OTP sub-blocks emit `{n: 0}` — same distinction the live path
+    uses between "no data" and "0% on-time."
     """
 
     def _otp_block(early: int, on_time: int, late: int, source: str) -> dict:
@@ -417,10 +453,19 @@ def _hydrate_overlay_row(row: RouteMetricsDailyOverlay) -> dict:
             "sched_sum_h": row.ewt_sched_sum_h,
             "sched_sum_h_sq": row.ewt_sched_sum_h_sq,
             "n_scheduled_headways": row.ewt_n_scheduled_headways,
+            **_derive_ewt_metrics(
+                row.ewt_obs_sum_h,
+                row.ewt_obs_sum_h_sq,
+                row.ewt_sched_sum_h,
+                row.ewt_sched_sum_h_sq,
+                row.ewt_n_observed_headways,
+                row.ewt_n_scheduled_headways,
+            ),
         },
         "bunching": {
             "bunching_count": row.bunching_count,
             "total_headways": row.bunching_total_headways,
+            **_derive_bunching_metrics(row.bunching_count, row.bunching_total_headways),
         },
     }
 
