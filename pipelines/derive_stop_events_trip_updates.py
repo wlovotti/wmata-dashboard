@@ -40,7 +40,6 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from sqlalchemy import text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import (
@@ -53,6 +52,7 @@ from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.models import Route, StopEvent, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
 from src.timezones import eastern_today, utcnow_naive
+from src.upsert_helpers import upsert_rows
 
 # Window around the target service_date to scan for snapshots, in Eastern hours.
 # Service hours run roughly 04:00 → 02:00 next day; one extra hour each side
@@ -296,10 +296,12 @@ def derive_trip_update_stop_events(
 
     rows_written = 0
     if rows:
-        stmt = pg_insert(StopEvent).values(rows)
-        update_cols = {
-            c: stmt.excluded[c]
-            for c in (
+        upsert_rows(
+            db,
+            StopEvent,
+            rows,
+            constraint_name="uq_stop_events_run_stop_source",
+            update_cols=[
                 "route_id",
                 "direction_id",
                 "vehicle_id",
@@ -311,14 +313,8 @@ def derive_trip_update_stop_events(
                 "schedule_relationship",
                 "match_distance_m",
                 "derived_at",
-            )
-        }
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_stop_events_run_stop_source",
-            set_=update_cols,
+            ],
         )
-        db.execute(stmt)
-        db.commit()
         rows_written = len(rows)
 
     result = {

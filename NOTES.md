@@ -6,13 +6,14 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-67 by extracting
-`run_route_date_grid` into `src/batch_iterator.py` and migrating all
-four per-route pipelines (`derive_stop_events`, `derive_stop_events_trip_updates`,
-`aggregate_runs`, `compute_bunching`) to use it. The helper encapsulates
-the dates-outer / routes-inner loop and accepts a `pool_workers` parameter
-as a reserved seam for future parallelisation (raises `NotImplementedError`
-today). No behaviour change; all 462 tests pass.
+Last edited 2026-05-17. Closed NOTES-65 by building
+`src/upsert_helpers.py:upsert_rows` and migrating all four per-route
+pipelines (`derive_stop_events`, `derive_stop_events_trip_updates`,
+`aggregate_runs`, `compute_bunching`) to call it. The helper wraps the
+`pg_insert(...).on_conflict_do_update(constraint=..., set_=...)` boilerplate
+behind a single call that takes the model, constraint name, and update-column
+list as arguments. Postgres-only by design; callers guard with `if rows:`
+before invoking. No behaviour change; all 462 tests pass.
 
 ---
 
@@ -97,11 +98,6 @@ taste.
   pages hand-roll `useEffect` + `Promise.all` + manual
   error/cancellation handling. A shared hook removes the repetition
   and fixes latent race conditions on fast route switches.
-- **NOTES-65 Shared `upsert_rows` helper for pipelines.** Each
-  pipeline reconstructs
-  `pg_insert(...).on_conflict_do_update(constraint=..., set_=...)`
-  by hand; a `src/upsert_helpers.py` shim standardizes the pattern
-  and centralizes error/conflict handling.
 
 ### P5 — Cleanup
 
@@ -530,26 +526,5 @@ Build `useMultiFetch(urls, transform)` in
 cleanup, and collapses the call sites to a single line. Migrate
 components one at a time; the hook is opt-in per call-site, so the
 refactor can land incrementally.
-
----
-
-## NOTES-65. Shared `upsert_rows` helper for pipelines
-
-**Severity: low** (works; each pipeline reimplements the same pattern).
-**Effort: medium** (3+ pipelines to migrate; constraint names to track).
-
-`pipelines/compute_bunching.py:62-78`,
-`pipelines/aggregate_runs.py:260-280`,
-`pipelines/derive_stop_events_trip_updates.py:315+`, and others each
-hand-build `pg_insert(...).on_conflict_do_update(constraint=...,
-set_={...})` with row dicts assembled inline. The boilerplate is
-nearly identical; only the table, the constraint name, and the
-update columns vary.
-
-Build `src/upsert_helpers.py:upsert_rows(db, Model, rows,
-constraint_name, update_cols)` to abstract away constraint-name
-hardcoding and `set_=` dict construction. Adds a single seam to
-standardize error handling and batching later. Migrate pipelines
-one at a time; each is independent.
 
 
