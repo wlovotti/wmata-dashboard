@@ -51,6 +51,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.database import get_session
+from src.date_ranges import iter_eastern_dates
 from src.models import Route, Run
 from src.timezones import eastern_today
 
@@ -147,11 +148,13 @@ def determine_target_dates(lookback_days: int = 7) -> list[date_type]:
     catch_up_window: list[date_type] = []
     db = get_session()
     try:
-        # Scan from (yesterday - lookback_days) up to (yesterday - 1).
+        # Scan from (today - lookback_days) up to (today - 2 == yesterday - 1).
         # Yesterday itself is always processed; skip it in the catch-up
-        # branch to avoid double-listing.
-        for offset in range(2, lookback_days + 1):
-            candidate = today - timedelta(days=offset)
+        # branch to avoid double-listing. iter_eastern_dates yields
+        # ascending; that matches the existing oldest-first sort below.
+        catch_up_start = today - timedelta(days=lookback_days)
+        catch_up_end = today - timedelta(days=2)
+        for candidate in iter_eastern_dates(catch_up_start, catch_up_end):
             count = db.query(Run).filter(Run.service_date == candidate.isoformat()).count()
             if count == 0:
                 catch_up_window.append(candidate)

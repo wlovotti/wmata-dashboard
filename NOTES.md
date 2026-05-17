@@ -6,20 +6,19 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-66 by extracting
-`_make_otp_block(early_count, on_time_count, late_count,
-total_count, source)` in `api/aggregations.py` and routing both
-`_aggregate_otp_split_window` (live path) and `_hydrate_overlay_row`
-(materialized-overlay path) through it. The two inline builders had
-been identical-but-duplicated and were the exact drift surface that
-caused the PR #115 near-miss bug; a parametrized
-`TestMakeOtpBlock.test_shape_contract` now locks the on-the-wire
-shape so future divergence gets caught at the unit level. Pure
-refactor — output is byte-identical to before. PR rides on the
-earlier same-day addition of NOTES-63..68 (six code-quality
-items grouped under the new `Code-quality / DRY cleanup`
-subsection) and the corresponding CLAUDE.md working-agreement
-updates (frontend-lint command + Claude tooling file locations).
+Last edited 2026-05-17. Closed NOTES-68 by extracting
+`iter_eastern_dates(start, end)` and
+`iter_recent_eastern_dates(lookback_days)` into a new
+`src/date_ranges.py` module and routing the two real date-iteration
+call-sites (`pipelines/compute_bunching.py`'s `--start-date/--end-date`
+and `--days` branches, and `pipelines/run_daily_batch.py:determine_target_dates`)
+through it. Service-date iteration semantics now live in one place,
+removing the drift surface where each pipeline reconstructed
+`for i in range(...) + timedelta(days=...)` loops by hand and giving
+future changes (weekday filters, holiday skips) a single seam to land
+on. Pure consolidation — no behavior change beyond standardizing
+`--days` ordering to ascending (matches `--start-date/--end-date`
+branch; idempotent upserts make ordering irrelevant to output).
 
 ---
 
@@ -118,9 +117,6 @@ taste.
   orchestration.** `pipelines/run_daily_batch.py` hand-rolls the
   per-route × per-date loop and other pipelines copy the pattern.
   Shared helper enables uniform parallelization later.
-- **NOTES-68 `iter_eastern_dates` helper in `src/date_ranges.py`.**
-  6+ pipelines reimport `eastern_today` and reconstruct date-range
-  loops manually. A small helper module dedupes the pattern.
 
 ### P5 — Cleanup
 
@@ -613,25 +609,6 @@ implementation; setting `pool_workers > 1` later becomes a one-line
 change for any pipeline that wants it, rather than per-pipeline
 retrofitting. Honor the existing single-threaded behavior by default
 — parallelism is a separate decision per pipeline.
-
----
-
-## NOTES-68. `iter_eastern_dates` helper in `src/date_ranges.py`
-
-**Severity: low** (works; dedup for clarity).
-**Effort: low** (small new module + grep-replace in pipelines).
-
-Several pipelines (`compute_bunching.py`, `derive_stop_events.py`,
-`derive_stop_events_trip_updates.py`, `aggregate_runs.py`,
-`run_daily_batch.py`, plus scripts) reimport `eastern_today` from
-`src/timezones.py` and reconstruct date-range loops manually
-(`for i in range(lookback_days): date = eastern_today() -
-timedelta(days=i)`).
-
-Add `src/date_ranges.py` with `iter_eastern_dates(start, end)` and
-`iter_recent_eastern_dates(lookback_days)` helpers. Replace the
-hand-rolled loops across 6+ call-sites. Pure consolidation — no
-behavior change.
 
 ---
 
