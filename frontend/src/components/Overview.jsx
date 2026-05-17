@@ -29,6 +29,78 @@ function formatContribMetricValue(metric, value) {
   return String(value)
 }
 
+// Off-target panel (NOTES-53). The panel ranks routes by their gap to a
+// configured per-route target — distinct from "Where to look," which is
+// volume-weighted contribution. We only include routes that appear in
+// `/api/targets`'s `routes` block (i.e. with an explicit override),
+// otherwise the panel would just re-rank the same routes the contributors
+// panel ranks, against the shared system default.
+const OFF_TARGET_TOP_N = 10
+
+/**
+ * For a given metric, pull the current per-route value from the scorecard
+ * row in the same canonical units that `route_targets.yaml` exposes via the
+ * `targets` block on /api/routes. Returns null when the underlying live
+ * field is missing.
+ *
+ * OTP is already in percent (0-100). service_delivered and bunching live
+ * as 0-1 fractions on the scorecard row; the matching target on `r.targets`
+ * is the same 0-1 fraction (NOTES-47 canonical units). EWT is seconds on
+ * both sides.
+ */
+function currentForMetric(metric, row) {
+  if (!row) return null
+  if (metric === 'otp') return row.otp_all_pct ?? null
+  if (metric === 'service_delivered') return row.service_delivered_ratio ?? null
+  if (metric === 'ewt') return row.ewt_seconds ?? null
+  if (metric === 'bunching') return row.bunching_rate ?? null
+  return null
+}
+
+/**
+ * Format a route's gap to target with units appropriate to the metric. For
+ * OTP / service_delivered / bunching we report percentage points (pp); for
+ * EWT we report seconds. The sign + suffix communicates direction:
+ * "below target" for the wrong-side, "above target" for the right-side.
+ *
+ * Returns the suffixed string only — callers tint / format the whole row.
+ */
+function formatGap(metric, current, target) {
+  if (current == null || target == null) return null
+  // Convert to display units (percent points for the 0-1 metrics) so the gap
+  // reads "13 pp below" instead of "0.13 below."
+  let currentDisp = current
+  let targetDisp = target
+  let unit = ''
+  let higherIsBetter = true
+  if (metric === 'otp') {
+    unit = 'pp'
+    higherIsBetter = true
+  } else if (metric === 'service_delivered') {
+    currentDisp = current * 100
+    targetDisp = target * 100
+    unit = 'pp'
+    higherIsBetter = true
+  } else if (metric === 'ewt') {
+    unit = 's'
+    higherIsBetter = false
+  } else if (metric === 'bunching') {
+    currentDisp = current * 100
+    targetDisp = target * 100
+    unit = 'pp'
+    higherIsBetter = false
+  }
+  // Signed gap from the route's perspective: negative = below target,
+  // positive = above target. For lower-is-better metrics we flip so the
+  // "below target" label always means "underperforming."
+  const signedGap = higherIsBetter ? currentDisp - targetDisp : targetDisp - currentDisp
+  const magnitude = Math.abs(signedGap)
+  const rounded = unit === 's' ? Math.round(magnitude) : magnitude.toFixed(1)
+  const direction = signedGap < 0 ? 'below target' : 'above target'
+  const sign = signedGap < 0 ? '-' : '+'
+  return { text: `${sign}${rounded} ${unit} ${direction}`, isBelow: signedGap < 0 }
+}
+
 /**
  * Pull the most recent non-null value from a `trend_data` series. Used to
  * derive a current system reading for the health pulse from whichever
@@ -189,6 +261,11 @@ function Overview() {
   const [contribData, setContribData] = useState(null)
   const [contribLoading, setContribLoading] = useState(false)
   const [contribError, setContribError] = useState(null)
+  // Off-target panel (NOTES-53). One fetch of `/api/targets` gives us the
+  // override set; per-route current values come from `scorecard` so we can
+  // share a single network round-trip with the health pulse and the "X
+  // routes below target" count.
+  const [targetsData, setTargetsData] = useState(null)
 
   // Fetch scorecard once for the "X routes below target" count. The
   // /api/routes endpoint is cached server-side (60s TTL) so the cost is
@@ -229,6 +306,26 @@ function Overview() {
       .catch(() => {
         // Degrade silently — the SystemTrend component below will show
         // its own error if the fan-out fails identically there.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // One-shot fetch for the off-target panel's override set. The endpoint is
+  // a static-ish YAML read on the backend (mtime-cached in
+  // `src/route_targets.py`), so no need to refetch on metric switch — the
+  // panel filters the cached payload client-side.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/targets')
+      .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
+      .then((json) => {
+        if (!cancelled) setTargetsData(json)
+      })
+      .catch(() => {
+        // Off-target panel falls back to its error / empty state. Don't
+        // block the rest of Overview on a missing targets endpoint.
       })
     return () => {
       cancelled = true
@@ -309,6 +406,69 @@ function Overview() {
   ]
 
   const visibleContributors = (contribData?.contributors ?? []).slice(0, CONTRIB_TOP_N)
+
+  // Off-target rows for the selected metric (NOTES-53). Build by joining
+  // the override set from `/api/targets` against the per-route current
+  // values + targets on the scorecard. `targetsData.routes` keys are
+  // route_ids; each value is a partial-override block (subset of the four
+  // metrics). We filter to routes that override the *selected* metric so
+  // the panel is target-driven rather than re-ranking the entire scorecard.
+  const offTargetRows = (() => {
+    if (!targetsData || !scorecard) return []
+    const overrides = targetsData.routes || {}
+    const byRouteId = new Map(
+      (scorecard.routes || []).map((r) => [r.route_id, r]),
+    )
+    const rows = []
+    for (const [routeId, overrideBlock] of Object.entries(overrides)) {
+      // Only routes whose override block names the selected metric. A
+      // route with an override for OTP but not EWT shouldn't appear under
+      // the EWT cut — its EWT target is the inherited system default.
+      if (!overrideBlock || overrideBlock[contribMetric] == null) continue
+      const row = byRouteId.get(routeId)
+      if (!row) continue
+      const target = overrideBlock[contribMetric]
+      const current = currentForMetric(contribMetric, row)
+      const gap = formatGap(contribMetric, current, target)
+      if (gap == null) continue
+      // signedGap (route-perspective) for sorting: most-below first.
+      // For higher-is-better, "below target" is current < target → (current - target) < 0;
+      // for lower-is-better we flipped the sign in formatGap, so the magnitude is the
+      // same but we need a sortable scalar. Recompute here for clarity.
+      const higherIsBetter = contribMetric === 'otp' || contribMetric === 'service_delivered'
+      const cDisp =
+        contribMetric === 'service_delivered' || contribMetric === 'bunching'
+          ? current * 100
+          : current
+      const tDisp =
+        contribMetric === 'service_delivered' || contribMetric === 'bunching'
+          ? target * 100
+          : target
+      const signedGap = higherIsBetter ? cDisp - tDisp : tDisp - cDisp
+      rows.push({
+        routeId,
+        routeShortName: row.route_name,
+        routeLongName: row.route_long_name,
+        current,
+        target,
+        gapText: gap.text,
+        isBelow: gap.isBelow,
+        signedGap,
+      })
+    }
+    // Sort most-below-target first (ascending signedGap — most negative first).
+    rows.sort((a, b) => a.signedGap - b.signedGap)
+    return rows.slice(0, OFF_TARGET_TOP_N)
+  })()
+
+  // Distinguish "no overrides configured at all" (the spec's empty-state
+  // message) from "overrides exist but none for this metric" (more honest
+  // sub-message). `targetsData.routes` can be `{}` when YAML is the
+  // out-of-box default.
+  const hasAnyOverrides =
+    targetsData != null &&
+    targetsData.routes &&
+    Object.keys(targetsData.routes).length > 0
 
   return (
     <main>
@@ -403,6 +563,74 @@ function Overview() {
             See all routes →
           </Link>
         </div>
+      </div>
+
+      <div className="table-container">
+        <h2>Off target</h2>
+        <p className="drilldown-anchor" style={{ marginBottom: '0.75rem' }}>
+          Routes with a configured per-route target in{' '}
+          <code>config/route_targets.yaml</code>, ranked by gap to that
+          target on the metric selected above. Complementary to "Where to
+          look" — a small-volume route can be far off target without
+          showing up as a big system contributor.
+        </p>
+
+        {!hasAnyOverrides ? (
+          <p>
+            Set per-route targets in <code>config/route_targets.yaml</code>{' '}
+            to populate this view.
+          </p>
+        ) : offTargetRows.length === 0 ? (
+          <p>
+            No per-route overrides configured for{' '}
+            {CONTRIB_METRICS.find((m) => m.key === contribMetric)?.label ??
+              contribMetric}
+            .
+          </p>
+        ) : (
+          <table className="routes-table">
+            <thead>
+              <tr>
+                <th>Route</th>
+                <th>Name</th>
+                <th>Route value</th>
+                <th>Target</th>
+                <th>Gap</th>
+              </tr>
+            </thead>
+            <tbody>
+              {offTargetRows.map((r) => (
+                <tr
+                  key={r.routeId}
+                  onClick={() => navigate(`/route/${r.routeId}`)}
+                  style={{ cursor: 'pointer' }}
+                >
+                  <td className="route-id">
+                    <span
+                      className="route-badge"
+                      style={{ backgroundColor: badgeColor(null, true) }}
+                    >
+                      {r.routeShortName || r.routeId}
+                    </span>
+                  </td>
+                  <td className="route-name">{r.routeLongName || 'N/A'}</td>
+                  <td className="metric">
+                    {formatContribMetricValue(contribMetric, r.current)}
+                  </td>
+                  <td className="metric">
+                    {formatContribMetricValue(contribMetric, r.target)}
+                  </td>
+                  <td
+                    className="metric"
+                    style={{ color: r.isBelow ? '#b91c1c' : '#15803d' }}
+                  >
+                    {r.gapText}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </main>
   )
