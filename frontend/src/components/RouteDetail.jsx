@@ -373,13 +373,15 @@ function RouteDetail() {
             </div>
             <div className="stat-label">
               On-Time Performance
-              {renderServerDelta(serverDeltas.otp, (d) => `${d.toFixed(1)} pp`)}
-              <TargetIndicator
-                value={routeData.otp_all_pct}
-                target={routeData.targets?.otp}
-                higherIsBetter
-                format={(t) => `${t.toFixed(0)}%`}
-              />
+              <div>{renderServerDelta(serverDeltas.otp, (d) => `${d.toFixed(1)} pp`)}</div>
+              <div>
+                <TargetIndicator
+                  value={routeData.otp_all_pct}
+                  target={routeData.targets?.otp}
+                  higherIsBetter
+                  format={(t) => `${t.toFixed(0)}%`}
+                />
+              </div>
             </div>
           </div>
         )
@@ -403,33 +405,35 @@ function RouteDetail() {
             </div>
             <div className="stat-label">
               Excess Wait Time
-              {renderServerDelta(serverDeltas.ewt, (d) => `${Math.round(d)}s`, true)}
+              <div>{renderServerDelta(serverDeltas.ewt, (d) => `${Math.round(d)}s`, true)}</div>
               {routeData.is_frequent && (
-                <span
-                  className="headline-kpi-tag"
-                  title="EWT is the rider-relevant headline for WMATA frequent-service routes (config/frequent_routes.yaml)"
-                  style={{
-                    marginLeft: '0.4rem',
-                    fontSize: '0.65rem',
-                    padding: '0.1rem 0.35rem',
-                    borderRadius: '4px',
-                    background: '#dbeafe',
-                    color: '#1e40af',
-                    textTransform: 'none',
-                    letterSpacing: 0,
-                    fontWeight: 600,
-                    verticalAlign: 'middle',
-                  }}
-                >
-                  Frequent service
-                </span>
+                <div>
+                  <span
+                    className="headline-kpi-tag"
+                    title="EWT is the rider-relevant headline for WMATA frequent-service routes (config/frequent_routes.yaml)"
+                    style={{
+                      fontSize: '0.65rem',
+                      padding: '0.1rem 0.35rem',
+                      borderRadius: '4px',
+                      background: '#dbeafe',
+                      color: '#1e40af',
+                      textTransform: 'none',
+                      letterSpacing: 0,
+                      fontWeight: 600,
+                    }}
+                  >
+                    Frequent service
+                  </span>
+                </div>
               )}
-              <TargetIndicator
-                value={routeData.ewt_seconds}
-                target={routeData.targets?.ewt}
-                higherIsBetter={false}
-                format={(t) => `${(t / 60).toFixed(1)} min`}
-              />
+              <div>
+                <TargetIndicator
+                  value={routeData.ewt_seconds}
+                  target={routeData.targets?.ewt}
+                  higherIsBetter={false}
+                  format={(t) => `${(t / 60).toFixed(1)} min`}
+                />
+              </div>
             </div>
             {routeData.ewt_seconds == null && (
               <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
@@ -458,24 +462,28 @@ function RouteDetail() {
               <div className="stat-label">
                 Service Delivered
                 {/* SD ratio is 0..1; the server delta is also 0..1 so scale to pp. */}
-                {renderServerDelta(
-                  serverDeltas.service_delivered,
-                  (d) => `${(d * 100).toFixed(1)} pp`,
-                )}
-                <TargetIndicator
-                  value={
-                    routeData.service_delivered_ratio != null
-                      ? routeData.service_delivered_ratio * 100
-                      : null
-                  }
-                  target={
-                    routeData.targets?.service_delivered != null
-                      ? routeData.targets.service_delivered * 100
-                      : null
-                  }
-                  higherIsBetter
-                  format={(t) => `${t.toFixed(0)}%`}
-                />
+                <div>
+                  {renderServerDelta(
+                    serverDeltas.service_delivered,
+                    (d) => `${(d * 100).toFixed(1)} pp`,
+                  )}
+                </div>
+                <div>
+                  <TargetIndicator
+                    value={
+                      routeData.service_delivered_ratio != null
+                        ? routeData.service_delivered_ratio * 100
+                        : null
+                    }
+                    target={
+                      routeData.targets?.service_delivered != null
+                        ? routeData.targets.service_delivered * 100
+                        : null
+                    }
+                    higherIsBetter
+                    format={(t) => `${t.toFixed(0)}%`}
+                  />
+                </div>
               </div>
               {routeData.service_delivered_scheduled != null && (
                 <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
@@ -507,25 +515,29 @@ function RouteDetail() {
               </div>
               <div className="stat-label">
                 Bunching Rate
-                {renderServerDelta(
-                  serverDeltas.bunching,
-                  (d) => `${(d * 100).toFixed(1)} pp`,
-                  true,
-                )}
-                <TargetIndicator
-                  value={
-                    routeData.bunching_rate != null
-                      ? routeData.bunching_rate * 100
-                      : null
-                  }
-                  target={
-                    routeData.targets?.bunching != null
-                      ? routeData.targets.bunching * 100
-                      : null
-                  }
-                  higherIsBetter={false}
-                  format={(t) => `${t.toFixed(1)}%`}
-                />
+                <div>
+                  {renderServerDelta(
+                    serverDeltas.bunching,
+                    (d) => `${(d * 100).toFixed(1)} pp`,
+                    true,
+                  )}
+                </div>
+                <div>
+                  <TargetIndicator
+                    value={
+                      routeData.bunching_rate != null
+                        ? routeData.bunching_rate * 100
+                        : null
+                    }
+                    target={
+                      routeData.targets?.bunching != null
+                        ? routeData.targets.bunching * 100
+                        : null
+                    }
+                    higherIsBetter={false}
+                    format={(t) => `${t.toFixed(1)}%`}
+                  />
+                </div>
               </div>
               {routeData.bunching_total_headways != null && routeData.bunching_total_headways > 0 && (
                 <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
@@ -541,11 +553,13 @@ function RouteDetail() {
               </div>
               <div className="stat-label">
                 % of Trips Running Long
-                {renderServerDelta(
-                  serverDeltas.excess_trip_time_pct,
-                  (d) => `${d.toFixed(1)} pp`,
-                  true,
-                )}
+                <div>
+                  {renderServerDelta(
+                    serverDeltas.excess_trip_time_pct,
+                    (d) => `${d.toFixed(1)} pp`,
+                    true,
+                  )}
+                </div>
               </div>
               {excessActualMin != null && excessSchedMin != null && (
                 <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>

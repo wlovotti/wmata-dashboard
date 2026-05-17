@@ -319,6 +319,7 @@ function RouteTrend({
               <DeltaIndicator
                 delta={excessDelta.delta}
                 format={(d) => `${d.toFixed(1)} pp`}
+                lowerIsBetter
               />
             )}
           </div>
