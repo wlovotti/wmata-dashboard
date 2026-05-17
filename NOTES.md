@@ -86,6 +86,34 @@ target lists directly.
 
 ### Independent of the redesign
 
+- **NOTES-71 JSONL archive multi-frame recovery / rotation strategy.**
+  `JsonlArchiveWriter` opens the per-day file in `"ab"` (append-binary)
+  mode, so a collector restart mid-day concatenates a fresh zstd frame
+  onto whatever's already there. If the prior collector exited
+  *ungracefully* (no `close()` → no frame footer), the day file ends up
+  with three regions: clean prior frames, an **abandoned frame with no
+  footer**, then a fresh frame. `pipelines/rotate_archive.py` uses
+  `dctx.stream_reader(f)` without `read_across_frames=True`, so it
+  reads only the first frame and silently truncates — followed by a
+  size-verify-and-delete that would discard the un-extracted data.
+  Even with `read_across_frames=True`, the decoder errors on the
+  abandoned frame (next frame's magic looks like garbage *inside* the
+  current frame), so no automatic recovery is possible across an
+  abandoned middle frame.
+  Real-world cost: 2026-05-17 deploy of #128 + #129 produced a
+  ~14.5 MB abandoned frame; data is also in `trip_update_snapshots`,
+  so operational loss is zero, but the corrupt day-file was preserved
+  as `archive/raw_snapshots/2026-05-17.jsonl.zst.corrupt-multiframe`
+  and a fresh day-file was started.
+  Fix options: (a) rotate to a per-process filename
+  (`YYYY-MM-DD.<pid>.<startup_ts>.jsonl.zst`) so each collector run
+  gets its own file — `rotate_archive.py` then loops over all day
+  files; (b) on startup, scan the existing day file for an
+  unfinalized last frame and write a synthetic footer before
+  appending; (c) write each line as its own complete frame
+  (FLUSH_FRAME after every append) — recoverable but loses much of
+  zstd's ratio. (a) is the cleanest.
+
 - **NOTES-70 Filter `select(StopEvent)` in derive-from-state tests.**
   `tests/test_derive_stop_events_from_state.py` does
   `pg_session.execute(select(StopEvent)).scalar_one()` (and equivalent
