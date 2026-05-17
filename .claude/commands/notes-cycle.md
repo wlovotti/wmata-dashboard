@@ -66,76 +66,82 @@ different NOTES-N. Capture the chosen NOTES-N for the rest of the cycle.
 
 # Step 4 — Dispatch subagent for implementation
 
-Invoke the `Agent` tool with `subagent_type: "general-purpose"` and a
-self-contained prompt. The subagent does the heavy lifting; its
-context dies on return so the parent stays slim under `/loop`.
+Invoke the `Agent` tool with:
 
-Subagent prompt template (fill in `{{NOTES-N}}` and `{{section_summary}}`
+- `subagent_type: "general-purpose"`
+- `model: "sonnet"` — the task is bounded mechanical work (branch,
+  edit, test, PR). Sonnet is cheaper and faster; genuinely hard items
+  kick back via `STATUS: needs_user` and the parent (Opus) re-routes.
+- a self-contained prompt (template below)
+
+The subagent loads the project's `CLAUDE.md` automatically, so the
+prompt does NOT restate repo conventions — it just hands over the task
+and the closing-PR checklist.
+
+Subagent prompt template (fill in `{{N}}` and `{{section_summary}}`
 from what you read in step 2):
 
 ```
-You are closing NOTES-{{N}} from /Users/wlovotti/repos/wmata-dashboard/NOTES.md
-in one PR. Here is the item's section verbatim:
+Close NOTES-{{N}} from /Users/wlovotti/repos/wmata-dashboard/NOTES.md
+in one PR. Item section verbatim:
 
 {{section_summary}}
 
-Repo conventions (from CLAUDE.md):
-- PostgreSQL only; never propose SQLite fallbacks
-- Pre-computed aggregations are the architectural rule
-- Datetime storage is naive UTC; use src/timezones.py for service-date math
-- GTFS queries must filter is_current=True
-- stop_id is not direction-unique; group by (route_id, direction_id, stop_id)
-- WMATA API budget: 10 calls/sec, 50k/day
+Execute this checklist top-to-bottom. Do not deviate.
 
-Git policy (from global CLAUDE.md):
-- Never commit to main directly
-- Branch naming: feature/ fix/ docs/ refactor/
+1. BRANCH. From `main`:
+     git checkout -b <prefix>/notes-{{N}}-<short-slug>
+   `<prefix>` ∈ {feature, fix, docs, refactor} per the item's nature.
 
-Your task:
+2. IMPLEMENT. Follow the item's "Implementation" / "Remaining work"
+   section. Keep scope tight; do NOT refactor adjacent code.
 
-1. Create a feature branch named after this item, e.g.
-   `feature/notes-{{N}}-<short-slug>` (use feature/ fix/ docs/ or
-   refactor/ as appropriate).
+3. SIDE EFFECTS. If you discover a new issue worth tracking, APPEND
+   a NOTES-<next-unused-N> entry to NOTES.md in this same session.
+   Never open a second PR. Never renumber existing items.
 
-2. Implement the change. Follow the item's "Implementation" or
-   "Remaining work" section if present. Keep scope tight — don't
-   refactor adjacent code.
-
-3. If you discover a side effect or new issue worth tracking, ADD a
-   new NOTES-N item to NOTES.md in the SAME edit session, using the
-   next sequential number after the current max. Don't open a second
-   PR.
-
-4. Run verification:
+4. VERIFY (run in order; fix and re-run until each is clean):
      uv run pytest -m smoke
      uv run ruff check src/ scripts/ api/ pipelines/
      uv run ruff format --check src/ scripts/ api/ pipelines/
-   Fix failures and re-run until clean. Run the broader test suite
-   (`uv run pytest`) if the change touches anything beyond a single
-   small surface.
+   If the change touches more than one small surface, also run the
+   full suite: `uv run pytest`.
 
-5. Fold the NOTES.md edits into the PR by following the procedure
-   in /Users/wlovotti/repos/wmata-dashboard/.claude/commands/update-notes-in-pr.md
-   (do NOT invoke a separate slash command — just follow the markdown's
-   procedure inline so this stays one subagent invocation).
+5. FOLD NOTES.md EDITS onto this branch (no separate PR):
+   a. Delete the NOTES-{{N}} section wholesale (its header through
+      the next `---` separator).
+   b. Remove the NOTES-{{N}} bullet from "Active priorities". If its
+      priority subsection becomes empty, remove the subsection header.
+   c. Rewrite surviving cross-references to NOTES-{{N}} into a
+      descriptive PR-anchored phrase, e.g.
+        `the route_service_profile rollout (PR #M)`
+      Use the in-flight PR number once known; otherwise leave a TODO
+      and patch on PR open.
+   d. Sweep the repo for stale references and rewrite them the same way:
+        grep -rn 'NOTES-{{N}}' --include='*.md' --include='*.py' \
+          --include='*.tsx' --include='*.ts'
+   e. Update the "Last edited YYYY-MM-DD" line at the top of NOTES.md
+      to today's date.
 
-6. Commit, push, and open the PR. Title style per recent merged PRs:
-   `feat:` / `fix:` / `docs:` / `refactor:` prefix, short summary,
-   parenthetical NOTES reference where appropriate. Body must explain
-   *why* the change was made — the body becomes the durable record once
-   NOTES-{{N}} is deleted from NOTES.md.
+6. COMMIT. Format:
+     <prefix>: <short summary> (NOTES-{{N}})
 
-7. Return ONLY:
-   - PR_NUMBER: <int>
-   - PR_URL: <url>
-   - SUMMARY: one paragraph, what changed and what verification ran
-   - NEW_NOTES: list of new NOTES-N items added (if any), or "none"
+7. OPEN PR with `gh pr create`. Title mirrors the commit. Body MUST
+   explain *why* the change was scoped this way — it becomes the
+   durable record once NOTES-{{N}} is deleted. A one-line body is
+   not acceptable.
 
-If you hit architectural ambiguity that needs a human decision,
-STOP and return:
-   - STATUS: needs_user
-   - QUESTION: <what you need decided>
-Do NOT guess — the parent will route the question.
+8. RETURN ONLY these four fields (no preamble, no recap):
+     PR_NUMBER: <int>
+     PR_URL: <url>
+     SUMMARY: one paragraph — what changed and what verification ran
+     NEW_NOTES: list of new NOTES-N items added, or "none"
+
+ESCAPE HATCH: if you hit architectural ambiguity that needs a human
+decision, STOP and return:
+     STATUS: needs_user
+     QUESTION: <what you need decided>
+Do not guess.
 ```
 
 Capture the subagent's return value. If it returned `STATUS:
