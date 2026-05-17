@@ -1,17 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-
-function formatDeviationSec(sec) {
-  /**
-   * Render an integer deviation_sec with sign and "late"/"early" suffix.
-   *
-   * Returns "—" for null so the table cells don't visually collapse.
-   */
-  if (sec == null) return '—'
-  const sign = sec > 0 ? '+' : ''
-  if (sec === 0) return '0s'
-  return `${sign}${sec}s`
-}
+import { formatDeviationSignedSec } from '../utils/formatters'
 
 function RecentRuns({ routeId }) {
   /**
@@ -112,8 +101,8 @@ function RecentRuns({ routeId }) {
                   <td>
                     {r.stops_observed ?? 0} / {r.stops_scheduled ?? 0}
                   </td>
-                  <td>{formatDeviationSec(r.dev_p50_sec)}</td>
-                  <td>{formatDeviationSec(r.dev_p95_sec)}</td>
+                  <td>{formatDeviationSignedSec(r.dev_p50_sec)}</td>
+                  <td>{formatDeviationSignedSec(r.dev_p95_sec)}</td>
                   <td>{r.vehicle_id || '—'}</td>
                 </tr>
               ))}

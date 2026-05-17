@@ -1,36 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-
-function formatDeviationSec(sec) {
-  /**
-   * Render an integer deviation_sec as Mm:SSs (signed) with "late"/"early"
-   * suffix, or "—" for null. Used in the worst-deviation column where the
-   * abs() has already been taken upstream — but we still want the human
-   * unit, so seconds → m:ss.
-   */
-  if (sec == null) return '—'
-  const abs = Math.abs(sec)
-  const mins = Math.floor(abs / 60)
-  const secs = abs % 60
-  return `${mins}:${secs.toString().padStart(2, '0')}`
-}
-
-function todayEasternIso() {
-  /**
-   * Return today's Eastern date as YYYY-MM-DD.
-   *
-   * Uses `Intl.DateTimeFormat` with the America/New_York timezone so the
-   * date matches what the API considers "today" — important during the
-   * early-morning UTC hours when the user's local browser date may differ.
-   */
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  })
-  return fmt.format(new Date())
-}
+import { formatDeviationMmSs, todayEasternIso } from '../utils/formatters'
 
 function BlockList({ routeId }) {
   /**
@@ -144,7 +114,7 @@ function BlockList({ routeId }) {
                   </td>
                   <td>{b.trip_count}</td>
                   <td>{b.trips_on_route}</td>
-                  <td>{formatDeviationSec(b.worst_deviation_seconds)}</td>
+                  <td>{formatDeviationMmSs(b.worst_deviation_seconds)}</td>
                   <td>{b.any_observed ? 'yes' : 'no'}</td>
                 </tr>
               ))}

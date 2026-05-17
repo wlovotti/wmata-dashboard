@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { computeSpectrumBar } from '../utils/spectrumBar'
+import { formatContribMetricValue } from '../utils/formatters'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -97,15 +98,6 @@ const CONTRIB_METRICS = [
 // a "Show all (M)" expander revealing the rest. Ten is enough to surface
 // the routes worth investigating without overwhelming the first viewport.
 const CONTRIB_TOP_N = 10
-
-function formatContribMetricValue(metric, value) {
-  if (value == null) return '—'
-  if (metric === 'otp') return `${Math.round(value)}%`
-  if (metric === 'service_delivered') return `${Math.round(value * 100)}%`
-  if (metric === 'ewt') return `${Math.round(value)}s`
-  if (metric === 'bunching') return `${(value * 100).toFixed(1)}%`
-  return String(value)
-}
 
 function formatContribScore(score) {
   if (score == null) return '—'
