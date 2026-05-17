@@ -1,10 +1,10 @@
 /**
- * Characterization tests for computeWindowDelta (RouteTrend.jsx).
+ * Characterization tests for computeWindowDelta.
  *
  * Lock in current behavior: 7-vs-prior-7 window, minimum DELTA_MIN_DAYS=3
  * per window, null suppression, date-based sorting.
  */
-import { computeWindowDelta } from '../../src/components/RouteTrend'
+import { computeWindowDelta } from '../../src/utils/computeWindowDelta'
 
 /** Build n days of {date, value} starting from day 1. */
 function days(n, valueFn = (i) => i + 1) {

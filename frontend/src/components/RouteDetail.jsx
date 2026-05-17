@@ -6,10 +6,10 @@ import PeriodDrilldown from './PeriodDrilldown'
 import RecentRuns from './RecentRuns'
 import BlockList from './BlockList'
 import RouteTrend, {
-  computeWindowDelta,
   DeltaIndicator,
   TargetIndicator,
 } from './RouteTrend'
+import { computeWindowDelta } from '../utils/computeWindowDelta'
 import StopDiagnostic from './StopDiagnostic'
 import RouteDiagnosisPanel from './RouteDiagnosisPanel'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'

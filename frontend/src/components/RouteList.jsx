@@ -11,7 +11,6 @@ import { DeltaIndicator } from './RouteTrend'
 // so the background fetch is cheap when warm.
 let _cachedRoutes = null
 let _cachedWindow = null
-let _cachedLastUpdated = null
 let _cachedGtfsFreshness = null
 
 // Inline target subline for the scorecard table cells (NOTES-47).
@@ -184,8 +183,6 @@ function RouteList() {
   const [error, setError] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [sortConfig, setSortConfig] = useState({ key: 'route_name', direction: 'asc' })
-  const [refreshing, setRefreshing] = useState(false)
-  const [lastUpdated, setLastUpdated] = useState(_cachedLastUpdated)
   const [gtfsFreshness, setGtfsFreshness] = useState(_cachedGtfsFreshness)
   // Mode toggle: 'contributors' (NOTES-39, default after NOTES-51) vs
   // 'default' (full alphabetic scorecard table, now collapsed behind a
@@ -220,11 +217,8 @@ function RouteList() {
         const window = data.window ?? null
         setRoutes(routesList)
         setScorecardWindow(window)
-        const now = new Date()
-        setLastUpdated(now)
         _cachedRoutes = routesList
         _cachedWindow = window
-        _cachedLastUpdated = now
         setError(null)
       })
       .catch(err => {
@@ -276,8 +270,7 @@ function RouteList() {
   }, [viewMode, contribMetric])
 
   const handleRefresh = () => {
-    setRefreshing(true)
-    fetchRoutes().finally(() => setRefreshing(false))
+    fetchRoutes()
   }
 
   // Filter and sort routes
