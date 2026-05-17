@@ -21,6 +21,7 @@ Call it only from pipelines that already require PostgreSQL.
 
 from typing import Any
 
+from sqlalchemy import case
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import DeclarativeBase, Session
 
@@ -70,3 +71,105 @@ def upsert_rows(
     stmt = stmt.on_conflict_do_update(constraint=constraint_name, set_=set_)
     db.execute(stmt)
     db.commit()
+
+
+def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:
+    """UPSERT trip_update_state rows with conditional last_pred_* semantics.
+
+    ``rows`` is a list of dicts shaped like::
+
+        {
+            "trip_id": str,
+            "stop_sequence": int,
+            "stop_id": str,
+            "vehicle_id": str | None,
+            "snapshot_ts": datetime,
+            "predicted_arrival_ts": datetime | None,
+            "schedule_relationship": str | None,
+        }
+
+    Semantics on conflict (trip_id, stop_sequence):
+        - final_snapshot_ts, final_schedule_relationship: always overwrite.
+        - last_pred_snapshot_ts, last_predicted_arrival_ts: overwrite ONLY
+          when the incoming predicted_arrival_ts is non-null. WMATA
+          sometimes nullifies predictions right at arrival; we want to
+          keep the last meaningful estimate (matching the existing
+          derivation algorithm at derive_stop_events_trip_updates.py:90).
+        - vehicle_id: COALESCE(new, existing) — keep last non-null.
+        - stop_id: overwrite (should be stable across snapshots for a
+          given (trip, stop_sequence), but defensively keep latest).
+        - derived_at: never touched by this function (only the derivation
+          pipeline writes it).
+
+    Postgres-only by construction: uses pg_insert with conditional
+    excluded.* logic in the ON CONFLICT DO UPDATE clause. SQLite cannot
+    represent this UPSERT, so callers in test contexts must use a real
+    Postgres connection (mark tests with ``@pytest.mark.integration``).
+
+    Parameters
+    ----------
+    db:
+        Active SQLAlchemy session bound to a PostgreSQL database.
+    rows:
+        List of row dicts.  Empty list is a no-op (returns 0).
+
+    Returns
+    -------
+    int
+        The number of rows passed in (Postgres doesn't reliably return
+        inserted-vs-updated counts on ON CONFLICT).
+    """
+    if not rows:
+        return 0
+
+    from src.models import TripUpdateState
+
+    payload = [
+        {
+            "trip_id": r["trip_id"],
+            "stop_sequence": r["stop_sequence"],
+            "stop_id": r["stop_id"],
+            "vehicle_id": r["vehicle_id"],
+            "final_snapshot_ts": r["snapshot_ts"],
+            "final_schedule_relationship": r["schedule_relationship"],
+            "last_pred_snapshot_ts": r["snapshot_ts"]
+            if r["predicted_arrival_ts"] is not None
+            else None,
+            "last_predicted_arrival_ts": r["predicted_arrival_ts"],
+        }
+        for r in rows
+    ]
+
+    stmt = pg_insert(TripUpdateState).values(payload)
+
+    excluded = stmt.excluded
+    table = TripUpdateState.__table__
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["trip_id", "stop_sequence"],
+        set_={
+            "stop_id": excluded.stop_id,
+            "vehicle_id": case(
+                (excluded.vehicle_id.is_(None), table.c.vehicle_id),
+                else_=excluded.vehicle_id,
+            ),
+            "final_snapshot_ts": excluded.final_snapshot_ts,
+            "final_schedule_relationship": excluded.final_schedule_relationship,
+            "last_pred_snapshot_ts": case(
+                (
+                    excluded.last_predicted_arrival_ts.is_(None),
+                    table.c.last_pred_snapshot_ts,
+                ),
+                else_=excluded.last_pred_snapshot_ts,
+            ),
+            "last_predicted_arrival_ts": case(
+                (
+                    excluded.last_predicted_arrival_ts.is_(None),
+                    table.c.last_predicted_arrival_ts,
+                ),
+                else_=excluded.last_predicted_arrival_ts,
+            ),
+        },
+    )
+
+    db.execute(stmt)
+    return len(rows)
