@@ -18,7 +18,6 @@ from datetime import date as date_type
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.batch_iterator import run_route_date_grid
@@ -27,6 +26,7 @@ from src.database import get_session
 from src.date_ranges import iter_eastern_dates, iter_recent_eastern_dates
 from src.models import Route, RouteHeadwayMetrics
 from src.timezones import eastern_today, utcnow_naive
+from src.upsert_helpers import upsert_rows
 
 
 def materialize_bunching_for_route_date(
@@ -61,23 +61,19 @@ def materialize_bunching_for_route_date(
 
     rows_written = 0
     if insert_rows:
-        stmt = pg_insert(RouteHeadwayMetrics).values(insert_rows)
-        update_cols = {
-            c: stmt.excluded[c]
-            for c in (
+        upsert_rows(
+            db,
+            RouteHeadwayMetrics,
+            insert_rows,
+            constraint_name="uq_route_headway_metrics_key",
+            update_cols=[
                 "day_type",
                 "bunching_count",
                 "total_headways",
                 "bunching_rate",
                 "computed_at",
-            )
-        }
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_route_headway_metrics_key",
-            set_=update_cols,
+            ],
         )
-        db.execute(stmt)
-        db.commit()
         rows_written = len(insert_rows)
 
     nonempty_periods = sum(1 for r in rows if r["total_headways"] > 0)

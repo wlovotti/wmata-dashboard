@@ -37,13 +37,13 @@ from datetime import datetime
 import numpy as np
 from dotenv import load_dotenv
 from sqlalchemy import func
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.models import Route, Run, StopEvent, StopTime
 from src.timezones import eastern_today, utcnow_naive
+from src.upsert_helpers import upsert_rows
 
 
 def aggregate_run_rows(
@@ -241,10 +241,12 @@ def aggregate_runs_for_route_date(
 
     rows_written = 0
     if rows:
-        stmt = pg_insert(Run).values(rows)
-        update_cols = {
-            c: stmt.excluded[c]
-            for c in (
+        upsert_rows(
+            db,
+            Run,
+            rows,
+            constraint_name="uq_runs_service_trip_source",
+            update_cols=[
                 "route_id",
                 "direction_id",
                 "vehicle_id",
@@ -266,14 +268,8 @@ def aggregate_runs_for_route_date(
                 "origin_dev_sec",
                 "destination_dev_sec",
                 "derived_at",
-            )
-        }
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_runs_service_trip_source",
-            set_=update_cols,
+            ],
         )
-        db.execute(stmt)
-        db.commit()
         rows_written = len(rows)
 
     result = {
