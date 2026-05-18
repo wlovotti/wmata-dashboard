@@ -51,7 +51,8 @@ from datetime import date as date_type
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 from dotenv import load_dotenv
 from sqlalchemy import text
 
@@ -78,6 +79,31 @@ ARCHIVE_COLUMNS = [
     "schedule_relationship",
     "collected_at",
 ]
+
+# Explicit pyarrow schema mirroring the Postgres column types. Declared
+# rather than inferred so we don't repeat the polars row-by-row inference
+# bug that crashed the prior implementation on day 1 (~32M rows).
+ARCHIVE_SCHEMA = pa.schema(
+    [
+        ("id", pa.int32()),
+        ("snapshot_ts", pa.timestamp("us")),
+        ("trip_id", pa.string()),
+        ("route_id", pa.string()),
+        ("vehicle_id", pa.string()),
+        ("stop_id", pa.string()),
+        ("stop_sequence", pa.int32()),
+        ("predicted_arrival_ts", pa.timestamp("us")),
+        ("predicted_departure_ts", pa.timestamp("us")),
+        ("schedule_relationship", pa.string()),
+        ("collected_at", pa.timestamp("us")),
+    ]
+)
+
+# Rows fetched per server-side cursor batch. ~50K rows × 11 columns of
+# strings/ints/timestamps lands at ~25 MB Python-side memory per batch —
+# well below the user's laptop pressure threshold, and large enough that
+# the per-batch overhead doesn't dominate end-to-end throughput.
+STREAM_BATCH_SIZE = 50_000
 
 
 def compute_cutoff(retention_days: int) -> datetime:
@@ -135,34 +161,59 @@ def count_rows_for_date(engine, day: date_type) -> int:
 def archive_date(engine, day: date_type, archive_path: Path) -> int:
     """Stream all rows for `day` (UTC) to `archive_path` as zstd parquet.
 
-    Returns the row count that was written. Uses polars' database reader to
-    pull the day's rows in one shot, then writes a single parquet file.
-    The day's volume (~20M rows × 11 columns of strings/ints/timestamps) is
-    well within RAM on the dev machine, so chunked streaming isn't needed
-    for the steady state. If a future cloud VM needs streaming, swap in
-    `pl.read_database_uri(..., iter_batches=True)` here.
+    Uses a psycopg2 server-side named cursor to fetch in fixed-size batches
+    and pyarrow's ParquetWriter to write each batch as a row group. Memory
+    is bounded by ``STREAM_BATCH_SIZE`` (~25 MB per batch) rather than the
+    full day, which avoids the OOM/swap behavior the prior polars-based
+    implementation showed on this dev laptop. The explicit ``ARCHIVE_SCHEMA``
+    bypasses schema-inference entirely, which was the failure mode polars'
+    row-by-row reader hit (couldn't reconcile NULL prediction columns with
+    later non-null datetime values).
+
+    Returns the row count that was written.
     """
     start = datetime.combine(day, datetime.min.time())
     end = start + timedelta(days=1)
-    columns = ", ".join(ARCHIVE_COLUMNS)
-    query = (
-        f"SELECT {columns} FROM {TABLE_NAME} "
-        f"WHERE snapshot_ts >= '{start.isoformat()}' "
-        f"AND snapshot_ts < '{end.isoformat()}' "
-        "ORDER BY snapshot_ts, id"
-    )
-    df = pl.read_database(query=query, connection=engine)
-    df.write_parquet(archive_path, compression="zstd")
-    return df.height
+    columns_sql = ", ".join(ARCHIVE_COLUMNS)
+    rows_written = 0
+
+    raw_conn = engine.raw_connection()
+    try:
+        with raw_conn.cursor(name=f"archive_stream_{day.isoformat()}") as cursor:
+            cursor.itersize = STREAM_BATCH_SIZE
+            cursor.execute(
+                f"SELECT {columns_sql} FROM {TABLE_NAME} "
+                "WHERE snapshot_ts >= %s AND snapshot_ts < %s "
+                "ORDER BY snapshot_ts, id",
+                (start, end),
+            )
+            with pq.ParquetWriter(archive_path, ARCHIVE_SCHEMA, compression="zstd") as writer:
+                while True:
+                    rows = cursor.fetchmany(STREAM_BATCH_SIZE)
+                    if not rows:
+                        break
+                    # Transpose row tuples to per-column lists and build a
+                    # RecordBatch with the explicit schema. pyarrow coerces
+                    # Python None → null and naive datetime → timestamp[us].
+                    columns_data = list(zip(*rows, strict=True))
+                    arrays = [
+                        pa.array(col, type=ARCHIVE_SCHEMA.field(i).type)
+                        for i, col in enumerate(columns_data)
+                    ]
+                    writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=ARCHIVE_SCHEMA))
+                    rows_written += len(rows)
+    finally:
+        raw_conn.close()
+
+    return rows_written
 
 
 def verify_archive(archive_path: Path, expected_rows: int) -> tuple[bool, int]:
-    """Read the parquet back; confirm row count matches `expected_rows`.
+    """Confirm parquet row count matches ``expected_rows``.
 
-    Returns (ok, actual_rows). Counted lazily via polars' scan to avoid
-    materializing the full frame just for a row count.
+    Reads only ParquetFile metadata so no row data is materialized.
     """
-    actual = pl.scan_parquet(archive_path).select(pl.len()).collect().item()
+    actual = pq.ParquetFile(archive_path).metadata.num_rows
     return actual == expected_rows, int(actual)
 
 

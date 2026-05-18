@@ -56,8 +56,18 @@ without asking. See `NOTES.md` for the active punch list.
 - **WMATA API limits: 10 calls/sec, 50k/day.** 60 s polling = 1,440/day.
   Don't propose more aggressive polling without checking the budget.
 
-- **Tests use SQLite in-memory** (`tests/conftest.py`), but production code
-  is Postgres-only. Don't conflate the two when reasoning about queries.
+- **Tests run on two engines** (`tests/conftest.py`): default `db_session`
+  fixture is SQLite in-memory; `pg_session` fixture is real Postgres for
+  integration tests that need pg-specific SQL (`pg_insert` / ON CONFLICT /
+  `IS NOT DISTINCT FROM`). CI sets `PG_TEST_DATABASE_URL`; locally
+  `pg_session` defaults to `postgresql:///wmata_dashboard`. SAVEPOINT
+  semantics keep each test's writes rolled back from the dev DB.
+
+- **`session.execute(text(...))` does NOT autoflush.** Autoflush fires for
+  ORM `Select(<Model>)` but not arbitrary `text()` queries. When mixing
+  `session.add(obj)` with raw SQL that depends on the pending row, call
+  `session.flush()` explicitly — otherwise the raw SQL runs against
+  server-side state without the new row.
 
 - **`stop_id` is not direction-unique.** Most WMATA stops are split by
   direction (NB stop and SB stop are different `stop_id`s on opposite
@@ -119,7 +129,8 @@ uv sync --extra viz --extra postgres                      # add for matplotlib /
 uv run uvicorn api.main:app --reload                      # API on :8000
 cd frontend && npm run dev                                # frontend on :5173
 cd frontend && npm run lint && npm run build              # frontend verification (no tests yet)
-uv run python scripts/continuous_collector.py             # 60 s collector
+uv run python scripts/continuous_combined_collector.py    # combined trip-update + position collector (30s/60s)
+uv run python scripts/collector_status.py                 # one-shot collector health check
 uv run python pipelines/run_daily_batch.py                # nightly batch (derive + aggregate + system rollup)
 psql -d wmata_dashboard                                   # ad-hoc DB queries
 uv run pytest -m smoke                                    # fast tests
