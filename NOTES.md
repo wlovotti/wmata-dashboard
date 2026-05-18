@@ -6,13 +6,16 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-38 (PR #125) — server-side 7-day-vs-prior-7-day
-deltas on every scorecard metric. API carries a `deltas` block per route (shape:
-`{value, valid, current_n, prior_n}` per metric) on both `/api/routes` and
-`/api/routes/{id}`; thin-data suppression generic (<3 valid days) plus
-EWT-specific (<20 observed headways per window). RouteList and RouteDetail KPI
-cards render up/down/flat arrows via an extended `DeltaIndicator` (`lowerIsBetter`
-prop). NOTES-54 ("What changed" panel) is now unblocked.
+Last edited 2026-05-17. Closed NOTES-71 (PR #132) — per-process JSONL archive
+filenames eliminate the multi-frame zstd hazard; rotate_archive.py now globs
+all per-day files and merges them. Closed NOTES-38 (PR #125) — server-side
+7-day-vs-prior-7-day deltas on every scorecard metric. API carries a `deltas`
+block per route (shape: `{value, valid, current_n, prior_n}` per metric) on
+both `/api/routes` and `/api/routes/{id}`; thin-data suppression generic
+(<3 valid days) plus EWT-specific (<20 observed headways per window). RouteList
+and RouteDetail KPI cards render up/down/flat arrows via an extended
+`DeltaIndicator` (`lowerIsBetter` prop). NOTES-54 ("What changed" panel) is
+now unblocked.
 
 ---
 
@@ -86,33 +89,32 @@ target lists directly.
 
 ### Independent of the redesign
 
-- **NOTES-71 JSONL archive multi-frame recovery / rotation strategy.**
-  `JsonlArchiveWriter` opens the per-day file in `"ab"` (append-binary)
-  mode, so a collector restart mid-day concatenates a fresh zstd frame
-  onto whatever's already there. If the prior collector exited
-  *ungracefully* (no `close()` → no frame footer), the day file ends up
-  with three regions: clean prior frames, an **abandoned frame with no
-  footer**, then a fresh frame. `pipelines/rotate_archive.py` uses
-  `dctx.stream_reader(f)` without `read_across_frames=True`, so it
-  reads only the first frame and silently truncates — followed by a
-  size-verify-and-delete that would discard the un-extracted data.
-  Even with `read_across_frames=True`, the decoder errors on the
-  abandoned frame (next frame's magic looks like garbage *inside* the
-  current frame), so no automatic recovery is possible across an
-  abandoned middle frame.
-  Real-world cost: 2026-05-17 deploy of #128 + #129 produced a
-  ~14.5 MB abandoned frame; data is also in `trip_update_snapshots`,
-  so operational loss is zero, but the corrupt day-file was preserved
-  as `archive/raw_snapshots/2026-05-17.jsonl.zst.corrupt-multiframe`
-  and a fresh day-file was started.
-  Fix options: (a) rotate to a per-process filename
-  (`YYYY-MM-DD.<pid>.<startup_ts>.jsonl.zst`) so each collector run
-  gets its own file — `rotate_archive.py` then loops over all day
-  files; (b) on startup, scan the existing day file for an
-  unfinalized last frame and write a synthetic footer before
-  appending; (c) write each line as its own complete frame
-  (FLUSH_FRAME after every append) — recoverable but loses much of
-  zstd's ratio. (a) is the cleanest.
+- **NOTES-72 Trip-update state refactor — complete Phase D/E/F.** PR #128
+  shipped the dual-write architecture and the side-by-side derivation
+  (`stop_events` from snapshots vs `stop_events_v2` from state). This is
+  the operational follow-up to finish the migration. Spec:
+  `docs/superpowers/specs/2026-05-17-trip-update-state-refactor-design.md`.
+
+  **Phase D — validation (open since 2026-05-17).** Nightly batch runs
+  both derivations; check `pipelines/compare_old_vs_new_derivation.py
+  --date YYYY-MM-DD` each morning. Gate: ≥7 consecutive days at
+  ≥99.5% agreement including ≥1 weekend day, plus zero `v2_only_rows`.
+
+  **Phase E — cutover.** Stop dual-writing to `trip_update_snapshots`
+  in `src/wmata_collector.py:_save_trip_updates`. Switch the primary
+  daily-batch derivation from `derive_stop_events_trip_updates.py`
+  (reads snapshots) to `derive_stop_events_from_state.py` (reads state).
+  Update `pipelines/run_daily_batch.py` so the v2 alias becomes primary
+  and the legacy entry is dropped.
+
+  **Phase F — retirement.** Drop `trip_update_snapshots` and
+  `stop_events_v2` (or rename v2 back to canonical). Delete the legacy
+  `derive_stop_events_trip_updates.py`,
+  `pipelines/compare_old_vs_new_derivation.py`, and
+  `pipelines/cleanup_trip_update_state.py`. Schedule
+  `pipelines/archive_trip_update_snapshots.py` (or its successor for
+  `trip_update_state`) via launchd timer for ongoing retention —
+  currently still manual after the 2026-05-17 one-shot run.
 
 - **NOTES-70 Filter `select(StopEvent)` in derive-from-state tests.**
   `tests/test_derive_stop_events_from_state.py` does

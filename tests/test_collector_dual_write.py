@@ -70,4 +70,7 @@ def test_collector_writes_jsonl_archive(pg_session, tmp_path):
     collector._save_trip_updates(rows)
     collector._archive_writer.close()
 
-    assert (tmp_path / "2026-05-17.jsonl.zst").exists()
+    # Per-process filenames: YYYY-MM-DD.<pid>.<startup_ts>.jsonl.zst.
+    # Glob for the date prefix rather than an exact name.
+    matches = list(tmp_path.glob("2026-05-17.*.jsonl.zst"))
+    assert len(matches) == 1, f"Expected 1 archive file, found: {matches}"

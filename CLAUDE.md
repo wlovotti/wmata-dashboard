@@ -121,6 +121,21 @@ without asking. See `NOTES.md` for the active punch list.
   the helper is invoked only inside pipeline code that the smoke
   suite doesn't exercise against SQLite.
 
+- **`VACUUM` marks pages reusable but does NOT shrink the file.**
+  `VACUUM FULL` is what returns space to the OS. After bulk DELETEs,
+  regular VACUUM can take ~90+ min on a multi-GB table because index
+  cleanup buffers (`maintenance_work_mem`) fill repeatedly. VACUUM FULL
+  on the post-DELETE table is faster AND reclaims to the filesystem;
+  it takes ACCESS EXCLUSIVE so pause writers (`SIGINT` the collector)
+  first.
+
+- **Long-running pipeline stdout is buffered when redirected.** Run via
+  `PYTHONUNBUFFERED=1 uv run python ...` or `python -u` so per-batch
+  `print()` lines hit the log file in real time. Without that flag, the
+  buffer flushes only at process exit — `tail -F | grep` monitors on the
+  log will fire all at once at the end. Monitor real artifacts (file
+  appearance, DB row counts) when running unbuffered isn't possible.
+
 ## Commands
 
 ```bash
