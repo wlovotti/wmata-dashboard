@@ -30,7 +30,21 @@ BASE_URL = "https://api.wmata.com/gtfs"
 
 
 class WMATADataCollector:
-    def __init__(self, api_key, db_session: Session = None):
+    def __init__(
+        self,
+        api_key,
+        db_session: Session = None,
+        archive_root: Path | str | None = None,
+    ):
+        """Construct a collector.
+
+        ``archive_root`` overrides the JSONL cold-archive directory. When
+        ``None``, defaults to ``REPO_ROOT / archive / raw_snapshots``.
+        Tests must pass ``archive_root=tmp_path`` to keep fixture rows out
+        of the live archive — every instantiation opens a writer, so
+        leaving the default path causes per-process orphan files to
+        accumulate under the real archive on every test run.
+        """
         self.api_key = api_key
         self.headers = {"api_key": api_key}
         self.gtfs_data = {}
@@ -46,7 +60,8 @@ class WMATADataCollector:
         # Cold archive: raw rows go to compressed JSONL daily files.
         # Path matches the existing archive_trip_update_snapshots.py
         # convention (REPO_ROOT / "archive" / ...).
-        archive_root = Path(__file__).resolve().parent.parent / "archive" / "raw_snapshots"
+        if archive_root is None:
+            archive_root = Path(__file__).resolve().parent.parent / "archive" / "raw_snapshots"
         self._archive_writer = JsonlArchiveWriter(archive_dir=archive_root)
 
     def close(self) -> None:

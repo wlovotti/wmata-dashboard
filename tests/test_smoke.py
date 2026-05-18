@@ -736,9 +736,9 @@ def test_compare_stop_event_sources_route_filter(db_session):
 
 
 @pytest.mark.smoke
-def test_save_trip_updates_bulk_inserts(db_session):
+def test_save_trip_updates_bulk_inserts(db_session, tmp_path):
     """_save_trip_updates persists a list of dicts produced by the collector."""
-    collector = WMATADataCollector(api_key="unused", db_session=db_session)
+    collector = WMATADataCollector(api_key="unused", db_session=db_session, archive_root=tmp_path)
     snapshot_ts = datetime(2026, 5, 3, 15, 0, 0)
     rows = [
         {
@@ -754,13 +754,16 @@ def test_save_trip_updates_bulk_inserts(db_session):
         }
     ]
 
-    saved = collector._save_trip_updates(rows)
-    assert saved == 1
+    try:
+        saved = collector._save_trip_updates(rows)
+        assert saved == 1
 
-    row = db_session.query(TripUpdateSnapshot).filter_by(trip_id="TRIP_B").one()
-    assert row.stop_sequence == 5
-    assert row.vehicle_id is None
-    assert row.snapshot_ts == snapshot_ts
+        row = db_session.query(TripUpdateSnapshot).filter_by(trip_id="TRIP_B").one()
+        assert row.stop_sequence == 5
+        assert row.vehicle_id is None
+        assert row.snapshot_ts == snapshot_ts
+    finally:
+        collector.close()
 
 
 def _se(**overrides) -> StopEvent:
