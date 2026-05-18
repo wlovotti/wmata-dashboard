@@ -6,7 +6,10 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-17. Closed NOTES-71 (PR #132) — per-process JSONL archive
+Last edited 2026-05-18. Closed NOTES-70 (PR #TBD) — added `.where(trip_id ==
+'T1')` filters to all bare `select(StopEvent)` and `select(TripUpdateState)`
+calls in `tests/test_derive_stop_events_from_state.py`; tests now pass on any
+DB (populated or empty). Closed NOTES-71 (PR #132) — per-process JSONL archive
 filenames eliminate the multi-frame zstd hazard; rotate_archive.py now globs
 all per-day files and merges them. Closed NOTES-38 (PR #125) — server-side
 7-day-vs-prior-7-day deltas on every scorecard metric. API carries a `deltas`
@@ -115,17 +118,6 @@ target lists directly.
   `pipelines/archive_trip_update_snapshots.py` (or its successor for
   `trip_update_state`) via launchd timer for ongoing retention —
   currently still manual after the 2026-05-17 one-shot run.
-
-- **NOTES-70 Filter `select(StopEvent)` in derive-from-state tests.**
-  `tests/test_derive_stop_events_from_state.py` does
-  `pg_session.execute(select(StopEvent)).scalar_one()` (and equivalent
-  for `select(TripUpdateState)`) without a filter. Passes in CI's
-  empty `wmata_test` DB but raises `MultipleResultsFound` on any
-  populated DB (e.g. local dev). Add a `where(StopEvent.trip_id == 'T1')`
-  filter — or use `scalar_one()` after `where(...)` with the seed row's
-  natural key — so the tests are portable. Caught locally during the
-  trip_update_state refactor verification; didn't block the merge
-  because CI runs against an empty DB.
 
 - **NOTES-34 service_delivered ceiling on 2-stop routes (TU structural
   exclusion).** Side effect of the NOTES-30 closing PR (proportional

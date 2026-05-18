@@ -63,7 +63,9 @@ def test_derive_produces_stop_event_with_correct_observed_arrival(pg_session):
     )
     pg_session.commit()
 
-    event = pg_session.execute(select(StopEvent)).scalar_one()
+    event = pg_session.execute(
+        select(StopEvent).where(StopEvent.trip_id == "T1")
+    ).scalar_one()
     assert event.trip_id == "T1"
     assert event.observed_arrival_ts == pred
     assert event.schedule_relationship == "SCHEDULED"
@@ -98,7 +100,9 @@ def test_derive_emits_skipped_stops(pg_session):
     )
     pg_session.commit()
 
-    event = pg_session.execute(select(StopEvent)).scalar_one()
+    event = pg_session.execute(
+        select(StopEvent).where(StopEvent.trip_id == "T1")
+    ).scalar_one()
     assert event.schedule_relationship == "SKIPPED"
     assert event.observed_arrival_ts is None
 
@@ -131,5 +135,7 @@ def test_derive_sets_derived_at_on_state_rows(pg_session):
     )
     pg_session.commit()
 
-    row = pg_session.execute(select(TripUpdateState)).scalar_one()
+    row = pg_session.execute(
+        select(TripUpdateState).where(TripUpdateState.trip_id == "T1")
+    ).scalar_one()
     assert row.derived_at is not None
