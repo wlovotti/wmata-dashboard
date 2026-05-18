@@ -100,8 +100,18 @@ target lists directly.
 
   **Phase D — validation (open since 2026-05-17).** Nightly batch runs
   both derivations; check `pipelines/compare_old_vs_new_derivation.py
-  --date YYYY-MM-DD` each morning. Gate: ≥7 consecutive days at
-  ≥99.5% agreement including ≥1 weekend day, plus zero `v2_only_rows`.
+  --date YYYY-MM-DD` each morning. Gate: ≥7 consecutive days at 100%
+  agreement on `trip_update`-sourced rows including ≥1 weekend day,
+  plus zero `v2_only_rows`. Both derivations are deterministic
+  transforms of the same input feed — any disagreement is a real bug,
+  not noise; investigate rather than widen the tolerance band (the
+  spec's original ≥99.5% was a precaution against unknown unknowns;
+  we no longer expect any). Calendar floor: collector started writing
+  `trip_update_state` on 2026-05-17 19:07 EDT, so the first full
+  comparable day is Mon 2026-05-18 (processed by the 03:00 ET batch
+  on 2026-05-19). The weekend-day requirement (Sat 2026-05-23 + Sun
+  2026-05-24) puts the earliest defensible cutover at 2026-05-25,
+  after that morning's batch finishes processing 2026-05-24.
 
   **Phase E — cutover.** Stop dual-writing to `trip_update_snapshots`
   in `src/wmata_collector.py:_save_trip_updates`. Switch the primary
