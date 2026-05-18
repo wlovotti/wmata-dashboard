@@ -150,11 +150,13 @@ uv run python pipelines/run_daily_batch.py                # nightly batch (deriv
 psql -d wmata_dashboard                                   # ad-hoc DB queries
 uv run pytest -m smoke                                    # fast tests
 uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
+uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format gate (CI requires)
 ```
 
 ## Working agreements
 
-- Run `ruff check` before committing — CI will fail otherwise.
+- Run `ruff check` AND `ruff format --check` before committing — CI
+  runs both as separate gates and will fail otherwise.
 - Frontend lint is enforced in CI as of PR #126 (kept at zero errors).
   Run `cd frontend && npm run lint` before pushing.
 - Frontend unit tests run in CI as of PR #126: `cd frontend && npm test`
