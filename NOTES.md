@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-18. Closed NOTES-70 (PR #TBD) — added `.where(trip_id ==
+Last edited 2026-05-18. Closed NOTES-70 (PR #133) — added `.where(trip_id ==
 'T1')` filters to all bare `select(StopEvent)` and `select(TripUpdateState)`
 calls in `tests/test_derive_stop_events_from_state.py`; tests now pass on any
 DB (populated or empty). Closed NOTES-71 (PR #132) — per-process JSONL archive
