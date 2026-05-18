@@ -16,6 +16,7 @@ dependencies = [
     "polars>=1.0.0",
     "zstandard>=0.25.0",
     "boto3>=1.43.9",
+    "pyarrow>=24.0.0",
 ]
 
 [project.optional-dependencies]
