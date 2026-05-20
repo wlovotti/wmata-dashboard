@@ -36,6 +36,7 @@ def _service_date_for_row(row: dict):
             pass  # fall through to snapshot_ts inference
     return eastern_date_from_naive_utc(row["snapshot_ts"])
 
+
 # Load environment variables from .env file
 load_dotenv()
 

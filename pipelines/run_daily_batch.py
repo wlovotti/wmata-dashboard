@@ -258,9 +258,7 @@ def _v2_row_count_guard(service_date: date_type, log_handle) -> bool:
         )
         log_handle.flush()
         return False
-    log_handle.write(
-        f"GUARD stop_events_v2 has {n} rows for {service_date.isoformat()}\n"
-    )
+    log_handle.write(f"GUARD stop_events_v2 has {n} rows for {service_date.isoformat()}\n")
     log_handle.flush()
     return True
 

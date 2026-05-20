@@ -24,7 +24,7 @@ from datetime import date as date_type
 from datetime import datetime
 
 from dotenv import load_dotenv
-from sqlalchemy import tuple_, update
+from sqlalchemy import Table, tuple_, update
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import parse_gtfs_time_to_dt
@@ -237,8 +237,6 @@ def derive_for_route_date(
         "elapsed_sec": round(time.time() - start_ts, 2),
     }
 
-
-from sqlalchemy import Table
 
 # Module-level cache for side-table objects. Used by _resolve_side_table
 # to avoid recreating the Table on every call. Keyed by table name.

@@ -95,11 +95,7 @@ def test_replay_writes_final_state(tmp_path, pg_session):
     pg_session.commit()
     assert count == 2  # two snapshot lines processed
 
-    state = (
-        pg_session.query(TripUpdateState)
-        .filter(TripUpdateState.trip_id == "T_REPLAY")
-        .all()
-    )
+    state = pg_session.query(TripUpdateState).filter(TripUpdateState.trip_id == "T_REPLAY").all()
     assert len(state) == 1
     assert state[0].service_date == date(2026, 5, 18)
     assert state[0].last_predicted_arrival_ts == datetime(2026, 5, 18, 22, 6)

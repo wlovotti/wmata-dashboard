@@ -15,6 +15,7 @@ both SQLite and Postgres honor identically once the model declares them.
 from datetime import date, datetime
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.models import TripUpdateState
 
@@ -94,5 +95,5 @@ def test_same_service_date_pk_collision(db_session):
             final_snapshot_ts=datetime(2026, 5, 18, 19, 0),
         )
     )
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         db_session.flush()
