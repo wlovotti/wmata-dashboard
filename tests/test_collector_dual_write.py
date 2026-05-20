@@ -9,11 +9,11 @@ from src.models import TripUpdateSnapshot, TripUpdateState
 
 
 @pytest.mark.integration
-def test_save_trip_updates_writes_to_both_tables(pg_session):
+def test_save_trip_updates_writes_to_both_tables(pg_session, tmp_path):
     """Each call to _save_trip_updates writes the row to BOTH tables."""
     from src.wmata_collector import WMATADataCollector
 
-    collector = WMATADataCollector(api_key="unused", db_session=pg_session)
+    collector = WMATADataCollector(api_key="unused", db_session=pg_session, archive_root=tmp_path)
 
     rows = [
         {
@@ -29,29 +29,32 @@ def test_save_trip_updates_writes_to_both_tables(pg_session):
             "collected_at": datetime(2026, 5, 17, 14, 0, 5),
         }
     ]
-    collector._save_trip_updates(rows)
+    try:
+        collector._save_trip_updates(rows)
 
-    # Old path: row exists in trip_update_snapshots.
-    snapshot = pg_session.execute(select(TripUpdateSnapshot)).scalar_one()
-    assert snapshot.trip_id == "T1"
+        # Filter by the test's trip_id so the assertion is portable against
+        # a dev DB that already holds production rows (same pattern as
+        # PR #133 / NOTES-70).
+        snapshot = (
+            pg_session.execute(select(TripUpdateSnapshot).filter_by(trip_id="T1"))
+        ).scalar_one()
+        assert snapshot.trip_id == "T1"
 
-    # New path: row exists in trip_update_state with the right final-state.
-    state = pg_session.execute(select(TripUpdateState)).scalar_one()
-    assert state.trip_id == "T1"
-    assert state.stop_sequence == 1
-    assert state.final_snapshot_ts == datetime(2026, 5, 17, 14, 0, 0)
-    assert state.last_predicted_arrival_ts == datetime(2026, 5, 17, 14, 5, 0)
+        state = (pg_session.execute(select(TripUpdateState).filter_by(trip_id="T1"))).scalar_one()
+        assert state.trip_id == "T1"
+        assert state.stop_sequence == 1
+        assert state.final_snapshot_ts == datetime(2026, 5, 17, 14, 0, 0)
+        assert state.last_predicted_arrival_ts == datetime(2026, 5, 17, 14, 5, 0)
+    finally:
+        collector.close()
 
 
 @pytest.mark.integration
 def test_collector_writes_jsonl_archive(pg_session, tmp_path):
     """_save_trip_updates appends rows to the JSONL archive."""
-    from src.archive_writer import JsonlArchiveWriter
     from src.wmata_collector import WMATADataCollector
 
-    collector = WMATADataCollector(api_key="unused", db_session=pg_session)
-    # Redirect the archive to a tmpdir.
-    collector._archive_writer = JsonlArchiveWriter(archive_dir=tmp_path)
+    collector = WMATADataCollector(api_key="unused", db_session=pg_session, archive_root=tmp_path)
 
     rows = [
         {
@@ -67,8 +70,10 @@ def test_collector_writes_jsonl_archive(pg_session, tmp_path):
             "collected_at": datetime(2026, 5, 17, 14, 0, 5),
         }
     ]
-    collector._save_trip_updates(rows)
-    collector._archive_writer.close()
+    try:
+        collector._save_trip_updates(rows)
+    finally:
+        collector.close()
 
     # Per-process filenames: YYYY-MM-DD.<pid>.<startup_ts>.jsonl.zst.
     # Glob for the date prefix rather than an exact name.
