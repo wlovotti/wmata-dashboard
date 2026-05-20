@@ -225,6 +225,46 @@ def run_housekeeping_pipeline(
     return proc.returncode, elapsed
 
 
+def _v2_row_count_guard(service_date: date_type, log_handle) -> bool:
+    """Return True if stop_events_v2 has rows for ``service_date``.
+
+    Closes the silent-failure mode that broke Phase D validation for 4
+    consecutive nightly batches (2026-05-16 → 19): the v2 derivation
+    crashed at the first non-empty route, exited 0 for the "no rows to
+    upsert" path on the remaining routes, and the wrapper had no way to
+    distinguish "ran successfully and produced rows" from "ran
+    successfully and produced nothing." This guard flips the latter into
+    a logged failure.
+
+    The check uses a fresh session because the long-lived batch process
+    doesn't hold a Postgres connection. Reports via ``log_handle`` and
+    returns True/False rather than raising — the caller treats it as a
+    soft failure (counts toward exit-non-zero, doesn't block downstream).
+    """
+    from sqlalchemy import text
+
+    db = get_session()
+    try:
+        n = db.execute(
+            text("SELECT COUNT(*) FROM stop_events_v2 WHERE service_date = :d"),
+            {"d": service_date.isoformat()},
+        ).scalar_one()
+    finally:
+        db.close()
+    if not n:
+        log_handle.write(
+            f"GUARD stop_events_v2 has 0 rows for {service_date.isoformat()} "
+            "after v2 derivation exited 0 — silent-failure guard tripped\n"
+        )
+        log_handle.flush()
+        return False
+    log_handle.write(
+        f"GUARD stop_events_v2 has {n} rows for {service_date.isoformat()}\n"
+    )
+    log_handle.flush()
+    return True
+
+
 def run_pipeline(
     module: str,
     service_date: date_type,
@@ -339,6 +379,16 @@ def run_batch(
                 log_handle.write(
                     f"OK   {pipeline['name']} for {service_date.isoformat()}: {elapsed:.1f}s\n"
                 )
+                # Post-step row-count guard for the v2 derivation. Catches the
+                # silent-zero failure mode (process exits 0 but writes 0 rows).
+                if pipeline["name"] == "derive_stop_events_from_state_v2":
+                    if not _v2_row_count_guard(service_date, log_handle):
+                        # Mark as failed for the rest of this run so the
+                        # process exits non-zero. We don't downgrade the
+                        # original rc=0 in `results` (no downstream depends
+                        # on v2), but the wrapper-level failure count is
+                        # what launchd surfaces.
+                        failure_count += 1
             log_handle.flush()
 
     # Housekeeping runs ONCE per batch, after all per-date pipelines. Failures
