@@ -6,10 +6,20 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-18. Closed NOTES-70 (PR #133) — added `.where(trip_id ==
-'T1')` filters to all bare `select(StopEvent)` and `select(TripUpdateState)`
-calls in `tests/test_derive_stop_events_from_state.py`; tests now pass on any
-DB (populated or empty). Closed NOTES-71 (PR #132) — per-process JSONL archive
+Last edited 2026-05-20. NOTES-72 Phase D recovery in flight: investigation
+on 2026-05-20 surfaced that the v2 derivation pipeline silently failed 4
+consecutive nightly batches (2026-05-16 → 19) due to a `_resolve_side_table`
+SQLAlchemy bug AND that the `trip_update_state` PK omitted `service_date`,
+so WMATA's repeating day-over-day trip_ids overwrote prior-day state.
+Schema-fix PR adds `service_date` to the PK, fixes the resolver, adds an
+idempotent JSONL replay tool for historical re-derivation, simplifies
+cleanup to a single date rule, and adds a row-count guard so silent-zero
+failures can't recur. See
+`docs/superpowers/specs/2026-05-20-trip-update-state-service-date-addendum.md`.
+Closed NOTES-70 (PR #133) — added `.where(trip_id == 'T1')` filters to all
+bare `select(StopEvent)` and `select(TripUpdateState)` calls in
+`tests/test_derive_stop_events_from_state.py`; tests now pass on any DB
+(populated or empty). Closed NOTES-71 (PR #132) — per-process JSONL archive
 filenames eliminate the multi-frame zstd hazard; rotate_archive.py now globs
 all per-day files and merges them. Closed NOTES-38 (PR #125) — server-side
 7-day-vs-prior-7-day deltas on every scorecard metric. API carries a `deltas`
@@ -96,22 +106,40 @@ target lists directly.
   shipped the dual-write architecture and the side-by-side derivation
   (`stop_events` from snapshots vs `stop_events_v2` from state). This is
   the operational follow-up to finish the migration. Spec:
-  `docs/superpowers/specs/2026-05-17-trip-update-state-refactor-design.md`.
+  `docs/superpowers/specs/2026-05-17-trip-update-state-refactor-design.md`
+  + addendum `docs/superpowers/specs/2026-05-20-trip-update-state-service-date-addendum.md`.
 
-  **Phase D — validation (open since 2026-05-17).** Nightly batch runs
-  both derivations; check `pipelines/compare_old_vs_new_derivation.py
-  --date YYYY-MM-DD` each morning. Gate: ≥7 consecutive days at 100%
-  agreement on `trip_update`-sourced rows including ≥1 weekend day,
-  plus zero `v2_only_rows`. Both derivations are deterministic
-  transforms of the same input feed — any disagreement is a real bug,
-  not noise; investigate rather than widen the tolerance band (the
-  spec's original ≥99.5% was a precaution against unknown unknowns;
-  we no longer expect any). Calendar floor: collector started writing
-  `trip_update_state` on 2026-05-17 19:07 EDT, so the first full
-  comparable day is Mon 2026-05-18 (processed by the 03:00 ET batch
-  on 2026-05-19). The weekend-day requirement (Sat 2026-05-23 + Sun
-  2026-05-24) puts the earliest defensible cutover at 2026-05-25,
-  after that morning's batch finishes processing 2026-05-24.
+  **Phase D — validation (in flight, schema-fix PR pending merge as of
+  2026-05-20).** The 2026-05-17 design used a PK of `(trip_id,
+  stop_sequence)` and assumed each day's snapshot would be derived
+  before the next day's runs overwrote state. Both assumptions failed:
+  (1) WMATA's GTFS-RT trip_ids repeat day-over-day (94% reuse Mon→Tue),
+  so the UPSERT silently overwrote prior-day state, and (2) the v2
+  derivation crashed on every nightly batch from 2026-05-16 onward via
+  a `_resolve_side_table` SQLAlchemy bug that the batch wrapper had no
+  way to surface (the pipeline exited 0 after crashing at the first
+  non-empty route). The schema-fix PR adds `service_date` to the PK,
+  fixes the resolver, adds `pipelines/replay_archive_to_state.py` for
+  idempotent historical recovery from the JSONL archive, collapses
+  cleanup to a single `service_date < CURRENT_DATE - INTERVAL '7 days'`
+  rule, and adds a row-count guard in `run_daily_batch.py` so the
+  silent-zero failure mode can't recur.
+
+  After the PR merges + the user runs the deployment sequence
+  (stop collector → migrate → restart collector), Phase D restarts
+  with two paths to the cutover bar (≥7 consecutive days at 100%
+  agreement including ≥1 weekend day):
+  - **Forward-only** (no backfill): earliest cutover 2026-05-27
+    (covers weekend 5/23–24).
+  - **Replay + forward** (backfill 5/18 + 5/19 from JSONL):
+    earliest cutover 2026-05-25 (the original target).
+
+  Both backfill commands are idempotent:
+  ```
+  uv run python pipelines/replay_archive_to_state.py --date 2026-05-18
+  uv run python pipelines/derive_stop_events_from_state.py \
+      --all-routes --date 2026-05-18 --target-table stop_events_v2
+  ```
 
   **Phase E — cutover.** Stop dual-writing to `trip_update_snapshots`
   in `src/wmata_collector.py:_save_trip_updates`. Switch the primary
