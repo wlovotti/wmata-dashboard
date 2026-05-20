@@ -97,9 +97,16 @@ def derive_for_route_date(
     if not schedule_index:
         return _empty(route_id, service_date_str, start_ts, "No stop_times for active trips")
 
-    # Read state directly — one row per (trip, stop_sequence). No scan.
+    # Read state directly — one row per (trip, stop_sequence, service_date).
+    # The service_date filter prevents bleed-through from prior or subsequent
+    # days' runs of the same trip_id (WMATA's scheduled trip_ids repeat
+    # day-over-day, so without this filter the derivation would read
+    # whichever day's snapshot landed in state last).
     state_rows = (
-        db.query(TripUpdateState).filter(TripUpdateState.trip_id.in_(active_trip_ids)).all()
+        db.query(TripUpdateState)
+        .filter(TripUpdateState.trip_id.in_(active_trip_ids))
+        .filter(TripUpdateState.service_date == service_date)
+        .all()
     )
 
     rows = []
@@ -231,24 +238,32 @@ def derive_for_route_date(
     }
 
 
-# Module-level cache for side-table model classes. Used by _resolve_side_table
-# to avoid recreating the class on every call. Keyed by table name.
-_side_table_registry: dict[str, type] = {}
+from sqlalchemy import Table
+
+# Module-level cache for side-table objects. Used by _resolve_side_table
+# to avoid recreating the Table on every call. Keyed by table name.
+_side_table_registry: dict[str, Table] = {}
 
 
-def _resolve_side_table(name: str):
-    """Return a model bound to the side table (same schema as StopEvent).
+def _resolve_side_table(name: str) -> Table:
+    """Return a SQLAlchemy Table bound to the side table (same schema as StopEvent).
 
     Used for Phase D validation where we write to ``stop_events_v2``.
     The side table must already exist with identical schema (see
-    scripts/migrate_create_stop_events_v2.py).
+    ``scripts/migrate_create_stop_events_v2.py``).
 
-    The cloned table lives on an isolated MetaData() — NOT Base.metadata —
-    so it never participates in ``Base.metadata.create_all()``. That's
-    important because the SQLite test fixture creates all tables in
-    Base.metadata at session setup; without isolation, the side table
-    would be added to the SQLite schema (and worse, the migration's
-    Postgres-only DDL would never run there).
+    Returns a real ``Table`` object on an isolated ``MetaData()`` — not
+    ``Base.metadata`` — so it never participates in
+    ``Base.metadata.create_all()``. That's important because the SQLite
+    test fixture creates all tables in Base.metadata at session setup;
+    without isolation the side table would be added to the SQLite schema
+    (and worse, the Postgres-only migration DDL would never run there).
+
+    Earlier versions wrapped the Table in a lightweight class with
+    ``__table__`` set; that broke ``pg_insert``, which rejects arbitrary
+    classes with an ``ArgumentError: subject table … expected``. The
+    ``upsert_rows`` helper accepts either a mapped class or a bare
+    Table, so returning the Table directly is the right shape.
     """
     if name != "stop_events_v2":
         raise ValueError(f"Unknown target table: {name}")
@@ -264,19 +279,8 @@ def _resolve_side_table(name: str):
     isolated_meta = MetaData()
     side_table = StopEvent.__table__.to_metadata(isolated_meta, name=name)
 
-    class _SideStopEvent:
-        """Lightweight model wrapper pointing at the stop_events_v2 side table.
-
-        Not a Base-derived ORM class — just enough surface (``__table__``,
-        ``__tablename__``) to satisfy ``upsert_rows`` which only reads
-        ``model.__table__``.
-        """
-
-        __table__ = side_table
-        __tablename__ = name
-
-    _side_table_registry[name] = _SideStopEvent
-    return _SideStopEvent
+    _side_table_registry[name] = side_table
+    return side_table
 
 
 def _empty(route_id: str, service_date_str: str, start_ts: float, note: str) -> dict:
