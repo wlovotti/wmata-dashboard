@@ -14,8 +14,27 @@ from sqlalchemy.orm import Session
 from src.archive_writer import JsonlArchiveWriter
 from src.database import get_session, init_db
 from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
-from src.timezones import from_epoch_naive_utc, utcnow_naive
+from src.timezones import eastern_date_from_naive_utc, from_epoch_naive_utc, utcnow_naive
 from src.upsert_helpers import upsert_trip_update_state
+
+
+def _service_date_for_row(row: dict):
+    """Return the Eastern service_date for a trip-update row.
+
+    Prefers ``trip_start_date`` (YYYYMMDD string from GTFS-RT
+    ``tripDescriptor.start_date``) when present and parseable; otherwise
+    falls back to the Eastern calendar day of ``snapshot_ts``.
+
+    Module-level (not a method) so the replay tool can reuse it without
+    pulling in the WMATADataCollector context.
+    """
+    raw = row.get("trip_start_date")
+    if raw:
+        try:
+            return datetime.strptime(raw, "%Y%m%d").date()
+        except ValueError:
+            pass  # fall through to snapshot_ts inference
+    return eastern_date_from_naive_utc(row["snapshot_ts"])
 
 # Load environment variables from .env file
 load_dotenv()
@@ -539,6 +558,11 @@ class WMATADataCollector:
                 trip_id = tu.trip.trip_id or None
                 route_id = tu.trip.route_id or None
                 vehicle_id = tu.vehicle.id if (tu.HasField("vehicle") and tu.vehicle.id) else None
+                trip_start_date = (
+                    tu.trip.start_date
+                    if tu.trip.HasField("start_date") and tu.trip.start_date
+                    else None
+                )
 
                 for stu in tu.stop_time_update:
                     if not stu.stop_id:
@@ -572,6 +596,7 @@ class WMATADataCollector:
                             "predicted_arrival_ts": predicted_arrival_ts,
                             "predicted_departure_ts": predicted_departure_ts,
                             "schedule_relationship": schedule_relationship,
+                            "trip_start_date": trip_start_date,
                         }
                     )
 
@@ -656,6 +681,7 @@ class WMATADataCollector:
             {
                 "trip_id": r["trip_id"],
                 "stop_sequence": r["stop_sequence"],
+                "service_date": _service_date_for_row(r),
                 "stop_id": r["stop_id"],
                 "vehicle_id": r.get("vehicle_id"),
                 "snapshot_ts": r["snapshot_ts"],

@@ -57,6 +57,18 @@ def from_epoch_naive_utc(ts):
     return datetime.fromtimestamp(ts, UTC).replace(tzinfo=None)
 
 
+def eastern_date_from_naive_utc(naive_utc_dt):
+    """Return the Eastern calendar date for a naive-UTC datetime.
+
+    Used by the collector to compute a row's ``service_date`` at UPSERT
+    time when ``tripDescriptor.start_date`` is not populated in the
+    GTFS-RT feed (WMATA omits it for ~24% of vehicle rows). Correct for
+    99%+ of WMATA bus trips since service-day-crossing overnight bus
+    operations are rare.
+    """
+    return naive_utc_dt.replace(tzinfo=UTC).astimezone(EASTERN).date()
+
+
 def eastern_midnight_as_utc(date):
     """Convert midnight on the given Eastern-zone date to a naive UTC datetime.
 

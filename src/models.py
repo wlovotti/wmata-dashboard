@@ -1,6 +1,7 @@
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -400,21 +401,29 @@ class TripUpdateState(Base):
     pipeline reads it directly, avoiding the ~21M-row/day snapshot scan.
 
     Lifecycle:
-        1. Trip starts -> rows inserted for upcoming stops.
+        1. Trip starts on service_date D -> rows inserted for upcoming stops.
         2. Bus moves -> rows update as predictions refine.
         3. Bus passes -> row's final state captured.
         4. End of service day -> ``derive_stop_events_from_state.py``
            materializes the corresponding ``stop_event`` and sets
            ``derived_at``.
-        5. Cleanup cron deletes derived rows >2 days old, and any rows
-           (derived or not) >7 days old, so the table can't grow
-           unbounded.
+        5. Cleanup cron deletes rows with ``service_date < CURRENT_DATE -
+           INTERVAL '7 days'`` so the table can't grow unbounded.
+
+    ``service_date`` is part of the PK because WMATA's GTFS-RT trip_ids
+    repeat day-over-day on scheduled routes. Without it, the same
+    (trip_id, stop_sequence) pair would overwrite itself across days,
+    making historical re-derivation impossible. The collector computes
+    ``service_date`` from ``tripDescriptor.start_date`` when present,
+    falling back to the Eastern calendar day of ``snapshot_ts``. See
+    ``docs/superpowers/specs/2026-05-20-trip-update-state-service-date-addendum.md``.
     """
 
     __tablename__ = "trip_update_state"
 
     trip_id = Column(String, primary_key=True)
     stop_sequence = Column(Integer, primary_key=True)
+    service_date = Column(Date, primary_key=True)
 
     stop_id = Column(String, nullable=False)
     vehicle_id = Column(String, nullable=True)
