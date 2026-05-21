@@ -45,6 +45,7 @@ def test_derive_produces_stop_event_with_correct_observed_arrival(pg_session):
         TripUpdateState(
             trip_id="T1",
             stop_sequence=1,
+            service_date=date(2026, 5, 17),
             stop_id="S1",
             vehicle_id="V1",
             final_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
@@ -80,6 +81,7 @@ def test_derive_emits_skipped_stops(pg_session):
         TripUpdateState(
             trip_id="T1",
             stop_sequence=1,
+            service_date=date(2026, 5, 17),
             stop_id="S1",
             vehicle_id="V1",
             final_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
@@ -113,6 +115,7 @@ def test_derive_sets_derived_at_on_state_rows(pg_session):
         TripUpdateState(
             trip_id="T1",
             stop_sequence=1,
+            service_date=date(2026, 5, 17),
             stop_id="S1",
             vehicle_id="V1",
             final_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),

@@ -143,6 +143,7 @@ def test_trip_update_state_schema(db_session):
     expected = {
         "trip_id",
         "stop_sequence",
+        "service_date",
         "stop_id",
         "vehicle_id",
         "final_snapshot_ts",
@@ -153,6 +154,8 @@ def test_trip_update_state_schema(db_session):
     }
     assert columns == expected, f"unexpected columns: {columns ^ expected}"
 
-    # Composite PK on (trip_id, stop_sequence)
+    # Composite PK on (trip_id, stop_sequence, service_date) — see
+    # 2026-05-20 spec addendum. Without service_date in the PK, WMATA's
+    # day-over-day repeating trip_ids would overwrite themselves.
     pk_cols = {c.name for c in TripUpdateState.__table__.primary_key.columns}
-    assert pk_cols == {"trip_id", "stop_sequence"}
+    assert pk_cols == {"trip_id", "stop_sequence", "service_date"}

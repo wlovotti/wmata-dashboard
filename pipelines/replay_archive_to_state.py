@@ -37,7 +37,6 @@ from src.upsert_helpers import upsert_trip_update_state
 from src.wmata_collector import _service_date_for_row
 
 DEFAULT_ARCHIVE_ROOT = Path("archive/raw_snapshots")
-BATCH_SIZE = 5000
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -89,8 +88,15 @@ def replay_archive_for_date(
     from PR #132) and the legacy single-file pattern
     (``{date}.jsonl.zst`` — pre-PR #132). Each line is decoded, parsed
     into the collector's row shape, and pushed through
-    ``upsert_trip_update_state`` in batches of ``BATCH_SIZE`` for memory
-    bounds.
+    ``upsert_trip_update_state``.
+
+    **Batching:** rows are flushed to the UPSERT helper whenever the
+    snapshot_ts changes. WMATA's GTFS-RT feed emits each (trip_id,
+    stop_sequence) at most once per snapshot, so a "one snapshot per
+    batch" boundary guarantees no within-batch duplicate keys — which
+    would otherwise trip Postgres's "ON CONFLICT DO UPDATE command cannot
+    affect row a second time" error. Cross-snapshot accumulation is
+    handled by ON CONFLICT in the helper itself.
 
     Rows whose computed service_date doesn't match ``target_date`` are
     silently skipped — defensive against midnight-crossing files that
@@ -122,6 +128,12 @@ def replay_archive_for_date(
 
     total = 0
     batch: list[dict] = []
+    batch_snapshot_ts = None
+
+    def _flush() -> None:
+        if batch:
+            upsert_trip_update_state(db, batch)
+
     for p in paths:
         for raw in _iter_jsonl_zst(p):
             if raw.get("stop_sequence") is None:
@@ -144,14 +156,17 @@ def replay_archive_for_date(
             }
             if row["service_date"] != target_date:
                 continue
+
+            # Flush on snapshot_ts boundary so a single batch never contains
+            # duplicate (trip_id, stop_sequence, service_date) keys.
+            if batch_snapshot_ts is not None and snapshot_ts != batch_snapshot_ts:
+                _flush()
+                batch = []
+            batch_snapshot_ts = snapshot_ts
             batch.append(row)
             total += 1
-            if len(batch) >= BATCH_SIZE:
-                upsert_trip_update_state(db, batch)
-                batch = []
 
-    if batch:
-        upsert_trip_update_state(db, batch)
+    _flush()
 
     print(f"Replayed {total} snapshot rows for {target_date}.")
     return total
