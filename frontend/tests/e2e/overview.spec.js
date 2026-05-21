@@ -69,10 +69,17 @@ test('Overview: "Where to look" heading renders', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Where to look' })).toBeVisible()
 })
 
+test('Overview: "What changed" panel renders', async ({ page }) => {
+  await page.goto('/')
+  // Wait for the panel heading to appear (scorecard fetch must complete).
+  await expect(page.getByRole('heading', { name: 'What changed' })).toBeVisible()
+})
+
 test('Overview: visual regression', async ({ page }) => {
   await page.goto('/')
-  // Wait for async content: contributors heading should appear.
+  // Wait for async content: contributors heading and "What changed" panel.
   await expect(page.getByRole('heading', { name: 'Where to look' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'What changed' })).toBeVisible()
   // Additional settle: sparklines are async recharts renders; a short wait
   // reduces flicker without making the test brittle.
   await page.waitForTimeout(500)

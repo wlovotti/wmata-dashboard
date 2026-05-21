@@ -4,6 +4,7 @@ import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
 import SystemTrend from './SystemTrend'
+import WhatChangedPanel from './WhatChangedPanel'
 
 // Available metrics for the "Where to look" contributors panel. Mirrors the
 // constant in RouteList.jsx — kept inline here to avoid threading a shared
@@ -129,7 +130,7 @@ function gapFraction({ current, target, higherIsBetter }) {
  * its configured/inherited target. Period-over-period deltas are
  * intentionally omitted from this banner — the `deltas` block on the
  * scorecard payload (PR #125) carries them per-route for RouteList /
- * RouteDetail; surfacing them here is NOTES-54.
+ * RouteDetail; surfacing them here is the What changed panel (PR #138).
  */
 function HealthPulse({ systemMetrics, scorecard }) {
   // Pick the worst metric — the one with the largest positive gapFraction.
@@ -615,6 +616,12 @@ function Overview() {
           </table>
         )}
       </div>
+
+      {/* What changed panel (PR #138). Reuses the scorecard fetch already
+          issued for HealthPulse and Off-target — no additional network
+          round-trip. */}
+      <WhatChangedPanel routes={scorecard?.routes ?? null} />
+
     </main>
   )
 }
