@@ -487,7 +487,9 @@ function Overview() {
         </div>
 
         {contribError && (
-          <p style={{ color: '#64748b' }}>Unable to load contributors: {contribError}</p>
+          <p style={{ color: '#64748b', padding: '0 1.5rem 1rem' }}>
+            Unable to load contributors: {contribError}
+          </p>
         )}
 
         {contribLoading ? (
@@ -496,7 +498,9 @@ function Overview() {
             <p>Loading contributors...</p>
           </div>
         ) : contribData == null ? null : visibleContributors.length === 0 ? (
-          <p>No routes have enough data to score contribution for this metric yet.</p>
+          <p style={{ padding: '0 1.5rem 1rem' }}>
+            No routes have enough data to score contribution for this metric yet.
+          </p>
         ) : (
           <table className="routes-table">
             <thead>
@@ -542,7 +546,7 @@ function Overview() {
           </table>
         )}
 
-        <div style={{ marginTop: '1rem' }}>
+        <div style={{ padding: '1rem 1.5rem 1.5rem' }}>
           <Link to="/routes" className="see-all-link">
             See all routes →
           </Link>
@@ -560,12 +564,12 @@ function Overview() {
         </p>
 
         {!hasAnyOverrides ? (
-          <p>
+          <p style={{ padding: '0 1.5rem 1.5rem' }}>
             Set per-route targets in <code>config/route_targets.yaml</code>{' '}
             to populate this view.
           </p>
         ) : offTargetRows.length === 0 ? (
-          <p>
+          <p style={{ padding: '0 1.5rem 1.5rem' }}>
             No per-route overrides configured for{' '}
             {CONTRIB_METRICS.find((m) => m.key === contribMetric)?.label ??
               contribMetric}

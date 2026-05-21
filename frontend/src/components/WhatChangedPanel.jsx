@@ -144,13 +144,14 @@ function WhatChangedPanel({ routes }) {
       </div>
 
       {!hasData ? (
-        <p style={{ color: '#64748b' }}>{noDataMessage}</p>
+        <p style={{ color: '#64748b', padding: '0 1.5rem 1.5rem' }}>{noDataMessage}</p>
       ) : (
         <div
           style={{
             display: 'grid',
             gridTemplateColumns: '1fr 1fr',
             gap: '1.5rem',
+            padding: '0 1.5rem 1.5rem',
           }}
         >
           {/* Improvements sub-list */}
