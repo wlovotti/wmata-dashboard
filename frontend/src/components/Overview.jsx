@@ -4,6 +4,7 @@ import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
 import SystemTrend from './SystemTrend'
+import WhatChangedPanel from './WhatChangedPanel'
 
 // Available metrics for the "Where to look" contributors panel. Mirrors the
 // constant in RouteList.jsx — kept inline here to avoid threading a shared
@@ -129,7 +130,7 @@ function gapFraction({ current, target, higherIsBetter }) {
  * its configured/inherited target. Period-over-period deltas are
  * intentionally omitted from this banner — the `deltas` block on the
  * scorecard payload (PR #125) carries them per-route for RouteList /
- * RouteDetail; surfacing them here is NOTES-54.
+ * RouteDetail; surfacing them here is the What changed panel (PR #138).
  */
 function HealthPulse({ systemMetrics, scorecard }) {
   // Pick the worst metric — the one with the largest positive gapFraction.
@@ -486,7 +487,9 @@ function Overview() {
         </div>
 
         {contribError && (
-          <p style={{ color: '#64748b' }}>Unable to load contributors: {contribError}</p>
+          <p style={{ color: '#64748b', padding: '0 1.5rem 1rem' }}>
+            Unable to load contributors: {contribError}
+          </p>
         )}
 
         {contribLoading ? (
@@ -495,7 +498,9 @@ function Overview() {
             <p>Loading contributors...</p>
           </div>
         ) : contribData == null ? null : visibleContributors.length === 0 ? (
-          <p>No routes have enough data to score contribution for this metric yet.</p>
+          <p style={{ padding: '0 1.5rem 1rem' }}>
+            No routes have enough data to score contribution for this metric yet.
+          </p>
         ) : (
           <table className="routes-table">
             <thead>
@@ -541,7 +546,7 @@ function Overview() {
           </table>
         )}
 
-        <div style={{ marginTop: '1rem' }}>
+        <div style={{ padding: '1rem 1.5rem 1.5rem' }}>
           <Link to="/routes" className="see-all-link">
             See all routes →
           </Link>
@@ -559,12 +564,12 @@ function Overview() {
         </p>
 
         {!hasAnyOverrides ? (
-          <p>
+          <p style={{ padding: '0 1.5rem 1.5rem' }}>
             Set per-route targets in <code>config/route_targets.yaml</code>{' '}
             to populate this view.
           </p>
         ) : offTargetRows.length === 0 ? (
-          <p>
+          <p style={{ padding: '0 1.5rem 1.5rem' }}>
             No per-route overrides configured for{' '}
             {CONTRIB_METRICS.find((m) => m.key === contribMetric)?.label ??
               contribMetric}
@@ -615,6 +620,12 @@ function Overview() {
           </table>
         )}
       </div>
+
+      {/* What changed panel (PR #138). Reuses the scorecard fetch already
+          issued for HealthPulse and Off-target — no additional network
+          round-trip. */}
+      <WhatChangedPanel routes={scorecard?.routes ?? null} />
+
     </main>
   )
 }

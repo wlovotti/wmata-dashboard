@@ -34,8 +34,8 @@ block per route (shape: `{value, valid, current_n, prior_n}` per metric) on
 both `/api/routes` and `/api/routes/{id}`; thin-data suppression generic
 (<3 valid days) plus EWT-specific (<20 observed headways per window). RouteList
 and RouteDetail KPI cards render up/down/flat arrows via an extended
-`DeltaIndicator` (`lowerIsBetter` prop). NOTES-54 ("What changed" panel) is
-now unblocked.
+`DeltaIndicator` (`lowerIsBetter` prop). The "What changed" panel (NOTES-54,
+PR #138) is now live on the Overview page.
 
 ---
 
@@ -67,10 +67,6 @@ proxies instead).
 **Trend & comparison (the "are we improving?" question)**
 
 **Information architecture & navigation**
-
-- **NOTES-54 "What changed" panel on Overview** *(deferred — period-over-period
-  deltas now shipped in PR #125; NOTES-54 is next)*. Week-over-week movers split
-  into improvements / degradations.
 
 **Diagnostic outputs (route-level + system-wide)**
 
@@ -194,29 +190,6 @@ WMATA's published scorecard for now. Future option: expose a stricter
 for non-frequent routes (frequent routes get EWT instead — see `src/ewt.py`).
 The constants live in `src/otp_constants.py`, so this is a one-line
 change — could even be a query-parameter toggle on the API.
-
----
-
-## NOTES-54. "What changed" panel on Overview
-
-**Severity: low.**
-
-Augments the Overview page (delivered by PR #105) with a panel
-showing week-over-week movers: the top routes whose OTP / SD /
-EWT / bunching changed most vs the prior 7-day window. Split
-into two sub-lists — "Improvements" and "Degradations" — so
-positive movement is celebrated alongside negative.
-
-Now implementable: the period-over-period deltas blocker landed in PR #125
-(NOTES-38). The `deltas` block is already on both `/api/routes` and
-`/api/routes/{id}`; this panel reads `/api/routes`, ranks by
-`|deltas.otp.value|` (or whichever metric the user selects), and splits
-into improvements / degradations. No new endpoint needed.
-
-### Dependencies
-
-Overview shell delivered by PR #105. Period-over-period deltas delivered by
-PR #125 (NOTES-38 closed).
 
 ---
 
