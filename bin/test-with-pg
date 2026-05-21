@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# bin/test-with-pg — run the full test suite with a local Postgres backend,
+# mirroring CI's Postgres lane as closely as possible.
+#
+# Motivation: `pytest -m smoke` is the only practical local gate because
+# @integration tests need a migrated Postgres DB that most devs don't keep
+# perpetually up-to-date. This script closes that gap by:
+#
+#   1. Dropping and recreating a scratch test DB (wmata_test_local).
+#   2. Running init_db() to create the schema from models.
+#   3. Running migrate_all.py to apply every migration.
+#   4. Running check_schema_drift.py to assert model/DB parity.
+#   5. Running the full pytest suite with both SQLite and Postgres lanes.
+#
+# This matches the CI steps in .github/workflows/test.yml ("Verify schema"
+# + "Run full test suite with coverage"), so a green local run is a strong
+# signal that CI will also be green before you push.
+#
+# Usage:
+#   bin/test-with-pg                        # uses default DB name
+#   PG_TEST_DB=my_test_db bin/test-with-pg  # use a custom DB name
+#
+# Requirements:
+#   - psql / createdb / dropdb on PATH (PostgreSQL client tools)
+#   - A local Postgres listening on the default Unix socket (or set PGHOST)
+#   - uv installed and dependencies synced (`uv sync --extra dev --extra postgres`)
+#
+# Environment variables (all optional):
+#   PG_TEST_DB    — name of the scratch test DB (default: wmata_test_local)
+#   PGHOST        — Postgres host (default: local Unix socket)
+#   PGPORT        — Postgres port (default: 5432)
+#   PGUSER        — Postgres user (default: current OS user)
+#   WMATA_API_KEY — passed to pytest; defaults to "test_api_key_local"
+
+set -euo pipefail
+
+PG_TEST_DB="${PG_TEST_DB:-wmata_test_local}"
+WMATA_API_KEY="${WMATA_API_KEY:-test_api_key_local}"
+
+# Build a connection URL that mirrors what CI uses.
+# CI: postgresql://wmata:wmata@localhost:5432/wmata_test
+# Local: use whatever psql defaults the developer has configured.
+PG_HOST="${PGHOST:-}"
+PG_PORT="${PGPORT:-5432}"
+PG_USER="${PGUSER:-$(whoami)}"
+
+if [[ -n "$PG_HOST" ]]; then
+    PG_TEST_DATABASE_URL="postgresql://${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_TEST_DB}"
+else
+    # Unix socket — no host in the URL.
+    PG_TEST_DATABASE_URL="postgresql:///${PG_TEST_DB}"
+fi
+
+DATABASE_URL="$PG_TEST_DATABASE_URL"
+
+echo "=== bin/test-with-pg ==="
+echo "Test DB  : ${PG_TEST_DB}"
+echo "DB URL   : ${PG_TEST_DATABASE_URL}"
+echo ""
+
+# ── Step 1: drop + recreate the scratch DB ──────────────────────────────────
+echo "--> Dropping existing test DB (if any)..."
+dropdb --if-exists "$PG_TEST_DB"
+echo "--> Creating fresh test DB..."
+createdb "$PG_TEST_DB"
+
+# ── Step 2: init schema from models ─────────────────────────────────────────
+echo "--> Initialising schema from SQLAlchemy models..."
+DATABASE_URL="$DATABASE_URL" uv run python -c "from src.database import init_db; init_db()"
+
+# ── Step 3: apply migrations ─────────────────────────────────────────────────
+echo "--> Applying all migrations..."
+DATABASE_URL="$DATABASE_URL" uv run python scripts/migrate_all.py
+
+# ── Step 4: schema drift check ───────────────────────────────────────────────
+echo "--> Running schema drift check..."
+DATABASE_URL="$DATABASE_URL" uv run python scripts/check_schema_drift.py
+
+# ── Step 5: full test suite ──────────────────────────────────────────────────
+echo "--> Running full pytest suite..."
+DATABASE_URL="sqlite:///:memory:" \
+    PG_TEST_DATABASE_URL="$PG_TEST_DATABASE_URL" \
+    WMATA_API_KEY="$WMATA_API_KEY" \
+    uv run pytest -v --tb=short "$@"
+
+echo ""
+echo "=== All steps passed. ==="

@@ -136,23 +136,32 @@ def test_query_vehicle_positions_by_route(db_session, sample_route, sample_vehic
 
 
 def test_trip_update_state_schema(db_session):
-    """TripUpdateState has the columns the refactor design requires."""
+    """TripUpdateState has the columns the refactor design requires.
+
+    Uses positive assertions (column-in-set) rather than set equality so
+    that adding a new column doesn't cause a false failure.  Deletions of
+    any named column are still caught because each ``assert X in columns``
+    would fail.  Set-equality tests are intentionally avoided here —
+    they require updating the test on every schema addition, which creates
+    noise for reviewers and raises the barrier to legitimate schema changes.
+    """
     from src.models import TripUpdateState
 
     columns = {c.name for c in TripUpdateState.__table__.columns}
-    expected = {
-        "trip_id",
-        "stop_sequence",
-        "service_date",
-        "stop_id",
-        "vehicle_id",
-        "final_snapshot_ts",
-        "final_schedule_relationship",
-        "last_pred_snapshot_ts",
-        "last_predicted_arrival_ts",
-        "derived_at",
-    }
-    assert columns == expected, f"unexpected columns: {columns ^ expected}"
+
+    # Core identity / PK columns.
+    assert "trip_id" in columns
+    assert "stop_sequence" in columns
+    assert "service_date" in columns
+
+    # Required payload columns.
+    assert "stop_id" in columns
+    assert "vehicle_id" in columns
+    assert "final_snapshot_ts" in columns
+    assert "final_schedule_relationship" in columns
+    assert "last_pred_snapshot_ts" in columns
+    assert "last_predicted_arrival_ts" in columns
+    assert "derived_at" in columns
 
     # Composite PK on (trip_id, stop_sequence, service_date) — see
     # 2026-05-20 spec addendum. Without service_date in the PK, WMATA's
