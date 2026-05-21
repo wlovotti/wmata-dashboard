@@ -8,6 +8,32 @@ from sqlalchemy import select
 from src.models import StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
 
 
+@pytest.mark.parametrize(
+    "items, size, expected",
+    [
+        ([1, 2, 3, 4, 5], 2, [[1, 2], [3, 4], [5]]),
+        ([1, 2, 3, 4], 2, [[1, 2], [3, 4]]),
+        ([1, 2], 5, [[1, 2]]),
+        ([], 3, []),
+    ],
+)
+def test_iter_chunks_partitions_input(items, size, expected):
+    """_iter_chunks splits a sequence into successive lists of length ``size``,
+    with a possibly-short final chunk."""
+    from pipelines.derive_stop_events_from_state import _iter_chunks
+
+    assert [list(c) for c in _iter_chunks(items, size)] == expected
+
+
+def test_iter_chunks_rejects_non_positive_size():
+    """_iter_chunks raises ValueError for size <= 0 (a silent infinite loop
+    is worse than a clear error)."""
+    from pipelines.derive_stop_events_from_state import _iter_chunks
+
+    with pytest.raises(ValueError):
+        list(_iter_chunks([1, 2, 3], 0))
+
+
 def _seed_minimal_route(pg_session, *, route_id="R1", trip_id="T1"):
     """Seed the minimum DB state for a single-stop derivation test."""
     pg_session.add_all(

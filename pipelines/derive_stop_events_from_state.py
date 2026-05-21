@@ -20,6 +20,7 @@ Usage:
 import argparse
 import sys
 import time
+from collections.abc import Iterable, Iterator
 from datetime import date as date_type
 from datetime import datetime
 
@@ -33,6 +34,28 @@ from src.database import get_session
 from src.models import Route, StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
 from src.timezones import eastern_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
+
+# Chunk size for the per-state-row derived_at UPDATE. The UPDATE filters on
+# ``tuple_(trip_id, stop_sequence).in_(<list>)``, which Postgres parses as a
+# deeply nested row-constructor OR expression. At ~thousands of pairs the
+# parser exhausts ``max_stack_depth`` (default 2MB) and the query fails with
+# ``StatementTooComplex: stack depth limit exceeded``. 1000 pairs per UPDATE
+# stays comfortably under that limit on production-shaped batches.
+_STATE_UPDATE_CHUNK_SIZE = 1000
+
+
+def _iter_chunks[T](items: Iterable[T], size: int) -> Iterator[list[T]]:
+    """Yield successive lists of length ``size`` from ``items`` (last may be short)."""
+    if size <= 0:
+        raise ValueError(f"chunk size must be positive, got {size}")
+    chunk: list[T] = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def derive_for_route_date(
@@ -207,17 +230,22 @@ def derive_for_route_date(
         # form (trip_id.in_(set) AND stop_sequence.in_(set)) would mark
         # cross-product rows as derived.
         #
+        # Chunked into _STATE_UPDATE_CHUNK_SIZE batches: a single UPDATE
+        # over the whole list blows past Postgres's max_stack_depth on
+        # large routes (see the constant's docstring).
+        #
         # Transaction semantics: upsert_rows() above already committed
-        # the stop_events writes. This UPDATE runs in a new transaction
-        # that we must commit explicitly, otherwise the session's
-        # auto-begin transaction is rolled back at db.close() in main()
-        # and every derived_at mark is silently lost — leaving cleanup
-        # pass 1 (derived-older-than-2-days) with nothing to delete.
-        db.execute(
-            update(TripUpdateState)
-            .where(tuple_(TripUpdateState.trip_id, TripUpdateState.stop_sequence).in_(derived_keys))
-            .values(derived_at=derived_at)
-        )
+        # the stop_events writes. The chunked UPDATEs run in a new
+        # transaction that we must commit explicitly, otherwise the
+        # session's auto-begin transaction is rolled back at db.close()
+        # in main() and every derived_at mark is silently lost — leaving
+        # cleanup pass 1 (derived-older-than-2-days) with nothing to delete.
+        for chunk in _iter_chunks(derived_keys, _STATE_UPDATE_CHUNK_SIZE):
+            db.execute(
+                update(TripUpdateState)
+                .where(tuple_(TripUpdateState.trip_id, TripUpdateState.stop_sequence).in_(chunk))
+                .values(derived_at=derived_at)
+            )
         db.commit()
 
     return {
