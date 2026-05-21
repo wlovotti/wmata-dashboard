@@ -27,6 +27,13 @@ def test_migration_creates_table_and_indexes(db_session):
     indexes = {idx["name"] for idx in inspector.get_indexes("trip_update_state")}
     assert "idx_tus_final_snapshot_ts" in indexes
     assert "idx_tus_trip_id" in indexes
+    assert "idx_tus_service_date" in indexes
+
+    # Fresh-install schema includes service_date in the PK (2026-05-20
+    # addendum). Verify the column exists so a regression that drops it
+    # from the CREATE TABLE SQL doesn't go unnoticed.
+    cols = {c["name"] for c in inspector.get_columns("trip_update_state")}
+    assert "service_date" in cols
 
     # Second run is a no-op (idempotent).
     run_migration(engine)  # Must not raise.

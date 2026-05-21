@@ -66,7 +66,13 @@ def upsert_rows(
     if not rows:
         raise ValueError("upsert_rows called with an empty rows list")
 
-    stmt = pg_insert(model).values(rows)
+    # Accept both ORM-mapped classes (which expose __table__) and bare
+    # Table objects (e.g. side tables produced by
+    # ``_resolve_side_table`` in pipelines/derive_stop_events_from_state.py).
+    # pg_insert rejects arbitrary classes; passing a Table works for both
+    # cases because mapped classes route through their __table__ anyway.
+    table = getattr(model, "__table__", model)
+    stmt = pg_insert(table).values(rows)
     set_ = {c: stmt.excluded[c] for c in update_cols}
     stmt = stmt.on_conflict_do_update(constraint=constraint_name, set_=set_)
     db.execute(stmt)
@@ -81,6 +87,7 @@ def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:
         {
             "trip_id": str,
             "stop_sequence": int,
+            "service_date": date,
             "stop_id": str,
             "vehicle_id": str | None,
             "snapshot_ts": datetime,
@@ -88,7 +95,7 @@ def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:
             "schedule_relationship": str | None,
         }
 
-    Semantics on conflict (trip_id, stop_sequence):
+    Semantics on conflict (trip_id, stop_sequence, service_date):
         - final_snapshot_ts, final_schedule_relationship: always overwrite.
         - last_pred_snapshot_ts, last_predicted_arrival_ts: overwrite ONLY
           when the incoming predicted_arrival_ts is non-null. WMATA
@@ -128,6 +135,7 @@ def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:
         {
             "trip_id": r["trip_id"],
             "stop_sequence": r["stop_sequence"],
+            "service_date": r["service_date"],
             "stop_id": r["stop_id"],
             "vehicle_id": r["vehicle_id"],
             "final_snapshot_ts": r["snapshot_ts"],
@@ -145,7 +153,7 @@ def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:
     excluded = stmt.excluded
     table = TripUpdateState.__table__
     stmt = stmt.on_conflict_do_update(
-        index_elements=["trip_id", "stop_sequence"],
+        index_elements=["trip_id", "stop_sequence", "service_date"],
         set_={
             "stop_id": excluded.stop_id,
             "vehicle_id": case(

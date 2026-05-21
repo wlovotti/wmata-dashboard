@@ -1,6 +1,6 @@
 """Tests for src.upsert_helpers.upsert_trip_update_state."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -11,16 +11,23 @@ from src.models import TripUpdateState
 def _make_row(
     trip_id: str = "T1",
     stop_sequence: int = 1,
+    service_date: date | None = None,
     stop_id: str = "S1",
     vehicle_id: str | None = "V1",
     snapshot_ts: datetime | None = None,
     predicted_arrival_ts: datetime | None = None,
     schedule_relationship: str | None = "SCHEDULED",
 ) -> dict:
-    """Build a row dict in the shape upsert_trip_update_state expects."""
+    """Build a row dict in the shape upsert_trip_update_state expects.
+
+    ``service_date`` defaults to 2026-05-17 to match the default
+    ``snapshot_ts``; tests that hold trip_id constant across snapshots
+    can rely on the default to land both rows on the same PK.
+    """
     return {
         "trip_id": trip_id,
         "stop_sequence": stop_sequence,
+        "service_date": service_date or date(2026, 5, 17),
         "stop_id": stop_id,
         "vehicle_id": vehicle_id,
         "snapshot_ts": snapshot_ts or datetime(2026, 5, 17, 14, 0, 0),
