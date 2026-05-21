@@ -27,6 +27,12 @@ def test_save_trip_updates_writes_to_both_tables(pg_session, tmp_path):
             "predicted_departure_ts": datetime(2026, 5, 17, 14, 5, 30),
             "schedule_relationship": "SCHEDULED",
             "collected_at": datetime(2026, 5, 17, 14, 0, 5),
+            # trip_start_date carries the GTFS-RT tripDescriptor.start_date
+            # forward to the upsert/archive paths. TripUpdateSnapshot has no
+            # such column, so the snapshot constructor must NOT receive it.
+            # Without this key in the test row, the dual-write test misses
+            # the regression where ``**row`` splats into TripUpdateSnapshot.
+            "trip_start_date": "20260517",
         }
     ]
     try:
@@ -68,6 +74,7 @@ def test_collector_writes_jsonl_archive(pg_session, tmp_path):
             "predicted_departure_ts": datetime(2026, 5, 17, 14, 5, 30),
             "schedule_relationship": "SCHEDULED",
             "collected_at": datetime(2026, 5, 17, 14, 0, 5),
+            "trip_start_date": "20260517",
         }
     ]
     try:

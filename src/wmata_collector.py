@@ -659,7 +659,22 @@ class WMATADataCollector:
             if self._tu_dedup_cache.get(key) == value:
                 continue
             self._tu_dedup_cache[key] = value
-            new_objects.append(TripUpdateSnapshot(**row))
+            # Explicit construction — the row dict carries trip_start_date for the
+            # upsert/archive paths but TripUpdateSnapshot's columns don't include
+            # it, so a bare ``**row`` splat raises "invalid keyword argument".
+            new_objects.append(
+                TripUpdateSnapshot(
+                    snapshot_ts=row["snapshot_ts"],
+                    trip_id=row["trip_id"],
+                    route_id=row.get("route_id"),
+                    vehicle_id=row.get("vehicle_id"),
+                    stop_id=row["stop_id"],
+                    stop_sequence=row.get("stop_sequence"),
+                    predicted_arrival_ts=row.get("predicted_arrival_ts"),
+                    predicted_departure_ts=row.get("predicted_departure_ts"),
+                    schedule_relationship=row.get("schedule_relationship"),
+                )
+            )
 
         for stale in self._tu_dedup_cache.keys() - seen_keys:
             del self._tu_dedup_cache[stale]
