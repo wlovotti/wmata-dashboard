@@ -84,4 +84,5 @@ markers = [
     "integration: Integration tests requiring database",
     "api: API endpoint tests",
     "slow: Tests that take longer than 1 second",
+    "pg: Tests that require a live Postgres connection (PG_TEST_DATABASE_URL)",
 ]

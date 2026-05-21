@@ -149,6 +149,7 @@ uv run python scripts/collector_status.py                 # one-shot collector h
 uv run python pipelines/run_daily_batch.py                # nightly batch (derive + aggregate + system rollup)
 psql -d wmata_dashboard                                   # ad-hoc DB queries
 uv run pytest -m smoke                                    # fast tests
+bin/test-with-pg                                          # full suite with Postgres (mirrors CI; needs local pg)
 uv run ruff check src/ scripts/ api/ pipelines/ tests/    # lint (CI requires)
 uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format gate (CI requires)
 ```

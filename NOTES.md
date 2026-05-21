@@ -6,15 +6,22 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-20. NOTES-72 Phase D recovery in flight: investigation
-on 2026-05-20 surfaced that the v2 derivation pipeline silently failed 4
-consecutive nightly batches (2026-05-16 → 19) due to a `_resolve_side_table`
-SQLAlchemy bug AND that the `trip_update_state` PK omitted `service_date`,
-so WMATA's repeating day-over-day trip_ids overwrote prior-day state.
-Schema-fix PR adds `service_date` to the PK, fixes the resolver, adds an
-idempotent JSONL replay tool for historical re-derivation, simplifies
-cleanup to a single date rule, and adds a row-count guard so silent-zero
-failures can't recur. See
+Last edited 2026-05-20. Test-infra hardening (PR #136's first CI push
+had 12 failures, 8 traced to migrate-script CREATE TABLE drift): extended
+`check_schema_drift.py` to validate `migrate_create_*.py` SQL against the
+model, isolated `test_migrate_trip_update_state.py` to its own engine,
+softened the rigid column-set assertion in `test_models.py`, and added
+`bin/test-with-pg` so the full suite runs locally before push (closed
+in the test-infra hardening PR). NOTES-72 Phase D recovery in
+flight: investigation on 2026-05-20 surfaced that the v2 derivation
+pipeline silently failed 4 consecutive nightly batches (2026-05-16 → 19)
+due to a `_resolve_side_table` SQLAlchemy bug AND that the
+`trip_update_state` PK omitted `service_date`, so WMATA's repeating
+day-over-day trip_ids overwrote prior-day state. Schema-fix PR adds
+`service_date` to the PK, fixes the resolver, adds an idempotent JSONL
+replay tool for historical re-derivation, simplifies cleanup to a single
+date rule, and adds a row-count guard so silent-zero failures can't recur.
+See
 `docs/superpowers/specs/2026-05-20-trip-update-state-service-date-addendum.md`.
 Closed NOTES-70 (PR #133) — added `.where(trip_id == 'T1')` filters to all
 bare `select(StopEvent)` and `select(TripUpdateState)` calls in
