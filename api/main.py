@@ -24,6 +24,7 @@ from api.aggregations import (
     get_route_bunching_causes,
     get_route_contributors,
     get_route_detail_metrics,
+    get_route_diagnosis,
     get_route_diagnostic_profile,
     get_route_period_drilldown,
     get_route_recent_runs,
@@ -950,6 +951,57 @@ async def get_route_diagnostic_profile_endpoint(
     db = get_session()
     try:
         return get_route_diagnostic_profile(db, route_id, period=period)
+    finally:
+        db.close()
+
+
+@app.get("/api/routes/{route_id}/diagnosis")
+async def get_route_diagnosis_endpoint(
+    route_id: str,
+    period: str = "all",
+):
+    """
+    Cached LLM narrative for one route's diagnostic profile (PR #141).
+
+    Reads from ``route_diagnosis_narrative`` — a cache table written offline
+    by ``scripts/generate_route_diagnosis.py``. This endpoint NEVER calls
+    Claude; it only serves rows already in the cache. The ``is_stale`` field
+    signals when the underlying diagnostic profile has changed since the
+    narrative was generated so the frontend can show a regeneration prompt.
+
+    Returns 404 when no narrative has been generated yet for this
+    ``(route_id, period)`` combination.
+
+    Args:
+        route_id: Route identifier (e.g., ``'D80'``).
+        period: One of ``all`` (default), ``am_peak``, ``midday``,
+            ``pm_peak``, ``evening``, ``late``.
+
+    Returns:
+        Dict with ``narrative`` (string), ``generated_at`` (ISO-8601 UTC),
+        ``model_id`` (string), ``prompt_version`` (string), and ``is_stale``
+        (bool — ``True`` when the diagnostic profile changed after the
+        narrative was generated).
+    """
+    if period not in DIAGNOSTIC_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
+        )
+
+    db = get_session()
+    try:
+        result = get_route_diagnosis(db, route_id, period=period)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No diagnosis narrative cached for route {route_id!r}, "
+                    f"period {period!r}. "
+                    f"Run: scripts/generate_route_diagnosis.py --route {route_id}"
+                ),
+            )
+        return result
     finally:
         db.close()
 

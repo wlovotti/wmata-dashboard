@@ -1241,3 +1241,49 @@ class CrossRouteSegmentRollup(Base):
             "to_stop_id",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM-generated route diagnosis narrative (PR #141)
+# ---------------------------------------------------------------------------
+#
+# Narrative text is generated offline by `scripts/generate_route_diagnosis.py`
+# (calls Claude; requires ANTHROPIC_API_KEY) and cached here. The API serves
+# the cache read-only — Claude is never called at request time. Staleness is
+# detected by comparing `profile_snapshot_hash` (SHA256 of the current
+# route_diagnostic_* rows) against the hash stored at generation time.
+
+
+class RouteDiagnosisNarrative(Base):
+    """
+    Cached LLM-generated narrative for one (route_id, period). PR #141.
+
+    Written by ``scripts/generate_route_diagnosis.py`` (offline; requires
+    ANTHROPIC_API_KEY). Read by ``GET /api/routes/{id}/diagnosis?period=``.
+    The API never calls Claude — it only serves rows already here.
+
+    Staleness detection: ``profile_snapshot_hash`` is a SHA-256 hex digest
+    of the canonicalized JSON of the ``route_diagnostic_segment`` +
+    ``route_diagnostic_timepoint`` rows for the same ``(route_id, period)``
+    at generation time. The API endpoint recomputes the current hash and
+    sets ``is_stale=True`` in the response when the two hashes differ —
+    indicating the diagnostic profile changed since the narrative was
+    generated. Regeneration is always manual (re-run the CLI script).
+
+    ``prompt_version`` is a short string (e.g. ``"v1"``) baked into the
+    CLI so cache invalidation can be forced by bumping the version even
+    when the profile data hasn't changed.
+    """
+
+    __tablename__ = "route_diagnosis_narrative"
+
+    route_id = Column(String, primary_key=True)
+    period = Column(String, primary_key=True)  # all | am_peak | midday | pm_peak | evening | late
+
+    narrative = Column(String, nullable=False)
+    generated_at = Column(DateTime, nullable=False)  # naive UTC
+    model_id = Column(String, nullable=False)
+    prompt_version = Column(String, nullable=False)
+    profile_snapshot_hash = Column(String, nullable=False)  # SHA-256 hex
+
+    __table_args__ = (Index("idx_route_diagnosis_narrative_route", "route_id"),)

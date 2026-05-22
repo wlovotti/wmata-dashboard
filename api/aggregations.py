@@ -28,6 +28,7 @@ from src.bunching import (
     compute_bunching_headline_for_route,
     compute_bunching_headline_for_routes,
 )
+from src.diagnosis_hash import compute_profile_hash
 from src.ewt import (
     _day_type_for,
     _eastern_hour,
@@ -44,6 +45,7 @@ from src.models import (
     Calendar,
     CrossRouteSegmentRollup,
     Route,
+    RouteDiagnosisNarrative,
     RouteDiagnosticDirection,
     RouteDiagnosticSegment,
     RouteDiagnosticTimepoint,
@@ -4315,6 +4317,102 @@ def get_route_diagnostic_profile(
         "segments": segments,
         "timepoints": timepoints,
         "direction_asymmetry": direction_asymmetry,
+    }
+
+
+# ---------------------------------------------------------------------------
+# LLM-generated route diagnosis narrative (PR #141)
+# ---------------------------------------------------------------------------
+
+
+def get_route_diagnosis(
+    db: Session,
+    route_id: str,
+    period: str = "all",
+) -> dict | None:
+    """Return the cached LLM narrative for one route and period.
+
+    Reads from ``route_diagnosis_narrative`` (written offline by
+    ``scripts/generate_route_diagnosis.py``; Claude is NEVER called here).
+    Detects staleness by comparing the stored ``profile_snapshot_hash``
+    against a freshly-computed hash of the current ``route_diagnostic_*``
+    rows for the same ``(route_id, period)``.
+
+    Args:
+        db: Active SQLAlchemy session.
+        route_id: Route identifier (e.g. ``'D80'``).
+        period: One of ``all`` / ``am_peak`` / ``midday`` / ``pm_peak`` /
+            ``evening`` / ``late``. Defaults to ``all``.
+
+    Returns:
+        Dict with ``narrative``, ``generated_at`` (ISO-8601 UTC), ``model_id``,
+        ``prompt_version``, and ``is_stale`` (bool). Returns ``None`` when no
+        cached narrative exists for the requested ``(route_id, period)``.
+    """
+    row = (
+        db.query(RouteDiagnosisNarrative)
+        .filter(
+            RouteDiagnosisNarrative.route_id == route_id,
+            RouteDiagnosisNarrative.period == period,
+        )
+        .first()
+    )
+    if row is None:
+        return None
+
+    # Re-compute the current profile hash for staleness detection.
+    seg_rows = (
+        db.query(RouteDiagnosticSegment)
+        .filter(
+            RouteDiagnosticSegment.route_id == route_id,
+            RouteDiagnosticSegment.period == period,
+        )
+        .all()
+    )
+    tp_rows = (
+        db.query(RouteDiagnosticTimepoint)
+        .filter(
+            RouteDiagnosticTimepoint.route_id == route_id,
+            RouteDiagnosticTimepoint.period == period,
+        )
+        .all()
+    )
+    seg_dicts = [
+        {
+            "direction_id": r.direction_id,
+            "from_seq": r.from_seq,
+            "from_stop_id": r.from_stop_id,
+            "to_seq": r.to_seq,
+            "to_stop_id": r.to_stop_id,
+            "mean_slip_sec": r.mean_slip_sec,
+            "cum_slip_sec": r.cum_slip_sec,
+            "n_observations": r.n_observations,
+            "is_timepoint": r.is_timepoint,
+        }
+        for r in seg_rows
+    ]
+    tp_dicts = [
+        {
+            "direction_id": r.direction_id,
+            "timepoint_stop_id": r.timepoint_stop_id,
+            "classification": r.classification,
+            "median_dev_entering": r.median_dev_entering,
+            "median_dev_leaving": r.median_dev_leaving,
+            "p10_dev_entering": r.p10_dev_entering,
+            "p10_dev_leaving": r.p10_dev_leaving,
+            "n_observations": r.n_observations,
+        }
+        for r in tp_rows
+    ]
+    current_hash = compute_profile_hash(seg_dicts, tp_dicts)
+    is_stale = current_hash != row.profile_snapshot_hash
+
+    return {
+        "narrative": row.narrative,
+        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "model_id": row.model_id,
+        "prompt_version": row.prompt_version,
+        "is_stale": is_stale,
     }
 
 
