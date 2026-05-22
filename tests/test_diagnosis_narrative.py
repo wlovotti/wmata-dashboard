@@ -213,17 +213,20 @@ def test_diagnosis_respects_period_param(client, db_session, sample_route):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_exits_1_when_no_diagnostic_data(db_session, monkeypatch, tmp_path):
+def test_cli_exits_1_when_no_diagnostic_data(test_engine, db_session, monkeypatch, tmp_path):
     """
     The CLI exits 1 and prints a useful message when no diagnostic rows exist
     for the requested route.
+
+    Uses ``test_engine`` (SQLite in-memory, already schema-initialised by the
+    fixture) instead of calling ``get_engine()`` directly, which passes
+    PostgreSQL-only pool kwargs (``max_overflow``) that SQLite's
+    SingletonThreadPool rejects.
     """
     import sys
 
-    from src.database import get_engine
-
-    # Re-use the in-memory SQLite engine already populated by db_session.
-    engine = get_engine()
+    # Re-use the in-memory SQLite engine already populated by test_engine.
+    engine = test_engine
 
     # Patch get_engine so the CLI uses the test engine.
     import src.database as _db_mod
@@ -270,10 +273,15 @@ def test_cli_exits_1_when_no_diagnostic_data(db_session, monkeypatch, tmp_path):
     )
     mod = importlib.util.module_from_spec(spec)
 
-    # Patch get_engine inside the module before executing.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
 
     spec.loader.exec_module(mod)
+
+    # Patch get_engine on the freshly-loaded module so that main()'s call to
+    # get_engine() at runtime uses the test engine, not the production one.
+    # The script does ``from src.database import get_engine`` so we must patch
+    # the name inside the module object, not just src.database.get_engine.
+    mod.get_engine = lambda: engine
 
     # Route NONEXISTENT does not exist → should exit 1.
     exit_code = mod.main(["--route", "NONEXISTENT"])
