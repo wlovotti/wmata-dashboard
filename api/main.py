@@ -18,6 +18,7 @@ from api.aggregations import (
     compute_block_timeline,
     get_active_blocks,
     get_all_routes_scorecard,
+    get_cross_route_segments,
     get_live_metrics_for_window,
     get_route_blocks,
     get_route_bunching_causes,
@@ -1026,6 +1027,62 @@ async def get_schedule_audit_endpoint(
             sign=sign,
             limit=limit,
         )
+    finally:
+        db.close()
+
+
+@app.get("/api/segments")
+async def get_segments(
+    period: str = "all",
+    limit: int = 100,
+):
+    """
+    Cross-route segment diagnostic — ranked stop-pairs by shared slip (NOTES-59).
+
+    Reads ``cross_route_segment_rollup`` rows materialized nightly by
+    ``pipelines/refresh_cross_route_segments.py`` and returns a ranked list of
+    stop-pairs that appear on ≥2 routes, ordered by total trip-volume-weighted
+    slip descending.  This is the V1 infrastructure-investment ranking: a high
+    ``total_weighted_slip_sec`` on a stop-pair means many bus trips on multiple
+    routes lose time on that segment — a shared chokepoint that is a candidate
+    for TSP, queue-jumps, or dedicated lanes.
+
+    V1 uses stop-pair identity matching only — two routes that share the same
+    ``(from_stop_id, to_stop_id)`` pair count as traversing the same segment.
+    Shape-aware corridor rollup across different stop_ids on the same street is
+    deferred to NOTES-62.
+
+    ``slip_min_per_trip`` is the average per-trip slip in minutes across all
+    contributing routes and directions.  ``peak_period`` (populated on
+    ``period='all'`` rows only) names the time-of-day band where the shared
+    slip is highest for the pair.
+
+    ``contributing_routes`` is the per-route breakdown list sorted by trip
+    volume — use it for the drilldown panel.
+
+    Args:
+        period: One of ``all`` (default), ``am_peak``, ``midday``,
+            ``pm_peak``, ``evening``, ``late``.
+        limit: Max rows to return (default 100, max 500).
+
+    Returns:
+        Dict with ``period``, ``lookback_days``, ``n_rows``, and ``segments``
+        (ranked list, each row carries from/to stop ids + names, route count,
+        route names summary, slip stats, and contributing_routes drilldown).
+    """
+    if period not in DIAGNOSTIC_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
+        )
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    db = get_session()
+    try:
+        return get_cross_route_segments(db, period=period, limit=limit)
     finally:
         db.close()
 

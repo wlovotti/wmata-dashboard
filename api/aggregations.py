@@ -42,6 +42,7 @@ from src.excess_trip_time import compute_excess_trip_time
 from src.frequent_routes import get_cell_hour_gate_sec, load_frequent_route_ids
 from src.models import (
     Calendar,
+    CrossRouteSegmentRollup,
     Route,
     RouteDiagnosticDirection,
     RouteDiagnosticSegment,
@@ -4314,4 +4315,126 @@ def get_route_diagnostic_profile(
         "segments": segments,
         "timepoints": timepoints,
         "direction_asymmetry": direction_asymmetry,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cross-route segment diagnostic (NOTES-59)
+# ---------------------------------------------------------------------------
+#
+# Reads `cross_route_segment_rollup` rows materialized nightly by
+# `pipelines/refresh_cross_route_segments.py` (NOTES-59). Returns a ranked
+# list of stop-pairs that appear on ≥2 routes, ordered by total
+# trip-volume-weighted slip descending.
+
+# Default lookback for the diagnostic materialization — mirrors the 30-day
+# window used by `refresh_route_diagnostic_profile.py`. Used to convert
+# n_total_observations into a per-day trip count estimate.
+CROSS_ROUTE_SEGMENT_LOOKBACK_DAYS = 30
+
+
+def get_cross_route_segments(
+    db: Session,
+    *,
+    period: str = "all",
+    limit: int = 100,
+) -> dict:
+    """Return the ranked cross-route segment diagnostic for the given period.
+
+    Reads ``cross_route_segment_rollup`` rows materialized nightly by
+    ``pipelines/refresh_cross_route_segments.py``.  Each row represents a
+    ``(from_stop_id, to_stop_id)`` stop-pair that is traversed by at least
+    2 distinct routes.  Rows are ordered by ``total_weighted_slip_sec``
+    descending — the infrastructure-investment ranked list.
+
+    ``slip_min_per_trip`` is ``total_weighted_slip_sec / n_total_observations
+    / 60`` — the average per-trip slip in minutes across all routes and
+    directions that traverse the pair.  A positive value means buses are
+    slower than scheduled on this segment on average; a high magnitude with
+    many routes indicates a shared chokepoint.
+
+    ``peak_period`` is populated on ``period='all'`` rows only (the named
+    period with highest weighted slip for the pair).
+
+    The ``contributing_routes`` field is the deserialized JSON array from
+    the rollup table — a list of per-route breakdown rows sorted by trip
+    volume.
+
+    Per CLAUDE.md: ``stops`` join uses ``is_current=True``.
+
+    Args:
+        db: SQLAlchemy session.
+        period: One of ``all`` / ``am_peak`` / ``midday`` / ``pm_peak`` /
+            ``evening`` / ``late`` — must match the materialized period set.
+        limit: Cap on returned rows (default 100, max 500).
+
+    Returns:
+        Dict with ``period``, ``lookback_days``, ``n_rows``, and ``segments``
+        (ranked list, each row carries from/to stop ids + names, route count,
+        route names summary, total weighted slip, slip_min_per_trip, peak_period,
+        and contributing_routes drilldown).
+    """
+    import json as _json
+
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    rollup_rows = (
+        db.query(CrossRouteSegmentRollup)
+        .filter(CrossRouteSegmentRollup.period == period)
+        .order_by(CrossRouteSegmentRollup.total_weighted_slip_sec.desc())
+        .limit(limit)
+        .all()
+    )
+
+    if not rollup_rows:
+        return {
+            "period": period,
+            "lookback_days": CROSS_ROUTE_SEGMENT_LOOKBACK_DAYS,
+            "n_rows": 0,
+            "segments": [],
+        }
+
+    # Bulk-load stop names for all from/to stop_ids.
+    stop_ids = {r.from_stop_id for r in rollup_rows} | {r.to_stop_id for r in rollup_rows}
+    stop_name_map: dict[str, str | None] = dict(
+        db.query(Stop.stop_id, Stop.stop_name)
+        .filter(Stop.stop_id.in_(stop_ids), Stop.is_current)
+        .all()
+    )
+
+    out: list[dict] = []
+    for r in rollup_rows:
+        contributing = _json.loads(r.contributing_routes_json)
+        # Average per-trip slip across all contributing routes.
+        slip_min_per_trip = (
+            (r.total_weighted_slip_sec / r.n_total_observations / 60.0)
+            if r.n_total_observations > 0
+            else 0.0
+        )
+        # Compact route names list for the "Contributing routes" column.
+        route_short_names = sorted({c["route_short_name"] or c["route_id"] for c in contributing})
+        out.append(
+            {
+                "from_stop_id": r.from_stop_id,
+                "from_stop_name": stop_name_map.get(r.from_stop_id),
+                "to_stop_id": r.to_stop_id,
+                "to_stop_name": stop_name_map.get(r.to_stop_id),
+                "n_routes": r.n_routes,
+                "route_short_names": route_short_names,
+                "total_weighted_slip_sec": r.total_weighted_slip_sec,
+                "slip_min_per_trip": slip_min_per_trip,
+                "n_total_observations": r.n_total_observations,
+                "peak_period": r.peak_period,
+                "contributing_routes": contributing,
+            }
+        )
+
+    return {
+        "period": period,
+        "lookback_days": CROSS_ROUTE_SEGMENT_LOOKBACK_DAYS,
+        "n_rows": len(out),
+        "segments": out,
     }
