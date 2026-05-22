@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-20. Test-infra hardening (PR #136's first CI push
+Last edited 2026-05-21. Test-infra hardening (PR #136's first CI push
 had 12 failures, 8 traced to migrate-script CREATE TABLE drift): extended
 `check_schema_drift.py` to validate `migrate_create_*.py` SQL against the
 model, isolated `test_migrate_trip_update_state.py` to its own engine,
@@ -81,13 +81,13 @@ target lists directly.
 - **RouteDetail diagnosis panel (PR #124)** — slip trajectory chart
   (both directions, timepoint markers) + timepoint behavior table.
   LLM diagnosis narrative deferred to NOTES-69.
-- **NOTES-59 Cross-route segment diagnostic (V1, stop-pair).**
+- **Cross-route segment diagnostic (PR #140).**
   Aggregate slip across all routes per `(from_stop, to_stop)`
   segment → ranked infrastructure-investment candidates (TSP /
   queue-jumps / dedicated lanes). Segment-identity matching only;
   no geometric corridor rollup.
 - **NOTES-62 Cross-route corridor diagnostic (V2, geometric rollup).**
-  Roll NOTES-59's segment-level slip up to corridor / intersection
+  Roll the cross-route segment diagnostic's (PR #140) stop-pair slip up to corridor / intersection
   level via shape-aware matching, so "the M St NW corridor from
   Wisconsin to Penn Ave" reads as one investment target rather
   than N stop-pairs. The framing that makes the output
@@ -315,54 +315,11 @@ Out of scope: scaling beyond a single API instance, real auth
 
 ---
 
-## NOTES-59. Cross-route segment diagnostic (V1, stop-pair)
-
-**Severity: low (highest-leverage novel output — V1 piece).**
-
-Aggregates per-segment slip from the route_diagnostic_profile
-foundation (PR #107) across *all* routes to identify
-infrastructure-investment targets at the stop-pair level.
-V1 deliberately uses segment-identity matching only — same
-`(from_stop, to_stop)` across routes counts as the same segment —
-and defers shape-aware corridor rollup to NOTES-62 so V1 can ship
-without geometric matching infrastructure.
-
-Computation:
-- For each unique stop-pair `(from_stop, to_stop)` traversed by ≥2
-  routes, aggregate total slip-seconds across all routes weighted by
-  observed trip volume.
-- Per time-of-day cuts; PM peak typically dominates for downtown.
-- "Contributing routes" list with per-route breakdown for drilldown.
-
-New page `/segments` (new top-level nav alongside Overview / Routes /
-Blocks / Targets per PR #105's IA). Ranked list with columns: segment
-description (from-stop → to-stop, distance), contributing routes
-(count + names), total slip-min/hour, peak hour. Click-through shows
-per-route contribution.
-
-Caveat: stop-pair identity misses cases where two routes traverse the
-same street segment using different stop_ids (NB and SB stops at
-different intersections, or alternative spacing). V1 systematically
-underestimates total corridor slip for those cases — NOTES-62
-addresses this with shape-aware matching.
-
-Use cases (V1):
-- "Which intersections / short segments lose the most time
-  system-wide?" — first cut at infrastructure-investment ranking.
-- "Where do bus routes share a chokepoint?" — direct visibility into
-  shared pain.
-
-### Dependencies
-
-route_diagnostic_profile foundation (PR #107).
-
----
-
 ## NOTES-62. Cross-route corridor diagnostic (V2, geometric rollup)
 
-**Severity: low (decision-useful framing — V2 follow-up to NOTES-59).**
+**Severity: low (decision-useful framing — V2 follow-up to the cross-route segment diagnostic, PR #140).**
 
-Rolls NOTES-59's stop-pair slip up to the corridor / intersection
+Rolls the stop-pair slip from the cross-route segment diagnostic (PR #140) up to the corridor / intersection
 level via shape-aware matching, so "the M St NW corridor from
 Wisconsin Ave to Pennsylvania Ave" reads as a single investment
 target rather than N stop-pairs. The framing transit planners,
@@ -385,10 +342,10 @@ Computation requirements beyond V1:
   stop-pairs that fall within a corridor, across all routes that
   traverse it.
 
-UI: extend the `/segments` page (NOTES-59) with a corridor view
+UI: extend the `/segments` page (PR #140) with a corridor view
 toggle, or new tab. Corridor cards: name, length, contributing
 routes, total system-wide slip-hours/day, peak periods, drill-down
-to constituent stop-pairs (NOTES-59 view).
+to constituent stop-pairs (PR #140 stop-pair view).
 
 Out of scope for V2: cost-of-intervention estimates (TSP install
 cost, bus-lane construction cost — those are WMATA / DDOT planning
@@ -398,7 +355,7 @@ cost data is a separate exercise.
 
 ### Dependencies
 
-NOTES-59 (segment-level aggregation). May benefit from any future
+Cross-route segment diagnostic (PR #140, segment-level aggregation). May benefit from any future
 work on stop-to-shape projection or OSM road-network ingestion if
 that lands independently.
 

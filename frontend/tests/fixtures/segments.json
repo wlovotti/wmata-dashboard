@@ -1,0 +1,112 @@
+{
+  "period": "all",
+  "lookback_days": 30,
+  "n_rows": 3,
+  "segments": [
+    {
+      "from_stop_id": "1001234",
+      "from_stop_name": "Wisconsin Ave NW + M St NW",
+      "to_stop_id": "1001235",
+      "to_stop_name": "Wisconsin Ave NW + N St NW",
+      "n_routes": 3,
+      "route_short_names": ["D6", "G2", "N2"],
+      "total_weighted_slip_sec": 18240.0,
+      "slip_min_per_trip": 1.9,
+      "n_total_observations": 160,
+      "peak_period": "pm_peak",
+      "contributing_routes": [
+        {
+          "route_id": "7900",
+          "route_short_name": "D6",
+          "direction_id": 0,
+          "mean_slip_sec": 115.0,
+          "n_observations": 80
+        },
+        {
+          "route_id": "8100",
+          "route_short_name": "G2",
+          "direction_id": 1,
+          "mean_slip_sec": 98.0,
+          "n_observations": 50
+        },
+        {
+          "route_id": "8200",
+          "route_short_name": "N2",
+          "direction_id": 0,
+          "mean_slip_sec": 112.0,
+          "n_observations": 30
+        }
+      ]
+    },
+    {
+      "from_stop_id": "1002345",
+      "from_stop_name": "16th St NW + U St NW",
+      "to_stop_id": "1002346",
+      "to_stop_name": "16th St NW + V St NW",
+      "n_routes": 2,
+      "route_short_names": ["S1", "S2"],
+      "total_weighted_slip_sec": 9800.0,
+      "slip_min_per_trip": 1.4,
+      "n_total_observations": 117,
+      "peak_period": "pm_peak",
+      "contributing_routes": [
+        {
+          "route_id": "5101",
+          "route_short_name": "S1",
+          "direction_id": 1,
+          "mean_slip_sec": 90.0,
+          "n_observations": 65
+        },
+        {
+          "route_id": "5102",
+          "route_short_name": "S2",
+          "direction_id": 1,
+          "mean_slip_sec": 82.0,
+          "n_observations": 52
+        }
+      ]
+    },
+    {
+      "from_stop_id": "1003456",
+      "from_stop_name": "Pennsylvania Ave NW + 7th St NW",
+      "to_stop_id": "1003457",
+      "to_stop_name": "Pennsylvania Ave NW + 9th St NW",
+      "n_routes": 4,
+      "route_short_names": ["32", "34", "36", "P6"],
+      "total_weighted_slip_sec": 7200.0,
+      "slip_min_per_trip": 0.9,
+      "n_total_observations": 133,
+      "peak_period": "am_peak",
+      "contributing_routes": [
+        {
+          "route_id": "3200",
+          "route_short_name": "32",
+          "direction_id": 0,
+          "mean_slip_sec": 55.0,
+          "n_observations": 50
+        },
+        {
+          "route_id": "3400",
+          "route_short_name": "34",
+          "direction_id": 0,
+          "mean_slip_sec": 60.0,
+          "n_observations": 40
+        },
+        {
+          "route_id": "3600",
+          "route_short_name": "36",
+          "direction_id": 0,
+          "mean_slip_sec": 48.0,
+          "n_observations": 25
+        },
+        {
+          "route_id": "8600",
+          "route_short_name": "P6",
+          "direction_id": 0,
+          "mean_slip_sec": 52.0,
+          "n_observations": 18
+        }
+      ]
+    }
+  ]
+}

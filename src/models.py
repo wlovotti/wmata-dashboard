@@ -1153,3 +1153,91 @@ class RouteDiagnosticDirection(Base):
         ),
         Index("idx_route_diag_direction_route_period", "route_id", "period"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Cross-route segment rollup (NOTES-59)
+# ---------------------------------------------------------------------------
+#
+# Materialized nightly by `pipelines/refresh_cross_route_segments.py`.
+# Aggregates per-segment slip from `route_diagnostic_segment` across all
+# routes that traverse the same (from_stop_id, to_stop_id) stop-pair.
+#
+# V1 uses stop-pair identity only — two routes that share the same stop_ids
+# for a given from→to segment are counted as traversing the same segment.
+# Shape-aware corridor rollup (NOTES-62) is deferred so V1 ships without
+# geometric matching infrastructure.
+#
+# One row per (from_stop_id, to_stop_id, period).  Route-level breakdown
+# is stored as a JSON array in `contributing_routes_json` to avoid a
+# separate join table.
+
+
+class CrossRouteSegmentRollup(Base):
+    """
+    Per-(from_stop_id, to_stop_id, period) aggregated slip across all routes
+    that traverse the stop-pair. Materialized nightly by
+    ``pipelines/refresh_cross_route_segments.py``. NOTES-59.
+
+    Only stop-pairs traversed by at least 2 distinct routes are included;
+    single-route stop-pairs carry no cross-route signal and clutter the
+    infrastructure-investment ranked list.
+
+    ``total_weighted_slip_sec`` is the sum of ``mean_slip_sec *
+    n_observations`` across all contributing (route, direction) rows for
+    the pair — a trip-volume-weighted total so busier corridors rank
+    higher when they also have higher slip.
+
+    ``n_routes`` is the count of distinct route_ids contributing to the
+    pair; ``n_route_directions`` is the count of distinct
+    (route_id, direction_id) rows, which can exceed ``n_routes`` when
+    the same stop-pair appears in both directions of a route.
+
+    ``contributing_routes_json`` is a JSON array of
+    ``{"route_id": ..., "route_short_name": ..., "direction_id": ...,
+    "mean_slip_sec": ..., "n_observations": ...}`` sorted by
+    ``n_observations`` descending — the per-route drilldown without a
+    second round-trip.
+
+    ``peak_period`` records which named period (am_peak / midday /
+    pm_peak / evening / late) has the highest total_weighted_slip_sec
+    for this pair — the "peak hour" column in the ranked list. Null
+    when ``period != 'all'`` (already filtered to a named period).
+    """
+
+    __tablename__ = "cross_route_segment_rollup"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    from_stop_id = Column(String, nullable=False)
+    to_stop_id = Column(String, nullable=False)
+    period = Column(String, nullable=False)  # am_peak | midday | pm_peak | evening | late | all
+
+    total_weighted_slip_sec = Column(Float, nullable=False)
+    n_routes = Column(Integer, nullable=False)
+    n_route_directions = Column(Integer, nullable=False)
+    n_total_observations = Column(Integer, nullable=False)
+    contributing_routes_json = Column(String, nullable=False)  # JSON array, see docstring
+    peak_period = Column(String, nullable=True)  # populated only on period='all' rows
+
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "from_stop_id",
+            "to_stop_id",
+            "period",
+            name="uq_cross_route_segment_key",
+        ),
+        # Primary read: ranked list scan for a given period.
+        Index(
+            "idx_cross_route_segment_period",
+            "period",
+            "total_weighted_slip_sec",
+        ),
+        # Drilldown: look up one stop-pair across periods.
+        Index(
+            "idx_cross_route_segment_pair",
+            "from_stop_id",
+            "to_stop_id",
+        ),
+    )

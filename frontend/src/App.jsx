@@ -8,6 +8,7 @@ import BlockTimeline from './components/BlockTimeline'
 import ActiveBlocks from './components/ActiveBlocks'
 import Targets from './components/Targets'
 import ScheduleAudit from './components/ScheduleAudit'
+import SegmentDiagnostic from './components/SegmentDiagnostic'
 import './App.css'
 
 function App() {
@@ -56,6 +57,9 @@ function App() {
             <NavLink to="/schedule-audit" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
               Schedule audit
             </NavLink>
+            <NavLink to="/segments" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Segments
+            </NavLink>
           </nav>
         </header>
 
@@ -68,6 +72,7 @@ function App() {
           <Route path="/blocks/:blockId" element={<BlockTimeline />} />
           <Route path="/targets" element={<Targets />} />
           <Route path="/schedule-audit" element={<ScheduleAudit />} />
+          <Route path="/segments" element={<SegmentDiagnostic />} />
         </Routes>
       </div>
     </Router>

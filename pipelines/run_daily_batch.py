@@ -148,6 +148,14 @@ HOUSEKEEPING_PIPELINES: list[dict] = [
         "name": "cleanup_trip_update_state",
         "module": "pipelines.cleanup_trip_update_state",
     },
+    {
+        # Refresh `cross_route_segment_rollup` from `route_diagnostic_segment`
+        # (NOTES-59). Must run AFTER `refresh_route_diagnostic_profile` so the
+        # source table is current. Aggregates per-stop-pair slip across all
+        # routes for the cross-route segment diagnostic /segments page.
+        "name": "refresh_cross_route_segments",
+        "module": "pipelines.refresh_cross_route_segments",
+    },
 ]
 
 
