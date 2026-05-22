@@ -5,12 +5,12 @@ Reads the materialized ``route_diagnostic_*`` tables (PR #107), calls Claude
 with a structured prompt and the profile as context, and writes the result to
 ``route_diagnosis_narrative`` keyed by ``(route_id, period)``.
 
-**This script calls the Anthropic API and costs money. It is a build-time
-tool; the public-facing API never calls Claude.**
+**This script calls Claude (via Claude Code) and consumes Max-subscription
+quota. It is a build-time tool; the public-facing API never calls Claude.**
 
 Requirements:
-  - ANTHROPIC_API_KEY in environment or ``.env``
-  - The ``anthropic`` package (``uv sync --extra llm``)
+  - The ``claude`` CLI on PATH (your Claude Code install).  Uses your
+    existing Claude Code auth — no separate API key needed.
   - The ``route_diagnostic_*`` tables must be populated by
     ``pipelines/refresh_route_diagnostic_profile.py``
 
@@ -36,19 +36,15 @@ Usage::
 """
 
 import argparse
-import os
+import shutil
+import subprocess
 import sys
 
-from dotenv import load_dotenv
+from sqlalchemy.orm import Session
 
-# Load .env before importing anything that reads env vars.
-load_dotenv()
-
-from sqlalchemy.orm import Session  # noqa: E402
-
-from src.database import get_engine  # noqa: E402
-from src.diagnosis_hash import compute_profile_hash  # noqa: E402
-from src.models import (  # noqa: E402
+from src.database import get_engine
+from src.diagnosis_hash import compute_profile_hash
+from src.models import (
     Base,
     Route,
     RouteDiagnosisNarrative,
@@ -56,7 +52,7 @@ from src.models import (  # noqa: E402
     RouteDiagnosticSegment,
     RouteDiagnosticTimepoint,
 )
-from src.timezones import utcnow_naive  # noqa: E402
+from src.timezones import utcnow_naive
 
 # ---------------------------------------------------------------------------
 # Prompt versioning — bump when the prompt text changes so callers can detect
@@ -192,20 +188,18 @@ def _build_user_prompt(
 
 
 def _generate_narrative(
-    client,
     route_id: str,
     period: str,
     seg_rows: list,
     tp_rows: list,
     dir_rows: list,
 ) -> tuple[str, str]:
-    """Call Claude and return ``(narrative_text, model_id_used)``.
+    """Call Claude via ``claude -p`` subprocess and return ``(narrative_text, model_id_used)``.
 
-    Uses prompt caching: the system prompt is marked as cacheable so repeated
-    calls across routes share the cached system-prompt tokens.
+    Invokes the ``claude`` CLI so that the script reuses the existing Claude
+    Code OAuth / keychain auth rather than requiring a separate ANTHROPIC_API_KEY.
 
     Args:
-        client: Anthropic client instance.
         route_id: Route identifier.
         period: Time-of-day period key.
         seg_rows: Segment ORM rows for this route+period.
@@ -214,24 +208,42 @@ def _generate_narrative(
 
     Returns:
         Tuple of ``(narrative_text, model_id_used)``.
+
+    Raises:
+        SystemExit: If the ``claude`` subprocess exits with a non-zero status.
     """
     user_text = _build_user_prompt(route_id, period, seg_rows, tp_rows, dir_rows)
 
-    response = client.messages.create(
-        model=MODEL_ID,
-        max_tokens=512,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
+    result = subprocess.run(
+        [
+            "claude",
+            "-p",
+            user_text,
+            "--system-prompt",
+            SYSTEM_PROMPT,
+            "--model",
+            MODEL_ID,
+            "--tools",
+            "",
+            "--disable-slash-commands",
+            "--output-format",
+            "text",
         ],
-        messages=[{"role": "user", "content": user_text}],
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
-    narrative = response.content[0].text.strip()
-    return narrative, response.model
+    if result.returncode != 0:
+        error_detail = result.stderr.strip() if result.stderr.strip() else "(no stderr output)"
+        print(
+            f"\nERROR: `claude -p` exited with code {result.returncode}.\n{error_detail}",
+            file=sys.stderr,
+        )
+        sys.exit(result.returncode)
+
+    narrative = result.stdout.strip()
+    return narrative, MODEL_ID
 
 
 def _upsert_narrative(
@@ -283,7 +295,6 @@ def _upsert_narrative(
 
 def _process_route_period(
     db: Session,
-    client,
     route_id: str,
     period: str,
     *,
@@ -294,7 +305,6 @@ def _process_route_period(
 
     Args:
         db: Active SQLAlchemy session.
-        client: Anthropic client (or ``None`` in dry-run mode).
         route_id: Route identifier.
         period: Time-of-day period key.
         force: If ``True``, regenerate even when the hash matches.
@@ -383,9 +393,7 @@ def _process_route_period(
         return
 
     print(f"  {route_id}/{period}: generating narrative...", end="", flush=True)
-    narrative, model_id_used = _generate_narrative(
-        client, route_id, period, seg_rows, tp_rows, dir_rows
-    )
+    narrative, model_id_used = _generate_narrative(route_id, period, seg_rows, tp_rows, dir_rows)
     _upsert_narrative(db, route_id, period, narrative, model_id_used, current_hash)
     print(f" done ({len(narrative)} chars, model={model_id_used})")
 
@@ -445,29 +453,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # Anthropic API key check (skip in dry-run — prompt inspection needs no key).
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key and not args.dry_run:
+    # claude CLI check (skip in dry-run — prompt inspection needs no CLI call).
+    if not args.dry_run and not shutil.which("claude"):
         print(
-            "ERROR: ANTHROPIC_API_KEY is not set. "
-            "Set it in the environment or in .env and re-run.\n"
+            "ERROR: 'claude' is not on PATH. "
+            "Install Claude Code (https://claude.ai/code) and re-run.\n"
             "Tip: use --dry-run to inspect the prompt without calling Claude.",
             file=sys.stderr,
         )
         return 1
-
-    client = None
-    if not args.dry_run:
-        try:
-            import anthropic  # noqa: PLC0415
-
-            client = anthropic.Anthropic(api_key=api_key)
-        except ImportError:
-            print(
-                "ERROR: The 'anthropic' package is not installed.\nRun: uv sync --extra llm",
-                file=sys.stderr,
-            )
-            return 1
 
     engine = get_engine()
     # Ensure the narrative table exists (idempotent).
@@ -523,7 +517,6 @@ def main(argv: list[str] | None = None) -> int:
             for period in periods_to_run:
                 _process_route_period(
                     db,
-                    client,
                     route_id,
                     period,
                     force=args.force,
