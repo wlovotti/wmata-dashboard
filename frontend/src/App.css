@@ -1006,3 +1006,187 @@ main {
     margin-left: 0;
   }
 }
+
+/* Segments page (NOTES-59) — cross-route segment diagnostic. */
+.segments-table .col-rank {
+  width: 2.5rem;
+  color: #94a3b8;
+  font-size: 0.85rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.segments-table .col-segment {
+  min-width: 22rem;
+}
+
+.segments-table .col-routes,
+.segments-table .col-slip,
+.segments-table .col-obs {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.segments-table .col-impact {
+  min-width: 9rem;
+}
+
+.segments-table .col-peak {
+  white-space: nowrap;
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
+.segments-table tbody tr.expand-row {
+  cursor: pointer;
+}
+
+.segments-table tbody tr.expand-row.is-expanded {
+  background: #f1f5f9;
+}
+
+.segments-table tbody tr.expand-row.is-expanded:hover {
+  background: #e2e8f0;
+}
+
+.segments-table .chevron {
+  display: inline-block;
+  width: 0.9rem;
+  color: #94a3b8;
+  margin-right: 0.4rem;
+  transition: transform 0.15s ease;
+}
+
+.segments-table tbody tr.is-expanded .chevron {
+  color: #002F6C;
+  transform: rotate(90deg);
+}
+
+.segment-from-to {
+  font-weight: 500;
+  color: #1e293b;
+  line-height: 1.4;
+}
+
+.segment-arrow {
+  color: #94a3b8;
+  margin: 0 0.4rem;
+}
+
+.segment-routes-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.segment-route-pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  background: #eef2f7;
+  color: #334155;
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Magnitude bar — visual indicator of total weighted slip relative to the
+   max in the visible page. The actual ranking criterion, made visible. */
+.impact-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.impact-bar-track {
+  flex: 1;
+  height: 0.4rem;
+  background: #f1f5f9;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.impact-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #fca5a5 0%, #dc2626 100%);
+  border-radius: 999px;
+}
+
+.impact-bar-label {
+  font-size: 0.85rem;
+  color: #1e293b;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 3.2rem;
+  text-align: right;
+}
+
+.slip-positive {
+  color: #b91c1c;
+}
+
+.slip-negative {
+  color: #047857;
+}
+
+/* Inline drilldown card — light-themed; replaces the dark-mode panel
+   that the first iteration shipped. */
+.segment-drilldown-row td {
+  padding: 0 0 1rem !important;
+  background: transparent !important;
+}
+
+.segment-drilldown-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem 1rem;
+  margin: 0 1rem 0.25rem;
+}
+
+.segment-drilldown-card h4 {
+  margin: 0 0 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #475569;
+}
+
+.segment-drilldown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.segment-drilldown-table th {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #64748b;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.segment-drilldown-table td {
+  padding: 0.45rem 0.6rem;
+  color: #1e293b;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.segment-drilldown-table tr:last-child td {
+  border-bottom: none;
+}
+
+.segment-drilldown-table .col-route {
+  width: 6rem;
+}
+
+.segment-drilldown-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

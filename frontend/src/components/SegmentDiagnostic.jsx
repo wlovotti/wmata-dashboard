@@ -24,7 +24,23 @@ function formatSignedSeconds(sec) {
 function formatMinPerTrip(min) {
   if (min == null) return '—'
   const sign = min >= 0 ? '+' : '−'
-  return `${sign}${Math.abs(min).toFixed(1)} min/trip`
+  return `${sign}${Math.abs(min).toFixed(1)}`
+}
+
+/**
+ * Format cumulative weighted slip seconds as a compact human-readable
+ * "delay budget" string — minutes when small, hours when large.
+ *
+ * @param {number|null} sec - Total weighted slip seconds
+ * @returns {string} Formatted string
+ */
+function formatTotalDelay(sec) {
+  if (sec == null) return '—'
+  const hours = sec / 3600
+  if (hours >= 10) return `${hours.toFixed(0)}h`
+  if (hours >= 1) return `${hours.toFixed(1)}h`
+  const mins = sec / 60
+  return `${mins.toFixed(0)}m`
 }
 
 const PERIOD_LABELS = {
@@ -48,80 +64,68 @@ const PERIOD_OPTIONS = [
 /**
  * Inline per-route drilldown panel for one stop-pair segment.
  *
- * Renders a compact table of contributing routes sorted by trip volume.
+ * Renders a light card with a compact table of contributing routes
+ * sorted by trip volume.
  *
  * @param {{ routes: Array<{route_id: string, route_short_name: string|null, direction_id: number, mean_slip_sec: number, n_observations: number}> }} props
  * @returns {JSX.Element}
  */
 function ContributingRoutesPanel({ routes }) {
   if (!routes || routes.length === 0) {
-    return <p style={{ color: '#64748b', fontSize: '0.8rem' }}>No route breakdown available.</p>
+    return (
+      <div className="segment-drilldown-card">
+        <p style={{ margin: 0, color: '#64748b', fontSize: '0.85rem' }}>
+          No per-route breakdown available.
+        </p>
+      </div>
+    )
   }
   return (
-    <table
-      style={{
-        width: '100%',
-        fontSize: '0.8rem',
-        borderCollapse: 'collapse',
-        marginTop: '0.5rem',
-      }}
-    >
-      <thead>
-        <tr style={{ borderBottom: '1px solid #334155' }}>
-          <th style={{ textAlign: 'left', padding: '0.25rem 0.5rem', fontWeight: 600 }}>Route</th>
-          <th style={{ textAlign: 'right', padding: '0.25rem 0.5rem', fontWeight: 600 }}>Dir</th>
-          <th style={{ textAlign: 'right', padding: '0.25rem 0.5rem', fontWeight: 600 }}>
-            Mean slip
-          </th>
-          <th style={{ textAlign: 'right', padding: '0.25rem 0.5rem', fontWeight: 600 }}>Trips</th>
-        </tr>
-      </thead>
-      <tbody>
-        {routes.map((r, idx) => (
-          <tr
-            key={`${r.route_id}-${r.direction_id}-${idx}`}
-            style={{ borderBottom: '1px solid #1e293b' }}
-          >
-            <td style={{ padding: '0.25rem 0.5rem' }}>
-              {r.route_short_name || r.route_id}
-            </td>
-            <td style={{ textAlign: 'right', padding: '0.25rem 0.5rem', color: '#94a3b8' }}>
-              {r.direction_id}
-            </td>
-            <td
-              style={{
-                textAlign: 'right',
-                padding: '0.25rem 0.5rem',
-                color: r.mean_slip_sec >= 0 ? '#f87171' : '#4ade80',
-                fontVariantNumeric: 'tabular-nums',
-              }}
-            >
-              {formatSignedSeconds(r.mean_slip_sec)}
-            </td>
-            <td
-              style={{
-                textAlign: 'right',
-                padding: '0.25rem 0.5rem',
-                color: '#94a3b8',
-                fontVariantNumeric: 'tabular-nums',
-              }}
-            >
-              {r.n_observations.toLocaleString()}
-            </td>
+    <div className="segment-drilldown-card">
+      <h4>Per-route breakdown</h4>
+      <table className="segment-drilldown-table">
+        <thead>
+          <tr>
+            <th className="col-route">Route</th>
+            <th className="num" style={{ width: '4rem' }}>Dir</th>
+            <th className="num">Mean slip</th>
+            <th className="num">Trips</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {routes.map((r, idx) => (
+            <tr key={`${r.route_id}-${r.direction_id}-${idx}`}>
+              <td>
+                <span className="segment-route-pill">
+                  {r.route_short_name || r.route_id}
+                </span>
+              </td>
+              <td className="num" style={{ color: '#64748b' }}>
+                {r.direction_id}
+              </td>
+              <td
+                className={`num ${r.mean_slip_sec >= 0 ? 'slip-positive' : 'slip-negative'}`}
+              >
+                {formatSignedSeconds(r.mean_slip_sec)}
+              </td>
+              <td className="num" style={{ color: '#475569' }}>
+                {r.n_observations.toLocaleString()}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
 /**
  * `/segments` page (NOTES-59). Cross-route segment diagnostic — ranked list
- * of stop-pairs that appear on ≥2 routes, ordered by total trip-volume-
- * weighted slip descending.  Infrastructure-investment candidates: a high
- * total weighted slip on a shared stop-pair indicates a chokepoint that
- * multiple routes traverse and where TSP / queue-jumps / dedicated lanes
- * would benefit the most passengers.
+ * of stop-pairs that appear on ≥2 routes, ordered by cumulative
+ * trip-volume-weighted slip descending.  Infrastructure-investment
+ * candidates: a high total delay on a shared stop-pair indicates a
+ * chokepoint that multiple routes traverse, where TSP / queue-jumps /
+ * dedicated lanes would benefit the most passengers.
  *
  * V1 uses stop-pair identity matching only — routes sharing the same
  * (from_stop_id, to_stop_id) pair count as traversing the same segment.
@@ -168,39 +172,47 @@ function SegmentDiagnostic() {
   const segments = useMemo(() => data?.segments || [], [data])
   const lookbackDays = data?.lookback_days ?? 30
 
+  const maxImpact = useMemo(() => {
+    if (segments.length === 0) return 0
+    return Math.max(...segments.map((s) => s.total_weighted_slip_sec || 0))
+  }, [segments])
+
   const handleRowClick = (idx) => {
     setExpandedIdx(expandedIdx === idx ? null : idx)
   }
+
+  const showPeakColumn = period === 'all'
+  const totalCols = showPeakColumn ? 7 : 6
 
   return (
     <main>
       <div className="chart-container">
         <h2>Cross-route segment diagnostic</h2>
         <p className="drilldown-anchor">
-          Stop-pairs traversed by ≥2 routes, ranked by total trip-volume-weighted
-          slip. A high value means multiple routes lose time on the same segment —
-          a shared infrastructure chokepoint that is a candidate for transit signal
-          priority, queue-jumps, or dedicated lanes. Based on the last{' '}
-          {lookbackDays} days of observed stop events.{' '}
-          <strong>V1 note:</strong> uses stop-pair identity only — routes sharing
-          the same stop IDs count as sharing a segment. Segments where routes use
-          different stop IDs on the same street are not yet aggregated (deferred to
-          NOTES-62 shape-aware corridor rollup).
+          Stop-pairs traversed by ≥2 routes, ranked by cumulative
+          trip-volume-weighted delay over the last {lookbackDays} days. A high
+          impact value means multiple routes lose time on the same segment —
+          a shared infrastructure chokepoint, a candidate for transit signal
+          priority, queue-jumps, or dedicated lanes.{' '}
+          <strong>V1 note:</strong> stop-pair identity only. Segments where
+          routes use different stop IDs on the same street are not yet
+          aggregated (deferred to NOTES-62 shape-aware corridor rollup).
         </p>
 
         <div
           style={{
             display: 'flex',
             flexWrap: 'wrap',
-            gap: '0.75rem',
+            gap: '1rem',
             alignItems: 'center',
-            margin: '0.5rem 0 1rem',
-            fontSize: '0.875rem',
+            margin: '0.5rem 0 1.25rem',
           }}
         >
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Period:</span>
+          <div className="filter-group">
+            <label htmlFor="seg-period">Period</label>
             <select
+              id="seg-period"
+              className="filter-select"
               value={period}
               onChange={(e) => setPeriod(e.target.value)}
               aria-label="Time-of-day period filter"
@@ -211,10 +223,12 @@ function SegmentDiagnostic() {
                 </option>
               ))}
             </select>
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Limit:</span>
+          </div>
+          <div className="filter-group">
+            <label htmlFor="seg-limit">Limit</label>
             <select
+              id="seg-limit"
+              className="filter-select"
               value={limit}
               onChange={(e) => setLimit(Number(e.target.value))}
               aria-label="Row limit"
@@ -225,118 +239,125 @@ function SegmentDiagnostic() {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
+          {!loading && !error && segments.length > 0 && (
+            <div className="results-count">
+              {segments.length} stop-pair{segments.length !== 1 ? 's' : ''} • Click a
+              row to expand
+            </div>
+          )}
         </div>
 
         {loading && <p style={{ color: '#64748b' }}>Loading segment diagnostic…</p>}
-        {error && <p style={{ color: '#64748b' }}>Unable to load segments: {error}</p>}
+        {error && <p style={{ color: '#991b1b' }}>Unable to load segments: {error}</p>}
 
         {!loading && !error && segments.length === 0 && (
           <p style={{ color: '#64748b' }}>
             No cross-route stop-pairs found for this period. The diagnostic
             pipeline materializes <code>cross_route_segment_rollup</code>{' '}
             nightly via{' '}
-            <code>pipelines/refresh_cross_route_segments.py</code> — if this
-            is a fresh install, run that pipeline after{' '}
+            <code>pipelines/refresh_cross_route_segments.py</code> — if this is
+            a fresh install, run that pipeline after{' '}
             <code>refresh_route_diagnostic_profile.py</code> has completed.
           </p>
         )}
 
         {!loading && !error && segments.length > 0 && (
-          <>
-            <p style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.5rem' }}>
-              {segments.length} stop-pair{segments.length !== 1 ? 's' : ''} •{' '}
-              {period !== 'all' ? PERIOD_LABELS[period] : 'All day'} • Click a row
-              to expand the per-route breakdown.
-            </p>
-            <div className="table-responsive">
-              <table>
-                <thead>
-                  <tr>
-                    <th style={{ width: '2rem' }}>#</th>
-                    <th>Segment (from → to)</th>
-                    <th style={{ textAlign: 'right' }}>Routes</th>
-                    <th style={{ textAlign: 'right' }}>Avg slip/trip</th>
-                    <th style={{ textAlign: 'right' }}>Total obs.</th>
-                    {period === 'all' && <th style={{ textAlign: 'right' }}>Peak period</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {segments.map((seg, idx) => (
+          <div className="table-responsive">
+            <table className="routes-table segments-table">
+              <thead>
+                <tr>
+                  <th className="col-rank" title="Rank by total delay">#</th>
+                  <th className="col-segment">Segment</th>
+                  <th className="col-routes" style={{ textAlign: 'right' }}>Routes</th>
+                  <th className="col-impact">Impact (total delay)</th>
+                  <th className="col-slip" style={{ textAlign: 'right' }}>
+                    Slip/trip
+                  </th>
+                  <th className="col-obs" style={{ textAlign: 'right' }}>
+                    Trips
+                  </th>
+                  {showPeakColumn && <th className="col-peak">Peak period</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {segments.map((seg, idx) => {
+                  const isExpanded = expandedIdx === idx
+                  const impactPct =
+                    maxImpact > 0 ? (seg.total_weighted_slip_sec / maxImpact) * 100 : 0
+                  return (
                     <>
                       <tr
                         key={`${seg.from_stop_id}-${seg.to_stop_id}`}
+                        className={`expand-row${isExpanded ? ' is-expanded' : ''}`}
                         onClick={() => handleRowClick(idx)}
-                        style={{
-                          cursor: 'pointer',
-                          backgroundColor: expandedIdx === idx ? '#1e293b' : undefined,
-                        }}
+                        aria-expanded={isExpanded}
                         title="Click to expand per-route breakdown"
                       >
-                        <td style={{ color: '#64748b', fontSize: '0.8rem' }}>{idx + 1}</td>
-                        <td>
-                          <span style={{ fontWeight: 500 }}>
+                        <td className="col-rank">{idx + 1}</td>
+                        <td className="col-segment">
+                          <span className="chevron">▸</span>
+                          <span className="segment-from-to">
                             {seg.from_stop_name || seg.from_stop_id}
-                          </span>
-                          <span style={{ color: '#64748b', margin: '0 0.3rem' }}>→</span>
-                          <span style={{ fontWeight: 500 }}>
+                            <span className="segment-arrow">→</span>
                             {seg.to_stop_name || seg.to_stop_id}
                           </span>
-                          <br />
-                          <span style={{ color: '#64748b', fontSize: '0.75rem' }}>
-                            {seg.route_short_names.join(', ')}
-                          </span>
+                          <div className="segment-routes-line">
+                            {seg.route_short_names.map((rsn) => (
+                              <span key={rsn} className="segment-route-pill">
+                                {rsn}
+                              </span>
+                            ))}
+                          </div>
                         </td>
-                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                          {seg.n_routes}
+                        <td className="col-routes">{seg.n_routes}</td>
+                        <td className="col-impact">
+                          <div className="impact-bar">
+                            <div className="impact-bar-track">
+                              <div
+                                className="impact-bar-fill"
+                                style={{ width: `${impactPct}%` }}
+                              />
+                            </div>
+                            <span className="impact-bar-label">
+                              {formatTotalDelay(seg.total_weighted_slip_sec)}
+                            </span>
+                          </div>
                         </td>
                         <td
-                          style={{
-                            textAlign: 'right',
-                            fontVariantNumeric: 'tabular-nums',
-                            color: seg.slip_min_per_trip >= 0 ? '#f87171' : '#4ade80',
-                          }}
+                          className={`col-slip ${
+                            seg.slip_min_per_trip >= 0 ? 'slip-positive' : 'slip-negative'
+                          }`}
                         >
                           {formatMinPerTrip(seg.slip_min_per_trip)}
                         </td>
-                        <td
-                          style={{
-                            textAlign: 'right',
-                            fontVariantNumeric: 'tabular-nums',
-                            color: '#94a3b8',
-                          }}
-                        >
+                        <td className="col-obs" style={{ color: '#475569' }}>
                           {seg.n_total_observations.toLocaleString()}
                         </td>
-                        {period === 'all' && (
-                          <td
-                            style={{
-                              textAlign: 'right',
-                              color: '#94a3b8',
-                              fontSize: '0.8rem',
-                            }}
-                          >
-                            {seg.peak_period ? PERIOD_LABELS[seg.peak_period] || seg.peak_period : '—'}
+                        {showPeakColumn && (
+                          <td className="col-peak">
+                            {seg.peak_period
+                              ? PERIOD_LABELS[seg.peak_period] || seg.peak_period
+                              : '—'}
                           </td>
                         )}
                       </tr>
-                      {expandedIdx === idx && (
-                        <tr key={`${seg.from_stop_id}-${seg.to_stop_id}-detail`}>
-                          <td />
-                          <td
-                            colSpan={period === 'all' ? 5 : 4}
-                            style={{ padding: '0.5rem 0.5rem 1rem', background: '#0f172a' }}
-                          >
+                      {isExpanded && (
+                        <tr
+                          key={`${seg.from_stop_id}-${seg.to_stop_id}-detail`}
+                          className="segment-drilldown-row"
+                        >
+                          <td colSpan={totalCols}>
                             <ContributingRoutesPanel routes={seg.contributing_routes} />
                           </td>
                         </tr>
                       )}
                     </>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </main>
