@@ -15,9 +15,8 @@ Covers:
 import pytest
 
 from src.diagnosis_hash import compute_profile_hash
-from src.models import RouteDiagnosisNarrative, RouteDiagnosticSegment, RouteDiagnosticTimepoint
+from src.models import RouteDiagnosisNarrative
 from src.timezones import utcnow_naive
-
 
 # ---------------------------------------------------------------------------
 # diagnosis_hash tests
@@ -64,8 +63,13 @@ class TestComputeProfileHash:
 
     def test_row_order_independent(self):
         """Hash is identical regardless of the order rows are supplied."""
-        seg2 = {**self._SEGMENT, "from_seq": 3, "to_seq": 4, "from_stop_id": "S002",
-                "to_stop_id": "S003"}
+        seg2 = {
+            **self._SEGMENT,
+            "from_seq": 3,
+            "to_seq": 4,
+            "from_stop_id": "S002",
+            "to_stop_id": "S003",
+        }
         h_forward = compute_profile_hash([self._SEGMENT, seg2], [self._TIMEPOINT])
         h_reversed = compute_profile_hash([seg2, self._SEGMENT], [self._TIMEPOINT])
         assert h_forward == h_reversed
@@ -216,13 +220,10 @@ def test_cli_exits_1_when_no_diagnostic_data(db_session, monkeypatch, tmp_path):
     """
     import sys
 
-    from sqlalchemy.orm import sessionmaker
-
     from src.database import get_engine
 
     # Re-use the in-memory SQLite engine already populated by db_session.
     engine = get_engine()
-    SessionLocal = sessionmaker(bind=engine)
 
     # Patch get_engine so the CLI uses the test engine.
     import src.database as _db_mod
@@ -245,7 +246,7 @@ def test_cli_exits_1_when_no_diagnostic_data(db_session, monkeypatch, tmp_path):
     # Use subprocess to invoke the CLI without contaminating the test process.
     import subprocess
 
-    result = subprocess.run(
+    subprocess.run(
         [
             sys.executable,
             "-m",
@@ -262,7 +263,6 @@ def test_cli_exits_1_when_no_diagnostic_data(db_session, monkeypatch, tmp_path):
 
     # Direct import + invocation of main() with mocked DB.
     import importlib.util
-    import os
 
     spec = importlib.util.spec_from_file_location(
         "generate_route_diagnosis",
