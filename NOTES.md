@@ -6,7 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-21. Test-infra hardening (PR #136's first CI push
+Last edited 2026-05-21. Route diagnosis narrative (NOTES-69, PR #141):
+offline CLI generates LLM summaries from `route_diagnostic_*` tables,
+cached in `route_diagnosis_narrative`; `GET /api/routes/{id}/diagnosis`
+serves cache read-only; `RouteDiagnosisPanel` shows narrative + stale
+banner. Claude never called at request time.
+
+Test-infra hardening (PR #136's first CI push
 had 12 failures, 8 traced to migrate-script CREATE TABLE drift): extended
 `check_schema_drift.py` to validate `migrate_create_*.py` SQL against the
 model, isolated `test_migrate_trip_update_state.py` to its own engine,
@@ -79,8 +85,8 @@ pipeline; the structured artifacts feed dashboard panels and ranked
 target lists directly.
 
 - **RouteDetail diagnosis panel (PR #124)** — slip trajectory chart
-  (both directions, timepoint markers) + timepoint behavior table.
-  LLM diagnosis narrative deferred to NOTES-69.
+  (both directions, timepoint markers) + timepoint behavior table +
+  LLM diagnosis narrative (the route diagnosis narrative, PR #141).
 - **Cross-route segment diagnostic (PR #140).**
   Aggregate slip across all routes per `(from_stop, to_stop)`
   segment → ranked infrastructure-investment candidates (TSP /
@@ -399,51 +405,3 @@ intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
 
----
-
-## NOTES-69. LLM-generated route diagnosis narrative
-
-**Severity: low (deferred from NOTES-58, closed by PR #124).**
-
-200–300 word interpretation of the route's diagnostic profile
-(PR #107 foundation): direction asymmetry, key delay zones, timepoint
-behavior (recovery / leaky / underpowered), 2–3 ranked hypotheses with
-evidence, suggested intervention class. Deferred from NOTES-58 so the
-chart + table panel could ship without a runtime Anthropic dependency.
-
-The LLM is a build-time tool here, not a runtime dependency — the
-public site must not call Anthropic and must not be exposed to LLM
-cost / latency / availability.
-
-### Workflow
-
-- **New CLI `scripts/generate_route_diagnosis.py`** invoked by the
-  user (per route or `--all`). Reads the materialized profile from the
-  `route_diagnostic_*` tables (PR #107), calls Claude with a
-  structured prompt + the profile as context, writes the result to a
-  new `route_diagnosis_narrative` table keyed by `(route_id, period)`
-  with `generated_at`, `model_id`, `prompt_version`,
-  `profile_snapshot_hash` columns.
-- **API endpoint `GET /api/routes/{id}/diagnosis?period=...`** reads
-  from the cache table; never invokes Claude. Returns `is_stale=true`
-  when `profile_snapshot_hash` differs from the current diagnostic
-  profile (PR #107) so the panel can show a "diagnosis is out of
-  date" badge — regeneration stays manual.
-- The `profile_snapshot_hash` is a deterministic hash of the
-  `route_diagnostic_segment` + `route_diagnostic_timepoint` rows for
-  the route+period so staleness detection doesn't require a
-  re-compute.
-
-### Frontend integration
-
-Add a "Narrative" sub-section in `RouteDiagnosisPanel.jsx` (PR #124)
-below the timepoint table. Show the cached text; render a
-"Diagnosis is out of date — re-run `generate_route_diagnosis.py
-{route_id}`" banner when `is_stale=true`.
-
-### Dependencies
-
-`route_diagnostic_*` tables (PR #107). `RouteDiagnosisPanel` (PR #124,
-slip trajectory + timepoint table). Claude API / Anthropic SDK
-(`anthropic` Python package — already in the environment or add to
-`pyproject.toml` extras).

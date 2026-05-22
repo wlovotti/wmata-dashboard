@@ -53,8 +53,10 @@ test.beforeEach(async ({ page }) => {
     if (url.includes('/api/routes/D72/stops')) {
       return route.fulfill({ json: { stops: [] } })
     }
+    // Narrative endpoint: 404 simulates "not yet generated" — the component
+    // renders a clean "no narrative" message rather than an empty/broken state.
     if (url.includes('/api/routes/D72/diagnosis')) {
-      return route.fulfill({ json: EMPTY_OBJECT })
+      return route.fulfill({ status: 404, json: { detail: 'No narrative cached' } })
     }
     if (url.includes('/api/routes/D72')) {
       // Catch-all for any other D72 sub-routes.

@@ -1,10 +1,10 @@
 /**
  * Route diagnosis panel — slip trajectory chart + timepoint behavior table
- * (PR #124, closes NOTES-58).
+ * + LLM narrative (the route diagnosis narrative, PR #141).
  *
  * Surfaces the route_diagnostic_profile materialized by
  * pipelines/refresh_route_diagnostic_profile.py (PR #107) for one route and
- * time-of-day period. Two sub-panels per direction:
+ * time-of-day period. Three sub-panels:
  *
  *   1. Slip trajectory chart — per-direction ComposedChart with a line of
  *      cumulative slip vs stop_sequence (cumulative delay picture) and a bar
@@ -18,13 +18,20 @@
  *      the distribution summaries (median entering, median leaving, p10
  *      spread change) that justify the label.
  *
+ *   3. Narrative — cached LLM interpretation of the diagnostic profile
+ *      (generated offline by scripts/generate_route_diagnosis.py; the
+ *      public API never calls Claude). Shows a stale-data banner when the
+ *      underlying profile has changed since the narrative was generated.
+ *
  * Terminology tooltip definitions for "slip" and "timepoint" appear inline
  * on first use to make the panel readable for a transit-interested public.
  *
  * Period filtering reuses the RouteDetail `period=` prop — no new selector
  * is added here; the parent controls the period and passes it as a prop.
  *
- * Data source: GET /api/routes/{routeId}/diagnostic_profile?period=...
+ * Data sources:
+ *   GET /api/routes/{routeId}/diagnostic_profile?period=...
+ *   GET /api/routes/{routeId}/diagnosis?period=...
  *
  * Props:
  *   routeId  — string route identifier (e.g. 'D80')
@@ -523,6 +530,169 @@ const tdStyle = {
 }
 
 // ---------------------------------------------------------------------------
+// Narrative section (route diagnosis narrative, PR #141)
+// ---------------------------------------------------------------------------
+
+/**
+ * Cached LLM narrative sub-section.
+ *
+ * Fetches GET /api/routes/{routeId}/diagnosis?period={period}. Shows:
+ *   - The narrative text when cached.
+ *   - A stale-data banner when is_stale=true (profile changed since generation).
+ *   - A "not generated yet" message when the endpoint returns 404.
+ *
+ * @param {{ routeId: string, period: string }} props
+ */
+function NarrativeSection({ routeId, period }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [notFound, setNotFound] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setNotFound(false)
+    setData(null)
+    const params = new URLSearchParams()
+    if (period && period !== 'all') params.set('period', period)
+    const qs = params.toString()
+    const url = `/api/routes/${routeId}/diagnosis${qs ? `?${qs}` : ''}`
+    fetch(url)
+      .then((res) => {
+        if (res.status === 404) {
+          if (!cancelled) { setNotFound(true); setLoading(false) }
+          return null
+        }
+        if (!res.ok) return Promise.reject(`HTTP ${res.status}`)
+        return res.json()
+      })
+      .then((json) => {
+        if (json !== null && !cancelled) {
+          setData(json)
+          setLoading(false)
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err?.message || String(err))
+          setLoading(false)
+        }
+      })
+    return () => { cancelled = true }
+  }, [routeId, period])
+
+  const headerStyle = {
+    fontSize: '0.95rem',
+    marginBottom: '0.4rem',
+    color: '#1e293b',
+  }
+
+  if (loading) {
+    return (
+      <div style={{ marginTop: '1.5rem' }}>
+        <h3 style={headerStyle}>Narrative</h3>
+        <p style={{ fontSize: '0.85rem', color: '#64748b' }}>Loading narrative…</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div style={{ marginTop: '1.5rem' }}>
+        <h3 style={headerStyle}>Narrative</h3>
+        <p style={{ color: '#a00', fontSize: '0.85rem' }}>Error: {error}</p>
+      </div>
+    )
+  }
+
+  if (notFound) {
+    return (
+      <div style={{ marginTop: '1.5rem' }}>
+        <h3 style={headerStyle}>Narrative</h3>
+        <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+          No narrative generated yet for this route and period.
+          Run:{' '}
+          <code
+            style={{
+              background: '#f1f5f9',
+              padding: '0.1rem 0.35rem',
+              borderRadius: '4px',
+              fontSize: '0.8rem',
+            }}
+          >
+            scripts/generate_route_diagnosis.py --route {routeId}
+            {period && period !== 'all' ? ` --period ${period}` : ''}
+          </code>
+        </p>
+      </div>
+    )
+  }
+
+  if (!data) return null
+
+  return (
+    <div style={{ marginTop: '1.5rem' }}>
+      <h3 style={headerStyle}>
+        Narrative
+        <InfoTip
+          text={
+            'AI-generated interpretation of this route\'s diagnostic profile. ' +
+            'Generated offline from the materialized slip and timepoint data — ' +
+            'Claude is never called when you load this page.'
+          }
+        />
+      </h3>
+
+      {data.is_stale && (
+        <div
+          style={{
+            background: '#fefce8',
+            border: '1px solid #facc15',
+            borderRadius: '6px',
+            padding: '0.5rem 0.75rem',
+            marginBottom: '0.75rem',
+            fontSize: '0.8rem',
+            color: '#713f12',
+          }}
+        >
+          <strong>Diagnosis is out of date.</strong> The diagnostic profile has changed
+          since this narrative was generated. Re-run:{' '}
+          <code
+            style={{
+              background: '#fef9c3',
+              padding: '0.1rem 0.3rem',
+              borderRadius: '3px',
+              fontSize: '0.78rem',
+            }}
+          >
+            scripts/generate_route_diagnosis.py --route {routeId}
+            {period && period !== 'all' ? ` --period ${period}` : ''}
+          </code>
+        </div>
+      )}
+
+      <p
+        style={{
+          fontSize: '0.85rem',
+          color: '#1e293b',
+          lineHeight: 1.65,
+          marginBottom: '0.5rem',
+          whiteSpace: 'pre-wrap',
+        }}
+      >
+        {data.narrative}
+      </p>
+      <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>
+        Generated {data.generated_at ? data.generated_at.slice(0, 10) : 'unknown'} ·{' '}
+        {data.model_id} · prompt {data.prompt_version}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Direction label helper
 // ---------------------------------------------------------------------------
 
@@ -749,6 +919,9 @@ function RouteDiagnosisPanel({ routeId, period }) {
           )
         })}
       </div>
+
+      {/* LLM narrative section (route diagnosis narrative, PR #141) */}
+      <NarrativeSection routeId={routeId} period={period} />
     </div>
   )
 }
