@@ -41,6 +41,7 @@ Usage:
 """
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -57,6 +58,47 @@ from src.timezones import eastern_today
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
+
+
+_COMPARE_LINE_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}): "
+    r"(?P<pct>[\d.]+)% agreement "
+    r"\((?P<matched>[\d,]+)/(?P<total>[\d,]+)\), "
+    r"(?P<v2_only>[\d,]+) v2-only rows, "
+    r"(?P<diverging>\d+) routes with >1% disagreement"
+)
+
+
+def _check_comparison_thresholds(line: str) -> str | None:
+    """Return a WARN reason string if the comparison line exceeds thresholds, else None.
+
+    Thresholds (from 2026-05-23 cutover design spec):
+    - agreement_pct >= 99.5
+    - 0 diverging routes
+    - v2-only rows <= 2% of total
+
+    Args:
+        line: A single output line from compare_old_vs_new_derivation.py.
+
+    Returns:
+        A short human-readable reason describing the violated threshold,
+        or None if all thresholds pass.
+    """
+    m = _COMPARE_LINE_RE.match(line.strip())
+    if not m:
+        return f"unparseable comparison output: {line.strip()[:80]!r}"
+    pct = float(m.group("pct"))
+    total = int(m.group("total").replace(",", ""))
+    v2_only = int(m.group("v2_only").replace(",", ""))
+    diverging = int(m.group("diverging"))
+    if pct < 99.5:
+        return f"agreement {pct}% below 99.5% bar"
+    if diverging > 0:
+        return f"{diverging} route(s) with >1% disagreement"
+    if total > 0 and (v2_only / total) > 0.02:
+        return f"v2-only fraction {v2_only / total * 100:.2f}% above 2% bar"
+    return None
+
 
 # Order matters. The first two are independent (both write stop_events from
 # different sources). aggregate_runs reads stop_events. compute_bunching
@@ -271,6 +313,49 @@ def _v2_row_count_guard(service_date: date_type, log_handle) -> bool:
     return True
 
 
+def _run_comparison_check(service_date: date_type, log_handle) -> None:
+    """Invoke compare_old_vs_new_derivation.py and write a WARN if thresholds exceeded.
+
+    Informational only — never fails the batch. Output (one line) is captured
+    and parsed via _check_comparison_thresholds. A violation writes a
+    grep-able ``WARN compare_old_vs_new_derivation: <reason>`` line.
+
+    Temporary: removed at NOTES-72 Phase E cutover when stop_events_v2 is
+    dropped. See docs/superpowers/specs/2026-05-23-stop-events-v2-cutover-design.md.
+
+    Args:
+        service_date: The service date to compare.
+        log_handle: Open file handle for the daily batch log.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "pipelines.compare_old_vs_new_derivation",
+        "--date",
+        service_date.isoformat(),
+    ]
+    log_handle.write(f"\n$ {' '.join(cmd)}\n")
+    log_handle.flush()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
+    except subprocess.TimeoutExpired:
+        log_handle.write("WARN compare_old_vs_new_derivation: timed out after 300s\n")
+        log_handle.flush()
+        return
+    log_handle.write(proc.stdout)
+    if proc.stderr:
+        log_handle.write(proc.stderr)
+    if proc.returncode != 0:
+        log_handle.write(f"WARN compare_old_vs_new_derivation: exited {proc.returncode}\n")
+        log_handle.flush()
+        return
+    last_line = (proc.stdout.strip().splitlines() or [""])[-1]
+    reason = _check_comparison_thresholds(last_line)
+    if reason:
+        log_handle.write(f"WARN compare_old_vs_new_derivation: {reason}\n")
+    log_handle.flush()
+
+
 def run_pipeline(
     module: str,
     service_date: date_type,
@@ -395,6 +480,13 @@ def run_batch(
                         # on v2), but the wrapper-level failure count is
                         # what launchd surfaces.
                         failure_count += 1
+                    else:
+                        # NOTES-72 Phase D monitoring: run the comparison
+                        # and log a WARN line if any threshold is exceeded.
+                        # Informational only; does NOT fail the batch.
+                        # Removed at cutover (see spec
+                        # docs/superpowers/specs/2026-05-23-stop-events-v2-cutover-design.md).
+                        _run_comparison_check(service_date, log_handle)
             log_handle.flush()
 
     # Housekeeping runs ONCE per batch, after all per-date pipelines. Failures
