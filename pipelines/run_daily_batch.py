@@ -41,6 +41,7 @@ Usage:
 """
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -57,6 +58,47 @@ from src.timezones import eastern_today
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
+
+
+_COMPARE_LINE_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}): "
+    r"(?P<pct>[\d.]+)% agreement "
+    r"\((?P<matched>[\d,]+)/(?P<total>[\d,]+)\), "
+    r"(?P<v2_only>[\d,]+) v2-only rows, "
+    r"(?P<diverging>\d+) routes with >1% disagreement"
+)
+
+
+def _check_comparison_thresholds(line: str) -> str | None:
+    """Return a WARN reason string if the comparison line exceeds thresholds, else None.
+
+    Thresholds (from 2026-05-23 cutover design spec):
+    - agreement_pct >= 99.5
+    - 0 diverging routes
+    - v2-only rows <= 2% of total
+
+    Args:
+        line: A single output line from compare_old_vs_new_derivation.py.
+
+    Returns:
+        A short human-readable reason describing the violated threshold,
+        or None if all thresholds pass.
+    """
+    m = _COMPARE_LINE_RE.match(line.strip())
+    if not m:
+        return f"unparseable comparison output: {line.strip()[:80]!r}"
+    pct = float(m.group("pct"))
+    total = int(m.group("total").replace(",", ""))
+    v2_only = int(m.group("v2_only").replace(",", ""))
+    diverging = int(m.group("diverging"))
+    if pct < 99.5:
+        return f"agreement {pct}% below 99.5% bar"
+    if diverging > 0:
+        return f"{diverging} route(s) with >1% disagreement"
+    if total > 0 and (v2_only / total) > 0.02:
+        return f"v2-only fraction {v2_only / total * 100:.2f}% above 2% bar"
+    return None
+
 
 # Order matters. The first two are independent (both write stop_events from
 # different sources). aggregate_runs reads stop_events. compute_bunching
