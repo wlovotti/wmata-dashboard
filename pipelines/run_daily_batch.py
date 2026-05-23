@@ -313,6 +313,49 @@ def _v2_row_count_guard(service_date: date_type, log_handle) -> bool:
     return True
 
 
+def _run_comparison_check(service_date: date_type, log_handle) -> None:
+    """Invoke compare_old_vs_new_derivation.py and write a WARN if thresholds exceeded.
+
+    Informational only — never fails the batch. Output (one line) is captured
+    and parsed via _check_comparison_thresholds. A violation writes a
+    grep-able ``WARN compare_old_vs_new_derivation: <reason>`` line.
+
+    Temporary: removed at NOTES-72 Phase E cutover when stop_events_v2 is
+    dropped. See docs/superpowers/specs/2026-05-23-stop-events-v2-cutover-design.md.
+
+    Args:
+        service_date: The service date to compare.
+        log_handle: Open file handle for the daily batch log.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "pipelines.compare_old_vs_new_derivation",
+        "--date",
+        service_date.isoformat(),
+    ]
+    log_handle.write(f"\n$ {' '.join(cmd)}\n")
+    log_handle.flush()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
+    except subprocess.TimeoutExpired:
+        log_handle.write("WARN compare_old_vs_new_derivation: timed out after 300s\n")
+        log_handle.flush()
+        return
+    log_handle.write(proc.stdout)
+    if proc.stderr:
+        log_handle.write(proc.stderr)
+    if proc.returncode != 0:
+        log_handle.write(f"WARN compare_old_vs_new_derivation: exited {proc.returncode}\n")
+        log_handle.flush()
+        return
+    last_line = (proc.stdout.strip().splitlines() or [""])[-1]
+    reason = _check_comparison_thresholds(last_line)
+    if reason:
+        log_handle.write(f"WARN compare_old_vs_new_derivation: {reason}\n")
+    log_handle.flush()
+
+
 def run_pipeline(
     module: str,
     service_date: date_type,
@@ -437,6 +480,13 @@ def run_batch(
                         # on v2), but the wrapper-level failure count is
                         # what launchd surfaces.
                         failure_count += 1
+                    else:
+                        # NOTES-72 Phase D monitoring: run the comparison
+                        # and log a WARN line if any threshold is exceeded.
+                        # Informational only; does NOT fail the batch.
+                        # Removed at cutover (see spec
+                        # docs/superpowers/specs/2026-05-23-stop-events-v2-cutover-design.md).
+                        _run_comparison_check(service_date, log_handle)
             log_handle.flush()
 
     # Housekeeping runs ONCE per batch, after all per-date pipelines. Failures
