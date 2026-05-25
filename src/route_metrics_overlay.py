@@ -127,6 +127,22 @@ def upsert_route_metrics_for_date(db: Session, service_date: date_type) -> int |
     raised (matching `upsert_system_metrics_for_date`'s soft-fail contract
     so the daily-batch wrapper can log and continue).
     """
+    # Refuse to materialize aggregates for partial-collection days — see
+    # src/data_completeness.py for the rationale. Mirrors the guard in
+    # src/system_metrics.upsert_system_metrics_for_date.
+    from src.data_completeness import (
+        coverage_pct_for_date,
+        is_date_sufficiently_complete,
+    )
+
+    if not is_date_sufficiently_complete(db, service_date):
+        pct = coverage_pct_for_date(db, service_date)
+        print(
+            f"  ⊘ Skipping route metrics overlay for {service_date.isoformat()}: "
+            f"ingest coverage {pct:.1%} below threshold (partial-day)"
+        )
+        return None
+
     try:
         rows = compute_route_metrics_overlay_for_date(db, service_date)
     except Exception as exc:
