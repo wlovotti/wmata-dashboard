@@ -18,12 +18,30 @@ Keeping it running with the lid closed (macOS):
   # `sudo pmset disablesleep 1` (and `sudo pmset disablesleep 0` to undo)
   # or run on a small cloud VM. A laptop-pegged-to-AC desk run is fine
   # if you can leave the lid open.
+
+Pid-file management
+-------------------
+The script writes ``logs/collector.pid`` on startup and removes it on
+graceful shutdown (via SIGINT/SIGTERM or atexit). On startup it checks
+whether a pid file already exists:
+
+- **Missing or malformed** — overwrite with the current pid.
+- **Points to a dead process** — stale file from a crash; overwrite.
+- **Points to a live process that is not this process** — a collector is
+  already running; refuse to start and exit non-zero to prevent two
+  collectors writing to the same DB simultaneously.
+
+Recovery after a crash: the stale pid file is detected and overwritten
+automatically on the next startup; no manual ``rm logs/collector.pid``
+is needed.
 """
 
+import atexit
 import os
 import signal
 import time
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -32,10 +50,14 @@ from src.wmata_collector import WMATADataCollector
 
 load_dotenv()
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PID_FILE = REPO_ROOT / "logs" / "collector.pid"
+
 API_KEY = os.getenv("WMATA_API_KEY")
 
 if not API_KEY:
     raise ValueError("WMATA_API_KEY not found in environment variables")
+
 
 # Trip updates poll every TICK_SEC; vehicle positions poll every
 # POSITIONS_TICK_RATIO ticks (so 30s and 60s respectively).
@@ -46,6 +68,74 @@ POSITIONS_TICK_RATIO = 2
 def now_str() -> str:
     """Local-time stamp prefix used in console logs."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Return True if *pid* refers to a live process on this machine.
+
+    Uses ``os.kill(pid, 0)`` which sends no signal but raises if the
+    process does not exist or if we lack permission to signal it.
+
+    - ``ProcessLookupError`` (ESRCH) — process does not exist; return False.
+    - ``PermissionError`` (EPERM) — process exists but is owned by another
+      user; treat as live (return True) to avoid clobbering.
+    - Any other ``OSError`` — treated conservatively as live.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+
+
+def _release_pid_file() -> None:
+    """Remove PID_FILE if it still contains this process's pid.
+
+    Safe to call multiple times (idempotent).  Registered via ``atexit``
+    by ``_acquire_pid_file`` and also called explicitly from the
+    ``finally`` block in ``main`` so the file is gone before the process
+    exits in both normal and signal-interrupted paths.
+    """
+    if PID_FILE.exists():
+        try:
+            if PID_FILE.read_text().strip() == str(os.getpid()):
+                PID_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _acquire_pid_file() -> None:
+    """Write the current pid to PID_FILE, refusing to start if a live collector is running.
+
+    Raises ``SystemExit(1)`` if an existing pid file points to a live
+    process that is not this process (i.e., another collector is already
+    running). Stale or malformed files are silently overwritten.
+
+    Also registers ``_release_pid_file`` via ``atexit`` so the file is
+    cleaned up on any normal process exit, including non-signal exits.
+    """
+    my_pid = os.getpid()
+    if PID_FILE.exists():
+        raw = PID_FILE.read_text().strip()
+        try:
+            existing_pid = int(raw)
+        except ValueError:
+            # Malformed file — overwrite.
+            existing_pid = None
+
+        if existing_pid is not None and existing_pid != my_pid and _is_pid_alive(existing_pid):
+            print(
+                f"[{now_str()}] ERROR: collector already running as pid {existing_pid}. "
+                f"Refusing to start a second instance. "
+                f"If you are sure no collector is running, remove {PID_FILE} and retry."
+            )
+            raise SystemExit(1)
+
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(my_pid))
+    atexit.register(_release_pid_file)
 
 
 def run_one_tick(tick_idx: int, collector: WMATADataCollector) -> None:
@@ -95,10 +185,16 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
+    # Acquire the pid file before doing any real work.  Exits non-zero if
+    # another collector is already running; silently overwrites stale files
+    # from previous crashes.
+    _acquire_pid_file()
+
     print("WMATA Combined Continuous Collector")
     print("=" * 50)
     print(f"Trip updates:      every {TICK_SEC}s")
     print(f"Vehicle positions: every {TICK_SEC * POSITIONS_TICK_RATIO}s")
+    print(f"Pid file:          {PID_FILE}")
     print("Press Ctrl+C to stop")
     print("=" * 50)
 
@@ -136,6 +232,7 @@ def main() -> None:
         print("Combined collector stopped successfully!")
     finally:
         collector.close()
+        _release_pid_file()
 
 
 if __name__ == "__main__":

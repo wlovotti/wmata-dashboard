@@ -10,16 +10,16 @@ Last edited 2026-05-25. Added NOTES-76 — surface partial-collection
 days via a `data_quality` / `coverage_pct` column on
 `system_metrics_daily` and `route_metrics_daily_overlay` so the UI can
 render an explicit "partial day" badge rather than the silent gap that
-the just-landed completeness guard produces. Added NOTES-75 — collector
-should write its own pid file
-(`scripts/continuous_combined_collector.py`) instead of relying on the
-external launcher; any non-standard launch leaves
-`collector_status.py` blind. Also noted real-world incident on NOTES-48
-(2026-05-24 12:15 ET power loss killed the collector and lost ~12.5h
-of WMATA feed — first concrete data point validating the "single point
-of failure" framing); recovery shipped `src/data_completeness.py` +
-guards on both `upsert_*` paths so future partial days won't pollute
-the materialized aggregates. Closed NOTES-74 (PR #144) — applied the
+the just-landed completeness guard produces. Closed NOTES-75 — the
+collector pid-self-management fix (PR #145): the collector now writes
+its own `logs/collector.pid` on startup, detects stale/live conflicts,
+and removes the file on graceful shutdown. Also noted real-world incident
+on NOTES-48 (2026-05-24 12:15 ET power loss killed the collector and
+lost ~12.5h of WMATA feed — first concrete data point validating the
+"single point of failure" framing); recovery shipped
+`src/data_completeness.py` + guards on both `upsert_*` paths so future
+partial days won't pollute the materialized aggregates. Closed NOTES-74
+(PR #144) — applied the
 NOTES-70 (PR #133) trip_id-filter pattern to 9 `trip_update_state`
 tests across `test_upsert_trip_update_state`, `test_cleanup_trip_update_state`,
 and `test_compare_derivations`; tests now pass on populated dev DBs and
@@ -202,13 +202,6 @@ target lists directly.
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
 
-- **NOTES-75 Collector should write its own pid file.** Pid currently
-  written by whatever shell / wrapper launches the collector, so any
-  non-standard launch leaves `collector_status.py` blind — the status
-  script reports "NOT RUNNING" even when the collector is alive.
-  Move pid management into `continuous_combined_collector.py` itself
-  (write on startup, remove on graceful shutdown).
-
 - **NOTES-76 Surface partial-collection days explicitly via `data_quality`
   column.** The completeness guard
   (`src/data_completeness.is_date_sufficiently_complete`) currently
@@ -281,10 +274,12 @@ killed the collector mid-tick and lost ~12.5 hours of WMATA real-time
 feed (gap unrecoverable — feed has no replay window). The
 `pmset disablesleep 1` setup protected against lid-close sleep but not
 against actual power interruption (battery dying / wall power cut).
-Recovery procedure today: `rm logs/collector.pid`, restart via
-`nohup env PYTHONUNBUFFERED=1 uv run python scripts/continuous_combined_collector.py >> logs/collector.log 2>&1 &`,
-write the new pid externally. First real-world data point validating
-this item's "single point of failure" framing — until the VM lift, any
+Recovery procedure: restart via
+`nohup env PYTHONUNBUFFERED=1 uv run python scripts/continuous_combined_collector.py >> logs/collector.log 2>&1 &`
+— the collector now writes its own pid file on startup (the
+collector pid-self-management fix, PR #145), so no manual pid
+bookkeeping is needed. First real-world data point validating this
+item's "single point of failure" framing — until the VM lift, any
 power event will keep causing permanent gaps.
 
 ---
@@ -449,41 +444,6 @@ filtering in the ranking (headway-based dispatching is the right
 intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
-
----
-
-## NOTES-75. Collector self-manages its pid file
-
-**Severity: low (operational ergonomics; no correctness impact).**
-**Effort: low (~10 lines in one file).**
-
-`scripts/continuous_combined_collector.py` does not write
-`logs/collector.pid` on startup — the pid is written externally by
-whatever shell / wrapper launches it (manually after `nohup ... &`, by
-convention). Any launch that skips this step leaves
-`scripts/collector_status.py` unable to identify the process: the
-status script reports "NOT RUNNING" even when the collector is alive
-and writing rows.
-
-Fix: have the script write `logs/collector.pid` containing
-`os.getpid()` on startup, and remove it on graceful shutdown (`atexit`
-+ existing SIGINT/SIGTERM handlers landed in PR #129). Behavior on
-stale pid file: if the pid points to a dead process, overwrite it; if
-it points to a live process, refuse to start (don't run two collectors
-against the same DB). Document the recovery procedure (`rm
-logs/collector.pid` is no longer needed after the fix — a graceful
-restart is enough; a crash leaves the stale file, which the next start
-detects and overwrites).
-
-Surfaced 2026-05-25 during recovery from the 2026-05-24 power-loss
-incident — the restart procedure required an extra "find the new pid
-via `pgrep` and write the file" step that the script itself should
-handle.
-
-### Dependencies
-
-None — independent. Touches the same file as NOTES-29 (collector
-self-rotate) and PR #129 (SIGINT/SIGTERM handlers).
 
 ---
 
