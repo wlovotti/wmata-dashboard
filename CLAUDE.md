@@ -1,9 +1,8 @@
 # CLAUDE.md
 
 WMATA bus/rail performance dashboard. FastAPI + Postgres backend, React/Vite
-frontend. Feature-complete but not deployed. The user has stepped back from
-active development — current work is mostly cleanup. Don't add features
-without asking. See `NOTES.md` for the active punch list.
+frontend. Feature-complete but not deployed. See `NOTES.md` for the active
+punch list.
 
 ## Load-bearing constraints
 
@@ -14,11 +13,9 @@ without asking. See `NOTES.md` for the active punch list.
 - **Stop_events / runs are the architectural foundation.** Per-route
   metrics (OTP, service-delivered, EWT, bunching, excess-trip-time) are
   derived from `stop_events` and `runs`, populated by the per-date
-  pipelines orchestrated via `pipelines/run_daily_batch.py`. The legacy
-  daily-batch pipeline (`compute_daily_metrics.py`) and its
-  materialization tables (`route_metrics_daily`, `route_metrics_summary`)
-  were retired in NOTES-19. System-level rollups land in
-  `system_metrics_daily` via `pipelines/upsert_system_metrics_daily.py`.
+  pipelines orchestrated via `pipelines/run_daily_batch.py`. System-level
+  rollups land in `system_metrics_daily` via
+  `pipelines/upsert_system_metrics_daily.py`.
 
 - **GTFS schedule is versioned via `is_current`.** All queries against
   `routes`, `stops`, `trips`, `stop_times`, `calendar`, `calendar_dates`
@@ -50,8 +47,9 @@ without asking. See `NOTES.md` for the active punch list.
 - **~40% of arrivals are early.** Real operational pattern, not a data
   error. Strict OTP windows will look harsh.
 
-- **22.75% vehicle/stop match rate is healthy.** Buses spend 75-80% of
-  their time between stops; top routes hit 45-50%.
+- **A low overall vehicle/stop match rate is healthy, not a data error.**
+  Buses spend 75-80% of their time between stops; top routes hit 45-50%
+  match.
 
 - **WMATA API limits: 10 calls/sec, 50k/day.** 60 s polling = 1,440/day.
   Don't propose more aggressive polling without checking the budget.
@@ -158,14 +156,14 @@ uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format gate (
 
 - Run `ruff check` AND `ruff format --check` before committing — CI
   runs both as separate gates and will fail otherwise.
-- Frontend lint is enforced in CI as of PR #126 (kept at zero errors).
-  Run `cd frontend && npm run lint` before pushing.
-- Frontend unit tests run in CI as of PR #126: `cd frontend && npm test`
-  (Vitest). Playwright visual regression is a blocking CI gate as of
-  PR #127 — baselines are platform-specific (`*-chromium-linux.png` for
-  CI, `*-chromium-darwin.png` for local macOS). When you change a
-  baselined page (Overview / RouteList / RouteDetail-D72), regenerate
-  BOTH sets or CI will fail on stale Linux PNGs:
+- Frontend lint is enforced in CI (kept at zero errors). Run
+  `cd frontend && npm run lint` before pushing.
+- Frontend unit tests run in CI: `cd frontend && npm test` (Vitest).
+  Playwright visual regression is a blocking CI gate — baselines are
+  platform-specific (`*-chromium-linux.png` for CI, `*-chromium-darwin.png`
+  for local macOS). When you change a baselined page (Overview /
+  RouteList / RouteDetail-D72), regenerate BOTH sets or CI will fail on
+  stale Linux PNGs:
   - macOS (local): `cd frontend && npx playwright test --update-snapshots`
   - Linux (Docker): `cd frontend && docker run --rm -v "$(pwd):/work"
     -v /work/node_modules -w /work mcr.microsoft.com/playwright:v1.60.0-noble
@@ -174,6 +172,3 @@ uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format gate (
 - Project Claude tooling: auto-triggering skills go in
   `.claude/skills/<name>/SKILL.md`, explicit slash commands go in
   `.claude/commands/<name>.md`. Both are checked in.
-- The user is not in build-more mode. For ambiguous requests, prefer
-  cleanup / verification / "delete unused code" over new features. Ask
-  before adding.
