@@ -6,11 +6,29 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-21. Route diagnosis narrative (NOTES-69, PR #141):
-offline CLI generates LLM summaries from `route_diagnostic_*` tables,
-cached in `route_diagnosis_narrative`; `GET /api/routes/{id}/diagnosis`
-serves cache read-only; `RouteDiagnosisPanel` shows narrative + stale
-banner. Claude never called at request time.
+Last edited 2026-05-25. Added NOTES-76 — surface partial-collection
+days via a `data_quality` / `coverage_pct` column on
+`system_metrics_daily` and `route_metrics_daily_overlay` so the UI can
+render an explicit "partial day" badge rather than the silent gap that
+the just-landed completeness guard produces. Added NOTES-75 — collector
+should write its own pid file
+(`scripts/continuous_combined_collector.py`) instead of relying on the
+external launcher; any non-standard launch leaves
+`collector_status.py` blind. Also noted real-world incident on NOTES-48
+(2026-05-24 12:15 ET power loss killed the collector and lost ~12.5h
+of WMATA feed — first concrete data point validating the "single point
+of failure" framing); recovery shipped `src/data_completeness.py` +
+guards on both `upsert_*` paths so future partial days won't pollute
+the materialized aggregates. Added NOTES-74 — apply the closed NOTES-70
+(PR #133) trip_id-filter pattern to 9 `trip_update_state` tests
+(`test_upsert_trip_update_state`, `test_cleanup_trip_update_state`,
+`test_compare_derivations`) that fail locally on a populated dev DB
+with `MultipleResultsFound`; CI passes against fresh PG. Route
+diagnosis narrative (NOTES-69, PR #141): offline CLI generates LLM
+summaries from `route_diagnostic_*` tables, cached in
+`route_diagnosis_narrative`; `GET /api/routes/{id}/diagnosis` serves
+cache read-only; `RouteDiagnosisPanel` shows narrative + stale banner.
+Claude never called at request time.
 
 Test-infra hardening (PR #136's first CI push
 had 12 failures, 8 traced to migrate-script CREATE TABLE drift): extended
@@ -108,6 +126,11 @@ target lists directly.
 - **NOTES-20 Tighter rider-experience OTP.** A stricter window alongside
   WMATA's official. Tracked but not yet scoped — user wants
   comparability with WMATA's scorecard for now.
+- **NOTES-74 Apply NOTES-70 (PR #133) trip_id-filter pattern to
+  `trip_update_state` tests.** Nine tests across three files use bare
+  `select()` calls that surface pre-existing dev-DB rows as
+  `MultipleResultsFound`; same root cause as the closed NOTES-70, same
+  mechanical fix.
 
 ### Independent of the redesign
 
@@ -184,6 +207,22 @@ target lists directly.
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
 
+- **NOTES-75 Collector should write its own pid file.** Pid currently
+  written by whatever shell / wrapper launches the collector, so any
+  non-standard launch leaves `collector_status.py` blind — the status
+  script reports "NOT RUNNING" even when the collector is alive.
+  Move pid management into `continuous_combined_collector.py` itself
+  (write on startup, remove on graceful shutdown).
+
+- **NOTES-76 Surface partial-collection days explicitly via `data_quality`
+  column.** The completeness guard
+  (`src/data_completeness.is_date_sufficiently_complete`) currently
+  drops partial days from the materialized aggregates by refusing to
+  insert. Cleaner UX: persist the row with a `data_quality` flag
+  (`'complete' | 'partial'`) and `coverage_pct`; downstream consumers
+  filter from delta computations but surface a "partial day" badge on
+  the trend chart, so the gap is explained rather than silent.
+
 ---
 
 ## NOTES-20. Tighter rider-experience OTP
@@ -241,6 +280,17 @@ Concrete steps:
 Out of scope for Phase 1: managed Postgres (NOTES-49), public API
 deployment (NOTES-50), automated backups beyond a weekly `pg_dump` to
 S3/B2/R2 (one-line cron, include).
+
+**2026-05-25 incident note.** Power loss on 2026-05-24 at 12:15 ET
+killed the collector mid-tick and lost ~12.5 hours of WMATA real-time
+feed (gap unrecoverable — feed has no replay window). The
+`pmset disablesleep 1` setup protected against lid-close sleep but not
+against actual power interruption (battery dying / wall power cut).
+Recovery procedure today: `rm logs/collector.pid`, restart via
+`nohup env PYTHONUNBUFFERED=1 uv run python scripts/continuous_combined_collector.py >> logs/collector.log 2>&1 &`,
+write the new pid externally. First real-world data point validating
+this item's "single point of failure" framing — until the VM lift, any
+power event will keep causing permanent gaps.
 
 ---
 
@@ -405,3 +455,149 @@ intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
 
+---
+
+## NOTES-74. Apply NOTES-70 trip_id-filter pattern to trip_update_state tests
+
+**Severity: low (local-only false-negative; CI is unaffected).**
+**Effort: low (~9 tests, single-file-per-test filter additions).**
+
+Surfaced during the NOTES-69 cycle (PR #141): 9 tests fail locally
+against a dev DB that has accumulated `trip_update_state` rows from
+prior pipeline runs, all with `sqlalchemy.exc.MultipleResultsFound`.
+Same root cause as the closed NOTES-70 (PR #133): the test SELECTs are
+not filtered to their own test-specific `trip_id`, so on a populated
+DB the `pg_session` SAVEPOINT fixture's write isolation can't prevent
+pre-existing matching rows from being returned. CI passes because the
+CI Postgres starts empty — this is a developer-experience bug, not a
+correctness bug.
+
+Affected files (9 failing tests total):
+- `tests/test_upsert_trip_update_state.py` — 4 tests
+  (`test_first_insert_creates_row`,
+  `test_upsert_overwrites_final_fields_always`,
+  `test_last_pred_updates_only_when_prediction_is_non_null`,
+  `test_vehicle_id_coalesces_to_latest_non_null`).
+- `tests/test_cleanup_trip_update_state.py` — 3 tests
+  (`test_cleanup_deletes_rows_older_than_retention_window`,
+  `test_cleanup_respects_explicit_retention_days`,
+  `test_cleanup_ignores_derived_at`).
+- `tests/test_compare_derivations.py` — 2 tests
+  (`test_perfect_match_reports_100_percent_agreement`,
+  `test_skipped_stops_with_agreeing_nulls_report_match`).
+
+Fix pattern (per PR #133): add `.where(TripUpdateState.trip_id ==
+"<test-specific id>")` to each bare `select(TripUpdateState)` /
+`select(StopEvent)` call. Each test already constructs its own test
+data with a (potentially unique) `trip_id`, so the filter is
+mechanical. Verify locally under both `bin/test-with-pg` (real local
+PG, with the cruft) and `DATABASE_URL=sqlite:///:memory: uv run
+pytest <file>` (fresh in-memory).
+
+Out of scope: a broader sweep of every test using bare `select()` —
+only fix the demonstrably-failing ones. If a third file in this area
+ever needs the same fix, consider a lint rule or fixture helper
+instead of a fourth round of manual patches.
+
+### Dependencies
+
+None — independent cleanup. Pattern reference: closed NOTES-70
+(PR #133), which fixed the same class of bug in
+`tests/test_derive_stop_events_from_state.py`.
+
+---
+
+## NOTES-75. Collector self-manages its pid file
+
+**Severity: low (operational ergonomics; no correctness impact).**
+**Effort: low (~10 lines in one file).**
+
+`scripts/continuous_combined_collector.py` does not write
+`logs/collector.pid` on startup — the pid is written externally by
+whatever shell / wrapper launches it (manually after `nohup ... &`, by
+convention). Any launch that skips this step leaves
+`scripts/collector_status.py` unable to identify the process: the
+status script reports "NOT RUNNING" even when the collector is alive
+and writing rows.
+
+Fix: have the script write `logs/collector.pid` containing
+`os.getpid()` on startup, and remove it on graceful shutdown (`atexit`
++ existing SIGINT/SIGTERM handlers landed in PR #129). Behavior on
+stale pid file: if the pid points to a dead process, overwrite it; if
+it points to a live process, refuse to start (don't run two collectors
+against the same DB). Document the recovery procedure (`rm
+logs/collector.pid` is no longer needed after the fix — a graceful
+restart is enough; a crash leaves the stale file, which the next start
+detects and overwrites).
+
+Surfaced 2026-05-25 during recovery from the 2026-05-24 power-loss
+incident — the restart procedure required an extra "find the new pid
+via `pgrep` and write the file" step that the script itself should
+handle.
+
+### Dependencies
+
+None — independent. Touches the same file as NOTES-29 (collector
+self-rotate) and PR #129 (SIGINT/SIGTERM handlers).
+
+---
+
+## NOTES-76. Surface partial-collection days via `data_quality` column
+
+**Severity: low (UX clarity; correctness already handled by the
+completeness guard).**
+**Effort: medium (schema column + migration + pipeline change +
+downstream filtering + UI badge).**
+
+The completeness guard landed alongside the 2026-05-24 power-loss
+recovery (`src/data_completeness.py`) refuses to materialize aggregates
+for any service date with < 80% ingest coverage. Per-date aggregate
+tables (`system_metrics_daily`, `route_metrics_daily_overlay`) end up
+with a *missing row* for partial days. The 7-day delta code in
+`api/aggregations.py` (NOTES-38) already handles absent days as `None`
+and skips them, so the math stays honest — but a user looking at the
+30-day system trend strip on Overview sees a silent gap with no
+explanation of *why*.
+
+Better: persist the row with a `data_quality` column (`'complete' |
+'partial'` enum) plus a `coverage_pct` float for diagnostics.
+Downstream consumers:
+
+- **Period-over-period deltas** (`api/aggregations.py:_build_metric_delta`
+  and friends): treat `data_quality = 'partial'` as `None` for the
+  pooled mean, exactly the current behavior for absent rows. No
+  visible change.
+- **System trend strip** (`get_system_trend_data`, Overview): render
+  the partial day's marker with a distinct style (greyed dot, no line
+  connection, hover badge "Partial collection — X% coverage") so the
+  user understands the gap rather than wondering if the chart is
+  broken.
+- **30-day rolling mean comparator** (`prior_window_value`): exclude
+  partial days from the prior-window mean too, for symmetry with the
+  delta filter.
+
+Schema work:
+
+1. Add `data_quality VARCHAR NOT NULL DEFAULT 'complete'` and
+   `coverage_pct DOUBLE PRECISION` to `SystemMetricsDaily` and
+   `RouteMetricsDailyOverlay` models. Backfill existing rows as
+   `'complete'`.
+2. Loosen the completeness guard from "refuse to upsert" to "upsert
+   with `data_quality='partial'`". The guard becomes a *flagger*, not
+   a *gate*.
+3. Update the API delta computation to filter on `data_quality`.
+4. Update the Vite frontend to render the partial-day badge on the
+   trend chart (Overview + RouteDetail).
+
+Out of scope: backfilling historical partial days. The deletes from
+the 2026-05-24 recovery left no row at all; if we want a marker for
+that day, we'd compute the AM-only metrics and insert with
+`data_quality='partial'` as a one-shot. Defer until the column exists.
+
+### Dependencies
+
+Depends on the just-landed `src/data_completeness.py` infrastructure
+and its wiring into both upsert pipelines. PR that closed the 5/24
+incident has the recovery context.
+
+---

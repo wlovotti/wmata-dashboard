@@ -177,13 +177,22 @@ def test_compute_system_metrics_for_date_ignores_trip_update_for_otp(db_session,
     assert result["otp_percentage"] is None
 
 
-def test_pipeline_upserts_system_metrics_row(db_session, sample_routes):
+def test_pipeline_upserts_system_metrics_row(db_session, sample_routes, monkeypatch):
     """Daily pipeline writes one row per service_date to `system_metrics_daily`.
 
     Calling `upsert_system_metrics_for_date` should produce exactly one
     row with the computed values; calling it again replaces in place
     (primary key on service_date).
+
+    Bypasses the ingest-coverage guard (``src.data_completeness``) because
+    this test seeds ``stop_events`` directly rather than the upstream
+    ingest tables — a state that can't occur in production but is the
+    minimum useful setup for testing the upsert path.
     """
+    monkeypatch.setattr(
+        "src.data_completeness.is_date_sufficiently_complete",
+        lambda *args, **kwargs: True,
+    )
     target_date = eastern_today() - timedelta(days=4)
     target_iso = target_date.isoformat()
 

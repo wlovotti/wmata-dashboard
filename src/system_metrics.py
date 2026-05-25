@@ -78,6 +78,23 @@ def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict
     Returns:
         The metrics dict written, or None if computation raised.
     """
+    # Refuse to materialize aggregates for partial-collection days — see
+    # src/data_completeness.py for the rationale. Live-compute via
+    # compute_system_metrics_for_date (called from the trend endpoint for
+    # "today") is unaffected; the guard only gates persistence.
+    from src.data_completeness import (
+        coverage_pct_for_date,
+        is_date_sufficiently_complete,
+    )
+
+    if not is_date_sufficiently_complete(db, service_date):
+        pct = coverage_pct_for_date(db, service_date)
+        print(
+            f"  ⊘ Skipping system metrics for {service_date.isoformat()}: "
+            f"ingest coverage {pct:.1%} below threshold (partial-day)"
+        )
+        return None
+
     try:
         metrics = compute_system_metrics_for_date(db, service_date)
     except Exception as exc:
