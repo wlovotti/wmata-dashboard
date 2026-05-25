@@ -19,7 +19,7 @@ external launcher; any non-standard launch leaves
 of WMATA feed — first concrete data point validating the "single point
 of failure" framing); recovery shipped `src/data_completeness.py` +
 guards on both `upsert_*` paths so future partial days won't pollute
-the materialized aggregates. Closed NOTES-74 (PR #PRNUM) — applied the
+the materialized aggregates. Closed NOTES-74 (PR #144) — applied the
 NOTES-70 (PR #133) trip_id-filter pattern to 9 `trip_update_state`
 tests across `test_upsert_trip_update_state`, `test_cleanup_trip_update_state`,
 and `test_compare_derivations`; tests now pass on populated dev DBs and
