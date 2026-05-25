@@ -63,27 +63,39 @@ function SystemTrend() {
     )
   }
 
-  // Map the four endpoint payloads to {date, value} series, applying the
-  // metric-specific value transform. Service-delivered is stored as 0..1
-  // and rendered as percentage points to match RouteTrend's convention.
-  // Bunching is stored as 0..1 and rendered as percentage. EWT is rendered
-  // in seconds. OTP is already a percentage.
+  // Map the four endpoint payloads to {date, value, data_quality, coverage_pct}
+  // series, applying the metric-specific value transform. Service-delivered is
+  // stored as 0..1 and rendered as percentage points. Bunching is stored as
+  // 0..1 and rendered as percentage. EWT is in seconds. OTP is already %.
+  //
+  // data_quality and coverage_pct are forwarded so the Sparkline component can
+  // render a distinct grey dot with a "Partial collection — X% coverage" hover
+  // badge for partial-ingest days, replacing the silent gap the old guard
+  // produced.
   const otpSeries = (data.otp?.trend_data || []).map((row) => ({
     date: row.date,
     value: row.otp_percentage,
+    data_quality: row.data_quality,
+    coverage_pct: row.coverage_pct,
   }))
   const sdSeries = (data.service_delivered?.trend_data || []).map((row) => ({
     date: row.date,
     value:
       row.service_delivered_ratio != null ? row.service_delivered_ratio * 100 : null,
+    data_quality: row.data_quality,
+    coverage_pct: row.coverage_pct,
   }))
   const ewtSeries = (data.ewt?.trend_data || []).map((row) => ({
     date: row.date,
     value: row.ewt_seconds,
+    data_quality: row.data_quality,
+    coverage_pct: row.coverage_pct,
   }))
   const bunSeries = (data.bunching?.trend_data || []).map((row) => ({
     date: row.date,
     value: row.bunching_rate != null ? row.bunching_rate * 100 : null,
+    data_quality: row.data_quality,
+    coverage_pct: row.coverage_pct,
   }))
 
   const otpDelta = computeSystemDelta(otpSeries, data.otp?.prior_window_value)

@@ -791,6 +791,11 @@ class SystemMetricsDaily(Base):
     a single-day live compute for "today" — sub-50ms warm, sub-second cold.
 
     `service_date` is the primary key (`YYYY-MM-DD`, Eastern operational day).
+
+    `data_quality` is either ``'complete'`` (ingest coverage ≥ 80%) or
+    ``'partial'`` (ingest coverage below threshold — row inserted as a
+    flagger so the UI can render an explicit "partial day" badge instead of
+    a silent gap). `coverage_pct` is the raw fraction for diagnostics.
     """
 
     __tablename__ = "system_metrics_daily"
@@ -801,6 +806,11 @@ class SystemMetricsDaily(Base):
     service_delivered_ratio = Column(Float)
     ewt_seconds = Column(Float)
     bunching_rate = Column(Float)
+
+    # Data-quality flag (NOTES-76). 'complete' | 'partial'.
+    data_quality = Column(String, nullable=False, default="complete")
+    # Raw ingest coverage fraction for diagnostics (0.0–1.0).
+    coverage_pct = Column(Float)
 
     computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
 
@@ -918,6 +928,11 @@ class RouteMetricsDailyOverlay(Base):
     # Bunching counts.
     bunching_count = Column(Integer, nullable=False, default=0)
     bunching_total_headways = Column(Integer, nullable=False, default=0)
+
+    # Data-quality flag (NOTES-76). 'complete' | 'partial'.
+    data_quality = Column(String, nullable=False, default="complete")
+    # Raw ingest coverage fraction for diagnostics (0.0–1.0).
+    coverage_pct = Column(Float)
 
     computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
 

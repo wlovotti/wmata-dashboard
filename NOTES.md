@@ -6,11 +6,13 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-25. Added NOTES-76 — surface partial-collection
-days via a `data_quality` / `coverage_pct` column on
-`system_metrics_daily` and `route_metrics_daily_overlay` so the UI can
-render an explicit "partial day" badge rather than the silent gap that
-the just-landed completeness guard produces. Closed NOTES-75 — the
+Last edited 2026-05-25. Closed NOTES-76 — the data_quality column rollout
+(PR #146): added `data_quality` (`'complete'|'partial'`) and `coverage_pct`
+columns to `system_metrics_daily` and `route_metrics_daily_overlay`; the
+completeness guard is now a *flagger* (persists partial rows) rather than a
+*gate* (refuses upsert); partial rows are excluded from delta computations and
+the prior-window mean; the system trend strip renders a grey dot with a
+"Partial collection — X% coverage" hover badge for partial days. Closed NOTES-75 — the
 collector pid-self-management fix (PR #145): the collector now writes
 its own `logs/collector.pid` on startup, detects stale/live conflicts,
 and removes the file on graceful shutdown. Also noted real-world incident
@@ -202,14 +204,6 @@ target lists directly.
   urgent; revisit if a second short express route appears and the
   ~50% ceiling becomes a problem.
 
-- **NOTES-76 Surface partial-collection days explicitly via `data_quality`
-  column.** The completeness guard
-  (`src/data_completeness.is_date_sufficiently_complete`) currently
-  drops partial days from the materialized aggregates by refusing to
-  insert. Cleaner UX: persist the row with a `data_quality` flag
-  (`'complete' | 'partial'`) and `coverage_pct`; downstream consumers
-  filter from delta computations but surface a "partial day" badge on
-  the trend chart, so the gap is explained rather than silent.
 
 ---
 
@@ -444,65 +438,5 @@ filtering in the ranking (headway-based dispatching is the right
 intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
-
----
-
-## NOTES-76. Surface partial-collection days via `data_quality` column
-
-**Severity: low (UX clarity; correctness already handled by the
-completeness guard).**
-**Effort: medium (schema column + migration + pipeline change +
-downstream filtering + UI badge).**
-
-The completeness guard landed alongside the 2026-05-24 power-loss
-recovery (`src/data_completeness.py`) refuses to materialize aggregates
-for any service date with < 80% ingest coverage. Per-date aggregate
-tables (`system_metrics_daily`, `route_metrics_daily_overlay`) end up
-with a *missing row* for partial days. The 7-day delta code in
-`api/aggregations.py` (NOTES-38) already handles absent days as `None`
-and skips them, so the math stays honest — but a user looking at the
-30-day system trend strip on Overview sees a silent gap with no
-explanation of *why*.
-
-Better: persist the row with a `data_quality` column (`'complete' |
-'partial'` enum) plus a `coverage_pct` float for diagnostics.
-Downstream consumers:
-
-- **Period-over-period deltas** (`api/aggregations.py:_build_metric_delta`
-  and friends): treat `data_quality = 'partial'` as `None` for the
-  pooled mean, exactly the current behavior for absent rows. No
-  visible change.
-- **System trend strip** (`get_system_trend_data`, Overview): render
-  the partial day's marker with a distinct style (greyed dot, no line
-  connection, hover badge "Partial collection — X% coverage") so the
-  user understands the gap rather than wondering if the chart is
-  broken.
-- **30-day rolling mean comparator** (`prior_window_value`): exclude
-  partial days from the prior-window mean too, for symmetry with the
-  delta filter.
-
-Schema work:
-
-1. Add `data_quality VARCHAR NOT NULL DEFAULT 'complete'` and
-   `coverage_pct DOUBLE PRECISION` to `SystemMetricsDaily` and
-   `RouteMetricsDailyOverlay` models. Backfill existing rows as
-   `'complete'`.
-2. Loosen the completeness guard from "refuse to upsert" to "upsert
-   with `data_quality='partial'`". The guard becomes a *flagger*, not
-   a *gate*.
-3. Update the API delta computation to filter on `data_quality`.
-4. Update the Vite frontend to render the partial-day badge on the
-   trend chart (Overview + RouteDetail).
-
-Out of scope: backfilling historical partial days. The deletes from
-the 2026-05-24 recovery left no row at all; if we want a marker for
-that day, we'd compute the AM-only metrics and insert with
-`data_quality='partial'` as a one-shot. Defer until the column exists.
-
-### Dependencies
-
-Depends on the just-landed `src/data_completeness.py` infrastructure
-and its wiring into both upsert pipelines. PR that closed the 5/24
-incident has the recovery context.
 
 ---
