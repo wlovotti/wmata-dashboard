@@ -7,7 +7,7 @@ NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
 Last edited 2026-05-25. Closed NOTES-76 — the data_quality column rollout
-(PR #TODO): added `data_quality` (`'complete'|'partial'`) and `coverage_pct`
+(PR #146): added `data_quality` (`'complete'|'partial'`) and `coverage_pct`
 columns to `system_metrics_daily` and `route_metrics_daily_overlay`; the
 completeness guard is now a *flagger* (persists partial rows) rather than a
 *gate* (refuses upsert); partial rows are excluded from delta computations and
