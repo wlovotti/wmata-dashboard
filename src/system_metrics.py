@@ -68,6 +68,12 @@ def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict
     Re-runs against the same date overwrite the prior row in place — the
     upsert is conflict-free since `service_date` is the primary key.
 
+    The completeness guard (see `src/data_completeness.py`) acts as a
+    *flagger*, not a *gate*: partial days are persisted with
+    ``data_quality='partial'`` and their raw ``coverage_pct`` so the UI
+    can render an explicit "partial day" badge instead of a silent gap.
+    Complete days receive ``data_quality='complete'``.
+
     Returns the computed metrics dict, or None if computation raised
     (failures here shouldn't block the rest of the batch).
 
@@ -76,24 +82,23 @@ def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict
         service_date: Eastern service date to compute and store.
 
     Returns:
-        The metrics dict written, or None if computation raised.
+        The metrics dict written (includes ``data_quality`` and
+        ``coverage_pct`` keys), or None if computation raised.
     """
-    # Refuse to materialize aggregates for partial-collection days — see
-    # src/data_completeness.py for the rationale. Live-compute via
-    # compute_system_metrics_for_date (called from the trend endpoint for
-    # "today") is unaffected; the guard only gates persistence.
     from src.data_completeness import (
         coverage_pct_for_date,
         is_date_sufficiently_complete,
     )
 
-    if not is_date_sufficiently_complete(db, service_date):
-        pct = coverage_pct_for_date(db, service_date)
+    pct = coverage_pct_for_date(db, service_date)
+    is_complete = is_date_sufficiently_complete(db, service_date)
+    data_quality = "complete" if is_complete else "partial"
+
+    if not is_complete:
         print(
-            f"  ⊘ Skipping system metrics for {service_date.isoformat()}: "
-            f"ingest coverage {pct:.1%} below threshold (partial-day)"
+            f"  ⚠ System metrics for {service_date.isoformat()}: "
+            f"ingest coverage {pct:.1%} below threshold — flagging as partial"
         )
-        return None
 
     try:
         metrics = compute_system_metrics_for_date(db, service_date)
@@ -112,6 +117,8 @@ def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict
         existing.service_delivered_ratio = metrics["service_delivered_ratio"]
         existing.ewt_seconds = metrics["ewt_seconds"]
         existing.bunching_rate = metrics["bunching_rate"]
+        existing.data_quality = data_quality
+        existing.coverage_pct = pct
         existing.computed_at = utcnow_naive()
     else:
         db.add(
@@ -121,16 +128,21 @@ def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict
                 service_delivered_ratio=metrics["service_delivered_ratio"],
                 ewt_seconds=metrics["ewt_seconds"],
                 bunching_rate=metrics["bunching_rate"],
+                data_quality=data_quality,
+                coverage_pct=pct,
                 computed_at=utcnow_naive(),
             )
         )
     db.commit()
 
+    quality_label = "partial" if not is_complete else "complete"
     print(
-        f"  ✓ System metrics for {service_date_iso}: "
+        f"  ✓ System metrics for {service_date_iso} [{quality_label}]: "
         f"OTP={metrics['otp_percentage']}, "
         f"SD={metrics['service_delivered_ratio']}, "
         f"EWT={metrics['ewt_seconds']}, "
         f"BUN={metrics['bunching_rate']}"
     )
+    metrics["data_quality"] = data_quality
+    metrics["coverage_pct"] = pct
     return metrics

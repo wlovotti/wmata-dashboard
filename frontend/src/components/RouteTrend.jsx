@@ -5,6 +5,7 @@ import {
   YAxis,
   Tooltip,
   ResponsiveContainer,
+  ReferenceDot,
 } from 'recharts'
 
 const OTP_LINE_COLOR = '#002F6C'
@@ -109,20 +110,82 @@ function DeltaIndicator({
 }
 
 /**
+ * Custom dot renderer for the Sparkline component.
+ *
+ * Renders a grey dot for partial-collection days (data_quality='partial')
+ * with a tooltip-readable title attribute. Regular days use a small dot
+ * only when it is the sole data point in the series (standard recharts
+ * behaviour). Partial-day dots are always rendered even when there are
+ * multiple points so the gap is visually explained rather than silent.
+ *
+ * Props come from recharts' internal dot injection:
+ *   cx, cy    — SVG coordinates
+ *   payload   — the data row (including `_partial` and `_coveragePct`)
+ *   isSingle  — true when the series has only one valid complete point
+ */
+function SparklineDot({ cx, cy, payload, isSingle }) {
+  if (payload && payload._partial) {
+    const pct = payload._coveragePct != null
+      ? `${Math.round(payload._coveragePct * 100)}%`
+      : 'unknown'
+    return (
+      <circle
+        cx={cx}
+        cy={cy}
+        r={3}
+        fill="#94a3b8"
+        stroke="white"
+        strokeWidth={1}
+        style={{ cursor: 'default' }}
+      >
+        <title>{`Partial collection — ${pct} coverage`}</title>
+      </circle>
+    )
+  }
+  // Render a dot when it's the only complete data point in the series.
+  if (isSingle) {
+    return <circle cx={cx} cy={cy} r={2} fill="#64748b" />
+  }
+  return null
+}
+
+/**
  * Mini 30-day sparkline rendered with recharts.
  *
- * `data` is an array of `{ date, value }` rows. Rows with `value == null`
- * are dropped defensively (the trend endpoint emits null for days with
- * no observations); without this a sparse early window plots a cliff
- * to zero. Strips axes / grid / legend for a compact card-friendly
- * presentation; tooltip on hover gives the date + value.
+ * `data` is an array of `{ date, value, data_quality?, coverage_pct? }` rows.
+ * Rows where `data_quality === 'partial'` are rendered as grey dots with a
+ * hover title "Partial collection — X% coverage"; the line does not connect
+ * to them so the gap is visible. Rows with `value == null` and no data_quality
+ * info are dropped entirely. Strips axes / grid / legend for compact cards.
  *
- * If only one valid point survives, recharts won't draw a line — fall
+ * If only one complete point survives, recharts won't draw a line — fall
  * back to a single dot so the user still sees the measurement.
  */
 function Sparkline({ data, color, valueFormat, height = 60 }) {
-  const valid = (data || []).filter((row) => row.value != null)
-  if (valid.length === 0) {
+  // Separate partial rows from complete rows. Partial rows are kept in the
+  // dataset with their value (for dot placement) but will be styled grey.
+  // We set `_partial` and `_coveragePct` as synthetic fields so the custom
+  // dot renderer can read them from `payload`.
+  const augmented = (data || []).map((row) => {
+    const isPartial = row.data_quality === 'partial'
+    return {
+      ...row,
+      // Null out the value for partial days so recharts draws a gap in the
+      // line (connectNulls=false) but keeps the row for the dot renderer.
+      value: isPartial ? null : row.value,
+      _partial: isPartial,
+      _partialValue: isPartial ? row.value : null,
+      _coveragePct: row.coverage_pct ?? null,
+    }
+  })
+
+  // For the "no trend data" guard: check whether any complete OR partial row
+  // has a non-null value.
+  const hasAnyData = augmented.some(
+    (row) => row.value != null || (row._partial && row._partialValue != null),
+  )
+
+  if (!hasAnyData) {
     return (
       <div
         className="sparkline-empty"
@@ -139,26 +202,89 @@ function Sparkline({ data, color, valueFormat, height = 60 }) {
       </div>
     )
   }
+
+  // Complete rows that have a value — used for single-point fallback logic.
+  const completeCount = augmented.filter((row) => !row._partial && row.value != null).length
+  const isSingle = completeCount === 1
+
+  // For partial rows: recharts skips null-value points in the line but still
+  // calls the custom dot renderer with cx/cy. We rely on that behaviour plus
+  // a synthetic `_partial` field to draw grey dots at the right position.
+  // However recharts does NOT call the dot renderer for null-value points by
+  // default. Workaround: for partial rows, store the raw value in a second
+  // key (`_partialValue`) and set `value` to null so the line doesn't connect,
+  // then overlay a separate ReferenceDot per partial row. Using a separate
+  // ReferenceDot is simpler and more reliable than fighting the dot renderer.
+
+  // Collect partial rows that have a numeric value for overlay dots.
+  const partialDots = augmented.filter(
+    (row) => row._partial && row._partialValue != null,
+  )
+
+  // For partial-row y-positioning we need the full domain (complete rows
+  // only drive the YAxis domain, so a partial value that falls outside the
+  // complete range would clip). Use 'dataMin - 5%' / 'dataMax + 5%' padding.
+  const completeValues = augmented
+    .filter((row) => !row._partial && row.value != null)
+    .map((row) => row.value)
+  const partialValues = partialDots.map((row) => row._partialValue)
+  const allValues = [...completeValues, ...partialValues]
+  const domainMin = allValues.length ? Math.min(...allValues) : 0
+  const domainMax = allValues.length ? Math.max(...allValues) : 1
+  const pad = (domainMax - domainMin) * 0.05 || 1
+
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={valid} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+      <LineChart data={augmented} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
         <XAxis dataKey="date" hide />
-        <YAxis hide domain={['dataMin', 'dataMax']} />
+        <YAxis
+          hide
+          domain={[domainMin - pad, domainMax + pad]}
+        />
         <Tooltip
-          formatter={(value) => [valueFormat(value), '']}
-          labelFormatter={(label) => label}
-          contentStyle={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
-          separator=""
+          content={({ active, payload, label }) => {
+            if (!active || !payload || !payload.length) return null
+            const row = payload[0]?.payload
+            if (row?._partial) {
+              const pct = row._coveragePct != null
+                ? `${Math.round(row._coveragePct * 100)}%`
+                : 'unknown'
+              return (
+                <div style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem', background: 'white', border: '1px solid #e2e8f0' }}>
+                  <div>{label}</div>
+                  <div style={{ color: '#64748b' }}>Partial collection — {pct} coverage</div>
+                </div>
+              )
+            }
+            const val = row?.value
+            return (
+              <div style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem', background: 'white', border: '1px solid #e2e8f0' }}>
+                <div>{label}</div>
+                {val != null && <div>{valueFormat(val)}</div>}
+              </div>
+            )
+          }}
         />
         <Line
           type="monotone"
           dataKey="value"
           stroke={color}
           strokeWidth={1.75}
-          dot={valid.length === 1}
+          dot={isSingle ? <SparklineDot isSingle /> : false}
           connectNulls={false}
           isAnimationActive={false}
         />
+        {partialDots.map((row) => (
+          <ReferenceDot
+            key={row.date}
+            x={row.date}
+            y={row._partialValue}
+            r={3}
+            fill="#94a3b8"
+            stroke="white"
+            strokeWidth={1}
+          />
+        ))}
       </LineChart>
     </ResponsiveContainer>
   )

@@ -1162,6 +1162,19 @@ def _overlay_per_route_per_day(
         ds = row.service_date
         rid = row.route_id
 
+        # Skip partial-quality rows in delta computations — metrics derived
+        # from a partial collection day are misleading as delta inputs.
+        # The row still exists in the DB for UI display purposes (badge).
+        if row.data_quality == "partial":
+            # Populate with None so the delta window treats this day as
+            # missing rather than zero.
+            otp_by_route[rid][ds] = None
+            sd_by_route[rid][ds] = None
+            ewt_by_route[rid][ds] = None
+            ewt_obs_by_route[rid][ds] = 0
+            bun_by_route[rid][ds] = None
+            continue
+
         # OTP: pooled all-timepoints on_time percentage
         all_n = row.otp_all_early + row.otp_all_on_time + row.otp_all_late
         otp_by_route[rid][ds] = round(row.otp_all_on_time * 100 / all_n, 4) if all_n else None
@@ -2148,13 +2161,18 @@ _METRIC_TO_COLUMN: dict[str, str] = {
 
 def _read_system_metrics_history(
     db: Session, dates: list[date_type], metric_key: str
-) -> dict[str, float | None]:
+) -> dict[str, dict]:
     """Read the materialized `system_metrics_daily` rows for `dates`.
 
     Returns a dict keyed by ISO date string; every requested date appears
-    in the dict, even if the row doesn't exist (value is `None`). Tests
+    in the dict, even if the row doesn't exist (value is ``None``). Tests
     that don't seed the table will get all-null history, which is exactly
     the right behavior for the empty-DB envelope assertions.
+
+    Each value is a dict with keys ``value`` (the metric float or None),
+    ``data_quality`` (``'complete'`` | ``'partial'`` | ``None`` for absent
+    rows), and ``coverage_pct`` (float or None). The ``None`` sentinel for
+    absent rows lets callers distinguish "no row" from "partial row".
     """
     if not dates:
         return {}
@@ -2168,8 +2186,16 @@ def _read_system_metrics_history(
         )
         .all()
     )
-    by_date: dict[str, float | None] = {row.service_date: getattr(row, metric_key) for row in rows}
-    return {d.isoformat(): by_date.get(d.isoformat()) for d in dates}
+    by_date: dict[str, dict] = {
+        row.service_date: {
+            "value": getattr(row, metric_key),
+            "data_quality": row.data_quality,
+            "coverage_pct": row.coverage_pct,
+        }
+        for row in rows
+    }
+    absent: dict = {"value": None, "data_quality": None, "coverage_pct": None}
+    return {d.isoformat(): by_date.get(d.isoformat(), absent) for d in dates}
 
 
 def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
@@ -2181,12 +2207,20 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
     has not yet written it. Falls back to `None` for any date without a
     materialized row, matching the empty-DB envelope tests rely on.
 
-    Returns `{metric, days, trend_data, prior_window_value}` where
-    `trend_data` is one row per service date in the *current* window (days+1
-    inclusive points; `value: null` for days with no data) and
-    `prior_window_value` is the simple mean of the prior-window values
-    (skipping null days). The 30-vs-prior-30 delta is then
-    `mean(trend_data) - prior_window_value` on the frontend.
+    Returns ``{metric, days, trend_data, prior_window_value}`` where
+    ``trend_data`` is one row per service date in the *current* window
+    (days+1 inclusive points; ``value: null`` for days with no data) and
+    ``prior_window_value`` is the simple mean of the prior-window values
+    (skipping null and partial days). The 30-vs-prior-30 delta is then
+    ``mean(trend_data) - prior_window_value`` on the frontend.
+
+    Each ``trend_data`` entry includes a ``data_quality`` field
+    (``'complete'``, ``'partial'``, or ``None`` for absent rows) so the
+    frontend can render a distinct visual style for partial days instead
+    of treating the gap as unexplained missing data.
+
+    Partial days are excluded from ``prior_window_value`` for symmetry
+    with the delta filter on the current window.
     """
     # Local import: src.system_metrics imports back into api.aggregations
     # for the per-date helpers, so a top-level import would cycle.
@@ -2220,16 +2254,39 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
     # Compute today live — single-date cost, ~1-2s rather than 60×.
     try:
         today_metrics = compute_system_metrics_for_date(db, today)
-        history[today.isoformat()] = today_metrics.get(response_key)
+        # Today is always live-computed and therefore considered complete
+        # for the trend strip (the live compute doesn't have a quality flag).
+        history[today.isoformat()] = {
+            "value": today_metrics.get(response_key),
+            "data_quality": "complete",
+            "coverage_pct": None,
+        }
     except Exception:
         # Live compute failure should not blow up the endpoint; fall back
         # to whatever the table currently holds for today (likely None).
         pass
 
     trend_data = [
-        {"date": d.isoformat(), response_key: history.get(d.isoformat())} for d in current_dates
+        {
+            "date": d.isoformat(),
+            response_key: history.get(d.isoformat(), {}).get("value"),
+            "data_quality": history.get(d.isoformat(), {}).get("data_quality"),
+            "coverage_pct": history.get(d.isoformat(), {}).get("coverage_pct"),
+        }
+        for d in current_dates
     ]
-    prior_window_value = _mean_skip_null([history.get(d.isoformat()) for d in prior_dates])
+
+    # Exclude partial days from the prior-window mean for symmetry with the
+    # current-window delta treatment (partial days have None metric values
+    # for the mean, so they're naturally skipped — but rows with data_quality
+    # 'partial' may have non-null values because the AM portion was computed).
+    # Explicitly filter them out so both windows treat partial days uniformly.
+    prior_values = [
+        history.get(d.isoformat(), {}).get("value")
+        for d in prior_dates
+        if history.get(d.isoformat(), {}).get("data_quality") != "partial"
+    ]
+    prior_window_value = _mean_skip_null(prior_values)
 
     # System-default target for this metric (NOTES-47). Surfaces as a
     # reference line / "vs target" badge on the system trend strip.
@@ -2346,9 +2403,10 @@ def _system_baseline_for_window(
 ) -> float | None:
     """Mean of `system_metrics_daily.<metric_column>` over the past `days` days.
 
-    Skips null rows (days with no data) so a single empty day doesn't
-    poison the mean. Returns None when no rows in the window have a
-    non-null value (fresh DB, or the materialization pipeline hasn't run).
+    Skips null rows and partial-quality rows (days with no data or partial
+    ingest) so a single incomplete day doesn't poison the mean. Returns None
+    when no rows in the window have a non-null value (fresh DB, or the
+    materialization pipeline hasn't run).
     """
     start_iso = (end_date - timedelta(days=days - 1)).isoformat()
     end_iso = end_date.isoformat()
@@ -2358,6 +2416,7 @@ def _system_baseline_for_window(
             SystemMetricsDaily.service_date >= start_iso,
             SystemMetricsDaily.service_date <= end_iso,
             getattr(SystemMetricsDaily, metric_column).isnot(None),
+            SystemMetricsDaily.data_quality == "complete",
         )
         .all()
     )

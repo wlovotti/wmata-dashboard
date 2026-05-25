@@ -126,22 +126,27 @@ def upsert_route_metrics_for_date(db: Session, service_date: date_type) -> int |
     place. Returns the number of rows written, or None if computation
     raised (matching `upsert_system_metrics_for_date`'s soft-fail contract
     so the daily-batch wrapper can log and continue).
+
+    The completeness guard acts as a *flagger*, not a *gate*: partial days
+    are persisted with ``data_quality='partial'`` and their raw
+    ``coverage_pct`` so the UI can render an explicit "partial day" badge
+    rather than showing a silent gap in the trend strip. Complete days
+    receive ``data_quality='complete'``.
     """
-    # Refuse to materialize aggregates for partial-collection days — see
-    # src/data_completeness.py for the rationale. Mirrors the guard in
-    # src/system_metrics.upsert_system_metrics_for_date.
     from src.data_completeness import (
         coverage_pct_for_date,
         is_date_sufficiently_complete,
     )
 
-    if not is_date_sufficiently_complete(db, service_date):
-        pct = coverage_pct_for_date(db, service_date)
+    pct = coverage_pct_for_date(db, service_date)
+    is_complete = is_date_sufficiently_complete(db, service_date)
+    data_quality = "complete" if is_complete else "partial"
+
+    if not is_complete:
         print(
-            f"  ⊘ Skipping route metrics overlay for {service_date.isoformat()}: "
-            f"ingest coverage {pct:.1%} below threshold (partial-day)"
+            f"  ⚠ Route metrics overlay for {service_date.isoformat()}: "
+            f"ingest coverage {pct:.1%} below threshold — flagging as partial"
         )
-        return None
 
     try:
         rows = compute_route_metrics_overlay_for_date(db, service_date)
@@ -165,10 +170,20 @@ def upsert_route_metrics_for_date(db: Session, service_date: date_type) -> int |
                 if key in ("route_id", "service_date"):
                     continue
                 setattr(existing, key, value)
+            existing.data_quality = data_quality
+            existing.coverage_pct = pct
             existing.computed_at = now
         else:
-            db.add(RouteMetricsDailyOverlay(**r, computed_at=now))
+            db.add(
+                RouteMetricsDailyOverlay(
+                    **r,
+                    data_quality=data_quality,
+                    coverage_pct=pct,
+                    computed_at=now,
+                )
+            )
     db.commit()
 
-    print(f"  ✓ Route metrics overlay for {service_date_iso}: {len(rows)} rows")
+    quality_label = "partial" if not is_complete else "complete"
+    print(f"  ✓ Route metrics overlay for {service_date_iso} [{quality_label}]: {len(rows)} rows")
     return len(rows)

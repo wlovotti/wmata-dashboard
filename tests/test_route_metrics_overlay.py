@@ -37,18 +37,22 @@ def test_overlay_compute_empty_db_returns_no_rows(db_session):
 
 
 @pytest.mark.smoke
-def test_overlay_upsert_empty_db_is_skipped_by_completeness_guard(db_session):
-    """Upsert on an empty DB is short-circuited by the completeness guard.
+def test_overlay_upsert_partial_day_writes_zero_rows(db_session):
+    """Upsert on an empty DB (zero ingest coverage) persists zero overlay rows.
 
     An empty test DB has zero ingest rows in ``trip_update_snapshots`` and
     ``vehicle_positions``, so :func:`is_date_sufficiently_complete` returns
-    False and the upsert refuses to materialize. Returns ``None`` (skipped)
-    rather than ``0`` (computed empty) — the two states are different
-    signals for the orchestrator.
+    False. Under NOTES-76 the guard is now a *flagger*: the upsert proceeds
+    but flags each written row as ``data_quality='partial'``. When there are
+    no source rows (empty DB → zero routes with data), the function returns
+    ``0`` (computed empty) rather than ``None`` (computation raised).
+
+    ``None`` is still the signal for "computation crashed."
     """
     target = date(2026, 5, 5)
     n = upsert_route_metrics_for_date(db_session, target)
-    assert n is None
+    # 0 rows written (no source data), not None (not crashed).
+    assert n == 0
     assert db_session.query(RouteMetricsDailyOverlay).count() == 0
 
 
