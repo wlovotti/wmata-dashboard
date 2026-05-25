@@ -131,60 +131,54 @@ target lists directly.
 
 ### Independent of the redesign
 
-- **NOTES-72 Trip-update state refactor — complete Phase D/E/F.** PR #128
+- **NOTES-72 Trip-update state refactor — complete Phase E.2 / F.** PR #128
   shipped the dual-write architecture and the side-by-side derivation
-  (`stop_events` from snapshots vs `stop_events_v2` from state). This is
-  the operational follow-up to finish the migration. Spec:
+  (`stop_events` from snapshots vs `stop_events_v2` from state). Phases
+  D and E.1 are complete; Phase E.2 and Phase F remain. Spec:
   `docs/superpowers/specs/2026-05-17-trip-update-state-refactor-design.md`
   + addendum `docs/superpowers/specs/2026-05-20-trip-update-state-service-date-addendum.md`.
 
-  **Phase D — validation (in flight, schema-fix PR pending merge as of
-  2026-05-20).** The 2026-05-17 design used a PK of `(trip_id,
-  stop_sequence)` and assumed each day's snapshot would be derived
-  before the next day's runs overwrote state. Both assumptions failed:
-  (1) WMATA's GTFS-RT trip_ids repeat day-over-day (94% reuse Mon→Tue),
-  so the UPSERT silently overwrote prior-day state, and (2) the v2
-  derivation crashed on every nightly batch from 2026-05-16 onward via
-  a `_resolve_side_table` SQLAlchemy bug that the batch wrapper had no
-  way to surface (the pipeline exited 0 after crashing at the first
-  non-empty route). The schema-fix PR adds `service_date` to the PK,
-  fixes the resolver, adds `pipelines/replay_archive_to_state.py` for
-  idempotent historical recovery from the JSONL archive, collapses
-  cleanup to a single `service_date < CURRENT_DATE - INTERVAL '7 days'`
-  rule, and adds a row-count guard in `run_daily_batch.py` so the
-  silent-zero failure mode can't recur.
+  **Phase D — validation (complete).** Five days of comparison evidence
+  (2026-05-20 → 2026-05-24, including the full Saturday 5/23) showed
+  agreement at ≥ 99.99% — the only deviation was 26 sub-minute timing
+  drifts on 5/21 (0.005% of rows). v2 produced ~5,000 extra rows/day
+  concentrated on C/D-series routes — directionally good (more coverage,
+  not less); investigate later but not a cutover blocker. The Sunday
+  outage on 5/24 hit both pipelines equally (160,639 old vs 160,948 v2 —
+  consistent with the ~1% v2-only pattern on full days), so it didn't
+  bias the comparison.
 
-  After the PR merges + the user runs the deployment sequence
-  (stop collector → migrate → restart collector), Phase D restarts
-  with two paths to the cutover bar (≥7 consecutive days at 100%
-  agreement including ≥1 weekend day):
-  - **Forward-only** (no backfill): earliest cutover 2026-05-27
-    (covers weekend 5/23–24).
-  - **Replay + forward** (backfill 5/18 + 5/19 from JSONL):
-    earliest cutover 2026-05-25 (the original target).
+  **Phase E.1 — derivation cutover (this PR).** Switched the primary
+  trip_update derivation in `pipelines/run_daily_batch.py` from
+  `derive_stop_events_trip_updates` (reads snapshots) to
+  `derive_stop_events_from_state` (reads `trip_update_state`), writing
+  to canonical `stop_events`. Dropped the v2 validation pipeline entry,
+  the v2 row-count guard, and the nightly comparison job. The collector
+  still dual-writes to `trip_update_snapshots` — see Phase E.2 below.
 
-  Both backfill commands are idempotent:
-  ```
-  uv run python pipelines/replay_archive_to_state.py --date 2026-05-18
-  uv run python pipelines/derive_stop_events_from_state.py \
-      --all-routes --date 2026-05-18 --target-table stop_events_v2
-  ```
+  **Phase E.2 — collector cutover + data_completeness rewrite.**
+  `src/data_completeness.py` unions `trip_update_snapshots.snapshot_ts`
+  with `vehicle_positions.timestamp` to count minute-buckets of ingest
+  coverage; the snapshot side contributes the steady ~24h signal
+  (every 30s poll = a row), and `vehicle_positions` alone is sparser
+  during off-hours. Stopping the collector dual-write naively drops a
+  healthy day's coverage_pct below the 0.80 threshold and starts
+  mis-flagging normal days as `'partial'`. Options:
+  (1) lower the threshold to what `vehicle_positions` alone can hit
+  (needs empirical calibration);
+  (2) add a heartbeat table the collector ticks every 30s;
+  (3) compute coverage from `trip_update_state.final_snapshot_ts`
+  (rough — UPSERT-only, no per-poll record).
+  Resolve, then remove the `TripUpdateSnapshot` bulk_save + dedup cache
+  from `src/wmata_collector.py:_save_trip_updates` and the
+  `TripUpdateSnapshot` import.
 
-  **Phase E — cutover.** Stop dual-writing to `trip_update_snapshots`
-  in `src/wmata_collector.py:_save_trip_updates`. Switch the primary
-  daily-batch derivation from `derive_stop_events_trip_updates.py`
-  (reads snapshots) to `derive_stop_events_from_state.py` (reads state).
-  Update `pipelines/run_daily_batch.py` so the v2 alias becomes primary
-  and the legacy entry is dropped.
-
-  **Phase F — retirement.** Drop `trip_update_snapshots` and
-  `stop_events_v2` (or rename v2 back to canonical). Delete the legacy
-  `derive_stop_events_trip_updates.py`,
+  **Phase F — retirement.** After Phase E.2 has been stable for ≥ 1
+  week: drop `trip_update_snapshots` and `stop_events_v2` (or rename v2
+  back to canonical). Delete `pipelines/derive_stop_events_trip_updates.py`,
   `pipelines/compare_old_vs_new_derivation.py`, and
-  `pipelines/cleanup_trip_update_state.py`. Schedule
-  `pipelines/archive_trip_update_snapshots.py` (or its successor for
-  `trip_update_state`) via launchd timer for ongoing retention —
-  currently still manual after the 2026-05-17 one-shot run.
+  `pipelines/archive_trip_update_snapshots.py`. Schedule a successor
+  retention script for `trip_update_state` via launchd timer.
 
 - **NOTES-34 service_delivered ceiling on 2-stop routes (TU structural
   exclusion).** Side effect of the NOTES-30 closing PR (proportional
