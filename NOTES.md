@@ -19,11 +19,11 @@ external launcher; any non-standard launch leaves
 of WMATA feed — first concrete data point validating the "single point
 of failure" framing); recovery shipped `src/data_completeness.py` +
 guards on both `upsert_*` paths so future partial days won't pollute
-the materialized aggregates. Added NOTES-74 — apply the closed NOTES-70
-(PR #133) trip_id-filter pattern to 9 `trip_update_state` tests
-(`test_upsert_trip_update_state`, `test_cleanup_trip_update_state`,
-`test_compare_derivations`) that fail locally on a populated dev DB
-with `MultipleResultsFound`; CI passes against fresh PG. Route
+the materialized aggregates. Closed NOTES-74 (PR #144) — applied the
+NOTES-70 (PR #133) trip_id-filter pattern to 9 `trip_update_state`
+tests across `test_upsert_trip_update_state`, `test_cleanup_trip_update_state`,
+and `test_compare_derivations`; tests now pass on populated dev DBs and
+in CI. Route
 diagnosis narrative (NOTES-69, PR #141): offline CLI generates LLM
 summaries from `route_diagnostic_*` tables, cached in
 `route_diagnosis_narrative`; `GET /api/routes/{id}/diagnosis` serves
@@ -126,11 +126,6 @@ target lists directly.
 - **NOTES-20 Tighter rider-experience OTP.** A stricter window alongside
   WMATA's official. Tracked but not yet scoped — user wants
   comparability with WMATA's scorecard for now.
-- **NOTES-74 Apply NOTES-70 (PR #133) trip_id-filter pattern to
-  `trip_update_state` tests.** Nine tests across three files use bare
-  `select()` calls that surface pre-existing dev-DB rows as
-  `MultipleResultsFound`; same root cause as the closed NOTES-70, same
-  mechanical fix.
 
 ### Independent of the redesign
 
@@ -454,56 +449,6 @@ filtering in the ranking (headway-based dispatching is the right
 intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
-
----
-
-## NOTES-74. Apply NOTES-70 trip_id-filter pattern to trip_update_state tests
-
-**Severity: low (local-only false-negative; CI is unaffected).**
-**Effort: low (~9 tests, single-file-per-test filter additions).**
-
-Surfaced during the NOTES-69 cycle (PR #141): 9 tests fail locally
-against a dev DB that has accumulated `trip_update_state` rows from
-prior pipeline runs, all with `sqlalchemy.exc.MultipleResultsFound`.
-Same root cause as the closed NOTES-70 (PR #133): the test SELECTs are
-not filtered to their own test-specific `trip_id`, so on a populated
-DB the `pg_session` SAVEPOINT fixture's write isolation can't prevent
-pre-existing matching rows from being returned. CI passes because the
-CI Postgres starts empty — this is a developer-experience bug, not a
-correctness bug.
-
-Affected files (9 failing tests total):
-- `tests/test_upsert_trip_update_state.py` — 4 tests
-  (`test_first_insert_creates_row`,
-  `test_upsert_overwrites_final_fields_always`,
-  `test_last_pred_updates_only_when_prediction_is_non_null`,
-  `test_vehicle_id_coalesces_to_latest_non_null`).
-- `tests/test_cleanup_trip_update_state.py` — 3 tests
-  (`test_cleanup_deletes_rows_older_than_retention_window`,
-  `test_cleanup_respects_explicit_retention_days`,
-  `test_cleanup_ignores_derived_at`).
-- `tests/test_compare_derivations.py` — 2 tests
-  (`test_perfect_match_reports_100_percent_agreement`,
-  `test_skipped_stops_with_agreeing_nulls_report_match`).
-
-Fix pattern (per PR #133): add `.where(TripUpdateState.trip_id ==
-"<test-specific id>")` to each bare `select(TripUpdateState)` /
-`select(StopEvent)` call. Each test already constructs its own test
-data with a (potentially unique) `trip_id`, so the filter is
-mechanical. Verify locally under both `bin/test-with-pg` (real local
-PG, with the cruft) and `DATABASE_URL=sqlite:///:memory: uv run
-pytest <file>` (fresh in-memory).
-
-Out of scope: a broader sweep of every test using bare `select()` —
-only fix the demonstrably-failing ones. If a third file in this area
-ever needs the same fix, consider a lint rule or fixture helper
-instead of a fourth round of manual patches.
-
-### Dependencies
-
-None — independent cleanup. Pattern reference: closed NOTES-70
-(PR #133), which fixed the same class of bug in
-`tests/test_derive_stop_events_from_state.py`.
 
 ---
 

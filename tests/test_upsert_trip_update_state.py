@@ -45,7 +45,9 @@ def test_first_insert_creates_row(pg_session):
     upsert_trip_update_state(pg_session, [_make_row(predicted_arrival_ts=pred)])
     pg_session.commit()
 
-    row = pg_session.execute(select(TripUpdateState)).scalar_one()
+    row = pg_session.execute(
+        select(TripUpdateState).where(TripUpdateState.trip_id == "T1")
+    ).scalar_one()
     assert row.trip_id == "T1"
     assert row.stop_sequence == 1
     assert row.final_snapshot_ts == datetime(2026, 5, 17, 14, 0, 0)
@@ -68,7 +70,9 @@ def test_upsert_overwrites_final_fields_always(pg_session):
     )
     pg_session.commit()
 
-    row = pg_session.execute(select(TripUpdateState)).scalar_one()
+    row = pg_session.execute(
+        select(TripUpdateState).where(TripUpdateState.trip_id == "T1")
+    ).scalar_one()
     assert row.final_snapshot_ts == t2
     assert row.final_schedule_relationship == "SKIPPED"
 
@@ -87,7 +91,9 @@ def test_last_pred_updates_only_when_prediction_is_non_null(pg_session):
     upsert_trip_update_state(pg_session, [_make_row(snapshot_ts=t2, predicted_arrival_ts=None)])
     pg_session.commit()
 
-    row = pg_session.execute(select(TripUpdateState)).scalar_one()
+    row = pg_session.execute(
+        select(TripUpdateState).where(TripUpdateState.trip_id == "T1")
+    ).scalar_one()
     assert row.final_snapshot_ts == t2  # final_ moved forward
     assert row.last_pred_snapshot_ts == t1  # but last_pred_ stuck on t1
     assert row.last_predicted_arrival_ts == pred1
@@ -105,5 +111,7 @@ def test_vehicle_id_coalesces_to_latest_non_null(pg_session):
     upsert_trip_update_state(pg_session, [_make_row(snapshot_ts=t2, vehicle_id=None)])
     pg_session.commit()
 
-    row = pg_session.execute(select(TripUpdateState)).scalar_one()
+    row = pg_session.execute(
+        select(TripUpdateState).where(TripUpdateState.trip_id == "T1")
+    ).scalar_one()
     assert row.vehicle_id == "V1"  # preserved from the earlier snapshot
