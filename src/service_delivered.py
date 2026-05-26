@@ -30,20 +30,27 @@ missing buses, not late ones.
   - **delivered_trips**: `COUNT(DISTINCT trip_id)` over `runs` where **any
     source row** clears a trip-length-aware existence threshold AND the
     trip_id is in GTFS scheduled for the actual `service_date`. The
-    threshold is `stops_observed >= max(2, stops_observable // 3)`:
-    a hard floor of 2 stops (otherwise a single ghost ping would qualify),
-    proportional to roughly a third of the observable stops on longer
-    trips. This recovers the original "≥3" semantics on a typical
-    30-stop urban route (threshold = 10) while admitting short express
-    routes whose entire schedule is 2-3 stops (NOTES-30; A90 was reporting
-    0/127 delivered despite 88% OTP because `stops_observed >= 3` is
-    structurally unreachable on a 2-stop trip). DISTINCT collapses the
-    per-source duplication; "any source" is the right rule because TU
-    and proximity have nearly inverse blind spots and either source
-    clearing the threshold is sufficient evidence the trip ran. The
-    GTFS-membership filter is load-bearing for ratio sanity: without it,
-    real-time-only ADDED trips end up in the numerator while the
-    denominator is purely GTFS-derived. Caveat: ~3-6% of TU-day trips
+    threshold is a three-tier CASE on `stops_observable`:
+      - stops_observable <= 2: threshold = 1 (any observation counts;
+        short-route TU rows have stops_observable=1 and a floor of 2 is
+        structurally unreachable — NOTES-34)
+      - stops_observable in [3..8]: threshold = 2 (hard floor; one ping
+        is not enough evidence on medium routes)
+      - stops_observable >= 9: threshold = floor(stops_observable / 3)
+        (proportional — recovers "≥3" semantics on a 30-stop urban route)
+    This recovers the original "≥3" semantics on a typical 30-stop urban
+    route (threshold = 10) while admitting short express routes whose
+    entire schedule is 2-3 stops (NOTES-30; A90 was reporting 0/127
+    delivered despite 88% OTP because `stops_observed >= 3` is
+    structurally unreachable on a 2-stop trip). The short-route loosening
+    lifts the ceiling on routes like A90 (was ~48% despite 88% OTP) by
+    counting TU rows that observed the single non-origin stop (NOTES-34).
+    DISTINCT collapses the per-source duplication; "any source" is the
+    right rule because TU and proximity have nearly inverse blind spots
+    and either source clearing the threshold is sufficient evidence the
+    trip ran. The GTFS-membership filter is load-bearing for ratio sanity:
+    without it, real-time-only ADDED trips end up in the numerator while
+    the denominator is purely GTFS-derived. Caveat: ~3-6% of TU-day trips
     have no matching `vehicle_positions` row and so get dropped by the
     B1 derivation — those look "not delivered" here even if they ran.
     The dropped set is route-concentrated as of 2026-05-03; re-run
@@ -185,21 +192,35 @@ def compute_service_delivered(
     scheduled = scheduled_trip_ids_q.distinct().count()
 
     # Trip-length-aware existence threshold (NOTES-30). Floor at 2 to reject
-    # single-ping ghost runs; otherwise scale with the source's observable
-    # stop count (NOTES-31 column) so short express routes — whose GTFS trips
-    # have only 2-3 stops total — aren't structurally excluded the way the
-    # old flat `stops_observed >= 3` did. `stops_observable` differs from
-    # `stops_scheduled` by 1 on trip_update rows (origin is unobservable);
-    # using the per-source observable count keeps the threshold honest.
+    # single-ping ghost runs on normal routes; otherwise scale with the
+    # source's observable stop count (NOTES-31 column) so short express
+    # routes — whose GTFS trips have only 2-3 stops total — aren't
+    # structurally excluded the way the old flat `stops_observed >= 3` did.
+    # `stops_observable` differs from `stops_scheduled` by 1 on trip_update
+    # rows (origin is unobservable); using the per-source observable count
+    # keeps the threshold honest.
+    #
+    # Short-route loosening (NOTES-34): when stops_observable <= 2, the floor
+    # of 2 is too high for trip_update rows whose stops_observable=1 (a 2-stop
+    # GTFS trip can only yield TU stops_observable=1, so threshold=2 is
+    # structurally unreachable). We accept any single real observation
+    # (stops_observed >= 1) when stops_observable <= 2, relying on the
+    # trip_id GTFS membership filter below to exclude ghost runs not in the
+    # schedule. This lifts the delivered ceiling on short express routes
+    # (e.g. A90 weekday was ~48% despite 88% OTP) without lowering the
+    # ghost-run floor on longer routes.
+    #
     # `func.floor(stops_observable / 3.0)` makes the divisor explicit-float
     # so the result is identical across Postgres (where INTEGER / INTEGER
     # would otherwise be integer division) and SQLite (where it's already
     # real division); FLOOR then yields the integer floor on both. The
-    # outer CASE pins the floor at 2 — algebraically equivalent to
-    # `max(2, floor(stops_observable / 3))`. NULL `stops_observable` falls
-    # through the CASE and the comparison fails closed; in practice
-    # NOTES-31's backfill plus `aggregate_runs.py` keep the column populated.
+    # outer CASE pins the floor at 2 for medium routes — algebraically
+    # equivalent to `max(2, floor(stops_observable / 3))`. NULL
+    # `stops_observable` falls through the CASE and the comparison fails
+    # closed; in practice NOTES-31's backfill plus `aggregate_runs.py`
+    # keep the column populated.
     delivered_threshold = case(
+        (Run.stops_observable <= 2, 1),
         (Run.stops_observable >= 9, func.floor(Run.stops_observable / 3.0)),
         else_=2,
     )

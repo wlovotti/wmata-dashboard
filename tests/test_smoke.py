@@ -1397,12 +1397,13 @@ def test_compute_service_delivered_dedups_per_source(db_session):
 
 @pytest.mark.smoke
 def test_compute_service_delivered_filters_ghost_runs_below_floor(db_session):
-    """Runs with stops_observed < 2 are excluded as ghost runs (NOTES-30 floor).
+    """Runs with stops_observed < threshold are excluded as ghost runs.
 
-    The proportional threshold is `max(2, stops_observable // 3)`; for routes
-    with stops_observable < 9 the floor of 2 always wins, so a 1-stop run
-    fails the existence check while a 2-stop run passes (assuming the route
-    is short enough that 2 is the threshold).
+    For 3-stop routes (stops_observable=3, in the medium range [3..8]),
+    the threshold is 2. A proximity run with stops_observed=1 fails (1 < 2),
+    a run with stops_observed=2 passes, and a TU run with stops_observed=0
+    always fails. Note: the short-route branch (stops_observable <= 2) uses
+    threshold=1 instead — see test_compute_service_delivered_short_route_tu_row_counts_as_delivered.
     """
     from datetime import date
 
@@ -1433,13 +1434,13 @@ def test_compute_service_delivered_filters_ghost_runs_below_floor(db_session):
 
 @pytest.mark.smoke
 def test_compute_service_delivered_short_route_two_stops(db_session):
-    """A90-style 2-stop route: stops_observable=2, threshold=2, both observed → delivered.
+    """A90-style 2-stop route: any single observation counts as delivered (NOTES-34).
 
-    Closes NOTES-30. Before the fix, the flat `stops_observed >= 3` filter
-    was structurally unreachable on routes whose GTFS trips have ≤3 stops
-    (the longest A90 trip is 2 stops), so service_delivered_ratio was
-    always 0.0 despite the buses obviously running. The proportional
-    threshold `max(2, stops_observable // 3)` admits these runs.
+    Closes NOTES-30 (proportional threshold) and NOTES-34 (short-route
+    loosening). For stops_observable <= 2, the delivered threshold is 1
+    (not 2), so both proximity rows that only saw one stop AND trip_update
+    rows (whose stops_observable=1 is structurally limited to 1) now count
+    as delivered. Only a run with stops_observed=0 is excluded.
     """
     from datetime import date
 
@@ -1452,22 +1453,76 @@ def test_compute_service_delivered_short_route_two_stops(db_session):
             _gtfs_trip("T2"),
             _gtfs_trip("T3"),
             _gtfs_trip("T4"),
+            _gtfs_trip("T5"),
             # 2-stop route: stops_observable=2 for proximity, =1 for TU.
-            # Threshold = max(2, n//3) = 2, so only proximity rows can possibly qualify.
+            # Short-route loosening (NOTES-34): threshold = 1 for stops_observable <= 2.
             _run("T1", "proximity", 2, stops_scheduled=2, stops_observable=2),  # delivered
             _run("T2", "proximity", 2, stops_scheduled=2, stops_observable=2),  # delivered
-            _run("T3", "proximity", 1, stops_scheduled=2, stops_observable=2),  # 1 stop — excluded
+            _run(
+                "T3", "proximity", 1, stops_scheduled=2, stops_observable=2
+            ),  # 1 obs >= 1 → delivered
             _run(
                 "T4", "trip_update", 1, stops_scheduled=2, stops_observable=1
-            ),  # TU can't reach 2 — excluded
+            ),  # TU 1 obs >= 1 → delivered
+            _run("T5", "proximity", 0, stops_scheduled=2, stops_observable=2),  # 0 obs — excluded
         ]
     )
     db_session.commit()
 
     out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
-    assert out["delivered_trips"] == 2  # T1, T2
-    assert out["scheduled_trips"] == 4
-    assert out["ratio"] == 0.5
+    assert out["delivered_trips"] == 4  # T1, T2, T3, T4 (T5 has 0 observed)
+    assert out["scheduled_trips"] == 5
+    assert out["ratio"] == 0.8
+
+
+@pytest.mark.smoke
+def test_compute_service_delivered_short_route_tu_row_counts_as_delivered(db_session):
+    """NOTES-34: TU row on a 2-stop route (stops_observable=1) is now counted delivered.
+
+    Before the NOTES-34 fix, trip_update rows on a 2-stop route had
+    stops_observable=1 (origin is structurally unobservable on TU) and the
+    delivered threshold was max(2, 1//3) = 2, so 1 >= 2 is always False —
+    TU could never contribute to the delivered numerator on these routes.
+    This produced a ~50% ceiling on A90 weekday despite 88% OTP (the other
+    ~50% of runs were TU-only with no proximity coverage).
+
+    After the fix: stops_observable <= 2 → threshold = 1, so a TU row that
+    observed the one non-origin stop (stops_observed=1) now counts delivered.
+    Proximity rows with 1 observation are also lifted by the same rule.
+    """
+    from datetime import date
+
+    from src.service_delivered import compute_service_delivered
+
+    db_session.add_all(
+        [
+            _gtfs_calendar(service_id="SUN", sunday=1),
+            _gtfs_trip("TU1"),
+            _gtfs_trip("TU2"),
+            _gtfs_trip("PROX_FULL"),
+            _gtfs_trip("PROX_SHORT"),
+            _gtfs_trip("ZERO"),
+            # TU rows: stops_scheduled=2, stops_observable=1 (origin hidden).
+            # Old threshold=2 → never delivered. New threshold=1 → delivered.
+            _run("TU1", "trip_update", 1, stops_scheduled=2, stops_observable=1),  # now delivered
+            _run("TU2", "trip_update", 1, stops_scheduled=2, stops_observable=1),  # now delivered
+            # Proximity full coverage: always delivered.
+            _run("PROX_FULL", "proximity", 2, stops_scheduled=2, stops_observable=2),  # delivered
+            # Proximity short (1 of 2 stops): old threshold=2 → excluded; new threshold=1 → delivered.
+            _run(
+                "PROX_SHORT", "proximity", 1, stops_scheduled=2, stops_observable=2
+            ),  # now delivered
+            # Zero-observation run: excluded regardless of route length.
+            _run("ZERO", "proximity", 0, stops_scheduled=2, stops_observable=2),  # excluded
+        ]
+    )
+    db_session.commit()
+
+    out = compute_service_delivered(db_session, "R1", date(2026, 5, 3))
+    # All 4 trips with observations qualify; ZERO is excluded.
+    assert out["delivered_trips"] == 4
+    assert out["scheduled_trips"] == 5
+    assert out["ratio"] == 0.8
 
 
 @pytest.mark.smoke
