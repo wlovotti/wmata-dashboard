@@ -206,65 +206,82 @@ can't be expressed in JSON.
 ```sql
 corridor_id              INT NOT NULL REFERENCES corridors(corridor_id) ON DELETE CASCADE
 period                   TEXT NOT NULL        -- 'all'|'am_peak'|'midday'|'pm_peak'|'evening'|'late'
-lookback_days            INT NOT NULL         -- mirror PR #140's value
-n_observed_runs          INT NOT NULL         -- distinct (route_id, run_id)
-n_observed_segments      INT NOT NULL
-total_weighted_slip_sec  REAL NOT NULL        -- SUM(slip_sec * trip_count)
-mean_slip_per_run_sec    REAL
-mean_slip_per_segment_sec REAL
-n_contributing_routes    INT NOT NULL         -- routes from route_set with data in window
+n_route_directions       INT NOT NULL         -- distinct (route_id, direction_id) contributing
+n_observed_segments      INT NOT NULL         -- count of route_diagnostic_segment rows aggregated
+n_total_observations     INT NOT NULL         -- SUM(n_observations) across contributing rows
+total_weighted_slip_sec  REAL NOT NULL        -- SUM(mean_slip_sec * n_observations)
+mean_slip_per_segment_sec REAL                -- total_weighted / n_observed_segments
+mean_slip_per_observation_sec REAL            -- total_weighted / n_total_observations
 peak_period              TEXT                 -- populated only on period='all' rows
-data_quality             TEXT NOT NULL        -- 'complete'|'partial' (NOTES-76 pattern)
-coverage_pct             REAL
-refreshed_at             TIMESTAMP NOT NULL DEFAULT NOW()
+computed_at              TIMESTAMP NOT NULL DEFAULT NOW()
 PRIMARY KEY (corridor_id, period)
 INDEX (period, total_weighted_slip_sec DESC)  -- ranked-list query
 ```
 
-**Period summability:** most fields are NOT summable across periods
+**Source window**: `route_diagnostic_segment` is itself materialized as
+a 30-day rolling aggregate (see model docstring). The corridor rollup
+inherits that window — no `lookback_days` or `service_date` column
+needed; the window changes only if the source materialization changes.
+
+**Period summability**: most fields are NOT summable across periods
 (distinct counts, weighted means, categoricals). The `'all'` row is
-computed from the underlying segment data with no period filter, not
-derived from the per-period rows. Mirror PR #140's exact behavior at
-implementation time.
+computed from the underlying `route_diagnostic_segment` rows with
+`period='all'` (which `RouteDiagnosticSegment` already stores as a
+separately-computed row per its docstring), not derived from the
+per-period corridor rows.
 
-### Aggregation SQL (the nightly join — illustrative)
+**Data quality**: `route_diagnostic_segment`'s nightly materialization
+already refuses to compute on partial-collection days (per PR #143).
+The corridor rollup inherits this implicit guarantee — no
+`data_quality` or `coverage_pct` column needed at the corridor level.
+The per-day concept doesn't translate to a 30-day rolling window
+anyway.
 
-Source: PR #140's **per-route** segment table (the input PR #140 itself
-reads from, before its own cross-route grouping). Per Explore-agent
-reporting that's `RouteDiagnosticSegment` keyed by
-`(route_id, direction_id, from_seq, to_seq, period, service_date)`.
-**Exact table and column names verified at impl time — Section 9
-item 1.**
+### Aggregation SQL (the nightly join)
+
+Source: `route_diagnostic_segment` (the **per-route** input that PR #140
+itself reads from before its own cross-route grouping). Confirmed in
+`src/models.py:977` — keyed by `(route_id, direction_id, period,
+from_seq, to_seq)` with `mean_slip_sec`, `n_observations`. No
+`service_date` column because the source table is already a 30-day
+rolling aggregate.
 
 ```sql
 INSERT INTO corridor_slip_rollup (...)
 SELECT
   crm.corridor_id,
-  seg.period,
-  :lookback_days,
-  COUNT(DISTINCT (seg.route_id, seg.run_id)) AS n_observed_runs,
+  rds.period,
+  COUNT(DISTINCT (rds.route_id, rds.direction_id)) AS n_route_directions,
   COUNT(*) AS n_observed_segments,
-  SUM(seg.slip_sec * seg.trip_count) AS total_weighted_slip_sec,
-  ...
+  SUM(rds.n_observations) AS n_total_observations,
+  SUM(rds.mean_slip_sec * rds.n_observations) AS total_weighted_slip_sec,
+  SUM(rds.mean_slip_sec * rds.n_observations) / NULLIF(COUNT(*), 0)
+    AS mean_slip_per_segment_sec,
+  SUM(rds.mean_slip_sec * rds.n_observations) / NULLIF(SUM(rds.n_observations), 0)
+    AS mean_slip_per_observation_sec
 FROM corridor_route_membership crm
-JOIN route_diagnostic_segment seg
-  ON seg.route_id = crm.route_id
- AND seg.direction_id = crm.direction_id
- AND seg.from_seq >= crm.start_stop_sequence
- AND seg.to_seq   <= crm.end_stop_sequence
-WHERE seg.service_date >= CURRENT_DATE - (:lookback_days || ' days')::INTERVAL
-GROUP BY crm.corridor_id, seg.period
+JOIN route_diagnostic_segment rds
+  ON rds.route_id = crm.route_id
+ AND rds.direction_id = crm.direction_id
+ AND rds.from_seq >= crm.start_stop_sequence
+ AND rds.to_seq   <= crm.end_stop_sequence
+GROUP BY crm.corridor_id, rds.period
 ON CONFLICT (corridor_id, period) DO UPDATE SET ...;
 ```
 
-**Why this source, not `cross_route_segment_rollup`**: PR #140's output
-table aggregates *across* routes (grouping by `from_stop_id, to_stop_id`
-only). We need per-route per-segment slip so we can attribute
-contributions to the corridor's `route_set`. The per-route input table
-is the right join target. As a side effect, all trips on a route
-(canonical + variant) automatically contribute via `seg.route_id = crm.route_id`,
-matching the "canonical-only for identity, all-variants for slip"
-asymmetry from Section 1.
+`peak_period` (only set on `period='all'` rows) is a second pass after
+the primary insert — for each corridor, find the named period with
+the highest `total_weighted_slip_sec` and write it back. Mirrors
+PR #140's `refresh_cross_route_segments.py` pattern.
+
+**Why this source, not `cross_route_segment_rollup`**: PR #140's
+output table aggregates *across* routes (grouping by `from_stop_id,
+to_stop_id` only). We need per-route per-segment slip so we can
+attribute contributions to a corridor's `route_set`. The per-route
+input table is the right join target. As a side effect, all trips on
+a route (canonical + variant) automatically contribute via
+`rds.route_id = crm.route_id`, matching the "canonical-only for
+identity, all-variants for slip" asymmetry from Section 1.
 
 ### Refresh cadence + atomicity
 
@@ -561,27 +578,39 @@ V2 ships with these defaults. Tuneable after empirical run.
 
 ---
 
-## 9. Open items to verify at implementation time
+## 9. Implementation-time facts (verified during plan writing)
 
-These are details that depend on PR #140's exact internals; the
-implementer pins them down by reading the existing code rather than
-guessing.
+These were "open items" in the draft spec; they were resolved by
+reading the codebase before writing the implementation plan.
 
-1. **Per-route segment table name + columns.** Spec assumes
-   `route_diagnostic_segment` keyed by
-   `(route_id, direction_id, from_seq, to_seq, period, service_date)`
-   with `slip_sec`, `trip_count`, `run_id` columns. Verify exact
-   names against PR #140's pipeline (`refresh_cross_route_segments.py`
-   and upstream).
-2. **`'all'` row construction in the per-route table.**
-   Mirror exactly whatever the upstream source does (separately
-   computed vs summed). If `'all'` rows don't exist upstream, the
-   corridor slip aggregator must add a second `UNION ALL` pass with
-   no period filter to populate them.
-3. **`LOOKBACK_DAYS` value.** Match PR #140.
-4. **Frontend page path** for PR #140's segments table.
-5. **Existing filter component reuse** — confirm `min-routes` /
-   `period` / `route` filters can be reused without modification.
+1. **Per-route segment table** — `route_diagnostic_segment`
+   (`src/models.py:977`, ORM class `RouteDiagnosticSegment`). Columns:
+   `route_id`, `direction_id`, `period`, `from_seq`, `from_stop_id`,
+   `to_seq`, `to_stop_id`, `mean_slip_sec`, `cum_slip_sec`,
+   `n_observations`, `is_timepoint`, `computed_at`. No `service_date`
+   column — the table is a 30-day rolling aggregate (docstring at
+   `src/models.py:981`).
+2. **`'all'` rows in `route_diagnostic_segment`** are present as
+   separately-materialized rows (per docstring at `src/models.py:988`).
+   Corridor slip aggregator joins them directly; no `UNION ALL` pass
+   needed.
+3. **Source window** is 30 days (inherited from
+   `route_diagnostic_segment`'s materialization). The corridor rollup
+   has no `lookback_days` column — it follows the source.
+4. **Frontend page** — `frontend/src/components/SegmentDiagnostic.jsx`
+   (`.jsx`, not `.tsx`). Routed at `/segments` in `App.jsx:75`. 367
+   lines as of plan writing.
+5. **Period enum** — `src/route_diagnostics.py:78`,
+   `ALL_PERIODS = ("all", "am_peak", "midday", "pm_peak", "evening",
+   "late")`. Imported as `DIAGNOSTIC_PERIODS` in `api/main.py:40`.
+6. **Migration convention** — `scripts/migrate_create_<table>.py`,
+   wired through `scripts/migrate_all.py`. `check_schema_drift.py`
+   validates SQL against the ORM model (per CLAUDE.md NOTES-72
+   addendum).
+7. **PR #140 API endpoint** at `api/main.py:1086` calls
+   `api/aggregations.py:get_cross_route_segments` (`:4493`).
+8. **Pipeline upsert helper** — `src/upsert_helpers.py:upsert_rows`
+   (per CLAUDE.md). Don't hand-roll `pg_insert(...).on_conflict_do_update`.
 
 ---
 
