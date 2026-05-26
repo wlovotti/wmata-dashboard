@@ -6,7 +6,11 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-25. Closed NOTES-76 — the data_quality column rollout
+Last edited 2026-05-25. Closed NOTES-34 — the short-route delivered-ceiling fix (PR #148):
+for stops_observable <= 2, the delivered threshold is now 1 (any real observation counts),
+lifting A90 weekday from 48% to 96% delivered (was 61/127; now 122/127) and aligning with
+88% OTP. Before the fix, trip_update rows on 2-stop routes had stops_observable=1 and a
+floor of 2 was structurally unreachable. Closed NOTES-76 — the data_quality column rollout
 (PR #146): added `data_quality` (`'complete'|'partial'`) and `coverage_pct`
 columns to `system_metrics_daily` and `route_metrics_daily_overlay`; the
 completeness guard is now a *flagger* (persists partial rows) rather than a
@@ -131,6 +135,30 @@ target lists directly.
 
 ### Independent of the redesign
 
+- **NOTES-77 Verify 2026-05-26 batch — Phase E.1 first end-to-end run
+  (HIGH PRIORITY; closes with next PR).** PR #147 (merged 2026-05-25)
+  switched `pipelines/run_daily_batch.py` to use
+  `derive_stop_events_from_state` as the primary trip_update derivation
+  writing canonical `stop_events`. The 03:44 EDT batch on 2026-05-26
+  is the first production run with downstream pipelines
+  (`aggregate_runs`, `compute_bunching`, `upsert_system_metrics_daily`,
+  `upsert_route_metrics_overlay`) consuming the new pipeline's output.
+  Skim `logs/daily_batch_2026-05-26.log` and confirm:
+  1. `OK   derive_stop_events_from_state for 2026-05-25` (new primary
+     ran, exited 0, processed all routes).
+  2. No `SKIP` lines downstream of it (hard-dependency chain held).
+  3. `system_metrics_daily` row for 2026-05-25 exists with
+     `data_quality` populated (`'complete'` if today's collection was
+     clean, `'partial'` if today's data is also thin).
+  Also spot-check: 2026-05-25 service_date row counts in `stop_events`
+  (source='trip_update') and `runs` are in normal range (≥ 400k for
+  stop_events on a healthy weekday; ≥ 4k for runs).
+  If anything is off, the rollback is `git revert 7912dcb` —
+  `trip_update_snapshots` is still being written, so the legacy
+  derivation can resume immediately with no data loss.
+  Remove this NOTE in the Phase E.2 PR (or earlier if a fix-up PR
+  beats it).
+
 - **NOTES-72 Trip-update state refactor — complete Phase E.2 / F.** PR #128
   shipped the dual-write architecture and the side-by-side derivation
   (`stop_events` from snapshots vs `stop_events_v2` from state). Phases
@@ -179,24 +207,6 @@ target lists directly.
   `pipelines/compare_old_vs_new_derivation.py`, and
   `pipelines/archive_trip_update_snapshots.py`. Schedule a successor
   retention script for `trip_update_state` via launchd timer.
-
-- **NOTES-34 service_delivered ceiling on 2-stop routes (TU structural
-  exclusion).** Side effect of the NOTES-30 closing PR (proportional
-  threshold). The new threshold is `max(2, stops_observable // 3)`; on a
-  2-stop route, TU rows have `stops_observable = 1` and can never reach
-  2, so TU never counts toward delivered. Proximity rows
-  (`stops_observable = 2`) cover the gap when they observe both stops,
-  but A90 weekday on 2026-05-05 came out at 61/127 delivered (48%)
-  despite 88% OTP — the residual gap is partly proximity rows that only
-  saw one stop and partly TU runs for trips with no proximity coverage.
-  Acceptable trade-off for closing the 0%-everywhere bug, but documents
-  a known ceiling on short-route delivered ratios. A more permissive
-  short-route rule — e.g. accept `stops_observed >= 1` when
-  `stops_observable <= 2`, or treat any observation at all as
-  delivered once `stops_observable` is small enough — would lift the
-  ceiling at the cost of admitting more single-ping ghost runs. Not
-  urgent; revisit if a second short express route appears and the
-  ~50% ceiling becomes a problem.
 
 
 ---
