@@ -4710,3 +4710,98 @@ def get_corridor_rollup(
         "n_rows": len(corridors_payload),
         "corridors": corridors_payload,
     }
+
+
+def get_corridor_constituent_segments(
+    db: Session,
+    *,
+    corridor_id: int,
+    period: str = "all",
+) -> dict:
+    """Return per-route stop-pair segments inside a single corridor (NOTES-62).
+
+    For each contributing route in ``corridor_route_membership``, fetches
+    the ``route_diagnostic_segment`` rows for that ``(route_id,
+    direction_id)`` whose ``(from_seq, to_seq)`` falls inside the
+    membership's ``[start_stop_sequence, end_stop_sequence]`` window —
+    matching the same boundary the slip rollup pipeline uses
+    (``pipelines/refresh_corridor_slip.py``). Results are joined with
+    ``stops`` for human-readable from/to stop names and ordered by
+    ``mean_slip_sec`` desc so the worst constituent shows up first in
+    the drill-down panel.
+
+    Caller is responsible for verifying ``corridor_id`` exists; this
+    function returns an empty ``segments`` list (not 404) when the
+    membership table has nothing for the corridor.
+
+    Args:
+        db: SQLAlchemy session.
+        corridor_id: ID from ``corridors.corridor_id``.
+        period: One of ``all`` / ``am_peak`` / ``midday`` / ``pm_peak`` /
+            ``evening`` / ``late``.
+
+    Returns:
+        Dict with ``corridor_id``, ``period``, and ``segments`` (each
+        carrying route + direction + from/to stop ids and names +
+        mean_slip_sec + n_observations).
+    """
+    from sqlalchemy import and_, or_
+
+    membership = (
+        db.query(CorridorRouteMembership)
+        .filter(CorridorRouteMembership.corridor_id == corridor_id)
+        .all()
+    )
+    if not membership:
+        return {"corridor_id": corridor_id, "period": period, "segments": []}
+
+    route_conditions = [
+        and_(
+            RouteDiagnosticSegment.route_id == m.route_id,
+            RouteDiagnosticSegment.direction_id == m.direction_id,
+            RouteDiagnosticSegment.from_seq >= m.start_stop_sequence,
+            RouteDiagnosticSegment.to_seq <= m.end_stop_sequence,
+        )
+        for m in membership
+    ]
+
+    rows = (
+        db.query(RouteDiagnosticSegment)
+        .filter(
+            RouteDiagnosticSegment.period == period,
+            or_(*route_conditions),
+        )
+        .order_by(RouteDiagnosticSegment.mean_slip_sec.desc())
+        .all()
+    )
+
+    if not rows:
+        return {"corridor_id": corridor_id, "period": period, "segments": []}
+
+    stop_ids = {r.from_stop_id for r in rows} | {r.to_stop_id for r in rows}
+    stop_name_map: dict[str, str | None] = dict(
+        db.query(Stop.stop_id, Stop.stop_name)
+        .filter(Stop.stop_id.in_(stop_ids), Stop.is_current)
+        .all()
+    )
+
+    segments_payload = [
+        {
+            "route_id": r.route_id,
+            "direction_id": r.direction_id,
+            "from_stop_id": r.from_stop_id,
+            "from_stop_name": stop_name_map.get(r.from_stop_id),
+            "from_seq": r.from_seq,
+            "to_stop_id": r.to_stop_id,
+            "to_stop_name": stop_name_map.get(r.to_stop_id),
+            "to_seq": r.to_seq,
+            "mean_slip_sec": r.mean_slip_sec,
+            "n_observations": r.n_observations,
+        }
+        for r in rows
+    ]
+    return {
+        "corridor_id": corridor_id,
+        "period": period,
+        "segments": segments_payload,
+    }

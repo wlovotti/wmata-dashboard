@@ -18,6 +18,7 @@ from api.aggregations import (
     compute_block_timeline,
     get_active_blocks,
     get_all_routes_scorecard,
+    get_corridor_constituent_segments,
     get_corridor_rollup,
     get_cross_route_segments,
     get_live_metrics_for_window,
@@ -37,7 +38,7 @@ from api.aggregations import (
     get_system_trend_data,
 )
 from src.database import get_session
-from src.models import GTFSSnapshot, VehiclePosition
+from src.models import Corridor, GTFSSnapshot, VehiclePosition
 from src.route_diagnostics import ALL_PERIODS as DIAGNOSTIC_PERIODS
 from src.time_periods import (
     ALL_DAY_TYPES,
@@ -1151,6 +1152,43 @@ async def get_segments(
         if level == "corridor":
             return get_corridor_rollup(db, period=period, limit=limit)
         return get_cross_route_segments(db, period=period, limit=limit)
+    finally:
+        db.close()
+
+
+@app.get("/api/corridors/{corridor_id}/segments")
+async def get_corridor_segments(corridor_id: int, period: str = "all"):
+    """Drill-down: per-route stop-pair segments inside a single corridor (NOTES-62).
+
+    Companion to ``GET /api/segments?level=corridor``. For each
+    contributing route in the corridor's membership, returns the
+    ``route_diagnostic_segment`` rows whose stop_sequence range falls
+    inside the corridor — matching the same join the slip rollup
+    pipeline uses so the row-level breakdown reconciles with the
+    headline ``total_weighted_slip_sec``.
+
+    Args:
+        corridor_id: Path parameter from ``corridors.corridor_id``.
+        period: One of ``all`` (default), ``am_peak``, ``midday``,
+            ``pm_peak``, ``evening``, ``late``.
+
+    Returns:
+        Dict with ``corridor_id``, ``period``, and ``segments``
+        (ordered by mean_slip_sec descending; each row carries route +
+        direction + from/to stop ids and names + mean_slip_sec +
+        n_observations).
+    """
+    if period not in DIAGNOSTIC_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
+        )
+
+    db = get_session()
+    try:
+        if not db.query(Corridor).filter_by(corridor_id=corridor_id).first():
+            raise HTTPException(status_code=404, detail="Corridor not found")
+        return get_corridor_constituent_segments(db, corridor_id=corridor_id, period=period)
     finally:
         db.close()
 
