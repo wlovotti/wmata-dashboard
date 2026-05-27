@@ -1,5 +1,4 @@
 from sqlalchemy import (
-    JSON,
     Boolean,
     Column,
     Date,
@@ -1279,10 +1278,13 @@ class Corridor(Base):
     within 30 degrees of bearing. Identified from `shapes` alone — no
     OSM dependency. Refreshed only on GTFS reload.
 
-    `route_set` is the sorted JSONB array of contributing route_ids
-    (denormalized for API convenience). `corridor_route_membership` is
-    the authoritative per-route membership table with stop_sequence
-    ranges for slip aggregation.
+    `route_set` is a TEXT column holding a comma-separated sorted list of
+    contributing route_ids (e.g., "D80,D82,G4"). Stored as text rather
+    than JSONB so it participates in the `uq_corridor_identity` btree
+    unique constraint and works on both Postgres and SQLite (tests).
+    The API splits on comma at serialization time.
+    `corridor_route_membership` is the authoritative per-route membership
+    table with stop_sequence ranges for slip aggregation.
 
     `direction_cardinal` is derived from `direction_bearing_deg` at
     pipeline time (N: 337.5-22.5, NE: 22.5-67.5, ..., NW: 292.5-337.5).
@@ -1304,7 +1306,7 @@ class Corridor(Base):
     end_stop_id = Column(String, nullable=False)
     length_m = Column(Float, nullable=False)
     n_routes = Column(Integer, nullable=False)
-    route_set = Column(JSON, nullable=False)  # JSONB on Postgres; sorted array of route_ids
+    route_set = Column(String, nullable=False)  # sorted comma-separated route_ids, e.g. "D80,D82"
     display_name = Column(String, nullable=False)
     geometry_wkt = Column(Text, nullable=False)  # LINESTRING(lon lat, lon lat, ...)
     gtfs_snapshot_id = Column(Integer, nullable=False)
