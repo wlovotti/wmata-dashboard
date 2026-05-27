@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from pipelines.refresh_corridors import refresh_corridors
 from src.database import get_session
 from src.models import (
     Agency,
@@ -397,6 +398,14 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
         db.add(RouteServiceProfile(snapshot_id=snapshot_id, **row))
     db.flush()
     print(f"  ✓ Loaded {len(profile_rows):,} route_service_profile rows")
+
+    # Cross-route corridors (NOTES-62) — full rebuild from the trips +
+    # shapes + stops we just wrote. Runs inside this transaction so the
+    # corridor identity tables either advance with the new snapshot or
+    # roll back together with everything else.
+    print("→ Rebuilding cross-route corridors...")
+    corridor_counts = refresh_corridors(session=db, gtfs_snapshot_id=snapshot_id)
+    print(f"  ✓ {corridor_counts}")
 
     return snapshot_id
 

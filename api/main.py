@@ -18,6 +18,8 @@ from api.aggregations import (
     compute_block_timeline,
     get_active_blocks,
     get_all_routes_scorecard,
+    get_corridor_constituent_segments,
+    get_corridor_rollup,
     get_cross_route_segments,
     get_live_metrics_for_window,
     get_route_blocks,
@@ -36,7 +38,7 @@ from api.aggregations import (
     get_system_trend_data,
 )
 from src.database import get_session
-from src.models import GTFSSnapshot, VehiclePosition
+from src.models import Corridor, GTFSSnapshot, VehiclePosition
 from src.route_diagnostics import ALL_PERIODS as DIAGNOSTIC_PERIODS
 from src.time_periods import (
     ALL_DAY_TYPES,
@@ -1085,43 +1087,56 @@ async def get_schedule_audit_endpoint(
 
 @app.get("/api/segments")
 async def get_segments(
+    level: str = "segment",
     period: str = "all",
     limit: int = 100,
 ):
     """
-    Cross-route segment diagnostic — ranked stop-pairs by shared slip (NOTES-59).
+    Ranked cross-route diagnostic — either stop-pair (NOTES-59) or
+    shape-anchored corridor (NOTES-62) view.
 
-    Reads ``cross_route_segment_rollup`` rows materialized nightly by
-    ``pipelines/refresh_cross_route_segments.py`` and returns a ranked list of
-    stop-pairs that appear on ≥2 routes, ordered by total trip-volume-weighted
-    slip descending.  This is the V1 infrastructure-investment ranking: a high
-    ``total_weighted_slip_sec`` on a stop-pair means many bus trips on multiple
-    routes lose time on that segment — a shared chokepoint that is a candidate
-    for TSP, queue-jumps, or dedicated lanes.
+    ``level='segment'`` (default; PR #140 contract) reads
+    ``cross_route_segment_rollup`` and returns a ranked list of stop-pairs
+    that appear on ≥2 routes, ordered by total trip-volume-weighted slip
+    descending. Two routes count as sharing a segment only when they
+    traverse the same ``(from_stop_id, to_stop_id)`` pair.
 
-    V1 uses stop-pair identity matching only — two routes that share the same
-    ``(from_stop_id, to_stop_id)`` pair count as traversing the same segment.
-    Shape-aware corridor rollup across different stop_ids on the same street is
-    deferred to NOTES-62.
+    ``level='corridor'`` reads ``corridor_slip_rollup`` joined with
+    ``corridors`` and ``corridor_route_membership`` and returns a ranked
+    list of shape-anchored corridors — contiguous stretches of street
+    where ≥2 routes' canonical shapes run within 15m and 30° of each
+    other. Catches the cross-route slip that the stop-pair view misses
+    when routes share infrastructure with different stop_ids (typical at
+    near-side / far-side stops on the same intersection).
 
-    ``slip_min_per_trip`` is the average per-trip slip in minutes across all
-    contributing routes and directions.  ``peak_period`` (populated on
-    ``period='all'`` rows only) names the time-of-day band where the shared
-    slip is highest for the pair.
+    ``slip_min_per_trip`` (segment mode) is the average per-trip slip in
+    minutes across contributing routes/directions. ``peak_period``
+    (populated on ``period='all'`` rows only) names the time-of-day band
+    with the highest shared slip.
 
-    ``contributing_routes`` is the per-route breakdown list sorted by trip
-    volume — use it for the drilldown panel.
+    ``contributing_routes`` is the per-route breakdown for the drill-down
+    panel: trip volume in segment mode; per-(route, direction) stop-range
+    membership in corridor mode. Corridor mode also carries
+    ``geometry_wkt`` so the frontend can render the corridor's LineString
+    on Leaflet without a follow-up request.
 
     Args:
+        level: ``segment`` (default) or ``corridor``.
         period: One of ``all`` (default), ``am_peak``, ``midday``,
             ``pm_peak``, ``evening``, ``late``.
         limit: Max rows to return (default 100, max 500).
 
     Returns:
-        Dict with ``period``, ``lookback_days``, ``n_rows``, and ``segments``
-        (ranked list, each row carries from/to stop ids + names, route count,
-        route names summary, slip stats, and contributing_routes drilldown).
+        ``level='segment'`` → dict with ``period``, ``lookback_days``,
+        ``n_rows``, ``segments``.
+        ``level='corridor'`` → dict with ``level``, ``period``, ``n_rows``,
+        ``corridors``.
     """
+    if level not in ("segment", "corridor"):
+        raise HTTPException(
+            status_code=400,
+            detail="level must be 'segment' or 'corridor'",
+        )
     if period not in DIAGNOSTIC_PERIODS:
         raise HTTPException(
             status_code=400,
@@ -1134,7 +1149,46 @@ async def get_segments(
 
     db = get_session()
     try:
+        if level == "corridor":
+            return get_corridor_rollup(db, period=period, limit=limit)
         return get_cross_route_segments(db, period=period, limit=limit)
+    finally:
+        db.close()
+
+
+@app.get("/api/corridors/{corridor_id}/segments")
+async def get_corridor_segments(corridor_id: int, period: str = "all"):
+    """Drill-down: per-route stop-pair segments inside a single corridor (NOTES-62).
+
+    Companion to ``GET /api/segments?level=corridor``. For each
+    contributing route in the corridor's membership, returns the
+    ``route_diagnostic_segment`` rows whose stop_sequence range falls
+    inside the corridor — matching the same join the slip rollup
+    pipeline uses so the row-level breakdown reconciles with the
+    headline ``total_weighted_slip_sec``.
+
+    Args:
+        corridor_id: Path parameter from ``corridors.corridor_id``.
+        period: One of ``all`` (default), ``am_peak``, ``midday``,
+            ``pm_peak``, ``evening``, ``late``.
+
+    Returns:
+        Dict with ``corridor_id``, ``period``, and ``segments``
+        (ordered by mean_slip_sec descending; each row carries route +
+        direction + from/to stop ids and names + mean_slip_sec +
+        n_observations).
+    """
+    if period not in DIAGNOSTIC_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
+        )
+
+    db = get_session()
+    try:
+        if not db.query(Corridor).filter_by(corridor_id=corridor_id).first():
+            raise HTTPException(status_code=404, detail="Corridor not found")
+        return get_corridor_constituent_segments(db, corridor_id=corridor_id, period=period)
     finally:
         db.close()
 

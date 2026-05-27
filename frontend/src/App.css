@@ -407,6 +407,101 @@ main {
   margin-left: auto;
 }
 
+/* NOTES-62: segment/corridor toggle on /segments */
+.level-toggle {
+  display: inline-flex;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.level-toggle button {
+  padding: 0.4rem 0.9rem;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: #334155;
+}
+
+.level-toggle button + button {
+  border-left: 1px solid #cbd5e1;
+}
+
+.level-toggle button:hover {
+  background: #f1f5f9;
+}
+
+.level-toggle button.active {
+  background: #002F6C;
+  color: white;
+}
+
+/* NOTES-62: corridor row two-pane expansion */
+.corridor-expansion {
+  padding: 0.75rem 0.5rem;
+}
+
+.corridor-expansion-header {
+  margin-bottom: 0.75rem;
+}
+
+.corridor-expansion-grid {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 800px) {
+  .corridor-expansion-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.corridor-expansion-map .corridor-map {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.corridor-constituent-segments {
+  margin-top: 1rem;
+}
+
+.corridor-constituent-segments h4 {
+  margin: 0 0 0.5rem;
+}
+
+.constituent-segments-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.constituent-segments-table th,
+.constituent-segments-table td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.constituent-segments-table th.num,
+.constituent-segments-table td.num {
+  text-align: right;
+}
+
+.filter-group-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 12rem;
+}
+
+.filter-group-slider .filter-value {
+  color: #002F6C;
+  font-weight: 600;
+}
+
 /* Routes Table */
 .routes-table {
   width: 100%;

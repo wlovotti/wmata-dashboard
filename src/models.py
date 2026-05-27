@@ -8,6 +8,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.ext.declarative import declarative_base
@@ -1254,6 +1255,158 @@ class CrossRouteSegmentRollup(Base):
             "idx_cross_route_segment_pair",
             "from_stop_id",
             "to_stop_id",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-route corridor diagnostic V2 (NOTES-62)
+# ---------------------------------------------------------------------------
+#
+# `corridors` + `corridor_route_membership` are pure-shape-derived. They
+# rebuild atomically on GTFS reload via `pipelines/refresh_corridors.py`.
+# `corridor_slip_rollup` (Phase 3) is refreshed nightly from
+# `route_diagnostic_segment` by `pipelines/refresh_corridor_slip.py`.
+#
+# Spec: docs/superpowers/specs/2026-05-25-cross-route-corridor-design.md
+
+
+class Corridor(Base):
+    """
+    A directional cross-route corridor: a contiguous stretch of street
+    where >=2 routes' canonical shapes run within 15m of each other and
+    within 30 degrees of bearing. Identified from `shapes` alone — no
+    OSM dependency. Refreshed only on GTFS reload.
+
+    `route_set` is a TEXT column holding a comma-separated sorted list of
+    contributing route_ids (e.g., "D80,D82,G4"). Stored as text rather
+    than JSONB so it participates in the `uq_corridor_identity` btree
+    unique constraint and works on both Postgres and SQLite (tests).
+    The API splits on comma at serialization time.
+    `corridor_route_membership` is the authoritative per-route membership
+    table with stop_sequence ranges for slip aggregation.
+
+    `direction_cardinal` is derived from `direction_bearing_deg` at
+    pipeline time (N: 337.5-22.5, NE: 22.5-67.5, ..., NW: 292.5-337.5).
+    Stored denormalized for API filtering.
+
+    `display_name` is the stop-anchored label, e.g.
+    "SB: Friendship Heights -> Foggy Bottom". Generated at pipeline time
+    from `start_stop_id` + `end_stop_id` + cardinal.
+
+    NOTES-62.
+    """
+
+    __tablename__ = "corridors"
+
+    corridor_id = Column(Integer, primary_key=True, autoincrement=True)
+    direction_bearing_deg = Column(Float, nullable=False)
+    direction_cardinal = Column(String, nullable=False)
+    start_stop_id = Column(String, nullable=False)
+    end_stop_id = Column(String, nullable=False)
+    length_m = Column(Float, nullable=False)
+    n_routes = Column(Integer, nullable=False)
+    route_set = Column(String, nullable=False)  # sorted comma-separated route_ids, e.g. "D80,D82"
+    display_name = Column(String, nullable=False)
+    geometry_wkt = Column(Text, nullable=False)  # LINESTRING(lon lat, lon lat, ...)
+    gtfs_snapshot_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "direction_cardinal",
+            "start_stop_id",
+            "end_stop_id",
+            "route_set",
+            name="uq_corridor_identity",
+        ),
+        Index("idx_corridor_cardinal", "direction_cardinal"),
+        Index("idx_corridor_n_routes", "n_routes"),
+    )
+
+
+class CorridorRouteMembership(Base):
+    """
+    Per-(corridor, route, direction) join table. Encodes which routes
+    contribute to a corridor and the stop_sequence range of each route's
+    canonical trip that falls inside the corridor's stop bounds.
+
+    ``direction_id`` is part of the PK because a single per-direction
+    corridor can include the same ``route_id`` in both GTFS directions
+    when the route loops back through the corridor (e.g. WMATA's C25 and
+    F44 each contribute (dir 0) + (dir 1) to certain Northern Virginia
+    corridors). Each (corridor, route, direction) tuple is unique;
+    the ``(corridor, route)`` pair on its own is not.
+
+    Used by ``pipelines/refresh_corridor_slip.py`` as the authoritative
+    join target against ``route_diagnostic_segment``.
+
+    NOTES-62.
+    """
+
+    __tablename__ = "corridor_route_membership"
+
+    corridor_id = Column(
+        Integer,
+        ForeignKey("corridors.corridor_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    route_id = Column(String, primary_key=True)
+    direction_id = Column(Integer, primary_key=True)
+    canonical_shape_id = Column(String, nullable=False)
+    start_stop_sequence = Column(Integer, nullable=False)
+    end_stop_sequence = Column(Integer, nullable=False)
+
+    __table_args__ = (Index("idx_corridor_route_membership_route", "route_id"),)
+
+
+class CorridorSlipRollup(Base):
+    """
+    Per-(corridor_id, period) aggregated slip across all routes in the
+    corridor's route_set. Materialized nightly by
+    `pipelines/refresh_corridor_slip.py` from `route_diagnostic_segment`.
+
+    `total_weighted_slip_sec` = SUM(mean_slip_sec * n_observations) over
+    the corridor's contributing route_diagnostic_segment rows, where rows
+    are filtered by:
+      seg.route_id = membership.route_id
+      AND seg.direction_id = membership.direction_id
+      AND seg.from_seq >= membership.start_stop_sequence
+      AND seg.to_seq <= membership.end_stop_sequence
+
+    `peak_period` (only set on period='all' rows) is the named period
+    with the highest total_weighted_slip_sec for the corridor.
+
+    Source window: `route_diagnostic_segment` is itself a 30-day rolling
+    aggregate (see RouteDiagnosticSegment docstring); this table inherits
+    that window.
+
+    NOTES-62.
+    """
+
+    __tablename__ = "corridor_slip_rollup"
+
+    corridor_id = Column(
+        Integer,
+        ForeignKey("corridors.corridor_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    period = Column(String, primary_key=True)
+
+    n_route_directions = Column(Integer, nullable=False)
+    n_observed_segments = Column(Integer, nullable=False)
+    n_total_observations = Column(Integer, nullable=False)
+    total_weighted_slip_sec = Column(Float, nullable=False)
+    mean_slip_per_segment_sec = Column(Float, nullable=True)
+    mean_slip_per_observation_sec = Column(Float, nullable=True)
+    peak_period = Column(String, nullable=True)
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        Index(
+            "idx_corridor_slip_rollup_period",
+            "period",
+            "total_weighted_slip_sec",
         ),
     )
 

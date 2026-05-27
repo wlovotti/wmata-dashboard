@@ -116,12 +116,6 @@ target lists directly.
   segment → ranked infrastructure-investment candidates (TSP /
   queue-jumps / dedicated lanes). Segment-identity matching only;
   no geometric corridor rollup.
-- **NOTES-62 Cross-route corridor diagnostic (V2, geometric rollup).**
-  Roll the cross-route segment diagnostic's (PR #140) stop-pair slip up to corridor / intersection
-  level via shape-aware matching, so "the M St NW corridor from
-  Wisconsin to Penn Ave" reads as one investment target rather
-  than N stop-pairs. The framing that makes the output
-  decision-useful for infrastructure planning.
 - **NOTES-61 Hold-down policy / dispatching candidates page.**
   Ranked timepoint-leakage table (% of buses departing > N seconds
   early per timepoint per period) → operational fix targets, no
@@ -356,55 +350,6 @@ Concrete steps:
 
 Out of scope: scaling beyond a single API instance, real auth
 (SSO/OAuth), CDN configuration beyond what Pages provides by default.
-
----
-
-## NOTES-62. Cross-route corridor diagnostic (V2, geometric rollup)
-
-**Severity: low (decision-useful framing — V2 follow-up to the cross-route segment diagnostic, PR #140).**
-
-Rolls the stop-pair slip from the cross-route segment diagnostic (PR #140) up to the corridor / intersection
-level via shape-aware matching, so "the M St NW corridor from
-Wisconsin Ave to Pennsylvania Ave" reads as a single investment
-target rather than N stop-pairs. The framing transit planners,
-advocates, and the public actually use — TSP and dedicated-lane
-decisions are made at the corridor level, not the stop-pair level.
-
-Computation requirements beyond V1:
-- **Stop → corridor mapping.** Project each stop onto the route's
-  GTFS shape; group stops within ~150 m of the same shape segment
-  into a "corridor" identified by street + endpoints. Handle
-  multi-street corridors (e.g., Wisconsin Ave NW from Friendship
-  Heights to M St) via shape connectivity, not stop-name parsing.
-- **Cross-route corridor identity.** Two routes traverse "the same"
-  corridor if their shapes overlap for ≥N meters along the same
-  street centerline. May require an external street-network dataset
-  (OpenStreetMap road network) for robust matching — GTFS shapes
-  alone may not give consistent corridor identity across routes that
-  use slightly different alignments.
-- **Aggregation.** Sum per-segment slip × trip volume across all
-  stop-pairs that fall within a corridor, across all routes that
-  traverse it.
-
-UI: extend the `/segments` page (PR #140) with a corridor view
-toggle, or new tab. Corridor cards: name, length, contributing
-routes, total system-wide slip-hours/day, peak periods, drill-down
-to constituent stop-pairs (PR #140 stop-pair view).
-
-Out of scope for V2: cost-of-intervention estimates (TSP install
-cost, bus-lane construction cost — those are WMATA / DDOT planning
-inputs, not derivable from operational data). The output ranks
-candidates by *benefit* (system-wide delay reduction); pairing with
-cost data is a separate exercise.
-
-### Dependencies
-
-Cross-route segment diagnostic (PR #140, segment-level aggregation). May benefit from any future
-work on stop-to-shape projection or OSM road-network ingestion if
-that lands independently.
-
----
-
 
 ---
 

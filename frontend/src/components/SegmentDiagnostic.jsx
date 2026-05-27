@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+
+import CorridorMap from './CorridorMap.jsx'
 
 /**
  * Format a signed seconds value as `±M:SS` for slip display.
@@ -120,6 +123,192 @@ function ContributingRoutesPanel({ routes }) {
 }
 
 /**
+ * Per-(route, direction) contribution table for a corridor row.
+ *
+ * Differs from ``ContributingRoutesPanel`` (segment mode) in that
+ * corridor memberships don't carry per-route slip stats — those live on
+ * the constituent ``route_diagnostic_segment`` rows under the corridor.
+ * We show the membership's stop_sequence window so users can sanity-check
+ * which portion of each route the corridor covers.
+ *
+ * @param {{ routes: Array<{route_id: string, direction_id: number, start_stop_sequence: number, end_stop_sequence: number}> }} props
+ * @returns {JSX.Element}
+ */
+function CorridorMembershipPanel({ routes }) {
+  if (!routes || routes.length === 0) {
+    return (
+      <div className="segment-drilldown-card">
+        <p style={{ margin: 0, color: '#64748b', fontSize: '0.85rem' }}>
+          No per-route membership available.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div className="segment-drilldown-card">
+      <h4>Contributing routes</h4>
+      <table className="segment-drilldown-table">
+        <thead>
+          <tr>
+            <th className="col-route">Route</th>
+            <th className="num" style={{ width: '4rem' }}>
+              Dir
+            </th>
+            <th className="num">Stop range</th>
+          </tr>
+        </thead>
+        <tbody>
+          {routes.map((r) => (
+            <tr key={`${r.route_id}-${r.direction_id}`}>
+              <td>
+                <span className="segment-route-pill">{r.route_id}</span>
+              </td>
+              <td className="num" style={{ color: '#64748b' }}>
+                {r.direction_id}
+              </td>
+              <td className="num" style={{ color: '#475569' }}>
+                {r.start_stop_sequence}–{r.end_stop_sequence}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/**
+ * Inline expansion content for a corridor row: two-pane layout with
+ * the Leaflet geometry on the left, the per-route membership table on
+ * the right, and the constituent stop-pair segments table beneath —
+ * lazily loaded from ``/api/corridors/{id}/segments`` when the row is
+ * first expanded so we don't waterfall the drill-downs into the
+ * initial page load.
+ *
+ * @param {{ corridor: object, period: string }} props
+ * @returns {JSX.Element}
+ */
+function CorridorExpansion({ corridor, period }) {
+  const routeShortNames = corridor.route_set ? corridor.route_set.split(',') : []
+  const [constituents, setConstituents] = useState(null)
+  const [constituentsErr, setConstituentsErr] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setConstituents(null)
+    setConstituentsErr(null)
+    fetch(`/api/corridors/${corridor.corridor_id}/segments?period=${period}`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
+      .then((json) => {
+        if (!cancelled) setConstituents(json.segments || [])
+      })
+      .catch((err) => {
+        if (!cancelled) setConstituentsErr(err.message || String(err))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [corridor.corridor_id, period])
+
+  return (
+    <div className="corridor-expansion">
+      <div className="corridor-expansion-header">
+        <h4 style={{ margin: 0 }}>{corridor.display_name}</h4>
+        <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.875rem' }}>
+          {Math.round(corridor.length_m)} m · {corridor.direction_cardinal} ·{' '}
+          {routeShortNames.join(', ')}
+        </p>
+      </div>
+      <div className="corridor-expansion-grid">
+        <div className="corridor-expansion-map">
+          <CorridorMap
+            geometryWkt={corridor.geometry_wkt}
+            displayName={corridor.display_name}
+          />
+        </div>
+        <div className="corridor-expansion-routes">
+          <CorridorMembershipPanel routes={corridor.contributing_routes} />
+        </div>
+      </div>
+      <CorridorConstituentSegments
+        segments={constituents}
+        error={constituentsErr}
+      />
+    </div>
+  )
+}
+
+/**
+ * Worst-first table of per-route stop-pair segments inside a corridor.
+ * Source: ``GET /api/corridors/{id}/segments``. Shows where on each
+ * contributing route's path the slip accumulates — the row-level view
+ * that reconciles with the headline ``total_weighted_slip_sec``.
+ *
+ * @param {{ segments: Array<object>|null, error: string|null }} props
+ * @returns {JSX.Element}
+ */
+function CorridorConstituentSegments({ segments, error }) {
+  return (
+    <div className="corridor-constituent-segments">
+      <h4>Constituent stop-pairs</h4>
+      {error && (
+        <p style={{ color: '#991b1b', fontSize: '0.85rem', margin: 0 }}>
+          Unable to load constituent segments: {error}
+        </p>
+      )}
+      {!error && segments === null && (
+        <p style={{ color: '#64748b', fontSize: '0.85rem', margin: 0 }}>Loading…</p>
+      )}
+      {!error && segments && segments.length === 0 && (
+        <p style={{ color: '#64748b', fontSize: '0.85rem', margin: 0 }}>
+          No stop-pair segments observed inside this corridor for the period.
+        </p>
+      )}
+      {!error && segments && segments.length > 0 && (
+        <table className="constituent-segments-table">
+          <thead>
+            <tr>
+              <th>Route</th>
+              <th className="num">Dir</th>
+              <th>From</th>
+              <th>To</th>
+              <th className="num">Slip</th>
+              <th className="num">Obs</th>
+            </tr>
+          </thead>
+          <tbody>
+            {segments.map((s) => (
+              <tr
+                key={`${s.route_id}-${s.direction_id}-${s.from_seq}-${s.to_seq}`}
+              >
+                <td>
+                  <span className="segment-route-pill">{s.route_id}</span>
+                </td>
+                <td className="num" style={{ color: '#64748b' }}>
+                  {s.direction_id}
+                </td>
+                <td>{s.from_stop_name || s.from_stop_id}</td>
+                <td>{s.to_stop_name || s.to_stop_id}</td>
+                <td
+                  className={`num ${
+                    s.mean_slip_sec >= 0 ? 'slip-positive' : 'slip-negative'
+                  }`}
+                >
+                  {formatSignedSeconds(s.mean_slip_sec)}
+                </td>
+                <td className="num" style={{ color: '#475569' }}>
+                  {s.n_observations.toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+/**
  * `/segments` page (NOTES-59). Cross-route segment diagnostic — ranked list
  * of stop-pairs that appear on ≥2 routes, ordered by cumulative
  * trip-volume-weighted slip descending.  Infrastructure-investment
@@ -135,12 +324,31 @@ function ContributingRoutesPanel({ routes }) {
  * Click any row to expand the per-route drilldown panel.
  */
 function SegmentDiagnostic() {
-  const [period, setPeriod] = useState('all')
-  const [limit, setLimit] = useState(100)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const level = searchParams.get('level') === 'corridor' ? 'corridor' : 'segment'
+  const period = searchParams.get('period') || 'all'
+  const limitParam = Number(searchParams.get('limit'))
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 100
+
+  const updateParam = (key, value) => {
+    const next = new URLSearchParams(searchParams)
+    if (value == null || value === '') {
+      next.delete(key)
+    } else {
+      next.set(key, String(value))
+    }
+    setSearchParams(next, { replace: false })
+  }
+
+  const setLevel = (newLevel) => updateParam('level', newLevel === 'segment' ? null : newLevel)
+  const setPeriod = (newPeriod) => updateParam('period', newPeriod === 'all' ? null : newPeriod)
+  const setLimit = (newLimit) => updateParam('limit', newLimit === 100 ? null : newLimit)
+
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [expandedIdx, setExpandedIdx] = useState(null)
+  const [minLengthM, setMinLengthM] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -148,6 +356,7 @@ function SegmentDiagnostic() {
     setError(null)
     setExpandedIdx(null)
     const params = new URLSearchParams()
+    params.set('level', level)
     params.set('period', period)
     params.set('limit', String(limit))
     fetch(`/api/segments?${params.toString()}`)
@@ -167,37 +376,53 @@ function SegmentDiagnostic() {
     return () => {
       cancelled = true
     }
-  }, [period, limit])
+  }, [level, period, limit])
 
   const segments = useMemo(() => data?.segments || [], [data])
+  const corridors = useMemo(() => {
+    const all = data?.corridors || []
+    return minLengthM > 0 ? all.filter((c) => (c.length_m || 0) >= minLengthM) : all
+  }, [data, minLengthM])
+  const rows = level === 'corridor' ? corridors : segments
   const lookbackDays = data?.lookback_days ?? 30
 
   const maxImpact = useMemo(() => {
-    if (segments.length === 0) return 0
-    return Math.max(...segments.map((s) => s.total_weighted_slip_sec || 0))
-  }, [segments])
+    if (rows.length === 0) return 0
+    return Math.max(...rows.map((r) => r.total_weighted_slip_sec || 0))
+  }, [rows])
 
   const handleRowClick = (idx) => {
     setExpandedIdx(expandedIdx === idx ? null : idx)
   }
 
   const showPeakColumn = period === 'all'
-  const totalCols = showPeakColumn ? 7 : 6
+  const segmentTotalCols = showPeakColumn ? 7 : 6
+  const corridorTotalCols = showPeakColumn ? 7 : 6
 
   return (
     <main>
       <div className="chart-container">
         <h2>Cross-route segment diagnostic</h2>
-        <p className="drilldown-anchor">
-          Stop-pairs traversed by ≥2 routes, ranked by cumulative
-          trip-volume-weighted delay over the last {lookbackDays} days. A high
-          impact value means multiple routes lose time on the same segment —
-          a shared infrastructure chokepoint, a candidate for transit signal
-          priority, queue-jumps, or dedicated lanes.{' '}
-          <strong>V1 note:</strong> stop-pair identity only. Segments where
-          routes use different stop IDs on the same street are not yet
-          aggregated (deferred to NOTES-62 shape-aware corridor rollup).
-        </p>
+        {level === 'segment' ? (
+          <p className="drilldown-anchor">
+            Stop-pairs traversed by ≥2 routes, ranked by cumulative
+            trip-volume-weighted delay over the last {lookbackDays} days. A high
+            impact value means multiple routes lose time on the same segment —
+            a shared infrastructure chokepoint, a candidate for transit signal
+            priority, queue-jumps, or dedicated lanes. Stop-pair identity only;
+            see the <strong>Corridors</strong> view for shape-aware rollup
+            across same-street stops with different stop IDs (NOTES-62).
+          </p>
+        ) : (
+          <p className="drilldown-anchor">
+            Shape-anchored corridors where ≥2 routes' canonical shapes run
+            within 15m and 30° of each other, ranked by total weighted slip.
+            Catches cross-route delay that the stop-pair view misses when
+            routes use different stop IDs on the same street (e.g. near-side
+            vs far-side stops on the same intersection). Identified once per
+            GTFS reload — see <code>pipelines/refresh_corridors.py</code>.
+          </p>
+        )}
 
         <div
           style={{
@@ -208,6 +433,26 @@ function SegmentDiagnostic() {
             margin: '0.5rem 0 1.25rem',
           }}
         >
+          <div className="level-toggle" role="tablist" aria-label="Diagnostic level">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={level === 'segment'}
+              className={level === 'segment' ? 'active' : ''}
+              onClick={() => setLevel('segment')}
+            >
+              Segments
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={level === 'corridor'}
+              className={level === 'corridor' ? 'active' : ''}
+              onClick={() => setLevel('corridor')}
+            >
+              Corridors
+            </button>
+          </div>
           <div className="filter-group">
             <label htmlFor="seg-period">Period</label>
             <select
@@ -240,10 +485,27 @@ function SegmentDiagnostic() {
               ))}
             </select>
           </div>
-          {!loading && !error && segments.length > 0 && (
+          {level === 'corridor' && (
+            <div className="filter-group filter-group-slider">
+              <label htmlFor="seg-min-length">
+                Min length: <span className="filter-value">{minLengthM} m</span>
+              </label>
+              <input
+                id="seg-min-length"
+                type="range"
+                min={0}
+                max={3000}
+                step={100}
+                value={minLengthM}
+                onChange={(e) => setMinLengthM(Number(e.target.value))}
+                aria-label="Minimum corridor length filter"
+              />
+            </div>
+          )}
+          {!loading && !error && rows.length > 0 && (
             <div className="results-count">
-              {segments.length} stop-pair{segments.length !== 1 ? 's' : ''} • Click a
-              row to expand
+              {rows.length} {level === 'corridor' ? 'corridor' : 'stop-pair'}
+              {rows.length !== 1 ? 's' : ''} • Click a row to expand
             </div>
           )}
         </div>
@@ -251,7 +513,7 @@ function SegmentDiagnostic() {
         {loading && <p style={{ color: '#64748b' }}>Loading segment diagnostic…</p>}
         {error && <p style={{ color: '#991b1b' }}>Unable to load segments: {error}</p>}
 
-        {!loading && !error && segments.length === 0 && (
+        {!loading && !error && level === 'segment' && segments.length === 0 && (
           <p style={{ color: '#64748b' }}>
             No cross-route stop-pairs found for this period. The diagnostic
             pipeline materializes <code>cross_route_segment_rollup</code>{' '}
@@ -262,7 +524,17 @@ function SegmentDiagnostic() {
           </p>
         )}
 
-        {!loading && !error && segments.length > 0 && (
+        {!loading && !error && level === 'corridor' && corridors.length === 0 && (
+          <p style={{ color: '#64748b' }}>
+            No shape-anchored corridors found for this period. Corridors are
+            identified once per GTFS reload via{' '}
+            <code>pipelines/refresh_corridors.py</code> (run automatically by{' '}
+            <code>scripts/reload_gtfs_complete.py</code>) and aggregated
+            nightly by <code>pipelines/refresh_corridor_slip.py</code>.
+          </p>
+        )}
+
+        {!loading && !error && level === 'segment' && segments.length > 0 && (
           <div className="table-responsive">
             <table className="routes-table segments-table">
               <thead>
@@ -347,8 +619,111 @@ function SegmentDiagnostic() {
                           key={`${seg.from_stop_id}-${seg.to_stop_id}-detail`}
                           className="segment-drilldown-row"
                         >
-                          <td colSpan={totalCols}>
+                          <td colSpan={segmentTotalCols}>
                             <ContributingRoutesPanel routes={seg.contributing_routes} />
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {!loading && !error && level === 'corridor' && corridors.length > 0 && (
+          <div className="table-responsive">
+            <table className="routes-table segments-table corridor-table">
+              <thead>
+                <tr>
+                  <th className="col-rank" title="Rank by total delay">
+                    #
+                  </th>
+                  <th className="col-segment">Corridor</th>
+                  <th className="col-routes" style={{ textAlign: 'right' }}>
+                    Routes
+                  </th>
+                  <th className="col-impact">Impact (total delay)</th>
+                  <th className="col-slip" style={{ textAlign: 'right' }}>
+                    Slip/obs
+                  </th>
+                  <th className="col-obs" style={{ textAlign: 'right' }}>
+                    Observations
+                  </th>
+                  {showPeakColumn && <th className="col-peak">Peak period</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {corridors.map((corr, idx) => {
+                  const isExpanded = expandedIdx === idx
+                  const impactPct =
+                    maxImpact > 0 ? (corr.total_weighted_slip_sec / maxImpact) * 100 : 0
+                  const routeShortNames = corr.route_set ? corr.route_set.split(',') : []
+                  return (
+                    <>
+                      <tr
+                        key={corr.corridor_id}
+                        className={`expand-row${isExpanded ? ' is-expanded' : ''}`}
+                        onClick={() => handleRowClick(idx)}
+                        aria-expanded={isExpanded}
+                        title="Click to expand corridor breakdown"
+                      >
+                        <td className="col-rank">{idx + 1}</td>
+                        <td className="col-segment">
+                          <span className="chevron">▸</span>
+                          <span className="segment-from-to">
+                            {corr.display_name}
+                          </span>
+                          <div className="segment-routes-line">
+                            {routeShortNames.map((rsn) => (
+                              <span key={rsn} className="segment-route-pill">
+                                {rsn}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="col-routes">{corr.n_routes}</td>
+                        <td className="col-impact">
+                          <div className="impact-bar">
+                            <div className="impact-bar-track">
+                              <div
+                                className="impact-bar-fill"
+                                style={{ width: `${impactPct}%` }}
+                              />
+                            </div>
+                            <span className="impact-bar-label">
+                              {formatTotalDelay(corr.total_weighted_slip_sec)}
+                            </span>
+                          </div>
+                        </td>
+                        <td
+                          className={`col-slip ${
+                            (corr.mean_slip_per_observation_sec ?? 0) >= 0
+                              ? 'slip-positive'
+                              : 'slip-negative'
+                          }`}
+                        >
+                          {formatSignedSeconds(corr.mean_slip_per_observation_sec)}
+                        </td>
+                        <td className="col-obs" style={{ color: '#475569' }}>
+                          {(corr.n_total_observations || 0).toLocaleString()}
+                        </td>
+                        {showPeakColumn && (
+                          <td className="col-peak">
+                            {corr.peak_period
+                              ? PERIOD_LABELS[corr.peak_period] || corr.peak_period
+                              : '—'}
+                          </td>
+                        )}
+                      </tr>
+                      {isExpanded && (
+                        <tr
+                          key={`${corr.corridor_id}-detail`}
+                          className="segment-drilldown-row"
+                        >
+                          <td colSpan={corridorTotalCols}>
+                            <CorridorExpansion corridor={corr} period={period} />
                           </td>
                         </tr>
                       )}

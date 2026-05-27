@@ -1,0 +1,418 @@
+"""Unit tests for corridor identity helpers (NOTES-62)."""
+
+import pytest
+
+from src.corridor_identity import (
+    Run,
+    StopInfo,
+    augment_shape_with_bearings,
+    bearing_circular_distance,
+    bearing_degrees,
+    bearing_to_cardinal,
+    build_display_name,
+    compute_colocated_route_sets,
+    extract_runs,
+    haversine_meters,
+    pick_canonical_shapes,
+    snap_run_to_stops,
+)
+
+# Synthetic reference points at D.C. latitude. Exact-bearing tests use
+# pure deltas (same lat or same lon) so the geometry is unambiguous.
+LINCOLN_MEMORIAL = (38.8893, -77.0502)
+WASHINGTON_MONUMENT = (38.8895, -77.0353)  # ~1.3 km east
+
+# Exact synthetic points: same longitude => due N/S; same latitude => due E/W.
+DC_BASE = (38.89, -77.05)
+DC_NORTH = (38.90, -77.05)  # 0.01 deg north of DC_BASE, same lon
+DC_EAST = (38.89, -77.04)  # 0.01 deg east of DC_BASE, same lat
+
+
+def test_haversine_zero_distance():
+    """Same point has zero distance."""
+    assert haversine_meters(*LINCOLN_MEMORIAL, *LINCOLN_MEMORIAL) == pytest.approx(0.0, abs=0.01)
+
+
+def test_haversine_known_distance():
+    """Lincoln Memorial to Washington Monument is ~1.3 km."""
+    dist = haversine_meters(*LINCOLN_MEMORIAL, *WASHINGTON_MONUMENT)
+    assert dist == pytest.approx(1290, abs=30)
+
+
+def test_bearing_due_east():
+    """Bearing across pure east longitudinal delta is exactly 90 degrees."""
+    b = bearing_degrees(*DC_BASE, *DC_EAST)
+    assert b == pytest.approx(90.0, abs=0.1)
+
+
+def test_bearing_due_north():
+    """Bearing across pure north latitudinal delta is exactly 0 degrees."""
+    b = bearing_degrees(*DC_BASE, *DC_NORTH)
+    assert b == pytest.approx(0.0, abs=0.1)
+
+
+def test_bearing_due_south():
+    """Bearing from north point back to base is exactly 180 degrees."""
+    b = bearing_degrees(*DC_NORTH, *DC_BASE)
+    assert b == pytest.approx(180.0, abs=0.1)
+
+
+def test_bearing_due_west():
+    """Bearing from east point back to base is exactly 270 degrees."""
+    b = bearing_degrees(*DC_EAST, *DC_BASE)
+    assert b == pytest.approx(270.0, abs=0.1)
+
+
+def test_bearing_circular_distance_simple():
+    """Bearings 10 and 350 are 20 degrees apart, not 340."""
+    assert bearing_circular_distance(10, 350) == pytest.approx(20.0)
+
+
+def test_bearing_circular_distance_opposite():
+    """Bearings 0 and 180 are 180 degrees apart."""
+    assert bearing_circular_distance(0, 180) == pytest.approx(180.0)
+
+
+def test_bearing_circular_distance_same():
+    """Same bearing has zero distance."""
+    assert bearing_circular_distance(45, 45) == 0.0
+
+
+def test_bearing_circular_distance_wraps():
+    """Bearings 359 and 1 are 2 degrees apart."""
+    assert bearing_circular_distance(359, 1) == pytest.approx(2.0)
+
+
+def test_augment_shape_with_bearings_basic():
+    """Bearings computed along a simple eastward shape; last point uses look-back."""
+    points = [
+        (38.89, -77.05, 1),
+        (38.89, -77.04, 2),  # ~870m east
+        (38.89, -77.03, 3),  # ~870m east again
+    ]
+    augmented = augment_shape_with_bearings(points)
+
+    assert len(augmented) == 3
+    # All three points heading east; bearings ~90.
+    for _lat, _lon, _seq, bearing in augmented:
+        assert bearing == pytest.approx(90.0, abs=0.1)
+
+
+def test_augment_shape_with_bearings_lookback_at_end():
+    """Last point's bearing falls back to i-1 -> i."""
+    points = [
+        (38.89, -77.05, 1),
+        (38.89, -77.04, 2),  # heading east
+    ]
+    augmented = augment_shape_with_bearings(points)
+    # Last point's bearing should also be ~90 (look-back uses point 0 -> point 1).
+    assert augmented[-1][3] == pytest.approx(90.0, abs=0.1)
+
+
+def test_augment_shape_with_bearings_too_short_raises():
+    """Single-point shapes are invalid input."""
+    with pytest.raises(ValueError):
+        augment_shape_with_bearings([(38.89, -77.05, 1)])
+
+
+def test_pick_canonical_shapes_highest_trip_count_per_direction():
+    """For each (route_id, direction_id), pick the highest-trip-count shape."""
+    trip_shape_counts = [
+        # (route_id, direction_id, shape_id, n_trips)
+        ("X", 0, "X:01", 100),
+        ("X", 0, "X:02", 200),  # winner for X dir 0
+        ("X", 1, "X:51", 150),  # winner for X dir 1 (only one)
+        ("Y", 0, "Y:01", 50),  # winner for Y dir 0 (only one)
+    ]
+
+    canonical = pick_canonical_shapes(trip_shape_counts)
+
+    assert canonical == {
+        ("X", 0): "X:02",
+        ("X", 1): "X:51",
+        ("Y", 0): "Y:01",
+    }
+
+
+def test_pick_canonical_shapes_tie_break_lexicographic():
+    """When two shapes have equal trip counts, pick lexicographically smaller shape_id."""
+    trip_shape_counts = [
+        ("Z", 0, "Z:99", 100),
+        ("Z", 0, "Z:01", 100),  # ties — Z:01 wins (lex < Z:99)
+    ]
+    assert pick_canonical_shapes(trip_shape_counts) == {("Z", 0): "Z:01"}
+
+
+def test_colocated_routes_two_routes_same_street_same_direction():
+    """Two shapes running side-by-side in the same direction colocate everywhere."""
+    # Route A and Route B both head east along the same coords, sub-meter apart.
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    shape_b = [(38.890001, -77.05, 1, 90.0), (38.890001, -77.04, 2, 90.0)]
+
+    result = compute_colocated_route_sets(
+        canonical_shapes={
+            ("A", 0): ("A:01", shape_a),
+            ("B", 0): ("B:01", shape_b),
+        }
+    )
+
+    # Each (route, dir, seq) maps to the set of OTHER colocated (route, dir) pairs.
+    assert ("B", 0) in result[("A", 0, 1)]
+    assert ("B", 0) in result[("A", 0, 2)]
+    assert ("A", 0) in result[("B", 0, 1)]
+    assert ("A", 0) in result[("B", 0, 2)]
+
+
+def test_colocated_routes_opposite_directions_dont_match():
+    """Two shapes on the same street in opposite directions do NOT colocate."""
+    # Route A goes east; Route B goes west along the same coords.
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    shape_b = [(38.89, -77.04, 1, 270.0), (38.89, -77.05, 2, 270.0)]
+
+    result = compute_colocated_route_sets(
+        canonical_shapes={
+            ("A", 0): ("A:01", shape_a),
+            ("B", 0): ("B:01", shape_b),
+        }
+    )
+
+    # Bearings differ by 180 degrees > 30; no matches.
+    assert result[("A", 0, 1)] == set()
+    assert result[("A", 0, 2)] == set()
+    assert result[("B", 0, 1)] == set()
+    assert result[("B", 0, 2)] == set()
+
+
+def test_colocated_routes_parallel_streets_dont_match():
+    """Two parallel streets (~85m apart) do not colocate."""
+    # Route A on lat 38.89, Route B on lat 38.8908 (~85m north). Same bearing.
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    shape_b = [(38.8908, -77.05, 1, 90.0), (38.8908, -77.04, 2, 90.0)]
+
+    result = compute_colocated_route_sets(
+        canonical_shapes={
+            ("A", 0): ("A:01", shape_a),
+            ("B", 0): ("B:01", shape_b),
+        }
+    )
+
+    # 85m > 15m; no matches.
+    assert result[("A", 0, 1)] == set()
+    assert result[("B", 0, 1)] == set()
+
+
+def test_colocated_routes_single_shape_returns_empty_sets():
+    """One shape alone: every point's colocated set is empty."""
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    result = compute_colocated_route_sets(canonical_shapes={("A", 0): ("A:01", shape_a)})
+    assert result[("A", 0, 1)] == set()
+    assert result[("A", 0, 2)] == set()
+
+
+def test_extract_runs_single_run():
+    """A continuous stretch with the same route_set produces one run."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 6)]
+    point_keys = [("A", 0, i) for i in range(1, 6)]
+    colocated = {pk: {("B", 0)} for pk in point_keys}
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert len(runs) == 1
+    assert runs[0].route_set == frozenset({("A", 0), ("B", 0)})
+    assert len(runs[0].points) == 5
+
+
+def test_extract_runs_break_on_routeset_change():
+    """A change in colocated route set breaks the run."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 11)]
+
+    # Seq 1-5: colocates with B. Seq 6-10: colocates with B AND C.
+    colocated = {}
+    for i in range(1, 6):
+        colocated[("A", 0, i)] = {("B", 0)}
+    for i in range(6, 11):
+        colocated[("A", 0, i)] = {("B", 0), ("C", 0)}
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert len(runs) == 2
+    assert runs[0].route_set == frozenset({("A", 0), ("B", 0)})
+    assert runs[1].route_set == frozenset({("A", 0), ("B", 0), ("C", 0)})
+
+
+def test_extract_runs_discard_single_route():
+    """Runs where the route is alone (|set| < 2 including self) are dropped."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 6)]
+    colocated = {("A", 0, i): set() for i in range(1, 6)}  # nobody else colocates
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert runs == []
+
+
+def test_extract_runs_discard_too_short():
+    """Runs with fewer than MIN_RUN_POINTS (5) are dropped."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 5)]  # 4 points
+    colocated = {("A", 0, i): {("B", 0)} for i in range(1, 5)}
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert runs == []
+
+
+def test_run_length_and_mean_bearing():
+    """Run.length_m sums consecutive haversine distances; mean_bearing_deg averages."""
+    points = tuple((38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(5))
+    run = Run(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        points=points,
+    )
+    # 4 consecutive 0.001-deg-east hops at lat 38.89; haversine for each
+    # ~= 87m, so total ~= 348m.
+    assert run.length_m == pytest.approx(348, abs=15)
+    assert run.mean_bearing_deg == pytest.approx(90.0, abs=0.1)
+
+
+def test_bearing_to_cardinal_eight_directions():
+    """Every cardinal/intercardinal sector maps correctly."""
+    cases = [
+        (0, "N"),
+        (22, "N"),
+        (45, "NE"),
+        (67, "NE"),
+        (90, "E"),
+        (112, "E"),
+        (135, "SE"),
+        (157, "SE"),
+        (180, "S"),
+        (202, "S"),
+        (225, "SW"),
+        (247, "SW"),
+        (270, "W"),
+        (292, "W"),
+        (315, "NW"),
+        (337, "NW"),
+        (350, "N"),  # wraps back to N
+    ]
+    for bearing, expected in cases:
+        assert bearing_to_cardinal(bearing) == expected, (
+            f"{bearing} -> {bearing_to_cardinal(bearing)} (expected {expected})"
+        )
+
+
+def test_snap_run_to_stops_picks_nearest_shared_stop():
+    """Endpoints snap to the nearest stop served by every route in the run's route_set."""
+    # Run from west to east along a fictional Wisconsin Ave segment.
+    points = [(38.94, -77.07 + 0.001 * i, i, 90.0) for i in range(10)]
+
+    # Stops: stop_S near point 0 (served by A and B), stop_E near point 9 (served by A and B).
+    stops = {
+        "stop_S": StopInfo(stop_id="stop_S", stop_name="Friendship Heights", lat=38.94, lon=-77.07),
+        "stop_E": StopInfo(stop_id="stop_E", stop_name="Foggy Bottom", lat=38.94, lon=-77.061),
+        "stop_other": StopInfo(stop_id="stop_other", stop_name="Some other", lat=38.93, lon=-77.07),
+    }
+
+    # Each route's (stop_id, stop_sequence).
+    route_stops = {
+        ("A", 0): [("stop_S", 1), ("stop_E", 2)],
+        ("B", 0): [("stop_S", 1), ("stop_E", 2)],
+    }
+
+    result = snap_run_to_stops(
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        run_points=points,
+        stops=stops,
+        route_stops=route_stops,
+    )
+
+    assert result is not None
+    start, end, per_route = result
+    assert start.stop_id == "stop_S"
+    assert end.stop_id == "stop_E"
+    assert per_route[("A", 0)] == (1, 2)
+    assert per_route[("B", 0)] == (1, 2)
+
+
+def test_snap_run_to_stops_returns_none_when_no_shared_stop_in_range():
+    """If no stop within 100m of the run endpoints is shared by all routes, return None."""
+    points = [(38.94, -77.07 + 0.001 * i, i, 90.0) for i in range(10)]
+
+    # Only stop_lonely exists, far from both endpoints.
+    stops = {
+        "stop_lonely": StopInfo(stop_id="stop_lonely", stop_name="Far Away", lat=38.50, lon=-77.0),
+    }
+
+    route_stops = {
+        ("A", 0): [("stop_lonely", 1)],
+        ("B", 0): [("stop_lonely", 1)],
+    }
+
+    result = snap_run_to_stops(
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        run_points=points,
+        stops=stops,
+        route_stops=route_stops,
+    )
+
+    assert result is None
+
+
+def test_snap_run_to_stops_requires_intersection_across_route_set():
+    """Stop served by only one route in the set is not eligible."""
+    points = [(38.94, -77.07 + 0.001 * i, i, 90.0) for i in range(10)]
+    stops = {
+        "stop_only_a": StopInfo(stop_id="stop_only_a", stop_name="A-only", lat=38.94, lon=-77.07),
+        "stop_only_b": StopInfo(stop_id="stop_only_b", stop_name="B-only", lat=38.94, lon=-77.061),
+    }
+
+    # A serves stop_only_a; B serves stop_only_b. No shared stop.
+    route_stops = {
+        ("A", 0): [("stop_only_a", 1)],
+        ("B", 0): [("stop_only_b", 1)],
+    }
+
+    result = snap_run_to_stops(
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        run_points=points,
+        stops=stops,
+        route_stops=route_stops,
+    )
+
+    assert result is None
+
+
+def test_build_display_name_format():
+    """Display name renders the corridor in 'Cardinal: A -> B' shape."""
+    name = build_display_name(
+        cardinal="SB",
+        start_stop_name="Friendship Heights",
+        end_stop_name="Foggy Bottom",
+    )
+    assert name == "SB: Friendship Heights -> Foggy Bottom"

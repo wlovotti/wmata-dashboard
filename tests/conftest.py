@@ -24,8 +24,10 @@ from api.main import app
 from src.models import (
     Base,
     Route,
+    Shape,
     Stop,
     StopEvent,
+    StopTime,
     Trip,
     VehiclePosition,
 )
@@ -271,6 +273,159 @@ def sample_route_otp_stop_events(db_session, sample_route) -> list[StopEvent]:
     for ev in events:
         db_session.refresh(ev)
     return events
+
+
+@pytest.fixture
+def populate_fixture_gtfs():
+    """Return a callable that seeds a synthetic GTFS scenario into a session.
+
+    Usage in a test:
+        populate_fixture_gtfs(pg_session, scenario="two_routes_one_corridor")
+
+    Scenarios:
+      - ``two_routes_one_corridor``: FX1 + FX2 share 10 stops along a
+        synthetic east-west street ("East St") in both directions; FX3
+        is a 3-stop perpendicular route with no overlap. Used by the
+        corridor-pipeline integration tests (NOTES-62).
+
+    Schema notes:
+      - ``Shape`` has no ``snapshot_id``/``is_current`` columns in this
+        codebase — shapes are unversioned. Versioned tables
+        (Route/Stop/Trip/StopTime) get ``is_current=True`` but leave
+        ``snapshot_id`` unset (column is nullable) so the seed doesn't
+        need a ``gtfs_snapshots`` row to satisfy the FK.
+      - ``Route.route_type`` is a ``String`` column; pass ``"3"`` (bus),
+        not the integer ``3``.
+    """
+
+    def _seed(session, scenario: str) -> None:
+        if scenario != "two_routes_one_corridor":
+            raise ValueError(f"Unknown fixture scenario: {scenario}")
+
+        # Routes (3 of them: FX1, FX2, FX3).
+        for route_id in ("FX1", "FX2", "FX3"):
+            session.add(
+                Route(
+                    route_id=route_id,
+                    agency_id=None,
+                    route_short_name=route_id,
+                    route_long_name=f"{route_id} fixture",
+                    route_type="3",
+                    is_current=True,
+                )
+            )
+
+        # Ten stops along East St — eastward stepping in longitude
+        # (lat constant), ~85m spacing per 0.001 deg lon at this latitude.
+        # Total length ~770m, comfortably above MIN_CORRIDOR_LENGTH_M=500.
+        for i in range(10):
+            session.add(
+                Stop(
+                    stop_id=f"east_{i}",
+                    stop_name=f"East St & {i}th",
+                    stop_lat=38.94,
+                    stop_lon=-77.07 + 0.0010 * i,
+                    is_current=True,
+                )
+            )
+
+        # Three perpendicular stops for FX3 — north-south.
+        for i in range(3):
+            session.add(
+                Stop(
+                    stop_id=f"north_{i}",
+                    stop_name=f"North St & {i}",
+                    stop_lat=38.95 + 0.001 * i,
+                    stop_lon=-77.08,
+                    is_current=True,
+                )
+            )
+
+        # Shapes for FX1/FX2 in both directions. Direction 0 = eastbound
+        # (sequence 1..10 stepping east), direction 1 = westbound (reversed).
+        for shape_id_prefix in ("FX1", "FX2"):
+            for direction, suffix in ((0, "51"), (1, "03")):
+                shape_id = f"{shape_id_prefix}:{suffix}"
+                indices = list(range(10))
+                if direction == 1:
+                    indices = list(reversed(indices))
+                for seq, i in enumerate(indices, start=1):
+                    session.add(
+                        Shape(
+                            shape_id=shape_id,
+                            shape_pt_lat=38.94,
+                            shape_pt_lon=-77.07 + 0.0010 * i,
+                            shape_pt_sequence=seq,
+                        )
+                    )
+
+        # FX3 north-south shape (no overlap with FX1/FX2).
+        for seq, i in enumerate(range(3), start=1):
+            session.add(
+                Shape(
+                    shape_id="FX3:01",
+                    shape_pt_lat=38.95 + 0.001 * i,
+                    shape_pt_lon=-77.08,
+                    shape_pt_sequence=seq,
+                )
+            )
+
+        # Trips: one per (route, direction) for FX1/FX2; one for FX3.
+        for route_id in ("FX1", "FX2"):
+            for direction in (0, 1):
+                shape_id = f"{route_id}:{'51' if direction == 0 else '03'}"
+                trip_id = f"{route_id}_dir{direction}_T1"
+                session.add(
+                    Trip(
+                        trip_id=trip_id,
+                        route_id=route_id,
+                        direction_id=direction,
+                        shape_id=shape_id,
+                        service_id="WEEKDAY",
+                        is_current=True,
+                    )
+                )
+                stop_indices = list(range(10))
+                if direction == 1:
+                    stop_indices = list(reversed(stop_indices))
+                for stop_sequence, i in enumerate(stop_indices, start=1):
+                    session.add(
+                        StopTime(
+                            trip_id=trip_id,
+                            stop_id=f"east_{i}",
+                            stop_sequence=stop_sequence,
+                            arrival_time=f"6:{stop_sequence:02d}:00",
+                            departure_time=f"6:{stop_sequence:02d}:00",
+                            is_current=True,
+                        )
+                    )
+
+        # FX3: single direction, 3 stops north-south.
+        session.add(
+            Trip(
+                trip_id="FX3_T1",
+                route_id="FX3",
+                direction_id=0,
+                shape_id="FX3:01",
+                service_id="WEEKDAY",
+                is_current=True,
+            )
+        )
+        for i in range(3):
+            session.add(
+                StopTime(
+                    trip_id="FX3_T1",
+                    stop_id=f"north_{i}",
+                    stop_sequence=i + 1,
+                    arrival_time=f"6:{i:02d}:00",
+                    departure_time=f"6:{i:02d}:00",
+                    is_current=True,
+                )
+            )
+
+        session.flush()
+
+    return _seed
 
 
 @pytest.fixture(autouse=True)
