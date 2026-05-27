@@ -1327,13 +1327,19 @@ class Corridor(Base):
 
 class CorridorRouteMembership(Base):
     """
-    Per-(corridor, route) join table. Encodes which route_id contributes
-    to a corridor, which GTFS direction_id participates, and the
-    stop_sequence range of that route's canonical trip that falls inside
-    the corridor's stop bounds.
+    Per-(corridor, route, direction) join table. Encodes which routes
+    contribute to a corridor and the stop_sequence range of each route's
+    canonical trip that falls inside the corridor's stop bounds.
 
-    Used by `pipelines/refresh_corridor_slip.py` as the authoritative
-    join target against `route_diagnostic_segment`.
+    ``direction_id`` is part of the PK because a single per-direction
+    corridor can include the same ``route_id`` in both GTFS directions
+    when the route loops back through the corridor (e.g. WMATA's C25 and
+    F44 each contribute (dir 0) + (dir 1) to certain Northern Virginia
+    corridors). Each (corridor, route, direction) tuple is unique;
+    the ``(corridor, route)`` pair on its own is not.
+
+    Used by ``pipelines/refresh_corridor_slip.py`` as the authoritative
+    join target against ``route_diagnostic_segment``.
 
     NOTES-62.
     """
@@ -1346,7 +1352,7 @@ class CorridorRouteMembership(Base):
         primary_key=True,
     )
     route_id = Column(String, primary_key=True)
-    direction_id = Column(Integer, nullable=False)
+    direction_id = Column(Integer, primary_key=True)
     canonical_shape_id = Column(String, nullable=False)
     start_stop_sequence = Column(Integer, nullable=False)
     end_stop_sequence = Column(Integer, nullable=False)
