@@ -4,14 +4,17 @@ import pytest
 
 from src.corridor_identity import (
     Run,
+    StopInfo,
     augment_shape_with_bearings,
     bearing_circular_distance,
     bearing_degrees,
     bearing_to_cardinal,
+    build_display_name,
     compute_colocated_route_sets,
     extract_runs,
     haversine_meters,
     pick_canonical_shapes,
+    snap_run_to_stops,
 )
 
 # Synthetic reference points at D.C. latitude. Exact-bearing tests use
@@ -322,3 +325,94 @@ def test_bearing_to_cardinal_eight_directions():
         assert bearing_to_cardinal(bearing) == expected, (
             f"{bearing} -> {bearing_to_cardinal(bearing)} (expected {expected})"
         )
+
+
+def test_snap_run_to_stops_picks_nearest_shared_stop():
+    """Endpoints snap to the nearest stop served by every route in the run's route_set."""
+    # Run from west to east along a fictional Wisconsin Ave segment.
+    points = [(38.94, -77.07 + 0.001 * i, i, 90.0) for i in range(10)]
+
+    # Stops: stop_S near point 0 (served by A and B), stop_E near point 9 (served by A and B).
+    stops = {
+        "stop_S": StopInfo(stop_id="stop_S", stop_name="Friendship Heights", lat=38.94, lon=-77.07),
+        "stop_E": StopInfo(stop_id="stop_E", stop_name="Foggy Bottom", lat=38.94, lon=-77.061),
+        "stop_other": StopInfo(stop_id="stop_other", stop_name="Some other", lat=38.93, lon=-77.07),
+    }
+
+    # Each route's (stop_id, stop_sequence).
+    route_stops = {
+        ("A", 0): [("stop_S", 1), ("stop_E", 2)],
+        ("B", 0): [("stop_S", 1), ("stop_E", 2)],
+    }
+
+    result = snap_run_to_stops(
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        run_points=points,
+        stops=stops,
+        route_stops=route_stops,
+    )
+
+    assert result is not None
+    start, end, per_route = result
+    assert start.stop_id == "stop_S"
+    assert end.stop_id == "stop_E"
+    assert per_route[("A", 0)] == (1, 2)
+    assert per_route[("B", 0)] == (1, 2)
+
+
+def test_snap_run_to_stops_returns_none_when_no_shared_stop_in_range():
+    """If no stop within 100m of the run endpoints is shared by all routes, return None."""
+    points = [(38.94, -77.07 + 0.001 * i, i, 90.0) for i in range(10)]
+
+    # Only stop_lonely exists, far from both endpoints.
+    stops = {
+        "stop_lonely": StopInfo(stop_id="stop_lonely", stop_name="Far Away", lat=38.50, lon=-77.0),
+    }
+
+    route_stops = {
+        ("A", 0): [("stop_lonely", 1)],
+        ("B", 0): [("stop_lonely", 1)],
+    }
+
+    result = snap_run_to_stops(
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        run_points=points,
+        stops=stops,
+        route_stops=route_stops,
+    )
+
+    assert result is None
+
+
+def test_snap_run_to_stops_requires_intersection_across_route_set():
+    """Stop served by only one route in the set is not eligible."""
+    points = [(38.94, -77.07 + 0.001 * i, i, 90.0) for i in range(10)]
+    stops = {
+        "stop_only_a": StopInfo(stop_id="stop_only_a", stop_name="A-only", lat=38.94, lon=-77.07),
+        "stop_only_b": StopInfo(stop_id="stop_only_b", stop_name="B-only", lat=38.94, lon=-77.061),
+    }
+
+    # A serves stop_only_a; B serves stop_only_b. No shared stop.
+    route_stops = {
+        ("A", 0): [("stop_only_a", 1)],
+        ("B", 0): [("stop_only_b", 1)],
+    }
+
+    result = snap_run_to_stops(
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        run_points=points,
+        stops=stops,
+        route_stops=route_stops,
+    )
+
+    assert result is None
+
+
+def test_build_display_name_format():
+    """Display name renders the corridor in 'Cardinal: A -> B' shape."""
+    name = build_display_name(
+        cardinal="SB",
+        start_stop_name="Friendship Heights",
+        end_stop_name="Foggy Bottom",
+    )
+    assert name == "SB: Friendship Heights -> Foggy Bottom"
