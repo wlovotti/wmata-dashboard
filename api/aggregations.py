@@ -43,6 +43,9 @@ from src.excess_trip_time import compute_excess_trip_time
 from src.frequent_routes import get_cell_hour_gate_sec, load_frequent_route_ids
 from src.models import (
     Calendar,
+    Corridor,
+    CorridorRouteMembership,
+    CorridorSlipRollup,
     CrossRouteSegmentRollup,
     Route,
     RouteDiagnosisNarrative,
@@ -4594,4 +4597,116 @@ def get_cross_route_segments(
         "lookback_days": CROSS_ROUTE_SEGMENT_LOOKBACK_DAYS,
         "n_rows": len(out),
         "segments": out,
+    }
+
+
+def get_corridor_rollup(
+    db: Session,
+    *,
+    period: str = "all",
+    limit: int = 100,
+) -> dict:
+    """Return ranked corridor rollup rows for the given period (NOTES-62).
+
+    Joins ``corridor_slip_rollup`` against ``corridors`` and bulk-loads
+    ``corridor_route_membership`` so each row carries its contributing
+    routes for the drill-down panel. Ordering: ``total_weighted_slip_sec``
+    desc — the infrastructure-investment ranking.
+
+    The payload includes ``geometry_wkt`` (LINESTRING) so the frontend
+    can render the corridor on a Leaflet map without an extra round-trip.
+
+    Args:
+        db: SQLAlchemy session.
+        period: One of ``all`` / ``am_peak`` / ``midday`` / ``pm_peak`` /
+            ``evening`` / ``late``.
+        limit: Cap on returned rows (default 100, clamped to [1, 500]).
+
+    Returns:
+        Dict with ``level='corridor'``, ``period``, ``n_rows``, and
+        ``corridors`` (ranked list of corridor rollup rows, each with
+        start/end stop names, geometry, slip stats, and
+        ``contributing_routes`` breakdown).
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    rows = (
+        db.query(CorridorSlipRollup, Corridor)
+        .join(Corridor, Corridor.corridor_id == CorridorSlipRollup.corridor_id)
+        .filter(CorridorSlipRollup.period == period)
+        .order_by(CorridorSlipRollup.total_weighted_slip_sec.desc())
+        .limit(limit)
+        .all()
+    )
+
+    if not rows:
+        return {
+            "level": "corridor",
+            "period": period,
+            "n_rows": 0,
+            "corridors": [],
+        }
+
+    corridor_ids = [c.corridor_id for (_, c) in rows]
+
+    memberships = (
+        db.query(CorridorRouteMembership)
+        .filter(CorridorRouteMembership.corridor_id.in_(corridor_ids))
+        .all()
+    )
+    by_corridor: dict[int, list[CorridorRouteMembership]] = {}
+    for m in memberships:
+        by_corridor.setdefault(m.corridor_id, []).append(m)
+
+    stop_ids = {c.start_stop_id for (_, c) in rows} | {c.end_stop_id for (_, c) in rows}
+    stop_name_map: dict[str, str | None] = dict(
+        db.query(Stop.stop_id, Stop.stop_name)
+        .filter(Stop.stop_id.in_(stop_ids), Stop.is_current)
+        .all()
+    )
+
+    corridors_payload: list[dict] = []
+    for slip, corridor in rows:
+        contributing = [
+            {
+                "route_id": m.route_id,
+                "direction_id": m.direction_id,
+                "canonical_shape_id": m.canonical_shape_id,
+                "start_stop_sequence": m.start_stop_sequence,
+                "end_stop_sequence": m.end_stop_sequence,
+            }
+            for m in by_corridor.get(corridor.corridor_id, [])
+        ]
+        corridors_payload.append(
+            {
+                "corridor_id": corridor.corridor_id,
+                "display_name": corridor.display_name,
+                "direction_cardinal": corridor.direction_cardinal,
+                "start_stop_id": corridor.start_stop_id,
+                "start_stop_name": stop_name_map.get(corridor.start_stop_id),
+                "end_stop_id": corridor.end_stop_id,
+                "end_stop_name": stop_name_map.get(corridor.end_stop_id),
+                "length_m": corridor.length_m,
+                "n_routes": corridor.n_routes,
+                "route_set": corridor.route_set,
+                "geometry_wkt": corridor.geometry_wkt,
+                "n_route_directions": slip.n_route_directions,
+                "n_observed_segments": slip.n_observed_segments,
+                "n_total_observations": slip.n_total_observations,
+                "total_weighted_slip_sec": slip.total_weighted_slip_sec,
+                "mean_slip_per_segment_sec": slip.mean_slip_per_segment_sec,
+                "mean_slip_per_observation_sec": slip.mean_slip_per_observation_sec,
+                "peak_period": slip.peak_period,
+                "contributing_routes": contributing,
+            }
+        )
+
+    return {
+        "level": "corridor",
+        "period": period,
+        "n_rows": len(corridors_payload),
+        "corridors": corridors_payload,
     }
