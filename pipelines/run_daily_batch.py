@@ -153,6 +153,15 @@ HOUSEKEEPING_PIPELINES: list[dict] = [
         "name": "refresh_cross_route_segments",
         "module": "pipelines.refresh_cross_route_segments",
     },
+    {
+        # Refresh `corridor_slip_rollup` from `route_diagnostic_segment` via
+        # `corridor_route_membership` (NOTES-62). Must also run AFTER
+        # `refresh_route_diagnostic_profile` (shared source). Aggregates
+        # per-corridor slip — the shape-aware V2 of the stop-pair rollup,
+        # backing the level=corridor view on /segments.
+        "name": "refresh_corridor_slip",
+        "module": "pipelines.refresh_corridor_slip",
+    },
 ]
 
 
