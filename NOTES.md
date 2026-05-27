@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-27. Closed NOTES-72 Phase E.2 — heartbeat-table cutover (PR #TODO):
+Last edited 2026-05-27. Closed NOTES-72 Phase E.2 — heartbeat-table cutover (PR #151):
 removed TripUpdateSnapshot dual-write + _tu_dedup_cache from the collector; added
 collector_heartbeats model + migrate script; rewrote data_completeness.py to union
 collector_heartbeats.ts + vehicle_positions.timestamp. Closed NOTES-77 (this PR) — verified Phase E.1 first end-to-end run:
@@ -169,7 +169,7 @@ target lists directly.
   unchanged; healthy-day coverage_pct stays at ≥ 0.99. The
   ``TripUpdateSnapshot`` bulk_save, ``_tu_dedup_cache``, and
   ``TripUpdateSnapshot`` import were removed from
-  ``src/wmata_collector.py``. The heartbeat-table cutover (PR #TODO).
+  ``src/wmata_collector.py``. The heartbeat-table cutover (PR #151).
 
   **Phase F — retirement.** After Phase E.2 has been stable for ≥ 1
   week: drop `trip_update_snapshots` and `stop_events_v2` (or rename v2
