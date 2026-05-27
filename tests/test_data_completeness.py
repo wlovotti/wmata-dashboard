@@ -35,10 +35,7 @@ def _insert_heartbeat_minutes(db, service_date: date, minute_count: int, offset_
     for i in range(minute_count):
         ts = start_utc + timedelta(minutes=offset_minutes + i)
         db.execute(
-            text(
-                "INSERT INTO collector_heartbeats (ts, collector_name) "
-                "VALUES (:ts, 'combined')"
-            ),
+            text("INSERT INTO collector_heartbeats (ts, collector_name) VALUES (:ts, 'combined')"),
             {"ts": ts},
         )
     db.flush()

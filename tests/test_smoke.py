@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from src.models import (
     Calendar,
+    CollectorHeartbeat,
     Route,
     RouteServiceProfile,
     Run,
@@ -21,10 +22,8 @@ from src.models import (
     StopTime,
     Trip,
     TripUpdateSnapshot,
-    CollectorHeartbeat,
 )
 from src.service_profile import compute_route_service_profile
-from src.wmata_collector import WMATADataCollector
 
 
 @pytest.mark.smoke
@@ -746,9 +745,7 @@ def test_collector_heartbeat_persists(db_session):
     db_session.add(hb)
     db_session.commit()
 
-    row = db_session.query(CollectorHeartbeat).filter_by(
-        ts=datetime(2026, 5, 27, 14, 0, 0)
-    ).one()
+    row = db_session.query(CollectorHeartbeat).filter_by(ts=datetime(2026, 5, 27, 14, 0, 0)).one()
     assert row.collector_name == "combined"
 
 
