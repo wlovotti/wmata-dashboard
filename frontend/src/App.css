@@ -407,6 +407,36 @@ main {
   margin-left: auto;
 }
 
+/* NOTES-62: segment/corridor toggle on /segments */
+.level-toggle {
+  display: inline-flex;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.level-toggle button {
+  padding: 0.4rem 0.9rem;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: #334155;
+}
+
+.level-toggle button + button {
+  border-left: 1px solid #cbd5e1;
+}
+
+.level-toggle button:hover {
+  background: #f1f5f9;
+}
+
+.level-toggle button.active {
+  background: #002F6C;
+  color: white;
+}
+
 /* Routes Table */
 .routes-table {
   width: 100%;
