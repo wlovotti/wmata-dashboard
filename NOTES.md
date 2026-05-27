@@ -6,7 +6,10 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-27. Closed NOTES-77 (this PR) — verified Phase E.1 first end-to-end run:
+Last edited 2026-05-27. Closed NOTES-72 Phase E.2 — heartbeat-table cutover (PR #TODO):
+removed TripUpdateSnapshot dual-write + _tu_dedup_cache from the collector; added
+collector_heartbeats model + migrate script; rewrote data_completeness.py to union
+collector_heartbeats.ts + vehicle_positions.timestamp. Closed NOTES-77 (this PR) — verified Phase E.1 first end-to-end run:
 `derive_stop_events_from_state` ran as primary for both 2026-05-25 and 2026-05-26 (caught
 up in the 2026-05-27 batch), full downstream chain completed with zero failures, and
 `system_metrics_daily` rows for both dates are present with `data_quality = 'complete'`.
@@ -133,10 +136,10 @@ target lists directly.
 
 ### Independent of the redesign
 
-- **NOTES-72 Trip-update state refactor — complete Phase E.2 / F.** PR #128
+- **NOTES-72 Trip-update state refactor — complete Phase F.** PR #128
   shipped the dual-write architecture and the side-by-side derivation
   (`stop_events` from snapshots vs `stop_events_v2` from state). Phases
-  D and E.1 are complete; Phase E.2 and Phase F remain. Spec:
+  D, E.1, and E.2 are complete; only Phase F remains. Spec:
   `docs/superpowers/specs/2026-05-17-trip-update-state-refactor-design.md`
   + addendum `docs/superpowers/specs/2026-05-20-trip-update-state-service-date-addendum.md`.
 
@@ -150,30 +153,23 @@ target lists directly.
   consistent with the ~1% v2-only pattern on full days), so it didn't
   bias the comparison.
 
-  **Phase E.1 — derivation cutover (this PR).** Switched the primary
+  **Phase E.1 — derivation cutover (complete).** Switched the primary
   trip_update derivation in `pipelines/run_daily_batch.py` from
   `derive_stop_events_trip_updates` (reads snapshots) to
   `derive_stop_events_from_state` (reads `trip_update_state`), writing
   to canonical `stop_events`. Dropped the v2 validation pipeline entry,
   the v2 row-count guard, and the nightly comparison job. The collector
-  still dual-writes to `trip_update_snapshots` — see Phase E.2 below.
+  dual-write was stopped in Phase E.2 (see below).
 
-  **Phase E.2 — collector cutover + data_completeness rewrite.**
-  `src/data_completeness.py` unions `trip_update_snapshots.snapshot_ts`
-  with `vehicle_positions.timestamp` to count minute-buckets of ingest
-  coverage; the snapshot side contributes the steady ~24h signal
-  (every 30s poll = a row), and `vehicle_positions` alone is sparser
-  during off-hours. Stopping the collector dual-write naively drops a
-  healthy day's coverage_pct below the 0.80 threshold and starts
-  mis-flagging normal days as `'partial'`. Options:
-  (1) lower the threshold to what `vehicle_positions` alone can hit
-  (needs empirical calibration);
-  (2) add a heartbeat table the collector ticks every 30s;
-  (3) compute coverage from `trip_update_state.final_snapshot_ts`
-  (rough — UPSERT-only, no per-poll record).
-  Resolve, then remove the `TripUpdateSnapshot` bulk_save + dedup cache
-  from `src/wmata_collector.py:_save_trip_updates` and the
-  `TripUpdateSnapshot` import.
+  **Phase E.2 — heartbeat-table cutover (complete).** The
+  heartbeat-table approach (option 2) was chosen: the collector writes
+  one ``collector_heartbeats`` row per 30s tick, replacing
+  ``trip_update_snapshots.snapshot_ts`` as the minute-bucket coverage
+  signal in ``src/data_completeness.py``. The 0.80 threshold is
+  unchanged; healthy-day coverage_pct stays at ≥ 0.99. The
+  ``TripUpdateSnapshot`` bulk_save, ``_tu_dedup_cache``, and
+  ``TripUpdateSnapshot`` import were removed from
+  ``src/wmata_collector.py``. The heartbeat-table cutover (PR #TODO).
 
   **Phase F — retirement.** After Phase E.2 has been stable for ≥ 1
   week: drop `trip_update_snapshots` and `stop_events_v2` (or rename v2

@@ -438,6 +438,30 @@ class TripUpdateState(Base):
     derived_at = Column(DateTime, nullable=True)
 
 
+class CollectorHeartbeat(Base):
+    """Per-tick heartbeat written by the continuous combined collector.
+
+    One row per tick (every 30 s), keyed on ``(ts, collector_name)``.
+    Replaces ``trip_update_snapshots.snapshot_ts`` as the primary
+    minute-bucket signal in ``src/data_completeness.py`` after the
+    Phase E.2 collector cutover. The heartbeat gives the same ~24 h/day
+    coverage signal that snapshots gave (every 30 s poll = ≥ 1 row per
+    minute bucket), but without the overhead of storing the full snapshot
+    payload.
+
+    ``collector_name`` defaults to ``'combined'`` so future collectors
+    (e.g., a dedicated positions-only collector) can coexist in the same
+    table without ambiguity.
+
+    ``ts`` is naive UTC per the project convention (see ``CLAUDE.md``).
+    """
+
+    __tablename__ = "collector_heartbeats"
+
+    ts = Column(DateTime, primary_key=True, nullable=False)
+    collector_name = Column(String, primary_key=True, nullable=False, default="combined")
+
+
 class TripUpdateSnapshot(Base):
     """
     Append-only rows from the WMATA GTFS-RT TripUpdates feed.

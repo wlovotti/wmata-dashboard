@@ -3,7 +3,7 @@ One-shot health check for the combined continuous collector.
 
 Prints a tight, human-scannable status report covering: process liveness,
 macOS sleep state, disk free, recent log errors, and per-table row
-counts / cadence / latest-data freshness for trip_update_snapshots and
+counts / cadence / latest-data freshness for collector_heartbeats and
 vehicle_positions. Exits 0 if everything is healthy; exits 1 if any
 hard check fails (process down, stale data, recent errors).
 
@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from sqlalchemy import func
 
 from src.database import get_session
-from src.models import TripUpdateSnapshot, VehiclePosition
+from src.models import CollectorHeartbeat, VehiclePosition
 from src.timezones import utcnow_naive
 
 load_dotenv()
@@ -33,7 +33,7 @@ LOG_FILE = REPO_ROOT / "logs" / "collector.log"
 
 # Thresholds for "healthy" — tuned to the 30s/60s collection cadence with
 # some headroom for the WMATA feed's own jitter.
-MAX_TRIP_UPDATE_AGE_SEC = 90
+MAX_HEARTBEAT_AGE_SEC = 90
 MAX_POSITION_AGE_SEC = 180
 MAX_DRIFT_SEC = 5
 LOG_TAIL_LINES = 100
@@ -122,54 +122,44 @@ def main() -> int:
         print("log         no errors")
     print()
 
-    # Trip update snapshots
+    # Collector heartbeats (Phase E.2: replaced trip_update_snapshots as coverage signal)
     now_utc = utcnow_naive()
-    tu_total = db.query(TripUpdateSnapshot).count()
-    tu_24h = (
-        db.query(TripUpdateSnapshot)
-        .filter(TripUpdateSnapshot.collected_at >= now_utc - timedelta(hours=24))
+    hb_total = db.query(CollectorHeartbeat).count()
+    hb_24h = (
+        db.query(CollectorHeartbeat)
+        .filter(CollectorHeartbeat.ts >= now_utc - timedelta(hours=24))
         .count()
     )
-    tu_latest = db.query(func.max(TripUpdateSnapshot.snapshot_ts)).scalar()
-    tu_snaps_24h = (
-        db.query(TripUpdateSnapshot.snapshot_ts)
-        .filter(TripUpdateSnapshot.snapshot_ts >= now_utc - timedelta(hours=24))
-        .distinct()
-        .count()
-    )
+    hb_latest = db.query(func.max(CollectorHeartbeat.ts)).scalar()
 
-    # Median of inter-snapshot gaps over the last 20 distinct snapshots —
-    # robust to historical interruptions (e.g., collector restarts).
-    recent_snaps = (
-        db.query(TripUpdateSnapshot.snapshot_ts)
-        .distinct()
-        .order_by(TripUpdateSnapshot.snapshot_ts.desc())
-        .limit(20)
-        .all()
+    # Median of inter-heartbeat gaps over the last 20 rows — robust to
+    # historical interruptions (e.g., collector restarts).
+    recent_hbs = (
+        db.query(CollectorHeartbeat.ts).order_by(CollectorHeartbeat.ts.desc()).limit(20).all()
     )
-    recent_ts = sorted([s[0] for s in recent_snaps])
+    recent_ts = sorted([r[0] for r in recent_hbs])
     gaps = [(recent_ts[i] - recent_ts[i - 1]).total_seconds() for i in range(1, len(recent_ts))]
     cadence_median = sorted(gaps)[len(gaps) // 2] if gaps else None
 
-    if tu_latest:
-        age_sec = (now_utc - tu_latest).total_seconds()
+    if hb_latest:
+        age_sec = (now_utc - hb_latest).total_seconds()
         cadence_str = f"{cadence_median:.1f}s" if cadence_median else "n/a"
         drift_flag = ""
         if cadence_median and abs(cadence_median - 30) > MAX_DRIFT_SEC:
             drift_flag = " ⚠"
-            issues.append(f"trip_update cadence drift: median {cadence_median:.1f}s vs 30s target")
+            issues.append(f"heartbeat cadence drift: median {cadence_median:.1f}s vs 30s target")
         age_flag = ""
-        if age_sec > MAX_TRIP_UPDATE_AGE_SEC:
+        if age_sec > MAX_HEARTBEAT_AGE_SEC:
             age_flag = " ⚠"
-            issues.append(f"trip_update_snapshots stale: latest {age_sec:.0f}s ago")
+            issues.append(f"collector_heartbeats stale: latest {age_sec:.0f}s ago")
         print(
-            f"trip_updates  {tu_total:>10,} rows  "
-            f"({tu_24h:>10,} last 24h, {tu_snaps_24h} snaps, "
+            f"heartbeats    {hb_total:>10,} rows  "
+            f"({hb_24h:>10,} last 24h, "
             f"cadence {cadence_str}{drift_flag}, latest {age_sec:.0f}s ago{age_flag})"
         )
     else:
-        print(f"trip_updates  {tu_total:>10,} rows  (no snapshots yet)")
-        issues.append("no trip_update_snapshots collected")
+        print(f"heartbeats    {hb_total:>10,} rows  (no heartbeats yet)")
+        issues.append("no collector_heartbeats collected")
 
     # Vehicle positions
     vp_total = db.query(VehiclePosition).count()

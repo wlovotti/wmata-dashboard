@@ -21,6 +21,7 @@ from src.models import (
     StopTime,
     Trip,
     TripUpdateSnapshot,
+    CollectorHeartbeat,
 )
 from src.service_profile import compute_route_service_profile
 from src.wmata_collector import WMATADataCollector
@@ -736,34 +737,19 @@ def test_compare_stop_event_sources_route_filter(db_session):
 
 
 @pytest.mark.smoke
-def test_save_trip_updates_bulk_inserts(db_session, tmp_path):
-    """_save_trip_updates persists a list of dicts produced by the collector."""
-    collector = WMATADataCollector(api_key="unused", db_session=db_session, archive_root=tmp_path)
-    snapshot_ts = datetime(2026, 5, 3, 15, 0, 0)
-    rows = [
-        {
-            "snapshot_ts": snapshot_ts,
-            "trip_id": "TRIP_B",
-            "route_id": "R2",
-            "vehicle_id": None,
-            "stop_id": "S10",
-            "stop_sequence": 5,
-            "predicted_arrival_ts": datetime(2026, 5, 3, 15, 5, 0),
-            "predicted_departure_ts": None,
-            "schedule_relationship": "SCHEDULED",
-        }
-    ]
+def test_collector_heartbeat_persists(db_session):
+    """CollectorHeartbeat rows insert and read back correctly.
 
-    try:
-        saved = collector._save_trip_updates(rows)
-        assert saved == 1
+    Validates the new model introduced in Phase E.2 (NOTES-72).
+    """
+    hb = CollectorHeartbeat(ts=datetime(2026, 5, 27, 14, 0, 0), collector_name="combined")
+    db_session.add(hb)
+    db_session.commit()
 
-        row = db_session.query(TripUpdateSnapshot).filter_by(trip_id="TRIP_B").one()
-        assert row.stop_sequence == 5
-        assert row.vehicle_id is None
-        assert row.snapshot_ts == snapshot_ts
-    finally:
-        collector.close()
+    row = db_session.query(CollectorHeartbeat).filter_by(
+        ts=datetime(2026, 5, 27, 14, 0, 0)
+    ).one()
+    assert row.collector_name == "combined"
 
 
 def _se(**overrides) -> StopEvent:

@@ -141,9 +141,8 @@ def _acquire_pid_file() -> None:
 def run_one_tick(tick_idx: int, collector: WMATADataCollector) -> None:
     """Run one fetch cycle: TripUpdates always, positions every Nth tick.
 
-    Reuses the same ``WMATADataCollector`` across ticks so its
-    ``_tu_dedup_cache`` survives between snapshots. Opens a fresh DB
-    session per tick so the loop survives stale connections during
+    Reuses the same ``WMATADataCollector`` instance across ticks. Opens a
+    fresh DB session per tick so the loop survives stale connections during
     multi-day runs.
     """
     db = get_session()
@@ -202,9 +201,8 @@ def main() -> None:
 
     print("\nStarting continuous collection...")
 
-    # Single collector instance shared across ticks so its dedup cache
-    # for trip_update_snapshots survives between snapshots. The DB
-    # session is rebound per tick inside run_one_tick.
+    # Single collector instance shared across ticks. The DB session is
+    # rebound per tick inside run_one_tick.
     collector = WMATADataCollector(API_KEY)
 
     tick_idx = 0

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from src.archive_writer import JsonlArchiveWriter
 from src.database import get_session, init_db
-from src.models import Route, Shape, Stop, StopTime, Trip, TripUpdateSnapshot, VehiclePosition
+from src.models import CollectorHeartbeat, Route, Shape, Stop, StopTime, Trip, VehiclePosition
 from src.timezones import eastern_date_from_naive_utc, from_epoch_naive_utc, utcnow_naive
 from src.upsert_helpers import upsert_trip_update_state
 
@@ -69,13 +69,6 @@ class WMATADataCollector:
         self.headers = {"api_key": api_key}
         self.gtfs_data = {}
         self.db = db_session
-        # Write-time dedup state for trip_update_snapshots. Maps
-        # (trip_id, stop_id) -> last persisted (predicted_arrival_ts,
-        # predicted_departure_ts, schedule_relationship, vehicle_id) tuple.
-        # Pairs are evicted at each snapshot when they drop out of the feed
-        # (bus has passed). Restart cost: one full snapshot stored before
-        # dedup resumes.
-        self._tu_dedup_cache: dict[tuple[str, str], tuple] = {}
 
         # Cold archive: raw rows go to compressed JSONL daily files.
         # Path matches the existing archive_trip_update_snapshots.py
@@ -618,81 +611,38 @@ class WMATADataCollector:
             return None, []
 
     def _save_trip_updates(self, rows):
-        """Bulk-insert TripUpdate rows, skipping ones whose state hasn't
-        changed since the prior snapshot.
+        """Upsert TripUpdate rows into ``trip_update_state`` and write a heartbeat.
 
         ``rows`` should be the second element returned by
-        ``get_realtime_trip_updates``. The WMATA TripUpdates feed republishes
-        every future stop on every poll, so the same ``(trip_id, stop_id)``
-        pair appears in dozens of snapshots before the bus passes it. We only
-        persist rows where the persisted state — ``(predicted_arrival_ts,
-        predicted_departure_ts, schedule_relationship, vehicle_id)`` — differs
-        from what was last stored for the same pair. The derivation pipeline
-        (``pipelines/derive_stop_events_trip_updates.py``) reduces all
-        snapshots per pair to the last distinct value anyway, so dedup is
-        lossless for downstream metrics (parity-tested across 6 routes × 2
-        days, 53k reduced keys, 0 mismatches).
+        ``get_realtime_trip_updates``. Every raw row is appended to the
+        JSONL cold archive before any DB writes, so the archive is the
+        complete evidence trail regardless of what the DB write path does.
 
-        Pairs that don't reappear in the current snapshot are evicted from
-        the cache — that's the bus having passed them, and the next time
-        the same pair appears (next service day or new trip instance) it's
-        a fresh insert.
+        The WMATA TripUpdates feed republishes every future stop on every
+        poll. We pass ALL rows to ``upsert_trip_update_state`` (not a
+        dedup-filtered subset) so ``final_snapshot_ts`` always reflects
+        the latest poll timestamp, even when the prediction value hasn't
+        changed.
+
+        One ``collector_heartbeats`` row is written per call (per tick),
+        keyed on ``snapshot_ts`` from the first row. This replaces the
+        former ``trip_update_snapshots`` dual-write as the minute-bucket
+        coverage signal used by ``src/data_completeness.py``.
+
+        Note: ``trip_update_snapshots`` is no longer written to by this
+        method (Phase E.2 cutover, NOTES-72). The table still exists in
+        the schema and will be dropped in Phase F retirement.
         """
         if not rows:
             return 0
 
-        new_objects = []
-        seen_keys: set[tuple[str, str]] = set()
         for row in rows:
-            # Archive EVERY raw row, even ones the dedup will skip — the
-            # archive is the complete evidence trail.
+            # Archive EVERY raw row — the archive is the complete evidence trail.
             self._archive_writer.append(row, snapshot_ts=row["snapshot_ts"])
 
-            key = (row["trip_id"], row["stop_id"])
-            seen_keys.add(key)
-            value = (
-                row["predicted_arrival_ts"],
-                row["predicted_departure_ts"],
-                row["schedule_relationship"],
-                row["vehicle_id"],
-            )
-            if self._tu_dedup_cache.get(key) == value:
-                continue
-            self._tu_dedup_cache[key] = value
-            # Explicit construction — the row dict carries trip_start_date for the
-            # upsert/archive paths but TripUpdateSnapshot's columns don't include
-            # it, so a bare ``**row`` splat raises "invalid keyword argument".
-            new_objects.append(
-                TripUpdateSnapshot(
-                    snapshot_ts=row["snapshot_ts"],
-                    trip_id=row["trip_id"],
-                    route_id=row.get("route_id"),
-                    vehicle_id=row.get("vehicle_id"),
-                    stop_id=row["stop_id"],
-                    stop_sequence=row.get("stop_sequence"),
-                    predicted_arrival_ts=row.get("predicted_arrival_ts"),
-                    predicted_departure_ts=row.get("predicted_departure_ts"),
-                    schedule_relationship=row.get("schedule_relationship"),
-                )
-            )
-
-        for stale in self._tu_dedup_cache.keys() - seen_keys:
-            del self._tu_dedup_cache[stale]
-
-        if new_objects:
-            self.db.bulk_save_objects(new_objects)
-
-        # NEW: dual-write to trip_update_state. We UPSERT one row per
-        # (trip_id, stop_sequence) holding the latest predictions. The
-        # derivation pipeline reads this table directly after cutover.
-        # We pass ALL rows (not just state-changed ones) so the
-        # final_snapshot_ts always reflects the latest poll, even when
-        # state hasn't changed.
-        #
-        # Atomicity note: this UPSERT shares a transaction with the
-        # snapshot bulk_save above. The single self.db.commit() below
-        # commits both writes together, so the two tables can't diverge
-        # on partial failure.
+        # UPSERT into trip_update_state — rows missing stop_sequence can't be
+        # keyed in state (it's part of the PK), so we drop them from the payload.
+        # Archived rows are unaffected by this filter.
         upsert_payload = [
             {
                 "trip_id": r["trip_id"],
@@ -705,26 +655,25 @@ class WMATADataCollector:
                 "schedule_relationship": r.get("schedule_relationship"),
             }
             for r in rows
-            # stop_sequence is part of the trip_update_state PK; rows
-            # missing it can't be keyed in state, so we drop them from
-            # the UPSERT. They still land in trip_update_snapshots above
-            # (which has its own auto-PK), so no data is lost — they're
-            # only invisible to the new derivation pipeline.
             if r.get("stop_sequence") is not None
         ]
         if upsert_payload:
             upsert_trip_update_state(self.db, upsert_payload)
 
-        # Single commit covers both the snapshot bulk_save and the upsert.
-        if new_objects or upsert_payload:
-            self.db.commit()
+        # Write one heartbeat row per tick so data_completeness.py can count
+        # minute-buckets of collector activity without reading snapshot rows.
+        # Use the snapshot_ts from the first row as the tick timestamp.
+        tick_ts = rows[0]["snapshot_ts"]
+        self.db.add(CollectorHeartbeat(ts=tick_ts, collector_name="combined"))
+
+        # Single commit covers both the state upsert and the heartbeat.
+        self.db.commit()
 
         print(
-            f"  Saved {len(new_objects)} of {len(rows)} trip update rows "
-            f"(cache={len(self._tu_dedup_cache):,}); "
-            f"upserted {len(upsert_payload)} into trip_update_state"
+            f"  Upserted {len(upsert_payload)} of {len(rows)} trip update rows "
+            f"into trip_update_state; heartbeat ts={tick_ts.isoformat()}"
         )
-        return len(new_objects)
+        return len(upsert_payload)
 
     def _save_vehicle_positions(self, vehicles):
         """Save vehicle positions to database with all GTFS-RT fields"""
