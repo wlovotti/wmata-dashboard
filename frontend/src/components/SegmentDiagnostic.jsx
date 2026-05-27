@@ -179,15 +179,37 @@ function CorridorMembershipPanel({ routes }) {
 
 /**
  * Inline expansion content for a corridor row: two-pane layout with
- * the Leaflet geometry on the left and the per-route membership table
- * on the right.  Constituent stop-pair segments (drill-down via
- * ``/api/corridors/{id}/segments``) land in Task 22.
+ * the Leaflet geometry on the left, the per-route membership table on
+ * the right, and the constituent stop-pair segments table beneath —
+ * lazily loaded from ``/api/corridors/{id}/segments`` when the row is
+ * first expanded so we don't waterfall the drill-downs into the
+ * initial page load.
  *
  * @param {{ corridor: object, period: string }} props
  * @returns {JSX.Element}
  */
-function CorridorExpansion({ corridor }) {
+function CorridorExpansion({ corridor, period }) {
   const routeShortNames = corridor.route_set ? corridor.route_set.split(',') : []
+  const [constituents, setConstituents] = useState(null)
+  const [constituentsErr, setConstituentsErr] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setConstituents(null)
+    setConstituentsErr(null)
+    fetch(`/api/corridors/${corridor.corridor_id}/segments?period=${period}`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
+      .then((json) => {
+        if (!cancelled) setConstituents(json.segments || [])
+      })
+      .catch((err) => {
+        if (!cancelled) setConstituentsErr(err.message || String(err))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [corridor.corridor_id, period])
+
   return (
     <div className="corridor-expansion">
       <div className="corridor-expansion-header">
@@ -208,6 +230,80 @@ function CorridorExpansion({ corridor }) {
           <CorridorMembershipPanel routes={corridor.contributing_routes} />
         </div>
       </div>
+      <CorridorConstituentSegments
+        segments={constituents}
+        error={constituentsErr}
+      />
+    </div>
+  )
+}
+
+/**
+ * Worst-first table of per-route stop-pair segments inside a corridor.
+ * Source: ``GET /api/corridors/{id}/segments``. Shows where on each
+ * contributing route's path the slip accumulates — the row-level view
+ * that reconciles with the headline ``total_weighted_slip_sec``.
+ *
+ * @param {{ segments: Array<object>|null, error: string|null }} props
+ * @returns {JSX.Element}
+ */
+function CorridorConstituentSegments({ segments, error }) {
+  return (
+    <div className="corridor-constituent-segments">
+      <h4>Constituent stop-pairs</h4>
+      {error && (
+        <p style={{ color: '#991b1b', fontSize: '0.85rem', margin: 0 }}>
+          Unable to load constituent segments: {error}
+        </p>
+      )}
+      {!error && segments === null && (
+        <p style={{ color: '#64748b', fontSize: '0.85rem', margin: 0 }}>Loading…</p>
+      )}
+      {!error && segments && segments.length === 0 && (
+        <p style={{ color: '#64748b', fontSize: '0.85rem', margin: 0 }}>
+          No stop-pair segments observed inside this corridor for the period.
+        </p>
+      )}
+      {!error && segments && segments.length > 0 && (
+        <table className="constituent-segments-table">
+          <thead>
+            <tr>
+              <th>Route</th>
+              <th className="num">Dir</th>
+              <th>From</th>
+              <th>To</th>
+              <th className="num">Slip</th>
+              <th className="num">Obs</th>
+            </tr>
+          </thead>
+          <tbody>
+            {segments.map((s) => (
+              <tr
+                key={`${s.route_id}-${s.direction_id}-${s.from_seq}-${s.to_seq}`}
+              >
+                <td>
+                  <span className="segment-route-pill">{s.route_id}</span>
+                </td>
+                <td className="num" style={{ color: '#64748b' }}>
+                  {s.direction_id}
+                </td>
+                <td>{s.from_stop_name || s.from_stop_id}</td>
+                <td>{s.to_stop_name || s.to_stop_id}</td>
+                <td
+                  className={`num ${
+                    s.mean_slip_sec >= 0 ? 'slip-positive' : 'slip-negative'
+                  }`}
+                >
+                  {formatSignedSeconds(s.mean_slip_sec)}
+                </td>
+                <td className="num" style={{ color: '#475569' }}>
+                  {s.n_observations.toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   )
 }
@@ -252,6 +348,7 @@ function SegmentDiagnostic() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [expandedIdx, setExpandedIdx] = useState(null)
+  const [minLengthM, setMinLengthM] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -282,7 +379,10 @@ function SegmentDiagnostic() {
   }, [level, period, limit])
 
   const segments = useMemo(() => data?.segments || [], [data])
-  const corridors = useMemo(() => data?.corridors || [], [data])
+  const corridors = useMemo(() => {
+    const all = data?.corridors || []
+    return minLengthM > 0 ? all.filter((c) => (c.length_m || 0) >= minLengthM) : all
+  }, [data, minLengthM])
   const rows = level === 'corridor' ? corridors : segments
   const lookbackDays = data?.lookback_days ?? 30
 
@@ -385,6 +485,23 @@ function SegmentDiagnostic() {
               ))}
             </select>
           </div>
+          {level === 'corridor' && (
+            <div className="filter-group filter-group-slider">
+              <label htmlFor="seg-min-length">
+                Min length: <span className="filter-value">{minLengthM} m</span>
+              </label>
+              <input
+                id="seg-min-length"
+                type="range"
+                min={0}
+                max={3000}
+                step={100}
+                value={minLengthM}
+                onChange={(e) => setMinLengthM(Number(e.target.value))}
+                aria-label="Minimum corridor length filter"
+              />
+            </div>
+          )}
           {!loading && !error && rows.length > 0 && (
             <div className="results-count">
               {rows.length} {level === 'corridor' ? 'corridor' : 'stop-pair'}

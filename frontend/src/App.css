@@ -464,6 +464,44 @@ main {
   overflow: hidden;
 }
 
+.corridor-constituent-segments {
+  margin-top: 1rem;
+}
+
+.corridor-constituent-segments h4 {
+  margin: 0 0 0.5rem;
+}
+
+.constituent-segments-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.constituent-segments-table th,
+.constituent-segments-table td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.constituent-segments-table th.num,
+.constituent-segments-table td.num {
+  text-align: right;
+}
+
+.filter-group-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 12rem;
+}
+
+.filter-group-slider .filter-value {
+  color: #002F6C;
+  font-weight: 600;
+}
+
 /* Routes Table */
 .routes-table {
   width: 100%;
