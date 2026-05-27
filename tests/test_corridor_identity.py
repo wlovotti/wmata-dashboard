@@ -3,10 +3,13 @@
 import pytest
 
 from src.corridor_identity import (
+    Run,
     augment_shape_with_bearings,
     bearing_circular_distance,
     bearing_degrees,
+    bearing_to_cardinal,
     compute_colocated_route_sets,
+    extract_runs,
     haversine_meters,
     pick_canonical_shapes,
 )
@@ -201,3 +204,121 @@ def test_colocated_routes_single_shape_returns_empty_sets():
     result = compute_colocated_route_sets(canonical_shapes={("A", 0): ("A:01", shape_a)})
     assert result[("A", 0, 1)] == set()
     assert result[("A", 0, 2)] == set()
+
+
+def test_extract_runs_single_run():
+    """A continuous stretch with the same route_set produces one run."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 6)]
+    point_keys = [("A", 0, i) for i in range(1, 6)]
+    colocated = {pk: {("B", 0)} for pk in point_keys}
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert len(runs) == 1
+    assert runs[0].route_set == frozenset({("A", 0), ("B", 0)})
+    assert len(runs[0].points) == 5
+
+
+def test_extract_runs_break_on_routeset_change():
+    """A change in colocated route set breaks the run."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 11)]
+
+    # Seq 1-5: colocates with B. Seq 6-10: colocates with B AND C.
+    colocated = {}
+    for i in range(1, 6):
+        colocated[("A", 0, i)] = {("B", 0)}
+    for i in range(6, 11):
+        colocated[("A", 0, i)] = {("B", 0), ("C", 0)}
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert len(runs) == 2
+    assert runs[0].route_set == frozenset({("A", 0), ("B", 0)})
+    assert runs[1].route_set == frozenset({("A", 0), ("B", 0), ("C", 0)})
+
+
+def test_extract_runs_discard_single_route():
+    """Runs where the route is alone (|set| < 2 including self) are dropped."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 6)]
+    colocated = {("A", 0, i): set() for i in range(1, 6)}  # nobody else colocates
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert runs == []
+
+
+def test_extract_runs_discard_too_short():
+    """Runs with fewer than MIN_RUN_POINTS (5) are dropped."""
+    points = [(38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(1, 5)]  # 4 points
+    colocated = {("A", 0, i): {("B", 0)} for i in range(1, 5)}
+
+    runs = extract_runs(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        points=points,
+        colocated=colocated,
+    )
+
+    assert runs == []
+
+
+def test_run_length_and_mean_bearing():
+    """Run.length_m sums consecutive haversine distances; mean_bearing_deg averages."""
+    points = tuple((38.89, -77.05 + 0.001 * i, i, 90.0) for i in range(5))
+    run = Run(
+        route_id="A",
+        direction_id=0,
+        canonical_shape_id="A:01",
+        route_set=frozenset({("A", 0), ("B", 0)}),
+        points=points,
+    )
+    # 4 consecutive 0.001-deg-east hops at lat 38.89; haversine for each
+    # ~= 87m, so total ~= 348m.
+    assert run.length_m == pytest.approx(348, abs=15)
+    assert run.mean_bearing_deg == pytest.approx(90.0, abs=0.1)
+
+
+def test_bearing_to_cardinal_eight_directions():
+    """Every cardinal/intercardinal sector maps correctly."""
+    cases = [
+        (0, "N"),
+        (22, "N"),
+        (45, "NE"),
+        (67, "NE"),
+        (90, "E"),
+        (112, "E"),
+        (135, "SE"),
+        (157, "SE"),
+        (180, "S"),
+        (202, "S"),
+        (225, "SW"),
+        (247, "SW"),
+        (270, "W"),
+        (292, "W"),
+        (315, "NW"),
+        (337, "NW"),
+        (350, "N"),  # wraps back to N
+    ]
+    for bearing, expected in cases:
+        assert bearing_to_cardinal(bearing) == expected, (
+            f"{bearing} -> {bearing_to_cardinal(bearing)} (expected {expected})"
+        )

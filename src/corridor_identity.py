@@ -12,6 +12,7 @@ Spec: docs/superpowers/specs/2026-05-25-cross-route-corridor-design.md
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 # Calibration knobs (Section 5 of the spec).
 SHAPE_PROXIMITY_THRESHOLD_M = 15.0
@@ -177,3 +178,107 @@ def compute_colocated_route_sets(
             result[point_key] = colocated
 
     return result
+
+
+@dataclass(frozen=True)
+class Run:
+    """A continuous stretch of one route's canonical shape that colocates with the same route_set."""
+
+    route_id: str
+    direction_id: int
+    canonical_shape_id: str
+    # frozenset of (route_id, direction_id) including this run's own route
+    route_set: frozenset[tuple[str, int]]
+    # (lat, lon, shape_pt_sequence, bearing_deg)
+    points: tuple[tuple[float, float, int, float], ...]
+
+    @property
+    def mean_bearing_deg(self) -> float:
+        """Arithmetic mean of point bearings; OK at sub-corridor scales."""
+        return sum(p[3] for p in self.points) / len(self.points)
+
+    @property
+    def length_m(self) -> float:
+        """Sum of consecutive haversine distances along the run."""
+        total = 0.0
+        for i in range(len(self.points) - 1):
+            lat1, lon1, _, _ = self.points[i]
+            lat2, lon2, _, _ = self.points[i + 1]
+            total += haversine_meters(lat1, lon1, lat2, lon2)
+        return total
+
+
+def extract_runs(
+    route_id: str,
+    direction_id: int,
+    canonical_shape_id: str,
+    points: list[tuple[float, float, int, float]],
+    colocated: dict[PointKey, set[ShapeKey]],
+) -> list[Run]:
+    """
+    Walk a canonical shape in sequence; emit runs at every change in the
+    colocated route set. Drop runs where |route_set| < 2 (route is alone)
+    or |points| < MIN_RUN_POINTS (too short / grazing match).
+    """
+    if not points:
+        return []
+
+    runs: list[Run] = []
+    own_key: ShapeKey = (route_id, direction_id)
+
+    current_set: frozenset[ShapeKey] | None = None
+    current_points: list[tuple[float, float, int, float]] = []
+
+    def flush() -> None:
+        if (
+            current_set is not None
+            and len(current_set) >= 2
+            and len(current_points) >= MIN_RUN_POINTS
+        ):
+            runs.append(
+                Run(
+                    route_id=route_id,
+                    direction_id=direction_id,
+                    canonical_shape_id=canonical_shape_id,
+                    route_set=current_set,
+                    points=tuple(current_points),
+                )
+            )
+
+    for point in points:
+        _lat, _lon, seq, _bearing = point
+        point_key: PointKey = (route_id, direction_id, seq)
+        others = colocated.get(point_key, set())
+        full_set = frozenset(others | {own_key})
+
+        if full_set != current_set:
+            flush()
+            current_set = full_set
+            current_points = [point]
+        else:
+            current_points.append(point)
+
+    flush()
+    return runs
+
+
+_CARDINAL_BINS = [
+    (22.5, "N"),
+    (67.5, "NE"),
+    (112.5, "E"),
+    (157.5, "SE"),
+    (202.5, "S"),
+    (247.5, "SW"),
+    (292.5, "W"),
+    (337.5, "NW"),
+    (360.0, "N"),  # wrap-around
+]
+
+
+def bearing_to_cardinal(bearing_deg: float) -> str:
+    """Map a bearing in [0, 360) to one of 8 cardinal/intercardinal labels."""
+    b = bearing_deg % 360.0
+    for upper, label in _CARDINAL_BINS:
+        if b < upper:
+            return label
+    return "N"  # defensive; shouldn't be reachable since 360.0 is the last bin
