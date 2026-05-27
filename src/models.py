@@ -1360,6 +1360,57 @@ class CorridorRouteMembership(Base):
     __table_args__ = (Index("idx_corridor_route_membership_route", "route_id"),)
 
 
+class CorridorSlipRollup(Base):
+    """
+    Per-(corridor_id, period) aggregated slip across all routes in the
+    corridor's route_set. Materialized nightly by
+    `pipelines/refresh_corridor_slip.py` from `route_diagnostic_segment`.
+
+    `total_weighted_slip_sec` = SUM(mean_slip_sec * n_observations) over
+    the corridor's contributing route_diagnostic_segment rows, where rows
+    are filtered by:
+      seg.route_id = membership.route_id
+      AND seg.direction_id = membership.direction_id
+      AND seg.from_seq >= membership.start_stop_sequence
+      AND seg.to_seq <= membership.end_stop_sequence
+
+    `peak_period` (only set on period='all' rows) is the named period
+    with the highest total_weighted_slip_sec for the corridor.
+
+    Source window: `route_diagnostic_segment` is itself a 30-day rolling
+    aggregate (see RouteDiagnosticSegment docstring); this table inherits
+    that window.
+
+    NOTES-62.
+    """
+
+    __tablename__ = "corridor_slip_rollup"
+
+    corridor_id = Column(
+        Integer,
+        ForeignKey("corridors.corridor_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    period = Column(String, primary_key=True)
+
+    n_route_directions = Column(Integer, nullable=False)
+    n_observed_segments = Column(Integer, nullable=False)
+    n_total_observations = Column(Integer, nullable=False)
+    total_weighted_slip_sec = Column(Float, nullable=False)
+    mean_slip_per_segment_sec = Column(Float, nullable=True)
+    mean_slip_per_observation_sec = Column(Float, nullable=True)
+    peak_period = Column(String, nullable=True)
+    computed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        Index(
+            "idx_corridor_slip_rollup_period",
+            "period",
+            "total_weighted_slip_sec",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # LLM-generated route diagnosis narrative (PR #141)
 # ---------------------------------------------------------------------------
