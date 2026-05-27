@@ -1,11 +1,11 @@
 """
 Per-service-date ingest completeness check for daily-aggregate pipelines.
 
-The continuous combined collector writes one tick every 30 seconds to
-``trip_update_snapshots`` and every 60 seconds to ``vehicle_positions``.
-A healthy service day therefore has near-continuous coverage across all
-~1,440 minutes of an Eastern operating day. When the collector is down,
-both tables stop receiving rows in lockstep.
+The continuous combined collector writes one heartbeat row every 30 seconds
+to ``collector_heartbeats`` and one vehicle-positions row every 60 seconds to
+``vehicle_positions``. A healthy service day therefore has near-continuous
+coverage across all ~1,440 minutes of an Eastern operating day. When the
+collector is down, both tables stop receiving rows in lockstep.
 
 This module exposes :func:`is_date_sufficiently_complete` so the per-date
 upsert pipelines (``src.system_metrics.upsert_system_metrics_for_date``,
@@ -19,10 +19,17 @@ the period-over-period delta code in ``api/aggregations.py`` already
 treats absent days as ``None`` and skips them.
 
 Coverage is measured as the union of distinct minute-buckets across
-the two ingest tables, so the signal survives the NOTES-72 cutover:
-``trip_update_snapshots`` is being retired in Phase F but
-``vehicle_positions`` remains. After Phase F the
-``trip_update_snapshots`` branch can be removed.
+the two ingest tables: ``collector_heartbeats`` (primary, every 30 s)
+and ``vehicle_positions`` (secondary, every 60 s). The heartbeat table
+was introduced in Phase E.2 of NOTES-72 to replace
+``trip_update_snapshots`` as the coverage signal once the collector
+stopped dual-writing snapshots. The two-source union means a brief
+heartbeat gap (e.g., API error on one tick) is covered by the position
+signal and vice versa.
+
+Note: ``trip_update_snapshots`` still exists in the schema until Phase F
+retirement, but is no longer written to by the collector and is no
+longer used for completeness accounting.
 """
 
 from datetime import date as date_type
@@ -56,9 +63,9 @@ def expected_minutes_for_date(service_date: date_type) -> int:
 def _coverage_minutes(db: Session, service_date: date_type) -> int:
     """Count distinct minute-buckets that have at least one ingest row.
 
-    Unions ``trip_update_snapshots.snapshot_ts`` and
-    ``vehicle_positions.timestamp`` so the signal survives the NOTES-72
-    cutover. Both columns are naive-UTC per the project's storage
+    Unions ``collector_heartbeats.ts`` and ``vehicle_positions.timestamp``
+    so both the collector's 30-second heartbeat and the 60-second position
+    signal contribute. Both columns are naive-UTC per the project's storage
     convention. Uses Postgres ``date_trunc``; the SQLite fallback uses
     ``strftime`` so the function still returns a sensible value when
     unit tests run against in-memory SQLite.
@@ -74,19 +81,19 @@ def _coverage_minutes(db: Session, service_date: date_type) -> int:
     start_utc, end_utc = eastern_day_bounds_utc(service_date)
     dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
     if dialect == "sqlite":
-        bucket_expr_snap = "strftime('%Y-%m-%d %H:%M:00', snapshot_ts)"
+        bucket_expr_hb = "strftime('%Y-%m-%d %H:%M:00', ts)"
         bucket_expr_pos = "strftime('%Y-%m-%d %H:%M:00', timestamp)"
     else:
-        bucket_expr_snap = "date_trunc('minute', snapshot_ts)"
+        bucket_expr_hb = "date_trunc('minute', ts)"
         bucket_expr_pos = "date_trunc('minute', timestamp)"
 
     row = db.execute(
         text(
             f"""
             SELECT COUNT(DISTINCT bucket) FROM (
-                SELECT {bucket_expr_snap} AS bucket
-                FROM trip_update_snapshots
-                WHERE snapshot_ts >= :start AND snapshot_ts < :end
+                SELECT {bucket_expr_hb} AS bucket
+                FROM collector_heartbeats
+                WHERE ts >= :start AND ts < :end
                 UNION
                 SELECT {bucket_expr_pos} AS bucket
                 FROM vehicle_positions
@@ -103,8 +110,8 @@ def coverage_pct_for_date(db: Session, service_date: date_type) -> float:
     """Return the fraction of in-day minute-buckets with ingest coverage.
 
     A full healthy day scores ≥ 0.99 in observed history (the collector
-    polls every 30 s, so even hours with no active vehicles still
-    produce ``trip_update_snapshots`` rows). The 2026-05-24 power-loss
+    writes a heartbeat every 30 s, so even hours with no active vehicles
+    still produce ``collector_heartbeats`` rows). The 2026-05-24 power-loss
     incident scored ~0.51 (AM-only).
 
     Args:
@@ -128,7 +135,7 @@ def is_date_sufficiently_complete(
     """Return True iff the date has enough coverage to materialize aggregates for.
 
     Threshold defaults to 80% — well above any plausible off-hours dip
-    (``trip_update_snapshots`` keeps ticking even when vehicle activity
+    (``collector_heartbeats`` keeps ticking even when vehicle activity
     is sparse) and well below "healthy day" (which is ≥ 99% in
     observed history). Tune via the ``threshold`` argument if a future
     incident motivates revisiting.

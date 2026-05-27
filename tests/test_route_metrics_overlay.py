@@ -40,7 +40,7 @@ def test_overlay_compute_empty_db_returns_no_rows(db_session):
 def test_overlay_upsert_partial_day_writes_zero_rows(db_session):
     """Upsert on an empty DB (zero ingest coverage) persists zero overlay rows.
 
-    An empty test DB has zero ingest rows in ``trip_update_snapshots`` and
+    An empty test DB has zero ingest rows in ``collector_heartbeats`` and
     ``vehicle_positions``, so :func:`is_date_sufficiently_complete` returns
     False. Under NOTES-76 the guard is now a *flagger*: the upsert proceeds
     but flags each written row as ``data_quality='partial'``. When there are

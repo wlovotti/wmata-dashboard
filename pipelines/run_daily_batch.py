@@ -74,9 +74,9 @@ PIPELINES: list[dict] = [
         # NOTES-72 Phase E.1: trip_update_state replaced trip_update_snapshots
         # as the primary source for trip_update-derived stop_events. The
         # legacy `derive_stop_events_trip_updates` (snapshots-based) is no
-        # longer invoked here; the collector still dual-writes to
-        # `trip_update_snapshots` until Phase E.2 (data_completeness rewrite)
-        # but those rows are unread.
+        # longer invoked here. NOTES-72 Phase E.2 (heartbeat-table cutover)
+        # stopped the collector's snapshot dual-write; trip_update_snapshots
+        # still exists in the schema until Phase F retirement.
         "name": "derive_stop_events_from_state",
         "module": "pipelines.derive_stop_events_from_state",
         "depends_on": None,
