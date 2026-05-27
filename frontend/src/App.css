@@ -437,6 +437,33 @@ main {
   color: white;
 }
 
+/* NOTES-62: corridor row two-pane expansion */
+.corridor-expansion {
+  padding: 0.75rem 0.5rem;
+}
+
+.corridor-expansion-header {
+  margin-bottom: 0.75rem;
+}
+
+.corridor-expansion-grid {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 800px) {
+  .corridor-expansion-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.corridor-expansion-map .corridor-map {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
 /* Routes Table */
 .routes-table {
   width: 100%;

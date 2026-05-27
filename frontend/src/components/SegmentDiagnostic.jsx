@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
+import CorridorMap from './CorridorMap.jsx'
+
 /**
  * Format a signed seconds value as `±M:SS` for slip display.
  *
@@ -116,6 +118,96 @@ function ContributingRoutesPanel({ routes }) {
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+/**
+ * Per-(route, direction) contribution table for a corridor row.
+ *
+ * Differs from ``ContributingRoutesPanel`` (segment mode) in that
+ * corridor memberships don't carry per-route slip stats — those live on
+ * the constituent ``route_diagnostic_segment`` rows under the corridor.
+ * We show the membership's stop_sequence window so users can sanity-check
+ * which portion of each route the corridor covers.
+ *
+ * @param {{ routes: Array<{route_id: string, direction_id: number, start_stop_sequence: number, end_stop_sequence: number}> }} props
+ * @returns {JSX.Element}
+ */
+function CorridorMembershipPanel({ routes }) {
+  if (!routes || routes.length === 0) {
+    return (
+      <div className="segment-drilldown-card">
+        <p style={{ margin: 0, color: '#64748b', fontSize: '0.85rem' }}>
+          No per-route membership available.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div className="segment-drilldown-card">
+      <h4>Contributing routes</h4>
+      <table className="segment-drilldown-table">
+        <thead>
+          <tr>
+            <th className="col-route">Route</th>
+            <th className="num" style={{ width: '4rem' }}>
+              Dir
+            </th>
+            <th className="num">Stop range</th>
+          </tr>
+        </thead>
+        <tbody>
+          {routes.map((r) => (
+            <tr key={`${r.route_id}-${r.direction_id}`}>
+              <td>
+                <span className="segment-route-pill">{r.route_id}</span>
+              </td>
+              <td className="num" style={{ color: '#64748b' }}>
+                {r.direction_id}
+              </td>
+              <td className="num" style={{ color: '#475569' }}>
+                {r.start_stop_sequence}–{r.end_stop_sequence}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/**
+ * Inline expansion content for a corridor row: two-pane layout with
+ * the Leaflet geometry on the left and the per-route membership table
+ * on the right.  Constituent stop-pair segments (drill-down via
+ * ``/api/corridors/{id}/segments``) land in Task 22.
+ *
+ * @param {{ corridor: object, period: string }} props
+ * @returns {JSX.Element}
+ */
+function CorridorExpansion({ corridor }) {
+  const routeShortNames = corridor.route_set ? corridor.route_set.split(',') : []
+  return (
+    <div className="corridor-expansion">
+      <div className="corridor-expansion-header">
+        <h4 style={{ margin: 0 }}>{corridor.display_name}</h4>
+        <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.875rem' }}>
+          {Math.round(corridor.length_m)} m · {corridor.direction_cardinal} ·{' '}
+          {routeShortNames.join(', ')}
+        </p>
+      </div>
+      <div className="corridor-expansion-grid">
+        <div className="corridor-expansion-map">
+          <CorridorMap
+            geometryWkt={corridor.geometry_wkt}
+            displayName={corridor.display_name}
+          />
+        </div>
+        <div className="corridor-expansion-routes">
+          <CorridorMembershipPanel routes={corridor.contributing_routes} />
+        </div>
+      </div>
     </div>
   )
 }
@@ -514,22 +606,7 @@ function SegmentDiagnostic() {
                           className="segment-drilldown-row"
                         >
                           <td colSpan={corridorTotalCols}>
-                            <div className="segment-drilldown-card">
-                              <h4>{corr.display_name}</h4>
-                              <p style={{ margin: '0 0 0.5rem', color: '#64748b' }}>
-                                {Math.round(corr.length_m)} m · {corr.direction_cardinal}{' '}
-                                · {routeShortNames.join(', ')}
-                              </p>
-                              <ContributingRoutesPanel
-                                routes={(corr.contributing_routes || []).map((r) => ({
-                                  route_id: r.route_id,
-                                  route_short_name: r.route_id,
-                                  direction_id: r.direction_id,
-                                  mean_slip_sec: 0,
-                                  n_observations: 0,
-                                }))}
-                              />
-                            </div>
+                            <CorridorExpansion corridor={corr} period={period} />
                           </td>
                         </tr>
                       )}
