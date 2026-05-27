@@ -78,6 +78,11 @@ def augment_shape_with_bearings(
     return result
 
 
+# Type aliases for clarity.
+ShapeKey = tuple[str, int]  # (route_id, direction_id)
+PointKey = tuple[str, int, int]  # (route_id, direction_id, shape_pt_sequence)
+
+
 def pick_canonical_shapes(
     trip_shape_counts: list[tuple[str, int, str, int]],
 ) -> dict[tuple[str, int], str]:
@@ -100,3 +105,75 @@ def pick_canonical_shapes(
             if n_trips > current_trips or (n_trips == current_trips and shape_id < current_shape):
                 best[key] = (n_trips, shape_id)
     return {key: shape_id for key, (_, shape_id) in best.items()}
+
+
+def compute_colocated_route_sets(
+    canonical_shapes: dict[ShapeKey, tuple[str, list[tuple[float, float, int, float]]]],
+) -> dict[PointKey, set[ShapeKey]]:
+    """
+    For each canonical shape point, return the set of OTHER (route_id,
+    direction_id) shapes that pass within SHAPE_PROXIMITY_THRESHOLD_M
+    AND within BEARING_AGREEMENT_THRESHOLD_DEG of bearing.
+
+    Input: mapping (route_id, direction_id) -> (canonical_shape_id, bearing-augmented points).
+    Output: mapping (route_id, direction_id, shape_pt_sequence) -> set of (route_id, direction_id) keys.
+
+    Algorithm: bucket each point into a ~30m x 30m grid cell; for each
+    point, scan the 9 neighbor cells (self + 8 surrounding) for
+    candidate matches; apply exact haversine + bearing test.
+
+    O(N) expected where N = total point count, given uniform spatial
+    distribution across the grid. For ~500k WMATA shape points and ~30m
+    bucket size, per-cell load is small.
+    """
+    # ~30m grid: at D.C.'s latitude, 1 degree latitude ~= 111 km, so
+    # 30m / 111000 m/deg ~= 0.00027 deg. Same scale for longitude at
+    # this latitude (cos(38.9 deg) ~= 0.78), so cells are roughly
+    # 30m N-S by 38m E-W — close enough for a coarse spatial index.
+    grid_size_deg = 0.00027
+
+    grid: dict[tuple[int, int], list[tuple[str, int, int, float, float, float]]] = {}
+    for (route_id, direction_id), (_shape_id, points) in canonical_shapes.items():
+        for lat, lon, seq, bearing in points:
+            cell = (int(lat / grid_size_deg), int(lon / grid_size_deg))
+            grid.setdefault(cell, []).append((route_id, direction_id, seq, lat, lon, bearing))
+
+    result: dict[PointKey, set[ShapeKey]] = {}
+
+    for (route_id, direction_id), (_shape_id, points) in canonical_shapes.items():
+        for lat, lon, seq, bearing in points:
+            point_key: PointKey = (route_id, direction_id, seq)
+            colocated: set[ShapeKey] = set()
+
+            cell = (int(lat / grid_size_deg), int(lon / grid_size_deg))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    neighbors = grid.get((cell[0] + dx, cell[1] + dy), [])
+                    for (
+                        other_route_id,
+                        other_direction_id,
+                        _other_seq,
+                        other_lat,
+                        other_lon,
+                        other_bearing,
+                    ) in neighbors:
+                        if (other_route_id, other_direction_id) == (
+                            route_id,
+                            direction_id,
+                        ):
+                            continue
+                        if (
+                            haversine_meters(lat, lon, other_lat, other_lon)
+                            >= SHAPE_PROXIMITY_THRESHOLD_M
+                        ):
+                            continue
+                        if (
+                            bearing_circular_distance(bearing, other_bearing)
+                            >= BEARING_AGREEMENT_THRESHOLD_DEG
+                        ):
+                            continue
+                        colocated.add((other_route_id, other_direction_id))
+
+            result[point_key] = colocated
+
+    return result

@@ -6,6 +6,7 @@ from src.corridor_identity import (
     augment_shape_with_bearings,
     bearing_circular_distance,
     bearing_degrees,
+    compute_colocated_route_sets,
     haversine_meters,
     pick_canonical_shapes,
 )
@@ -134,3 +135,69 @@ def test_pick_canonical_shapes_tie_break_lexicographic():
         ("Z", 0, "Z:01", 100),  # ties — Z:01 wins (lex < Z:99)
     ]
     assert pick_canonical_shapes(trip_shape_counts) == {("Z", 0): "Z:01"}
+
+
+def test_colocated_routes_two_routes_same_street_same_direction():
+    """Two shapes running side-by-side in the same direction colocate everywhere."""
+    # Route A and Route B both head east along the same coords, sub-meter apart.
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    shape_b = [(38.890001, -77.05, 1, 90.0), (38.890001, -77.04, 2, 90.0)]
+
+    result = compute_colocated_route_sets(
+        canonical_shapes={
+            ("A", 0): ("A:01", shape_a),
+            ("B", 0): ("B:01", shape_b),
+        }
+    )
+
+    # Each (route, dir, seq) maps to the set of OTHER colocated (route, dir) pairs.
+    assert ("B", 0) in result[("A", 0, 1)]
+    assert ("B", 0) in result[("A", 0, 2)]
+    assert ("A", 0) in result[("B", 0, 1)]
+    assert ("A", 0) in result[("B", 0, 2)]
+
+
+def test_colocated_routes_opposite_directions_dont_match():
+    """Two shapes on the same street in opposite directions do NOT colocate."""
+    # Route A goes east; Route B goes west along the same coords.
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    shape_b = [(38.89, -77.04, 1, 270.0), (38.89, -77.05, 2, 270.0)]
+
+    result = compute_colocated_route_sets(
+        canonical_shapes={
+            ("A", 0): ("A:01", shape_a),
+            ("B", 0): ("B:01", shape_b),
+        }
+    )
+
+    # Bearings differ by 180 degrees > 30; no matches.
+    assert result[("A", 0, 1)] == set()
+    assert result[("A", 0, 2)] == set()
+    assert result[("B", 0, 1)] == set()
+    assert result[("B", 0, 2)] == set()
+
+
+def test_colocated_routes_parallel_streets_dont_match():
+    """Two parallel streets (~85m apart) do not colocate."""
+    # Route A on lat 38.89, Route B on lat 38.8908 (~85m north). Same bearing.
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    shape_b = [(38.8908, -77.05, 1, 90.0), (38.8908, -77.04, 2, 90.0)]
+
+    result = compute_colocated_route_sets(
+        canonical_shapes={
+            ("A", 0): ("A:01", shape_a),
+            ("B", 0): ("B:01", shape_b),
+        }
+    )
+
+    # 85m > 15m; no matches.
+    assert result[("A", 0, 1)] == set()
+    assert result[("B", 0, 1)] == set()
+
+
+def test_colocated_routes_single_shape_returns_empty_sets():
+    """One shape alone: every point's colocated set is empty."""
+    shape_a = [(38.89, -77.05, 1, 90.0), (38.89, -77.04, 2, 90.0)]
+    result = compute_colocated_route_sets(canonical_shapes={("A", 0): ("A:01", shape_a)})
+    assert result[("A", 0, 1)] == set()
+    assert result[("A", 0, 2)] == set()
