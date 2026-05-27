@@ -8,9 +8,10 @@ them by stop-pair × period. Only stop-pairs traversed by ≥2 distinct
 route_ids are retained; single-route stop-pairs carry no cross-route signal.
 
 V1 uses stop-pair identity matching only — same ``(from_stop_id, to_stop_id)``
-across routes counts as the same segment.  Shape-aware corridor rollup is
-deferred to NOTES-62 so this can ship without geometric matching
-infrastructure.
+across routes counts as the same segment.  Shape-aware corridor rollup
+(NOTES-62) is the complementary view — see
+``pipelines/refresh_corridors.py`` + ``pipelines/refresh_corridor_slip.py``
+and ``GET /api/segments?level=corridor``.
 
 Design: full replace (DELETE then INSERT) on every run.  The rollup table
 is bounded — one row per unique (from_stop_id, to_stop_id, period) pair —
