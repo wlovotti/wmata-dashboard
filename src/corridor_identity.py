@@ -48,3 +48,55 @@ def bearing_circular_distance(b1: float, b2: float) -> float:
     """Smallest angular distance between two bearings in degrees (0-180)."""
     diff = abs(b1 - b2) % 360.0
     return min(diff, 360.0 - diff)
+
+
+def augment_shape_with_bearings(
+    points: list[tuple[float, float, int]],
+) -> list[tuple[float, float, int, float]]:
+    """
+    Compute the local bearing at every shape point.
+
+    Input rows: (lat, lon, shape_pt_sequence) sorted by sequence.
+    Output rows: (lat, lon, shape_pt_sequence, bearing_deg).
+
+    Bearing at point i is the compass angle from i to i+1. At the last
+    point, look back: bearing from i-1 to i. Single-point shapes are
+    invalid input and will raise.
+    """
+    if len(points) < 2:
+        raise ValueError("Shape must have at least 2 points to compute bearings")
+
+    result: list[tuple[float, float, int, float]] = []
+    for i, (lat, lon, seq) in enumerate(points):
+        if i < len(points) - 1:
+            next_lat, next_lon, _ = points[i + 1]
+            bearing = bearing_degrees(lat, lon, next_lat, next_lon)
+        else:
+            prev_lat, prev_lon, _ = points[i - 1]
+            bearing = bearing_degrees(prev_lat, prev_lon, lat, lon)
+        result.append((lat, lon, seq, bearing))
+    return result
+
+
+def pick_canonical_shapes(
+    trip_shape_counts: list[tuple[str, int, str, int]],
+) -> dict[tuple[str, int], str]:
+    """
+    For each (route_id, direction_id), pick the shape_id with the
+    highest trip count as the canonical representative.
+
+    Input rows: (route_id, direction_id, shape_id, n_trips).
+    Output: mapping (route_id, direction_id) -> canonical shape_id.
+
+    Ties broken by lexicographic shape_id (deterministic).
+    """
+    best: dict[tuple[str, int], tuple[int, str]] = {}
+    for route_id, direction_id, shape_id, n_trips in trip_shape_counts:
+        key = (route_id, direction_id)
+        if key not in best:
+            best[key] = (n_trips, shape_id)
+        else:
+            current_trips, current_shape = best[key]
+            if n_trips > current_trips or (n_trips == current_trips and shape_id < current_shape):
+                best[key] = (n_trips, shape_id)
+    return {key: shape_id for key, (_, shape_id) in best.items()}

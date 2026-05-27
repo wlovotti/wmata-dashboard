@@ -3,9 +3,11 @@
 import pytest
 
 from src.corridor_identity import (
+    augment_shape_with_bearings,
     bearing_circular_distance,
     bearing_degrees,
     haversine_meters,
+    pick_canonical_shapes,
 )
 
 # Synthetic reference points at D.C. latitude. Exact-bearing tests use
@@ -72,3 +74,63 @@ def test_bearing_circular_distance_same():
 def test_bearing_circular_distance_wraps():
     """Bearings 359 and 1 are 2 degrees apart."""
     assert bearing_circular_distance(359, 1) == pytest.approx(2.0)
+
+
+def test_augment_shape_with_bearings_basic():
+    """Bearings computed along a simple eastward shape; last point uses look-back."""
+    points = [
+        (38.89, -77.05, 1),
+        (38.89, -77.04, 2),  # ~870m east
+        (38.89, -77.03, 3),  # ~870m east again
+    ]
+    augmented = augment_shape_with_bearings(points)
+
+    assert len(augmented) == 3
+    # All three points heading east; bearings ~90.
+    for _lat, _lon, _seq, bearing in augmented:
+        assert bearing == pytest.approx(90.0, abs=0.1)
+
+
+def test_augment_shape_with_bearings_lookback_at_end():
+    """Last point's bearing falls back to i-1 -> i."""
+    points = [
+        (38.89, -77.05, 1),
+        (38.89, -77.04, 2),  # heading east
+    ]
+    augmented = augment_shape_with_bearings(points)
+    # Last point's bearing should also be ~90 (look-back uses point 0 -> point 1).
+    assert augmented[-1][3] == pytest.approx(90.0, abs=0.1)
+
+
+def test_augment_shape_with_bearings_too_short_raises():
+    """Single-point shapes are invalid input."""
+    with pytest.raises(ValueError):
+        augment_shape_with_bearings([(38.89, -77.05, 1)])
+
+
+def test_pick_canonical_shapes_highest_trip_count_per_direction():
+    """For each (route_id, direction_id), pick the highest-trip-count shape."""
+    trip_shape_counts = [
+        # (route_id, direction_id, shape_id, n_trips)
+        ("X", 0, "X:01", 100),
+        ("X", 0, "X:02", 200),  # winner for X dir 0
+        ("X", 1, "X:51", 150),  # winner for X dir 1 (only one)
+        ("Y", 0, "Y:01", 50),  # winner for Y dir 0 (only one)
+    ]
+
+    canonical = pick_canonical_shapes(trip_shape_counts)
+
+    assert canonical == {
+        ("X", 0): "X:02",
+        ("X", 1): "X:51",
+        ("Y", 0): "Y:01",
+    }
+
+
+def test_pick_canonical_shapes_tie_break_lexicographic():
+    """When two shapes have equal trip counts, pick lexicographically smaller shape_id."""
+    trip_shape_counts = [
+        ("Z", 0, "Z:99", 100),
+        ("Z", 0, "Z:01", 100),  # ties — Z:01 wins (lex < Z:99)
+    ]
+    assert pick_canonical_shapes(trip_shape_counts) == {("Z", 0): "Z:01"}
