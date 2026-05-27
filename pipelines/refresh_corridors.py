@@ -21,7 +21,13 @@ Section 1):
      ``(cardinal, start_stop_id, end_stop_id, route_set)`` identity —
      this is the same tuple as the DB's ``uq_corridor_identity``
      constraint, so collisions are resolved here rather than at INSERT.
-  6. Persist in a single transaction: ``DELETE`` then ``INSERT`` both
+  6. Merge contiguous same-(cardinal, route_set) candidates into single
+     longer corridors (one physical street can produce N fragments where
+     canonical shapes diverge at intersections), then drop nested
+     same-group candidates whose per-route stop ranges sit strictly
+     inside a kept candidate's. Without these two passes the UI shows
+     6+ rows for one Arlington Bl corridor.
+  7. Persist in a single transaction: ``DELETE`` then ``INSERT`` both
      tables; ``corridor_route_membership.corridor_id`` is resolved by
      flushing each new ``Corridor`` to get its serial PK.
 
@@ -60,6 +66,7 @@ class RefreshCounts:
     canonical_shapes_picked: int = 0
     points_examined: int = 0
     runs_extracted: int = 0
+    candidates_before_merge: int = 0
     corridors_inserted: int = 0
     memberships_inserted: int = 0
 
@@ -232,6 +239,174 @@ class _SnappedCandidate:
         )
 
 
+def _merge_chain(chain: list[_SnappedCandidate]) -> _SnappedCandidate:
+    """Combine an ordered chain of contiguous candidates into one merged candidate.
+
+    The chain is ordered so that ``chain[i].end_stop_id ==
+    chain[i+1].start_stop_id``. The merged candidate inherits the
+    first's start endpoint, the last's end endpoint, and the union of
+    per-route stop ranges. Points are concatenated as-is; small visual
+    artifacts at junctions are acceptable.
+    """
+    first = chain[0]
+    last = chain[-1]
+
+    merged_points: list[tuple[float, float, int, float]] = []
+    for cand in chain:
+        merged_points.extend(cand.run.points)
+
+    merged_range: dict[ShapeKey, tuple[int, int]] = {}
+    for key in first.run.route_set:
+        first_start, _ = first.per_route_range[key]
+        _, last_end = last.per_route_range[key]
+        merged_range[key] = (first_start, last_end)
+
+    merged_run = Run(
+        route_id=first.run.route_id,
+        direction_id=first.run.direction_id,
+        canonical_shape_id=first.run.canonical_shape_id,
+        route_set=first.run.route_set,
+        points=tuple(merged_points),
+    )
+
+    return _SnappedCandidate(
+        run=merged_run,
+        cardinal=first.cardinal,
+        start_stop_id=first.start_stop_id,
+        start_stop_name=first.start_stop_name,
+        end_stop_id=last.end_stop_id,
+        end_stop_name=last.end_stop_name,
+        per_route_range=merged_range,
+        route_ids_sorted=first.route_ids_sorted,
+        length_m=sum(c.length_m for c in chain),
+    )
+
+
+def _drop_nested_candidates(
+    candidates: list[_SnappedCandidate],
+) -> list[_SnappedCandidate]:
+    """Remove candidates whose per-route stop ranges are strictly nested in another's.
+
+    After merging, a long chain X->Y can coexist in the same
+    (cardinal, route_set) group with shorter same-group candidates whose
+    stop_sequence ranges sit entirely inside X->Y (e.g., a single
+    un-chainable short run mid-corridor whose endpoints didn't match
+    any chain neighbor). The slip rollup would otherwise double-count
+    these stretches and the UI would show one "long" corridor row plus
+    a redundant "short" sub-corridor.
+
+    A is nested in B iff for EVERY route in the (shared) route_set:
+    ``B.start_seq <= A.start_seq AND A.end_seq <= B.end_seq``, and at
+    least one inequality is strict.
+    """
+    # Group key must include the actual ShapeKey set, not just sorted
+    # route_ids — a loop route (e.g. C25) can put both direction_ids in
+    # route_set, producing two same-route_ids-but-different-per_route_range
+    # candidates that share a cardinal. Grouping by route_ids alone would
+    # KeyError when _strictly_nested looks up keys across them.
+    by_group: dict[tuple[str, frozenset[ShapeKey]], list[_SnappedCandidate]] = defaultdict(list)
+    for cand in candidates:
+        by_group[(cand.cardinal, cand.run.route_set)].append(cand)
+
+    kept: list[_SnappedCandidate] = []
+    for group in by_group.values():
+        # Sort longest-first so we test smaller candidates against larger
+        # ones (the only direction nesting can hold).
+        group_sorted = sorted(group, key=lambda c: c.length_m, reverse=True)
+        survivors: list[_SnappedCandidate] = []
+        for cand in group_sorted:
+            nested_in_survivor = False
+            for larger in survivors:
+                if _strictly_nested(cand, larger):
+                    nested_in_survivor = True
+                    break
+            if not nested_in_survivor:
+                survivors.append(cand)
+        kept.extend(survivors)
+    return kept
+
+
+def _strictly_nested(inner: _SnappedCandidate, outer: _SnappedCandidate) -> bool:
+    """True iff ``inner``'s per-route stop ranges sit strictly inside ``outer``'s.
+
+    Assumes the two candidates share the same route_set (the caller
+    groups by it). Returns False if any route's inner range escapes
+    outer's range, or if the ranges are identical.
+    """
+    any_strict = False
+    for key, (in_start, in_end) in inner.per_route_range.items():
+        out_start, out_end = outer.per_route_range[key]
+        if in_start < out_start or in_end > out_end:
+            return False
+        if in_start > out_start or in_end < out_end:
+            any_strict = True
+    return any_strict
+
+
+def _merge_contiguous_candidates(
+    candidates_by_identity: dict[tuple[str, str, str, str], _SnappedCandidate],
+) -> list[_SnappedCandidate]:
+    """Merge adjacent same-identity corridors into single longer corridors.
+
+    Without this step the algorithm produces N fragmented corridors for one
+    physical street (e.g. 6+ Arlington Bl segments with route_set
+    F60,F61,F62 along a continuous stretch). Two candidates chain when
+    they share the same (cardinal, route_set) AND one's ``end_stop_id``
+    equals the other's ``start_stop_id``; the shared-stop test alone is
+    sufficient because both candidates' per-route stop_sequence ranges
+    come from the same canonical trip.
+
+    Handles linear chains only. Branching topologies (two predecessors
+    converging at one stop) are not common in directional corridors,
+    but if they arise the un-merged branch survives as its own corridor
+    rather than being silently dropped.
+    """
+    # Same key shape as _drop_nested_candidates: include the full
+    # ShapeKey set so loop-route cases (one route in both directions)
+    # don't get mis-grouped with non-loop candidates.
+    by_group: dict[tuple[str, frozenset[ShapeKey]], list[_SnappedCandidate]] = defaultdict(list)
+    for cand in candidates_by_identity.values():
+        by_group[(cand.cardinal, cand.run.route_set)].append(cand)
+
+    merged: list[_SnappedCandidate] = []
+    for group in by_group.values():
+        # Successor map: end_stop -> the candidate that starts there.
+        # In branching cases the last one wins; that candidate becomes
+        # the chain successor and the other predecessor stays unmerged.
+        by_start_stop: dict[str, _SnappedCandidate] = {c.start_stop_id: c for c in group}
+        end_stops: set[str] = {c.end_stop_id for c in group}
+
+        # Chain heads: candidates whose start_stop isn't anyone's end_stop.
+        # If a cycle exists, no head is found — fall back to no merge for
+        # that group rather than dropping data.
+        heads = [c for c in group if c.start_stop_id not in end_stops]
+        if not heads:
+            merged.extend(group)
+            continue
+
+        visited: set[int] = set()
+        for head in heads:
+            chain = [head]
+            visited.add(id(head))
+            current = head
+            while True:
+                nxt = by_start_stop.get(current.end_stop_id)
+                if nxt is None or id(nxt) in visited:
+                    break
+                chain.append(nxt)
+                visited.add(id(nxt))
+                current = nxt
+            merged.append(_merge_chain(chain) if len(chain) > 1 else head)
+
+        # Any candidate not reachable from a head (mid-chain orphan from
+        # branching, or part of a cycle) survives as its own row.
+        for cand in group:
+            if id(cand) not in visited:
+                merged.append(cand)
+
+    return merged
+
+
 def refresh_corridors(session: Session, gtfs_snapshot_id: int) -> dict[str, int]:
     """Rebuild the two corridor identity tables from current GTFS shapes.
 
@@ -331,10 +506,30 @@ def refresh_corridors(session: Session, gtfs_snapshot_id: int) -> dict[str, int]
         if prior is None or candidate.length_m > prior.length_m:
             candidates_by_identity[candidate.identity] = candidate
 
-    # Step 6: assemble corridor + membership rows from the deduped set.
+    counts.candidates_before_merge = len(candidates_by_identity)
+
+    # Step 6: merge contiguous same-(cardinal, route_set) candidates
+    # into single longer corridors. One physical street can produce
+    # many fragments when canonical shapes diverge at intersections
+    # and the colocation flickers — see _merge_contiguous_candidates
+    # docstring for the chain-walk semantics.
+    merged_candidates = _merge_contiguous_candidates(candidates_by_identity)
+
+    # Post-merge dedupe: a single un-merged candidate X->Y can coexist
+    # with a chain X->A->...->Y in the same group, both collapsing to
+    # the same final (cardinal, start_stop, end_stop, route_set)
+    # identity. Keep the longest representative.
+    by_final_identity: dict[tuple[str, str, str, str], _SnappedCandidate] = {}
+    for cand in merged_candidates:
+        prior = by_final_identity.get(cand.identity)
+        if prior is None or cand.length_m > prior.length_m:
+            by_final_identity[cand.identity] = cand
+    merged_candidates = _drop_nested_candidates(list(by_final_identity.values()))
+
+    # Step 7: assemble corridor + membership rows from the merged set.
     corridor_rows: list[dict] = []
     membership_rows: list[dict] = []
-    for cand in candidates_by_identity.values():
+    for cand in merged_candidates:
         display_name = build_display_name(
             cardinal=cand.cardinal,
             start_stop_name=cand.start_stop_name,
@@ -371,7 +566,7 @@ def refresh_corridors(session: Session, gtfs_snapshot_id: int) -> dict[str, int]
                 }
             )
 
-    # Step 7: persist. We add Corridors first, flush to materialize
+    # Step 8: persist. We add Corridors first, flush to materialize
     # their serial PKs, then add memberships keyed by index.
     inserted_corridor_ids: list[int] = []
     for row in corridor_rows:
@@ -397,6 +592,7 @@ def _counts_to_dict(counts: RefreshCounts) -> dict[str, int]:
         "canonical_shapes_picked": counts.canonical_shapes_picked,
         "points_examined": counts.points_examined,
         "runs_extracted": counts.runs_extracted,
+        "candidates_before_merge": counts.candidates_before_merge,
         "corridors_inserted": counts.corridors_inserted,
         "memberships_inserted": counts.memberships_inserted,
     }
