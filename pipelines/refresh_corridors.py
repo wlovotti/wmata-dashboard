@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
-from sqlalchemy import delete, text
+from sqlalchemy import bindparam, delete, text
 from sqlalchemy.orm import Session
 
 from src.corridor_identity import (
@@ -94,16 +94,19 @@ def _load_canonical_shape_points(
         return {}
 
     shape_ids = sorted(set(canonical.values()))
+    # ``expanding=True`` expands to ``IN (?, ?, ...)`` on both Postgres
+    # and SQLite — using Postgres-specific ``ANY(array)`` here would
+    # break the smoke suite that runs apply_gtfs_to_db on SQLite.
     rows = session.execute(
         text(
             """
             SELECT shape_id, shape_pt_lat AS lat, shape_pt_lon AS lon,
                    shape_pt_sequence AS seq
             FROM shapes
-            WHERE shape_id = ANY(:shape_ids)
+            WHERE shape_id IN :shape_ids
             ORDER BY shape_id, shape_pt_sequence
             """
-        ),
+        ).bindparams(bindparam("shape_ids", expanding=True)),
         {"shape_ids": shape_ids},
     ).all()
 
