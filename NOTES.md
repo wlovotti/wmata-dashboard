@@ -6,7 +6,11 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-25. Closed NOTES-34 — the short-route delivered-ceiling fix (PR #148):
+Last edited 2026-05-27. Closed NOTES-77 (this PR) — verified Phase E.1 first end-to-end run:
+`derive_stop_events_from_state` ran as primary for both 2026-05-25 and 2026-05-26 (caught
+up in the 2026-05-27 batch), full downstream chain completed with zero failures, and
+`system_metrics_daily` rows for both dates are present with `data_quality = 'complete'`.
+Closed NOTES-34 — the short-route delivered-ceiling fix (PR #148):
 for stops_observable <= 2, the delivered threshold is now 1 (any real observation counts),
 lifting A90 weekday from 48% to 96% delivered (was 61/127; now 122/127) and aligning with
 88% OTP. Before the fix, trip_update rows on 2-stop routes had stops_observable=1 and a
@@ -128,30 +132,6 @@ target lists directly.
   comparability with WMATA's scorecard for now.
 
 ### Independent of the redesign
-
-- **NOTES-77 Verify 2026-05-26 batch — Phase E.1 first end-to-end run
-  (HIGH PRIORITY; closes with next PR).** PR #147 (merged 2026-05-25)
-  switched `pipelines/run_daily_batch.py` to use
-  `derive_stop_events_from_state` as the primary trip_update derivation
-  writing canonical `stop_events`. The 03:44 EDT batch on 2026-05-26
-  is the first production run with downstream pipelines
-  (`aggregate_runs`, `compute_bunching`, `upsert_system_metrics_daily`,
-  `upsert_route_metrics_overlay`) consuming the new pipeline's output.
-  Skim `logs/daily_batch_2026-05-26.log` and confirm:
-  1. `OK   derive_stop_events_from_state for 2026-05-25` (new primary
-     ran, exited 0, processed all routes).
-  2. No `SKIP` lines downstream of it (hard-dependency chain held).
-  3. `system_metrics_daily` row for 2026-05-25 exists with
-     `data_quality` populated (`'complete'` if today's collection was
-     clean, `'partial'` if today's data is also thin).
-  Also spot-check: 2026-05-25 service_date row counts in `stop_events`
-  (source='trip_update') and `runs` are in normal range (≥ 400k for
-  stop_events on a healthy weekday; ≥ 4k for runs).
-  If anything is off, the rollback is `git revert 7912dcb` —
-  `trip_update_snapshots` is still being written, so the legacy
-  derivation can resume immediately with no data loss.
-  Remove this NOTE in the Phase E.2 PR (or earlier if a fix-up PR
-  beats it).
 
 - **NOTES-72 Trip-update state refactor — complete Phase E.2 / F.** PR #128
   shipped the dual-write architecture and the side-by-side derivation
