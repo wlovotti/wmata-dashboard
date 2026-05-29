@@ -34,13 +34,16 @@ current shape is different:
 Growth (measured over the 10 days ending 2026-05-28):
 
 - `vehicle_positions`: ~340 MB/day (~124 GB/year) — the dominant driver, raw input.
-- `stop_events`: ~220 MB/day (~80 GB/year) — foundational derived data, keep-forever.
+- `stop_events`: ~220 MB/day (~80 GB/year) — foundational derived data (windowed to 365 d per §3.5).
 - Total uncontrolled growth: ~570 MB/day ≈ **~200 GB/year**.
 
 Two consequences drive the design: (1) sequence the Phase F `DROP` **before**
 the data transfer so we move ~28 GB instead of ~95 GB; (2) growth is a
-first-class concern — the DB is a ~28 GB base growing ~80 GB/year even after we
-tame raw positions, so storage must be resizable, not fixed.
+first-class concern. Left uncontrolled the DB grows ~200 GB/year; the retention
+policy in §3.5 turns that into a **bounded ~120 GB plateau** by windowing the
+big tables and keeping only the tiny aggregate rollups forever. Storage must
+still be resizable (the DB climbs from ~28 GB to the plateau over the first
+year), but it does not grow without limit.
 
 ## 3. Decisions (and the reasoning behind each)
 
@@ -80,20 +83,28 @@ durability-focused project at ~$60/year more.
 Region: **us-east-1 (N. Virginia)** — closest to DC, minimizing latency to the
 WMATA API.
 
-### 3.3 Postgres data directory on an attached, resizable block-storage disk
+### 3.3 Postgres data directory on an attached block-storage disk
 
-Even with raw-position archival, the DB grows ~80 GB/year (`stop_events` is
-keep-forever per the project's architecture), so it will exceed the instance's
-included 60 GB SSD within the first year. `PGDATA` therefore lives on an
-attached Lightsail block-storage disk (starts ~50 GB, $0.10/GB-month ≈ $5/mo)
-so storage grows by resizing the disk — not by rebuilding the instance.
+Even with the §3.5 retention policy, the DB climbs from ~28 GB to a ~120 GB
+plateau over the first year, exceeding the instance's bundled 60 GB SSD within
+~3 months. `PGDATA` therefore lives on an attached Lightsail block-storage disk
+(starts ~50 GB, $0.10/GB-month ≈ $5/mo); the bundled 60 GB SSD holds only the OS.
 
 The disk is attached and `PGDATA` placed on it **during initial provisioning,
-before any production data exists**, rather than starting on the included SSD
-and migrating later. Moving `PGDATA` on a live Postgres (stop server, copy,
-remount) is risky and exactly the kind of operation a first-time operator
-should not run against the production box. Paying ~$5/mo from day one buys out
-that future risk; the included 60 GB SSD holds only the OS.
+before any production data exists** — not started on the bundled SSD and
+migrated later. Pointing `pg_restore` at the disk on an empty box is a no-op;
+moving a live, populated `PGDATA` later (stop server, copy ~50 GB, remount) is
+risky and exactly the operation a first-time operator should not run against
+the production box. The ~$5/mo is not a permanent *extra* cost — the DB needs
+storage beyond the bundled SSD within ~3 months regardless — it only front-loads
+that spend by a couple of months to make the one-time placement risk-free.
+
+Lightsail block disks **cannot be resized in place.** To grow storage as the DB
+approaches the plateau, snapshot the disk, create a larger disk from the
+snapshot, and swap it in (brief, AWS-managed downtime — no hand-copying of
+data). Expect one or two such grow operations during the first year as the disk
+climbs toward ~130 GB; document the procedure in the runbook so it is not
+first-attempted under pressure.
 
 ### 3.4 Object storage: AWS S3 (private bucket)
 
@@ -102,16 +113,51 @@ over Cloudflare R2 for ecosystem consistency (one bill, one console, AWS-native
 learning); the cost delta vs R2 is pennies at this scale and Lightsail→S3
 transfer is cheap.
 
-### 3.5 Retention: archive raw `vehicle_positions`, keep a 90-day rolling window
+### 3.5 Retention: a three-tier model that bounds the DB to a ~120 GB plateau
 
-Raw positions are the fastest-growing table and are an *input* to `stop_events`
-(rarely needed once derived). A nightly job moves positions older than 90 days
-to compressed parquet in S3, then `DELETE`s them from Postgres. 90 days covers
-re-deriving a full quarter from the archive if ever needed. `stop_events` and
-`runs` are **not** archived — they are the foundational kept data. NOTE: raw
-positions are **not** archived anywhere today (the JSONL archive in
-`archive/raw_snapshots/` holds only the trip-update feed), so this is net-new
-code.
+Tables fall into three tiers with very different retention economics:
+
+**Tier 1 — aggregate rollups: keep forever.** `system_metrics_daily`,
+`route_metrics_daily_overlay`, `route_headway_metrics`, the `route_diagnostic_*`
+tables, `cross_route_segment_rollup`, `corridor_slip_rollup`. These are tiny
+(KB–MB each) and *are* the long-term trend record — one row per route per day.
+Keeping them forever costs essentially nothing. They are never windowed.
+
+**Tier 2 — granular derived: 365-day rolling window.** `stop_events`,
+`runs`. These are large (`stop_events` ~222 MB/day) but *intermediate* — every
+metric is computed from them and the answer lands in a tier-1 rollup. A nightly
+job `DELETE`s rows older than 365 days. No separate archive is needed because
+they are **recoverable by re-derivation** (see below). A 365-day window keeps a
+full year of granular data hot for instant drill-down and new-metric backfill —
+deliberately generous because the project is in an active metric-development
+phase, where re-deriving history for every new metric would be friction. Tighten
+toward 90 days later once the metric set stabilizes.
+
+**Tier 3 — raw inputs: archive + rolling window.** `vehicle_positions` → a
+nightly job writes rows older than 90 days to compressed parquet in S3, then
+`DELETE`s them from Postgres (net-new code; positions are *not* archived
+anywhere today — the `archive/raw_snapshots/` JSONL holds only the trip-update
+feed). `trip_update_state` already has both a JSONL archive (`archive/raw_snapshots/`)
+and an existing single-date cleanup rule, so it stays bounded with no new work.
+
+**Why windowing tier 2 is safe — the re-derivation path.** `stop_events` for
+any past date can be rebuilt from the archived raw inputs:
+`replay_archive_to_state.py` reconstructs `trip_update_state` from the JSONL
+archive, and the parquet positions archive restores `vehicle_positions`;
+`derive_stop_events_from_state.py` then regenerates the rows. So dropping old
+tier-2 data is recoverable, not lossy — it is a storage/latency trade, not a
+data-loss trade.
+
+**The one invariant this imposes:** any metric whose history matters long-term
+must be rolled up into a tier-1 table *before* its source `stop_events` age out
+of the 365-day window. With a year of slack this is comfortable, but a metric
+invented later that wants >365-day history must be backfilled via the
+re-derivation pipeline over the archive for the older periods.
+
+Resulting steady state (≈): tier-2 `stop_events` 365 d ~80 GB + `runs` ~2 GB;
+tier-3 `vehicle_positions` 90 d ~30 GB; static GTFS ~9 GB; `trip_update_state`
+~4 GB; tier-1 rollups negligible → **~120 GB plateau**, reached over the first
+year, then flat.
 
 ### 3.6 Sequencing: Approach A — lift first, archival fast-follow
 
@@ -129,10 +175,10 @@ provisioning takes longer than the ~4 days until the gate lifts.
 │  continuous_combined_collector.py ──(30s/60s)──► PostgreSQL 14                │
 │      (systemd, Restart=on-failure)                  │  PGDATA on attached     │
 │                                                     │  block disk (~50 GB,    │
-│  run_daily_batch.py        (systemd timer, nightly) │  resizable)             │
+│  run_daily_batch.py        (systemd timer, nightly) │  grows via snapshot)    │
 │  pg_dump → S3              (systemd timer, weekly) ──┤                         │
-│  archive vehicle_positions → S3 parquet (nightly,   │                         │
-│      fast-follow)                                   ┘                         │
+│  retention jobs (nightly, fast-follow):             │                         │
+│    tier-3 positions → S3 parquet; tier-2 window     ┘                         │
 │                                                                               │
 └──────────────────────────────┬────────────────────────────────────────────-─┘
                                 │  SSH tunnel (-L 5432:localhost:5432)
@@ -158,7 +204,9 @@ provisioning takes longer than the ~4 days until the gate lifts.
 2. Install PostgreSQL **14** (match local 14.23). Move `PGDATA` to the attached
    disk. Configure `pg_hba.conf` for localhost/tunnel-only access. Set up SSH
    key auth and disable password login.
-3. Write and test the `vehicle_positions` → parquet archival script locally.
+3. Write and test the retention jobs (§3.5) locally: the tier-3
+   `vehicle_positions` → parquet archival script and the tier-2 `DELETE`-older-
+   than-365-days job for `stop_events` / `runs`.
 
 ### Phase 1 — Shrink the source (after NOTES-72 Phase F gate, ~2026-06-01)
 
@@ -180,7 +228,8 @@ provisioning takes longer than the ~4 days until the gate lifts.
 ### Phase 3 — Harden
 
 9. Install systemd timers for the nightly batch and the weekly `pg_dump → S3`.
-10. Deploy the archival cron (fast-follow; can land just before or after cutover).
+10. Deploy the retention jobs as nightly timers (fast-follow; can land just
+    before or after cutover): tier-3 positions archival and tier-2 windowing (§3.5).
 11. Keep the laptop DB **read-only as a backup for ≥7 days**. Only after 7 clean
     days on the VM: `sudo pmset disablesleep 0` on the laptop and decommission
     the local DB.
