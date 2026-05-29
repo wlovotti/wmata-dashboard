@@ -40,7 +40,7 @@ Growth (measured over the 10 days ending 2026-05-28):
 Two consequences drive the design: (1) sequence the Phase F `DROP` **before**
 the data transfer so we move ~28 GB instead of ~95 GB; (2) growth is a
 first-class concern. Left uncontrolled the DB grows ~200 GB/year; the retention
-policy in §3.5 turns that into a **bounded ~120 GB plateau** by windowing the
+policy in §3.5 turns that into a **bounded ~105 GB plateau** by windowing the
 big tables and keeping only the tiny aggregate rollups forever. Storage must
 still be resizable (the DB climbs from ~28 GB to the plateau over the first
 year), but it does not grow without limit.
@@ -103,7 +103,7 @@ Lightsail block disks **cannot be resized in place.** To grow storage as the DB
 approaches the plateau, snapshot the disk, create a larger disk from the
 snapshot, and swap it in (brief, AWS-managed downtime — no hand-copying of
 data). Expect one or two such grow operations during the first year as the disk
-climbs toward ~130 GB; document the procedure in the runbook so it is not
+climbs toward ~115 GB; document the procedure in the runbook so it is not
 first-attempted under pressure.
 
 ### 3.4 Object storage: AWS S3 (private bucket)
@@ -113,7 +113,7 @@ over Cloudflare R2 for ecosystem consistency (one bill, one console, AWS-native
 learning); the cost delta vs R2 is pennies at this scale and Lightsail→S3
 transfer is cheap.
 
-### 3.5 Retention: a three-tier model that bounds the DB to a ~120 GB plateau
+### 3.5 Retention: a three-tier model that bounds the DB to a ~105 GB plateau
 
 Tables fall into three tiers with very different retention economics:
 
@@ -133,11 +133,15 @@ deliberately generous because the project is in an active metric-development
 phase, where re-deriving history for every new metric would be friction. Tighten
 toward 90 days later once the metric set stabilizes.
 
-**Tier 3 — raw inputs: archive + rolling window.** `vehicle_positions` → a
-nightly job writes rows older than 90 days to compressed parquet in S3, then
-`DELETE`s them from Postgres (net-new code; positions are *not* archived
+**Tier 3 — raw inputs: archive + short rolling window.** `vehicle_positions` →
+a nightly job writes rows older than **30 days** to compressed parquet in S3,
+then `DELETE`s them from Postgres (net-new code; positions are *not* archived
 anywhere today — the `archive/raw_snapshots/` JSONL holds only the trip-update
-feed). `trip_update_state` already has both a JSONL archive (`archive/raw_snapshots/`)
+feed). The window is short because the *only* consumer of raw positions — the
+nightly `derive_stop_events.py` proximity derivation — runs within ~1 day of
+collection; 30 days simply covers batch reruns and late-arriving data. Older
+positions live in parquet and are reloaded only for re-derivation.
+`trip_update_state` already has both a JSONL archive (`archive/raw_snapshots/`)
 and an existing single-date cleanup rule, so it stays bounded with no new work.
 
 **Why windowing tier 2 is safe — the re-derivation path.** `stop_events` for
@@ -155,9 +159,21 @@ invented later that wants >365-day history must be backfilled via the
 re-derivation pipeline over the archive for the older periods.
 
 Resulting steady state (≈): tier-2 `stop_events` 365 d ~80 GB + `runs` ~2 GB;
-tier-3 `vehicle_positions` 90 d ~30 GB; static GTFS ~9 GB; `trip_update_state`
-~4 GB; tier-1 rollups negligible → **~120 GB plateau**, reached over the first
+tier-3 `vehicle_positions` 30 d ~10 GB; static GTFS ~9 GB; `trip_update_state`
+~4 GB; tier-1 rollups negligible → **~105 GB plateau**, reached over the first
 year, then flat.
+
+**Why not drop `vehicle_positions` collection entirely?** Investigated
+empirically 2026-05-28 (the proximity source is the table's only live consumer).
+Verdict: keep collecting. All-timepoints OTP *is* substitutable on `trip_update`
+(96% event-level agreement), but two surfaces are not: **origin-OTP** (proximity
+observes the trip's first stop 89% of the time vs trip_update's 19%) and the
+**segment-slip / corridor diagnostics** (proximity's top-20 worst segments — all
+early-trip — have 0 overlap with trip_update's top-50, because trip_update is
+structurally blind to the trip origin; see NOTES-31). So the lever is retention
+(this short window), not collection. Downsampling polling is also rejected — at
+60 s the bus already moves ~500-800 m between fixes, so less-frequent polling
+degrades the ~45-50% proximity stop-match rate.
 
 ### 3.6 Sequencing: Approach A — lift first, archival fast-follow
 
