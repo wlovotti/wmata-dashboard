@@ -93,7 +93,7 @@ def test_stop_time_relationships(db_session, sample_route, sample_stop):
 
 
 def test_vehicle_position_creation(db_session, sample_route, sample_trip):
-    """Test creating VehiclePosition with all fields"""
+    """Test creating VehiclePosition with the persisted fields"""
     timestamp = utcnow_naive()
     position = VehiclePosition(
         vehicle_id="BUS_123",
@@ -101,11 +101,9 @@ def test_vehicle_position_creation(db_session, sample_route, sample_trip):
         trip_id=sample_trip.trip_id,
         latitude=38.9072,
         longitude=-77.0369,
-        bearing=180.0,
         speed=25.5,
         timestamp=timestamp,
         current_status=2,
-        occupancy_status=3,
     )
     db_session.add(position)
     db_session.commit()

@@ -347,20 +347,37 @@ class Shape(Base):
 
 
 class VehiclePosition(Base):
-    """Real-time vehicle position data from GTFS-RT (collected every 30-60 seconds)"""
+    """Real-time vehicle position data from GTFS-RT (collected every 30-60 seconds).
+
+    Only the columns the proximity derivation (``pipelines/derive_stop_events.py``)
+    actually reads are persisted: vehicle/route/trip identity, lat/lon, the GPS
+    fix ``timestamp``, and ``trip_start_date`` (the trip-instance discriminator).
+
+    Five GTFS-RT fields the feed also carries are **intentionally not stored** —
+    they were written but never read by any live surface, so persisting them was
+    pure storage cost (~30 bytes/row on the largest table):
+      * ``schedule_relationship`` — constant (always 0/NULL in practice)
+      * ``occupancy_status`` — ~96% the "no data" sentinel; WMATA doesn't populate it
+      * ``bearing`` — no consumer (there is no live vehicle-direction map)
+      * ``vehicle_label`` — duplicates ``vehicle_id`` for identity
+      * ``trip_start_time`` — redundant with ``trip_id`` + ``trip_start_date``
+    Don't re-add them without a concrete reader; they're recoverable only from the
+    live feed, never backfillable. ``stop_id`` / ``direction_id`` /
+    ``current_status`` / ``current_stop_sequence`` / ``speed`` are retained — the
+    derivation ignores them today, but they carry latent value (matcher / speed
+    analysis) and the real-time fields can't be reconstructed later.
+    """
 
     __tablename__ = "vehicle_positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     vehicle_id = Column(String, nullable=False, index=True)
-    vehicle_label = Column(String)  # Vehicle display label
     route_id = Column(String, index=True)  # References routes.route_id (not FK due to versioning)
     trip_id = Column(String, index=True)  # References trips.trip_id (not FK due to versioning)
 
     # Position data
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
-    bearing = Column(Float)  # Direction vehicle is facing (0-360 degrees)
     speed = Column(Float)  # Speed in meters/second
 
     # Stop information
@@ -370,12 +387,7 @@ class VehiclePosition(Base):
 
     # Trip details
     direction_id = Column(Integer)  # 0 or 1 for trip direction
-    trip_start_time = Column(String)  # HH:MM:SS format
     trip_start_date = Column(String)  # YYYYMMDD format
-    schedule_relationship = Column(Integer)  # 0=scheduled, 1=added, 2=unscheduled, 3=canceled
-
-    # Additional data
-    occupancy_status = Column(Integer)  # Passenger load (0-7 scale)
 
     # Timestamps
     timestamp = Column(DateTime, nullable=False, index=True)

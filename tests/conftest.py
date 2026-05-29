@@ -224,11 +224,9 @@ def sample_vehicle_positions(db_session, sample_route, sample_trip) -> list[Vehi
             trip_id=sample_trip.trip_id,
             latitude=38.9072 + (i * 0.001),
             longitude=-77.0369 + (i * 0.001),
-            bearing=180.0,
             speed=25.0 + (i * 2),
             timestamp=base_time + timedelta(minutes=i * 5),
             current_status=2,  # IN_TRANSIT_TO
-            occupancy_status=3,  # MANY_SEATS_AVAILABLE
         )
         positions.append(position)
 
