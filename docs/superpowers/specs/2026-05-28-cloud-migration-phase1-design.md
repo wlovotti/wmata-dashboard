@@ -31,15 +31,35 @@ current shape is different:
 | **Dead weight retired in NOTES-72 Phase F (~2026-06-01)** | **~67 GB** |
 | **Real footprint after Phase F** | **~28 GB** |
 
-Growth (measured over the 10 days ending 2026-05-28):
+Growth (measured over the 10 days ending 2026-05-28; `vehicle_positions`
+adjusted for PR #152 — see note below):
 
-- `vehicle_positions`: ~340 MB/day (~124 GB/year) — the dominant driver, raw input.
+- `vehicle_positions`: ~320 MB/day (~117 GB/year) — the dominant driver, raw input.
 - `stop_events`: ~220 MB/day (~80 GB/year) — foundational derived data (windowed to 365 d per §3.5).
-- Total uncontrolled growth: ~570 MB/day ≈ **~200 GB/year**.
+- Total uncontrolled growth: ~540 MB/day ≈ **~195 GB/year**.
+
+**PR #152 pruning, quantified.** PR #152 stopped persisting five unused
+`vehicle_positions` columns (`vehicle_label`, `bearing`, `trip_start_time`,
+`schedule_relationship`, `occupancy_status`). The on-disk impact is smaller
+than the "~26% of data width" the PR cites at the row level, because
+`vehicle_positions` is **62% indexes / 38% heap** (8.9 GB total = 3.4 GB heap
++ 5.5 GB indexes over 24.8 M rows) and the pruned columns are *unindexed* heap
+data carrying ~23 B/row. Dropping them trims ~20 MB/day (~6%) off the table's
+growth — ~340 → ~320 MB/day — not 26%, since the heap shrinks ~16% while the
+five indexes (which are most of the table) do not shrink at all. Because the
+change is non-destructive (new rows write NULL; old rows keep the columns), a
+faithful `pg_dump | pg_restore` carries the five dead columns to the new host
+too — so the ~6% is **forward-only** on the migrated DB. Reclaiming the
+old-row bytes needs an explicit `ALTER TABLE … DROP COLUMN`, run as a
+post-restore maintenance step on the VM (§5 Phase 3). The larger relative win
+is downstream — the tier-3 parquet archive
+(§3.5) is columnar, so dropping whole columns (especially high-entropy
+`bearing`, which compresses poorly) shrinks every archived day and compounds
+over the archive's unbounded lifetime.
 
 Two consequences drive the design: (1) sequence the Phase F `DROP` **before**
 the data transfer so we move ~28 GB instead of ~95 GB; (2) growth is a
-first-class concern. Left uncontrolled the DB grows ~200 GB/year; the retention
+first-class concern. Left uncontrolled the DB grows ~195 GB/year; the retention
 policy in §3.5 turns that into a **bounded ~105 GB plateau** by windowing the
 big tables and keeping only the tiny aggregate rollups forever. Storage must
 still be resizable (the DB climbs from ~28 GB to the plateau over the first
@@ -85,7 +105,7 @@ WMATA API.
 
 ### 3.3 Postgres data directory on an attached block-storage disk
 
-Even with the §3.5 retention policy, the DB climbs from ~28 GB to a ~120 GB
+Even with the §3.5 retention policy, the DB climbs from ~28 GB to the ~105 GB
 plateau over the first year, exceeding the instance's bundled 60 GB SSD within
 ~3 months. `PGDATA` therefore lives on an attached Lightsail block-storage disk
 (starts ~50 GB, $0.10/GB-month ≈ $5/mo); the bundled 60 GB SSD holds only the OS.
@@ -246,7 +266,17 @@ provisioning takes longer than the ~4 days until the gate lifts.
 9. Install systemd timers for the nightly batch and the weekly `pg_dump → S3`.
 10. Deploy the retention jobs as nightly timers (fast-follow; can land just
     before or after cutover): tier-3 positions archival and tier-2 windowing (§3.5).
-11. Keep the laptop DB **read-only as a backup for ≥7 days**. Only after 7 clean
+11. Reclaim PR #152's pruned columns on the VM (the faithful `pg_dump | pg_restore`
+    in step 6 carried them over). In a quiet window, after the collector is
+    confirmed healthy: `ALTER TABLE vehicle_positions DROP COLUMN vehicle_label,
+    DROP COLUMN bearing, DROP COLUMN trip_start_time, DROP COLUMN
+    schedule_relationship, DROP COLUMN occupancy_status;` then `VACUUM (FULL,
+    ANALYZE) vehicle_positions;` to return the old-row bytes to the disk. This is
+    a one-time maintenance step, not on the cutover critical path; defer it if the
+    box is under load. `DROP COLUMN` is metadata-only and instant — the `VACUUM
+    FULL` is the expensive part and takes ACCESS EXCLUSIVE, so pause the collector
+    first (SIGINT) and run it when a collection gap is acceptable.
+12. Keep the laptop DB **read-only as a backup for ≥7 days**. Only after 7 clean
     days on the VM: `sudo pmset disablesleep 0` on the laptop and decommission
     the local DB.
 
