@@ -2,6 +2,26 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Amendments (recorded after this plan was executed — the shipped code in
+> `pipelines/archive_vehicle_positions.py` is authoritative over the snippets below):**
+> 1. **`archive_day_to_parquet` must NOT use `conn.execution_options(stream_results=True, ...)`.**
+>    `Connection.execution_options()` mutates the Connection *in place* (returns `self`)
+>    in SQLAlchemy 2.0, so the option persists and breaks the subsequent `DELETE` /
+>    `ROLLBACK TO SAVEPOINT` on the same connection. The shipped version uses a psycopg2
+>    named server-side cursor on `conn.connection` (the raw DBAPI connection) — matching
+>    `archive_trip_update_snapshots.py`, still bounded-memory, still inside the caller's
+>    transaction (so the savepoint test cleanup works). Use that pattern, not Task 3 Step 2's snippet.
+> 2. **The orchestrator's per-day upload `except` is `except Exception`, not `except RuntimeError`.**
+>    A botocore `ClientError` (auth, throttling, missing bucket, network) must degrade that
+>    day to "failed, continue" — never crash the whole run. The narrow `RuntimeError` catch
+>    in Task 4 Step 3's snippet would let those escape.
+> 3. **Built as a single commit, not split Task 2/3/4.** Splitting left `argparse`/`sys`/
+>    `load_dotenv`/`get_engine` imported-but-unused (F401) until the orchestrator landed.
+>    The whole tier-3 module + tests ship in one commit so every import is used at commit time.
+> 4. **Extra tests added beyond the snippets:** an empty-DB tier-2 test (documents the
+>    `rowcount or 0` guard) and a multi-day tier-3 orchestrator test (day 1 succeeds, day 2
+>    raises a non-`RuntimeError` → proves per-day-commit independence AND the broadened catch).
+
 **Goal:** Build the two net-new, locally-testable retention jobs from the NOTES-48 cloud-migration spec (§3.5): a tier-3 job that archives aged `vehicle_positions` to S3 parquet then deletes them, and a tier-2 job that windows `stop_events`/`runs` to a 365-day rolling window.
 
 **Architecture:** Two standalone pipeline CLIs (`pipelines/`), siblings to the existing `cleanup_trip_update_state.py` and `archive_trip_update_snapshots.py`. Each is a pure function + a thin `main()`. The tier-2 job is pure-ORM (`delete(Model).where(...)`) and runs on SQLite for fast smoke tests. The tier-3 job streams rows server-side to a local zstd parquet, uploads to AWS S3, verifies, then deletes — Postgres-only, so its DB-touching tests are integration tests scoped to a sentinel far-past day inside the `pg_session` savepoint so they never contaminate a populated dev DB. They are deployed later as nightly systemd timers on the VM (spec §5 — out of scope for this plan).
