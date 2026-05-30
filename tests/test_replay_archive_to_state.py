@@ -86,7 +86,10 @@ def test_replay_writes_final_state(tmp_path, pg_session):
         ],
     )
 
-    pg_session.execute(TripUpdateState.__table__.delete())
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_REPLAY")
+    )
     pg_session.commit()
 
     count = replay_archive_for_date(
@@ -118,7 +121,10 @@ def test_replay_is_idempotent(tmp_path, pg_session):
         [_row("2026-05-18 22:00:00", "T_IDEM", 1, "2026-05-18 22:05:00")],
     )
 
-    pg_session.execute(TripUpdateState.__table__.delete())
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_IDEM")
+    )
     pg_session.commit()
 
     replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
@@ -153,7 +159,10 @@ def test_replay_does_not_touch_other_dates(tmp_path, pg_session):
 
     # Pre-seed a 5/19 row for the same (trip_id, stop_sequence). The
     # replay must leave it untouched.
-    pg_session.execute(TripUpdateState.__table__.delete())
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_SAME")
+    )
     pg_session.add(
         TripUpdateState(
             trip_id="T_SAME",
@@ -201,7 +210,10 @@ def test_replay_finds_legacy_single_daily_filename(tmp_path, pg_session):
         [_row("2026-05-18 22:00:00", "T_LEGACY", 1, "2026-05-18 22:05:00")],
     )
 
-    pg_session.execute(TripUpdateState.__table__.delete())
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_LEGACY")
+    )
     pg_session.commit()
 
     replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
