@@ -215,7 +215,7 @@ def run_housekeeping_pipeline(
     """Run a single non-date-scoped housekeeping pipeline.
 
     Same subprocess pattern as `run_pipeline`, minus `--all-routes`/`--date`
-    args — housekeeping pipelines like `archive_trip_update_snapshots`
+    args — housekeeping pipelines like `retain_trip_update_state`
     operate on the global table, not a per-(route, date) subset.
     """
     cmd = [sys.executable, "-m", module]

@@ -21,7 +21,6 @@ from src.models import (
     StopEvent,
     StopTime,
     Trip,
-    TripUpdateSnapshot,
 )
 from src.service_profile import compute_route_service_profile
 
@@ -116,48 +115,6 @@ def test_critical_modules_import():
     assert Route is not None
     assert Stop is not None
     assert Trip is not None
-
-
-@pytest.mark.smoke
-def test_trip_update_snapshot_persists(db_session):
-    """TripUpdateSnapshot rows insert and read back with a shared snapshot_ts."""
-    snapshot_ts = datetime(2026, 5, 3, 14, 30, 0)
-    rows = [
-        TripUpdateSnapshot(
-            snapshot_ts=snapshot_ts,
-            trip_id="TRIP_A",
-            route_id="R1",
-            vehicle_id="V1",
-            stop_id="S1",
-            stop_sequence=1,
-            predicted_arrival_ts=datetime(2026, 5, 3, 14, 31, 0),
-            schedule_relationship="SCHEDULED",
-        ),
-        TripUpdateSnapshot(
-            snapshot_ts=snapshot_ts,
-            trip_id="TRIP_A",
-            route_id="R1",
-            vehicle_id="V1",
-            stop_id="S2",
-            stop_sequence=2,
-            predicted_arrival_ts=None,
-            schedule_relationship="SKIPPED",
-        ),
-    ]
-    db_session.add_all(rows)
-    db_session.commit()
-
-    persisted = (
-        db_session.query(TripUpdateSnapshot)
-        .filter_by(trip_id="TRIP_A")
-        .order_by(TripUpdateSnapshot.stop_sequence)
-        .all()
-    )
-    assert len(persisted) == 2
-    assert persisted[0].stop_id == "S1"
-    assert persisted[1].schedule_relationship == "SKIPPED"
-    assert persisted[1].predicted_arrival_ts is None
-    assert persisted[0].snapshot_ts == persisted[1].snapshot_ts
 
 
 @pytest.mark.smoke

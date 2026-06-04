@@ -27,9 +27,10 @@ stopped dual-writing snapshots. The two-source union means a brief
 heartbeat gap (e.g., API error on one tick) is covered by the position
 signal and vice versa.
 
-Note: ``trip_update_snapshots`` still exists in the schema until Phase F
-retirement, but is no longer written to by the collector and is no
-longer used for completeness accounting.
+Note: ``trip_update_snapshots`` has been retired — its ORM model was
+removed and the table is dropped via the manual runbook in
+``scripts/migrate_drop_phase_f.py`` (Phase F, PR #155). It is no longer
+written to or used for completeness accounting.
 """
 
 from datetime import date as date_type

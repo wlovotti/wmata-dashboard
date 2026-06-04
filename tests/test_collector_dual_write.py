@@ -13,7 +13,7 @@ from datetime import datetime
 import pytest
 from sqlalchemy import func, select
 
-from src.models import CollectorHeartbeat, TripUpdateSnapshot, TripUpdateState
+from src.models import CollectorHeartbeat, TripUpdateState
 
 
 @pytest.mark.integration
@@ -57,14 +57,8 @@ def test_save_trip_updates_writes_state_and_heartbeat(pg_session, tmp_path):
             .filter(CollectorHeartbeat.ts == datetime(2026, 5, 17, 14, 0, 0))
         ).scalar()
         assert hb_count == 1
-
-        # trip_update_snapshots must NOT be written (Phase E.2 cutover).
-        snap_count = pg_session.execute(
-            select(func.count())
-            .select_from(TripUpdateSnapshot)
-            .filter(TripUpdateSnapshot.trip_id == "T1")
-        ).scalar()
-        assert snap_count == 0, "snapshot write was not removed: TripUpdateSnapshot has rows for T1"
+        # trip_update_snapshots has been retired (model and table dropped via
+        # scripts/migrate_drop_phase_f.py) — no snapshot assertion needed.
     finally:
         collector.close()
 

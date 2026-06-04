@@ -53,9 +53,9 @@ missing buses, not late ones.
     the denominator is purely GTFS-derived. Caveat: ~3-6% of TU-day trips
     have no matching `vehicle_positions` row and so get dropped by the
     B1 derivation — those look "not delivered" here even if they ran.
-    The dropped set is route-concentrated as of 2026-05-03; re-run
-    `scripts/probe_dropped_tu_trips.py` periodically against multi-day
-    windows to see whether the bias shifts.
+    The dropped set is route-concentrated as of 2026-05-03; periodically
+    query `vehicle_positions` vs. trip_update_state to see whether the bias
+    shifts (probe_dropped_tu_trips.py was removed in Phase F, PR #155).
 """
 
 from __future__ import annotations

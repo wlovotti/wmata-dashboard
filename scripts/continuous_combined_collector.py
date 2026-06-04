@@ -2,9 +2,9 @@
 Combined continuous collector — pulls both TripUpdates (every 30s) and
 VehiclePositions (every 60s) from one process.
 
-Single-process equivalent of running continuous_collector.py and
-continuous_trip_updates_collector.py side by side. One log, one Ctrl+C,
-one DB session per tick. Cadence is enforced by time-budgeting each
+Single-process replacement for the former continuous_collector.py and
+continuous_trip_updates_collector.py scripts (both retired in Phase F,
+PR #155). One log, one Ctrl+C, one DB session per tick. Cadence is enforced by time-budgeting each
 tick so a slow fetch doesn't compound into long-term drift.
 
 API budget: 30s trip_updates + 60s positions = 4,320 calls/day, well
