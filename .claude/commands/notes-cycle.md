@@ -136,8 +136,11 @@ Execute this checklist top-to-bottom. Do not deviate.
 
 4. VERIFY (run in order; fix and re-run until each is clean):
      uv run pytest -m smoke
-     uv run ruff check src/ scripts/ api/ pipelines/
-     uv run ruff format --check src/ scripts/ api/ pipelines/
+     uv run ruff check src/ scripts/ api/ pipelines/ tests/
+     uv run ruff format --check src/ scripts/ api/ pipelines/ tests/
+   Match CI exactly — both ruff gates must include `tests/` or test-only
+   lint errors will slip through and break the PR after push (this is
+   what happened on PR #151 — heartbeat-table cutover for NOTES-72 Phase E.2).
    If the change touches more than one small surface, also run the
    full suite: `uv run pytest`.
 
