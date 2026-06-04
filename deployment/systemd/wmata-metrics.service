@@ -1,5 +1,5 @@
 [Unit]
-Description=WMATA Dashboard Metrics Processor
+Description=WMATA Dashboard Nightly Batch (derive + aggregate + system rollup)
 After=network.target postgresql.service
 Requires=postgresql.service
 
@@ -11,24 +11,31 @@ WorkingDirectory=/home/wmata/wmata-dashboard
 Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/home/wmata/wmata-dashboard/.env
 
-# Run metrics computation for last 7 days
-ExecStart=/home/wmata/.local/bin/uv run python pipelines/compute_daily_metrics.py --days 7
+# Run the nightly batch orchestrator (covers yesterday + ~7-day catch-up).
+# No --days flag; run_daily_batch.py has no such argument — it manages its
+# own lookback window internally. Pass --lookback-days only for manual
+# catch-up runs (e.g. systemctl start wmata-metrics --property
+# ExecStart="... --lookback-days 14").
+ExecStart=/home/wmata/.local/bin/uv run python pipelines/run_daily_batch.py
 
 # Logging
 StandardOutput=append:/var/log/wmata/metrics.log
 StandardError=append:/var/log/wmata/metrics-error.log
 SyslogIdentifier=wmata-metrics
 
-# Resource limits (allow more resources for batch processing)
-MemoryMax=300M
-CPUQuota=80%
+# Resource limits.
+# The nightly batch (derive_stop_events*, aggregate_runs) is memory-heavy
+# (spec §9). On the 2 GB instance + swap there is no fixed cap; rely on
+# the OS swap rather than OOM-killing mid-batch.
+# CPUQuota left open during the batch window to let it finish quickly.
+CPUQuota=90%
 
 # Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/log/wmata
+ReadWritePaths=/var/log/wmata /home/wmata/wmata-dashboard/logs
 
-# Timeout (metrics computation can take a while)
-TimeoutSec=30min
+# Timeout (nightly batch can take 30-60 min on a 2 GB instance)
+TimeoutSec=3h

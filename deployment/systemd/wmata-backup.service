@@ -1,0 +1,35 @@
+[Unit]
+Description=WMATA Dashboard Weekly Database Backup
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=wmata
+Group=wmata
+WorkingDirectory=/home/wmata/wmata-dashboard
+Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/wmata/wmata-dashboard/.env
+
+# Run the backup script. S3 upload happens only if S3_BACKUP_BUCKET is
+# set in the EnvironmentFile (see deployment/scripts/backup_db.sh).
+ExecStart=/bin/bash /home/wmata/wmata-dashboard/deployment/scripts/backup_db.sh
+
+# Logging
+StandardOutput=append:/var/log/wmata/backup.log
+StandardError=append:/var/log/wmata/backup-error.log
+SyslogIdentifier=wmata-backup
+
+# No hard memory cap — xz compression is CPU-bound but pg_dump itself
+# can be memory-heavy on large DBs. Rely on the OS swap if needed.
+CPUQuota=60%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/wmata /home/wmata/backups
+
+# Timeout: allow up to 4 hours for a large backup + S3 upload
+TimeoutSec=4h

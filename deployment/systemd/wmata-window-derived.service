@@ -1,0 +1,38 @@
+[Unit]
+Description=WMATA Dashboard Tier-2 Derived Tables Rolling Window
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=wmata
+Group=wmata
+WorkingDirectory=/home/wmata/wmata-dashboard
+Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/wmata/wmata-dashboard/.env
+
+# Tier-2 retention: DELETE stop_events and runs rows older than 365 days
+# (spec §3.5). Keeps a full year of granular data hot for drill-down and
+# new-metric backfill. Re-derivation from archived raw inputs is the
+# recovery path if older history is ever needed.
+ExecStart=/home/wmata/.local/bin/uv run python pipelines/window_derived_tables.py --retention-days 365
+
+# Logging
+StandardOutput=append:/var/log/wmata/window-derived.log
+StandardError=append:/var/log/wmata/window-derived-error.log
+SyslogIdentifier=wmata-window-derived
+
+# No hard memory cap; DELETE on large tables can be memory-intensive
+# depending on maintenance_work_mem. Rely on OS swap on the 2 GB instance.
+CPUQuota=70%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/wmata /home/wmata/wmata-dashboard/logs
+
+# A 365-day window DELETE on a large stop_events table can take
+# significant time; allow up to 2h.
+TimeoutSec=2h

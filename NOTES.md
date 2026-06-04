@@ -208,6 +208,16 @@ bookkeeping is needed. First real-world data point validating this
 item's "single point of failure" framing — until the VM lift, any
 power event will keep causing permanent gaps.
 
+**2026-06-03 artifact reconciliation.** `docs/DEPLOYMENT.md` rewritten from
+DigitalOcean to AWS Lightsail per the approved spec
+(`docs/superpowers/specs/2026-05-28-cloud-migration-phase1-design.md`); two
+broken `ExecStart` script references in the systemd units fixed
+(`continuous_collector` → `continuous_combined_collector`,
+`compute_daily_metrics` [nonexistent] → `run_daily_batch`); RAM caps relaxed
+for the 2 GB instance; retention/backup systemd timer pairs added
+(`wmata-backup`, `wmata-archive-positions`, `wmata-window-derived`). Live VM
+provisioning, data transfer, and cutover remain manual (this item stays open).
+
 ---
 
 ## NOTES-49. Cloud migration phase 2 — managed Postgres + backups

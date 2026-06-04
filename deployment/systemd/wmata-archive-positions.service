@@ -1,0 +1,37 @@
+[Unit]
+Description=WMATA Dashboard Tier-3 Vehicle Positions Archival
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=wmata
+Group=wmata
+WorkingDirectory=/home/wmata/wmata-dashboard
+Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/wmata/wmata-dashboard/.env
+
+# Tier-3 retention: archive vehicle_positions rows older than 30 days
+# to S3 parquet, then DELETE them from Postgres (spec §3.5).
+# --retention-days 30 matches the spec's short window (the proximity
+# derivation runs within ~1 day of collection; 30 days covers reruns).
+ExecStart=/home/wmata/.local/bin/uv run python pipelines/archive_vehicle_positions.py --retention-days 30
+
+# Logging
+StandardOutput=append:/var/log/wmata/archive-positions.log
+StandardError=append:/var/log/wmata/archive-positions-error.log
+SyslogIdentifier=wmata-archive-positions
+
+# No hard memory cap — psycopg2+pyarrow streaming (PR #131) keeps peak
+# memory low; rely on OS swap if needed on the 2 GB instance.
+CPUQuota=70%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/wmata /home/wmata/wmata-dashboard/logs
+
+# Archival over S3 can be slow for large catch-up batches; allow up to 2h.
+TimeoutSec=2h
