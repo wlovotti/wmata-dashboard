@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wmata-dashboard.retain-trip-update-state</string>
+
+    <!--
+        Run pipelines/retain_trip_update_state.py once daily at 04:30
+        local time (Eastern, on the user's machine). Scheduled 30 minutes
+        after the daily-batch (03:00) and 90 minutes before the GTFS
+        reload (04:00 Sunday) so no two jobs contend for DB / disk
+        resources. Off-peak ensures the collector's steady-state 30s
+        writes are the only concurrent DB writers.
+
+        launchd uses the system's local timezone — no UTC conversion
+        needed.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!--
+        RunAtLoad=false: don't fire immediately when `launchctl load`
+        runs. Validate the install by running the script manually with
+        --dry-run first.
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard</string>
+
+    <!--
+        `uv run` resolves the project venv from pyproject.toml. The
+        absolute path to uv is required because launchd jobs do not
+        inherit the user's shell PATH.
+
+        Default retention is 14 days (matches the retired
+        archive_trip_update_snapshots.py default). Override here if
+        a different window is needed rather than editing the script.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>pipelines/retain_trip_update_state.py</string>
+    </array>
+
+    <!--
+        launchd's stdout/stderr capture is the outermost safety net —
+        catches any failure too early to reach the script's own output
+        (e.g., uv not found, working directory missing).
+    -->
+    <key>StandardOutPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/launchd_retain_trip_update_state.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/launchd_retain_trip_update_state.err.log</string>
+</dict>
+</plist>

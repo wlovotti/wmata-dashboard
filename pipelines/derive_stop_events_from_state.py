@@ -1,12 +1,11 @@
 """Derive stop_events from trip_update_state (the refactored pipeline).
 
-Replaces the old ``derive_stop_events_trip_updates.py``. Reads
+Replaces the retired ``derive_stop_events_trip_updates.py``. Reads
 ``trip_update_state`` directly — one row per (trip, stop_sequence)
 already in final-state — eliminating the ~21M-row/day snapshot scan.
 
-The output schema and semantics MUST be byte-for-byte identical to the
-old pipeline (validated during Phase D against ``stop_events_v2``); see
-the design doc for the parity criteria.
+Output schema and semantics are identical to the old pipeline (parity
+was validated during Phase D against ``stop_events_v2``).
 
 Service-date attribution: as before, vehicle_positions for the same
 trip_id on the target service_date is the authoritative anchor — trip
@@ -25,7 +24,7 @@ from datetime import date as date_type
 from datetime import datetime
 
 from dotenv import load_dotenv
-from sqlalchemy import Table, tuple_, update
+from sqlalchemy import tuple_, update
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import parse_gtfs_time_to_dt
@@ -67,13 +66,18 @@ def derive_for_route_date(
 ) -> dict:
     """Materialize stop_events for one (route, service_date) from trip_update_state.
 
-    ``target_table_name`` is "stop_events" for production and
-    "stop_events_v2" during Phase D side-by-side validation. The target
-    table must already exist with the StopEvent schema.
+    ``target_table_name`` must be "stop_events" (the production table).
+    The parameter is retained for call-site compatibility; passing any
+    other value raises a ``ValueError``.
 
-    Returns a counters dict identical in shape to the old pipeline's
-    output, for parity comparison.
+    Returns a counters dict.
     """
+    if target_table_name != "stop_events":
+        raise ValueError(
+            f"target_table_name must be 'stop_events', got {target_table_name!r}. "
+            "The stop_events_v2 side table was used during Phase D validation only "
+            "and is no longer supported."
+        )
     start_ts = time.time()
     service_date_str = service_date.isoformat()
     trip_start_date_str = service_date.strftime("%Y%m%d")
@@ -138,9 +142,7 @@ def derive_for_route_date(
     no_prediction_count = 0
     derived_keys: list[tuple[str, int]] = []
 
-    target_model = (
-        StopEvent if target_table_name == "stop_events" else _resolve_side_table(target_table_name)
-    )
+    target_model = StopEvent
 
     for state in state_rows:
         sched = schedule_index.get((state.trip_id, state.stop_sequence))
@@ -197,11 +199,7 @@ def derive_for_route_date(
 
     rows_written = 0
     if rows:
-        constraint_name = (
-            "uq_stop_events_run_stop_source"
-            if target_table_name == "stop_events"
-            else f"uq_{target_table_name}_run_stop_source"
-        )
+        constraint_name = "uq_stop_events_run_stop_source"
         upsert_rows(
             db,
             target_model,
@@ -266,49 +264,6 @@ def derive_for_route_date(
     }
 
 
-# Module-level cache for side-table objects. Used by _resolve_side_table
-# to avoid recreating the Table on every call. Keyed by table name.
-_side_table_registry: dict[str, Table] = {}
-
-
-def _resolve_side_table(name: str) -> Table:
-    """Return a SQLAlchemy Table bound to the side table (same schema as StopEvent).
-
-    Used for Phase D validation where we write to ``stop_events_v2``.
-    The side table must already exist with identical schema (see
-    ``scripts/migrate_create_stop_events_v2.py``).
-
-    Returns a real ``Table`` object on an isolated ``MetaData()`` — not
-    ``Base.metadata`` — so it never participates in
-    ``Base.metadata.create_all()``. That's important because the SQLite
-    test fixture creates all tables in Base.metadata at session setup;
-    without isolation the side table would be added to the SQLite schema
-    (and worse, the Postgres-only migration DDL would never run there).
-
-    Earlier versions wrapped the Table in a lightweight class with
-    ``__table__`` set; that broke ``pg_insert``, which rejects arbitrary
-    classes with an ``ArgumentError: subject table … expected``. The
-    ``upsert_rows`` helper accepts either a mapped class or a bare
-    Table, so returning the Table directly is the right shape.
-    """
-    if name != "stop_events_v2":
-        raise ValueError(f"Unknown target table: {name}")
-
-    cached = _side_table_registry.get(name)
-    if cached is not None:
-        return cached
-
-    from sqlalchemy import MetaData
-
-    from src.models import StopEvent
-
-    isolated_meta = MetaData()
-    side_table = StopEvent.__table__.to_metadata(isolated_meta, name=name)
-
-    _side_table_registry[name] = side_table
-    return side_table
-
-
 def _empty(route_id: str, service_date_str: str, start_ts: float, note: str) -> dict:
     """Return an empty result dict when there's nothing to derive."""
     return {
@@ -335,11 +290,8 @@ def main() -> int:
     parser.add_argument(
         "--target-table",
         default="stop_events",
-        choices=["stop_events", "stop_events_v2"],
-        help=(
-            "Output table. Default: stop_events (production). "
-            "Use stop_events_v2 for Phase D side-by-side validation."
-        ),
+        choices=["stop_events"],
+        help="Output table (default: stop_events). Only stop_events is supported.",
     )
     args = parser.parse_args()
 

@@ -2,7 +2,7 @@
 Shared helpers for the stop_events derivation pipelines.
 
 Both `derive_stop_events.py` (proximity source) and
-`derive_stop_events_trip_updates.py` (trip_update source) parse GTFS schedule
+`derive_stop_events_from_state.py` (trip_update source) parse GTFS schedule
 strings and resolve trip_id+stop_id to a scheduled (arrival, departure) pair.
 This module owns those primitives so the two pipelines can't drift apart.
 """
