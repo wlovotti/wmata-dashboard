@@ -71,8 +71,8 @@ class WMATADataCollector:
         self.db = db_session
 
         # Cold archive: raw rows go to compressed JSONL daily files.
-        # Path matches the existing archive_trip_update_snapshots.py
-        # convention (REPO_ROOT / "archive" / ...).
+        # Path mirrors the archive layout under REPO_ROOT / "archive" / ...
+        # (same convention as the vehicle positions archive).
         if archive_root is None:
             archive_root = Path(__file__).resolve().parent.parent / "archive" / "raw_snapshots"
         self._archive_writer = JsonlArchiveWriter(archive_dir=archive_root)
@@ -615,8 +615,8 @@ class WMATADataCollector:
         coverage signal used by ``src/data_completeness.py``.
 
         Note: ``trip_update_snapshots`` is no longer written to by this
-        method (Phase E.2 cutover, NOTES-72). The table still exists in
-        the schema and will be dropped in Phase F retirement.
+        method (Phase E.2 cutover, PR #151). The table is dropped via the
+        manual runbook in ``scripts/migrate_drop_phase_f.py``.
         """
         if not rows:
             return 0

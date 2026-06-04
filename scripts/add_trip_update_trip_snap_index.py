@@ -2,7 +2,7 @@
 Add `idx_tu_trip_snap` to `trip_update_snapshots` — a (trip_id, snapshot_ts)
 index that fits the lazy/live derivation access pattern.
 
-`pipelines/derive_stop_events_trip_updates.py` filters with
+The retired `pipelines/derive_stop_events_trip_updates.py` filtered with
 `WHERE trip_id IN (~100-200 ids) AND snapshot_ts BETWEEN x AND y`. The
 existing `idx_tu_trip_stop_snap (trip_id, stop_id, snapshot_ts)` is unused
 for this shape because `stop_id` sits between the two filtered columns;

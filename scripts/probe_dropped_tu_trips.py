@@ -1,12 +1,12 @@
 """Profile trips that appear in trip_update_snapshots but never in
 vehicle_positions for the same service date.
 
-Background: derive_stop_events_trip_updates.py needs trip_start_date for
-service-date attribution but TripUpdate snapshots don't carry it (the
-GTFS-RT TripDescriptor field isn't populated by WMATA). The pipeline
-cross-references vehicle_positions on (trip_id, trip_start_date) to
-recover it. Trips that appear in TU but never in VP for the day are
-silently dropped.
+Background: the retired derive_stop_events_trip_updates.py needed
+trip_start_date for service-date attribution but TripUpdate snapshots
+don't carry it (the GTFS-RT TripDescriptor field isn't populated by
+WMATA). The pipeline cross-referenced vehicle_positions on
+(trip_id, trip_start_date) to recover it. Trips that appear in TU but
+never in VP for the day were silently dropped.
 
 The service-delivered ratio (PR #47) is sensitive to this: dropped trips
 look like "not delivered" even if they ran. Re-run this periodically as

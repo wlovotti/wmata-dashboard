@@ -1,7 +1,7 @@
 """
 Shared upsert helper for PostgreSQL pipeline pipelines.
 
-All four per-route pipelines (derive_stop_events, derive_stop_events_trip_updates,
+All four per-route pipelines (derive_stop_events, derive_stop_events_from_state,
 aggregate_runs, compute_bunching) share the identical boilerplate:
 
     stmt = pg_insert(Model).values(rows)
@@ -101,7 +101,7 @@ def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:
           when the incoming predicted_arrival_ts is non-null. WMATA
           sometimes nullifies predictions right at arrival; we want to
           keep the last meaningful estimate (matching the existing
-          derivation algorithm at derive_stop_events_trip_updates.py:90).
+          derivation algorithm in derive_stop_events_from_state.py).
         - vehicle_id: COALESCE(new, existing) — keep last non-null.
         - stop_id: overwrite (should be stable across snapshots for a
           given (trip, stop_sequence), but defensively keep latest).

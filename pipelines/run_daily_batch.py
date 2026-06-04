@@ -71,12 +71,12 @@ PIPELINES: list[dict] = [
         "depends_on": None,
     },
     {
-        # NOTES-72 Phase E.1: trip_update_state replaced trip_update_snapshots
-        # as the primary source for trip_update-derived stop_events. The
-        # legacy `derive_stop_events_trip_updates` (snapshots-based) is no
-        # longer invoked here. NOTES-72 Phase E.2 (heartbeat-table cutover)
-        # stopped the collector's snapshot dual-write; trip_update_snapshots
-        # still exists in the schema until Phase F retirement.
+        # NOTES-72 Phase E.1 switched the primary trip_update derivation to
+        # derive_stop_events_from_state (reads trip_update_state). Phase E.2
+        # stopped the collector's snapshot dual-write. Phase F (the
+        # trip-update-state retirement, PR #TBD) deleted the old pipeline and
+        # its archive job; trip_update_snapshots is dropped via the manual
+        # runbook in migrate_drop_phase_f.py.
         "name": "derive_stop_events_from_state",
         "module": "pipelines.derive_stop_events_from_state",
         "depends_on": None,
@@ -122,10 +122,6 @@ PIPELINES: list[dict] = [
 # Failures here log but don't block the run — these are housekeeping, not
 # the metrics critical path.
 HOUSEKEEPING_PIPELINES: list[dict] = [
-    {
-        "name": "archive_trip_update_snapshots",
-        "module": "pipelines.archive_trip_update_snapshots",
-    },
     {
         # Refresh `route_diagnostic_segment/_timepoint/_direction` from the
         # last 30 days of stop_events (NOTES-57). The diagnostic surfaces

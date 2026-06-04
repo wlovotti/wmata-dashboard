@@ -6,13 +6,14 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-05-27. Closed NOTES-72 Phase E.2 — heartbeat-table cutover (PR #151):
-removed TripUpdateSnapshot dual-write + _tu_dedup_cache from the collector; added
-collector_heartbeats model + migrate script; rewrote data_completeness.py to union
-collector_heartbeats.ts + vehicle_positions.timestamp. Closed NOTES-77 (this PR) — verified Phase E.1 first end-to-end run:
-`derive_stop_events_from_state` ran as primary for both 2026-05-25 and 2026-05-26 (caught
-up in the 2026-05-27 batch), full downstream chain completed with zero failures, and
-`system_metrics_daily` rows for both dates are present with `data_quality = 'complete'`.
+Last edited 2026-06-03. Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #TBD):
+deleted `derive_stop_events_trip_updates.py`, `compare_old_vs_new_derivation.py`, and
+`archive_trip_update_snapshots.py`; removed the archive housekeeping entry from
+`run_daily_batch.py`; added `pipelines/retain_trip_update_state.py` + launchd timer
+(`scripts/launchd/com.wmata-dashboard.retain-trip-update-state.plist`); added
+`scripts/migrate_drop_phase_f.py` (unrun manual runbook) for dropping `trip_update_snapshots`
+and (if present) `stop_events_v2`. The E.2 stability gate (≥1 week since PR #151 merged
+2026-05-25) was satisfied as of 2026-06-03.
 Closed NOTES-34 — the short-route delivered-ceiling fix (PR #148):
 for stops_observable <= 2, the delivered threshold is now 1 (any real observation counts),
 lifting A90 weekday from 48% to 96% delivered (was 61/127; now 122/127) and aligning with
@@ -134,51 +135,6 @@ target lists directly.
   WMATA's official. Tracked but not yet scoped — user wants
   comparability with WMATA's scorecard for now.
 
-### Independent of the redesign
-
-- **NOTES-72 Trip-update state refactor — complete Phase F.** PR #128
-  shipped the dual-write architecture and the side-by-side derivation
-  (`stop_events` from snapshots vs `stop_events_v2` from state). Phases
-  D, E.1, and E.2 are complete; only Phase F remains. Spec:
-  `docs/superpowers/specs/2026-05-17-trip-update-state-refactor-design.md`
-  + addendum `docs/superpowers/specs/2026-05-20-trip-update-state-service-date-addendum.md`.
-
-  **Phase D — validation (complete).** Five days of comparison evidence
-  (2026-05-20 → 2026-05-24, including the full Saturday 5/23) showed
-  agreement at ≥ 99.99% — the only deviation was 26 sub-minute timing
-  drifts on 5/21 (0.005% of rows). v2 produced ~5,000 extra rows/day
-  concentrated on C/D-series routes — directionally good (more coverage,
-  not less); investigate later but not a cutover blocker. The Sunday
-  outage on 5/24 hit both pipelines equally (160,639 old vs 160,948 v2 —
-  consistent with the ~1% v2-only pattern on full days), so it didn't
-  bias the comparison.
-
-  **Phase E.1 — derivation cutover (complete).** Switched the primary
-  trip_update derivation in `pipelines/run_daily_batch.py` from
-  `derive_stop_events_trip_updates` (reads snapshots) to
-  `derive_stop_events_from_state` (reads `trip_update_state`), writing
-  to canonical `stop_events`. Dropped the v2 validation pipeline entry,
-  the v2 row-count guard, and the nightly comparison job. The collector
-  dual-write was stopped in Phase E.2 (see below).
-
-  **Phase E.2 — heartbeat-table cutover (complete).** The
-  heartbeat-table approach (option 2) was chosen: the collector writes
-  one ``collector_heartbeats`` row per 30s tick, replacing
-  ``trip_update_snapshots.snapshot_ts`` as the minute-bucket coverage
-  signal in ``src/data_completeness.py``. The 0.80 threshold is
-  unchanged; healthy-day coverage_pct stays at ≥ 0.99. The
-  ``TripUpdateSnapshot`` bulk_save, ``_tu_dedup_cache``, and
-  ``TripUpdateSnapshot`` import were removed from
-  ``src/wmata_collector.py``. The heartbeat-table cutover (PR #151).
-
-  **Phase F — retirement.** After Phase E.2 has been stable for ≥ 1
-  week: drop `trip_update_snapshots` and `stop_events_v2` (or rename v2
-  back to canonical). Delete `pipelines/derive_stop_events_trip_updates.py`,
-  `pipelines/compare_old_vs_new_derivation.py`, and
-  `pipelines/archive_trip_update_snapshots.py`. Schedule a successor
-  retention script for `trip_update_state` via launchd timer.
-
-
 ---
 
 ## NOTES-20. Tighter rider-experience OTP
@@ -221,8 +177,10 @@ Concrete steps:
 5. Run the collector under systemd (`Restart=on-failure`,
    `StandardOutput=append:/var/log/wmata-collector.log`) so it survives
    crashes and reboots without `caffeinate` / `disablesleep` hacks.
-6. Schedule `pipelines/archive_trip_update_snapshots.py` and
+6. Schedule `pipelines/retain_trip_update_state.py` and
    `pipelines/run_daily_batch.py` via systemd timers (or cron).
+   (`archive_trip_update_snapshots.py` was deleted in the Phase F
+   retirement — its successor is `retain_trip_update_state.py`.)
 7. Point the local API at the VM's Postgres via SSH tunnel
    (`ssh -L 5432:localhost:5432 vm` then `DATABASE_URL` to localhost),
    so dev workflow doesn't change. Note that some pipelines doing bulk

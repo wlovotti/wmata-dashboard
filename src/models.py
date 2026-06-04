@@ -497,12 +497,12 @@ class TripUpdateSnapshot(Base):
         are a count of TRANSITIONS, not observations. The probe scripts
         (``scripts/probe_trip_updates*.py``) read this distinction at
         face value — adapt them if you need raw-observation counts.
-      * The downstream derivation
-        (``pipelines/derive_stop_events_trip_updates.py``) reduces all
-        snapshots per pair to the last tuple-distinct value anyway, so
-        dedup is provably lossless for ``stop_events`` and every metric
-        derived from it (parity-tested across 6 routes × 2 days, 53k
-        reduced keys, 0 mismatches).
+      * The downstream derivation (the retired
+        ``pipelines/derive_stop_events_trip_updates.py``) reduced all
+        snapshots per pair to the last tuple-distinct value; dedup was
+        provably lossless for ``stop_events`` (parity-tested across
+        6 routes × 2 days, 53k reduced keys, 0 mismatches). This table
+        is pending DROP via ``scripts/migrate_drop_phase_f.py``.
 
     Stop entries drop out of the feed once the bus passes them — the last
     ``predicted_arrival_ts`` before disappearance is WMATA's effective
