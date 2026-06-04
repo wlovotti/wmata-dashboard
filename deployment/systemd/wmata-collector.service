@@ -11,8 +11,8 @@ WorkingDirectory=/home/wmata/wmata-dashboard
 Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/home/wmata/wmata-dashboard/.env
 
-# Run the continuous collector script
-ExecStart=/home/wmata/.local/bin/uv run python scripts/continuous_collector.py
+# Run the continuous combined collector script
+ExecStart=/home/wmata/.local/bin/uv run python scripts/continuous_combined_collector.py
 
 # Restart policy
 Restart=always
@@ -23,8 +23,8 @@ StandardOutput=append:/var/log/wmata/collector.log
 StandardError=append:/var/log/wmata/collector-error.log
 SyslogIdentifier=wmata-collector
 
-# Resource limits (512MB RAM droplet friendly)
-MemoryMax=200M
+# Resource limits (2 GB RAM instance; collector is lightweight, cap at 400M)
+MemoryMax=400M
 CPUQuota=50%
 
 # Security hardening

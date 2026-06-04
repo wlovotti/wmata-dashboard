@@ -1,636 +1,407 @@
-# DigitalOcean Deployment Guide
+# AWS Lightsail Operator Runbook
 
-Complete step-by-step guide for deploying the WMATA Dashboard to DigitalOcean in production.
+WMATA Dashboard — cloud migration Phase 1 (NOTES-48).
 
-## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Phase 1: DigitalOcean Setup](#phase-1-digitalocean-setup)
-- [Phase 2: Server Configuration](#phase-2-server-configuration)
-- [Phase 3: Database Setup](#phase-3-database-setup)
-- [Phase 4: Application Deployment](#phase-4-application-deployment)
-- [Phase 5: Service Configuration](#phase-5-service-configuration)
-- [Phase 6: Monitoring & Backups](#phase-6-monitoring--backups)
-- [Maintenance](#maintenance)
-- [Troubleshooting](#troubleshooting)
+**Authoritative design spec:** `docs/superpowers/specs/2026-05-28-cloud-migration-phase1-design.md`
+This runbook is a field-operator summary derived from the spec. The spec is the
+canonical record of *why* each decision was made — read §3 before deviating
+from anything here.
+
+**Status:** infrastructure deployed once live migration completes (NOTES-48 is
+open). This document covers the target topology; the live cutover steps are in
+the spec §5 runbook.
 
 ---
 
-## Prerequisites
+## 1. Target topology (summary)
 
-- WMATA API Key (get from https://developer.wmata.com/)
-- SSH key pair for server access
-- Email account for alerts (Gmail recommended)
+| Decision | Choice |
+|---|---|
+| Provider | AWS Lightsail |
+| Plan | $12/mo — 2 GB RAM, 60 GB SSD (OS only), 3 TB bundled transfer |
+| Region | us-east-1 (N. Virginia) — lowest latency to WMATA API |
+| OS | Ubuntu LTS (latest LTS at provision time) |
+| PostgreSQL | **14** (must match local 14.x — `src/database.py` / `pyproject.toml`) |
+| PGDATA | Attached Lightsail block-storage disk, starts ~50 GB, ~$5/mo |
+| Object storage | AWS S3 private bucket (weekly `pg_dump` + parquet archives) |
+| Firewall | SSH (22) only — ideally restricted to your IP; Postgres never publicly reachable |
+| DB access from laptop | SSH tunnel only: `ssh -L 5432:localhost:5432 <vm>` |
+
+See spec §3 for the full rationale. See spec §3.5 for the three-tier retention
+model that bounds the DB to a ~105 GB plateau.
 
 ---
 
-## Phase 1: DigitalOcean Setup
+## 2. Provisioning (Phase 0 — do this now, in parallel with Phase F)
 
-### 1.1 Create Account and Claim Free Credit
+For step-by-step console navigation, defer to official AWS Lightsail docs:
+<https://docs.aws.amazon.com/lightsail/>
 
-1. Sign up at https://www.digitalocean.com
-2. Verify email address
-3. Add payment method (required for $200 credit)
-4. Credit should be automatically applied (valid for 60 days)
+**High-level checklist:**
 
-### 1.2 Create SSH Key
+1. Create the Lightsail instance ($12 plan, us-east-1, Ubuntu LTS).
+2. Attach a ~50 GB block-storage disk to the instance.
+3. Create a private S3 bucket for backups and parquet archives.
+4. Restrict the Lightsail firewall to allow SSH (22) only. Optionally restrict
+   to your home IP.
 
-On your local machine:
+### 2.1 SSH key setup
+
 ```bash
-# Generate SSH key if you don't have one
-ssh-keygen -t ed25519 -C "your_email@example.com"
+# Generate a dedicated key if you don't have one
+ssh-keygen -t ed25519 -C "wmata-lightsail"
 
-# Copy public key to clipboard (macOS)
-pbcopy < ~/.ssh/id_ed25519.pub
-
-# Or display it to copy manually
-cat ~/.ssh/id_ed25519.pub
+# Upload the public key during Lightsail instance creation (or via the
+# Lightsail console → Account → SSH keys).
 ```
 
-In DigitalOcean:
-1. Go to Settings → Security → SSH Keys
-2. Click "Add SSH Key"
-3. Paste your public key
-4. Name it (e.g., "macbook-pro")
-
-### 1.3 Create Droplet
-
-1. Click "Create" → "Droplets"
-2. **Choose Region**: New York 3 (NYC3) - closest to DC
-3. **Choose Image**: Ubuntu 24.04 LTS x64
-4. **Choose Size**: Basic → Regular → $4/month
-   - 1 vCPU
-   - 512 MB RAM
-   - 10 GB SSD
-   - 500 GB transfer
-5. **Authentication**: Select your SSH key
-6. **Hostname**: `wmata-dashboard`
-7. **Tags**: `production`, `wmata`
-8. **Backups**: Optional ($1/month extra)
-9. Click "Create Droplet"
-
-### 1.4 Note Your Droplet's IP Address
-
-Once created, note the public IPv4 address (e.g., `206.189.123.45`)
-
----
-
-## Phase 2: Server Configuration
-
-### 2.1 Initial Server Access
+### 2.2 Initial server hardening
 
 ```bash
-# SSH into your droplet (replace with your IP)
-ssh root@206.189.123.45
-```
+# SSH in as the default Lightsail user (usually 'ubuntu')
+ssh -i ~/.ssh/id_ed25519 ubuntu@<INSTANCE_IP>
 
-### 2.2 Create Non-Root User
-
-```bash
-# Create wmata user
+# Create application user
 adduser wmata
-
-# Add to sudo group
 usermod -aG sudo wmata
-
-# Copy SSH keys to new user
 rsync --archive --chown=wmata:wmata ~/.ssh /home/wmata
+
+# Disable password login
+sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl reload sshd
+
+# Verify firewall allows only SSH (Lightsail's built-in firewall handles ingress;
+# optionally add ufw as a second layer for defense-in-depth)
 ```
 
-### 2.3 Configure Firewall
+### 2.3 System packages
 
 ```bash
-# Allow SSH
-uv allow OpenSSH
-
-# Enable firewall
-ufw enable
-
-# Check status
-ufw status
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git curl build-essential
 ```
 
-### 2.4 Update System Packages
+### 2.4 Install uv (as wmata user)
 
 ```bash
-# Update package list
-apt update
-
-# Upgrade existing packages
-apt upgrade -y
-
-# Install essential packages
-apt install -y git curl build-essential
-```
-
-### 2.5 Install Python 3.11+
-
-```bash
-# Install Python and pip
-apt install -y python3.11 python3.11-venv python3-pip
-
-# Verify installation
-python3.11 --version
-```
-
-### 2.6 Install uv Package Manager
-
-```bash
-# Install uv for the wmata user
 su - wmata
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Add to PATH (add to ~/.bashrc for persistence)
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
-
-# Verify installation
 uv --version
-exit  # Return to root
+exit
 ```
 
----
-
-## Phase 3: Database Setup
-
-### 3.1 Install PostgreSQL
+### 2.5 PostgreSQL 14 — install and move PGDATA to attached disk
 
 ```bash
 # Install PostgreSQL 14
-apt install -y postgresql postgresql-contrib
+sudo apt install -y postgresql-14 postgresql-client-14
 
-# Verify installation
-systemctl status postgresql
+# Stop Postgres before moving PGDATA
+sudo systemctl stop postgresql
+
+# Mount the attached block disk (adjust /dev/xvdf to the device shown in
+# 'lsblk' — Lightsail typically presents the first attached disk as /dev/xvdf
+# or /dev/nvme1n1 depending on instance type)
+sudo mkfs.ext4 /dev/xvdf
+sudo mkdir -p /mnt/pgdata
+sudo mount /dev/xvdf /mnt/pgdata
+
+# Add to /etc/fstab for persistence across reboots
+echo '/dev/xvdf /mnt/pgdata ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab
+
+# Move PGDATA
+sudo mv /var/lib/postgresql/14/main /mnt/pgdata/
+sudo ln -s /mnt/pgdata/main /var/lib/postgresql/14/main
+sudo chown -h postgres:postgres /var/lib/postgresql/14/main
+
+# Update postgresql.conf if data_directory is set explicitly
+sudo -u postgres psql -c "SHOW data_directory;"   # verify
+
+sudo systemctl start postgresql
+sudo systemctl status postgresql
 ```
 
-### 3.2 Create Database and User
+### 2.6 Configure pg_hba.conf for tunnel-only access
+
+Postgres should only accept connections from localhost (the SSH tunnel delivers
+all client connections through localhost). Edit
+`/etc/postgresql/14/main/pg_hba.conf` and ensure only `127.0.0.1/32` (IPv4)
+and `::1/128` (IPv6) local entries exist — remove any `0.0.0.0/0` or public
+entries. Reload after any change:
 
 ```bash
-# Switch to postgres user
-sudo -u postgres psql
+sudo -u postgres psql -c "SELECT pg_reload_conf();"
+```
 
-# In PostgreSQL shell:
+### 2.7 Create database and application user
+
+```bash
+sudo -u postgres psql <<'SQL'
 CREATE DATABASE wmata_dashboard;
-CREATE USER wmata WITH ENCRYPTED PASSWORD 'your_secure_password_here';
+CREATE USER wmata WITH ENCRYPTED PASSWORD 'choose_a_strong_password';
 GRANT ALL PRIVILEGES ON DATABASE wmata_dashboard TO wmata;
-\q
-```
-
-### 3.3 Configure PostgreSQL for Local Access
-
-PostgreSQL is already configured for localhost connections. No changes needed.
-
-### 3.4 Test Database Connection
-
-```bash
-# Test as wmata user
-su - wmata
-psql -U wmata -d wmata_dashboard -h localhost
-# Enter password when prompted
-# Type \q to exit
-exit
+SQL
 ```
 
 ---
 
-## Phase 4: Application Deployment
+## 3. Data transfer (Phase 1 — after NOTES-72 Phase F drops)
 
-### 4.1 Clone Repository
+Wait for the Phase F drops (`trip_update_snapshots`, `stop_events_v2`) to run
+on the laptop. See `scripts/migrate_drop_phase_f.py` for the Phase F shrink
+runbook. After the drops the transfer is ~28 GB instead of ~95 GB.
 
-```bash
-# Switch to wmata user
-su - wmata
-cd ~
-
-# Clone the repository
-git clone https://github.com/yourusername/wmata-dashboard.git
-cd wmata-dashboard
-```
-
-### 4.2 Configure Environment Variables
+Verify Phase F is done:
 
 ```bash
-# Copy example env file
-cp .env.example .env
-
-# Edit with your credentials
-nano .env
-```
-
-Update the following values:
-```bash
-WMATA_API_KEY=your_actual_api_key_here
-DATABASE_URL=postgresql://wmata:your_db_password@localhost/wmata_dashboard
-```
-
-Save and exit (Ctrl+X, then Y, then Enter)
-
-**Important**: Secure the .env file:
-```bash
-chmod 600 .env
-```
-
-### 4.3 Install Dependencies
-
-```bash
-# Install with PostgreSQL support
-uv sync --extra postgres --extra dev
-
-# Verify installation
-uv run python -c "import fastapi; import sqlalchemy; print('Dependencies OK')"
-```
-
-### 4.4 Initialize Database
-
-```bash
-# This will:
-# - Create all database tables
-# - Download and load GTFS static data
-# Takes 5-10 minutes
-
-uv run python scripts/init_database.py
-```
-
-### 4.5 Test Data Collection
-
-```bash
-# Collect a few cycles of test data
-uv run python scripts/collect_sample_data.py all 5
-
-# Verify data was collected
-uv run python -c "
-from src.database import get_session
-from src.models import VehiclePosition
-db = get_session()
-count = db.query(VehiclePosition).count()
-print(f'Vehicle positions collected: {count}')
-db.close()
-"
+# On laptop — these should return "does not exist" after Phase F:
+psql -d wmata_dashboard -c "\dt trip_update_snapshots"
+psql -d wmata_dashboard -c "\dt stop_events_v2"
 ```
 
 ---
 
-## Phase 5: Service Configuration
+## 4. Cutover (Phase 2 — short downtime, minutes)
 
-### 5.1 Install Systemd Service Files
+Follows spec §5 Phase 2 closely:
 
 ```bash
-# Still as wmata user, copy service files to system directory
-exit  # Return to root
+# 1. Stop the laptop collector gracefully (SIGINT — PR #129 handler)
+kill -INT $(cat logs/collector.pid)
 
-# Copy service files
-cp /home/wmata/wmata-dashboard/deployment/systemd/wmata-collector.service /etc/systemd/system/
-cp /home/wmata/wmata-dashboard/deployment/systemd/wmata-metrics.service /etc/systemd/system/
-cp /home/wmata/wmata-dashboard/deployment/systemd/wmata-metrics.timer /etc/systemd/system/
+# 2. Stream dump directly to VM (no intermediate file)
+pg_dump -Fc -d wmata_dashboard | ssh wmata@<INSTANCE_IP> \
+  'pg_restore -U wmata -d wmata_dashboard -Fc'
+# Expect ~1–3 hours at typical consumer upload speeds for ~28 GB.
 
-# Reload systemd to recognize new services
-systemctl daemon-reload
+# 3. On the VM — verify row counts match laptop:
+#    (run same queries on both sides and compare)
+ssh wmata@<INSTANCE_IP> 'psql -U wmata -d wmata_dashboard \
+  -c "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 20;"'
+
+# 4. Move WMATA API key to VM .env
+ssh wmata@<INSTANCE_IP> 'nano /home/wmata/wmata-dashboard/.env'
+# Set: WMATA_API_KEY=<key>
+#      DATABASE_URL=postgresql://wmata:<password>@localhost/wmata_dashboard
+
+# 5. Start collector on VM under systemd
+ssh wmata@<INSTANCE_IP> 'sudo systemctl enable --now wmata-collector.service'
+ssh wmata@<INSTANCE_IP> 'journalctl -u wmata-collector -f'
+# Verify vehicle_positions row count is climbing.
+
+# 6. From laptop — open the SSH tunnel and point local API at VM
+ssh -N -L 5432:localhost:5432 wmata@<INSTANCE_IP> &
+# In .env on laptop:
+#   DATABASE_URL=postgresql://wmata:<password>@localhost/wmata_dashboard
+# Then restart the local API:
+uv run uvicorn api.main:app --reload
 ```
 
-### 5.2 Create Log Directory
+---
+
+## 5. Harden (Phase 3)
+
+### 5.1 Install all systemd units
 
 ```bash
-# Create log directory
+# On VM, as root:
+REPO=/home/wmata/wmata-dashboard
+cp ${REPO}/deployment/systemd/wmata-collector.service     /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-metrics.service       /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-metrics.timer         /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-backup.service        /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-backup.timer          /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-archive-positions.service  /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-archive-positions.timer    /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-window-derived.service     /etc/systemd/system/
+cp ${REPO}/deployment/systemd/wmata-window-derived.timer       /etc/systemd/system/
+
 mkdir -p /var/log/wmata
 chown wmata:wmata /var/log/wmata
-```
 
-### 5.3 Enable and Start Collector Service
-
-```bash
-# Enable service to start on boot
-systemctl enable wmata-collector.service
-
-# Start the collector
-systemctl start wmata-collector.service
-
-# Check status
-systemctl status wmata-collector.service
-
-# View logs
-journalctl -u wmata-collector.service -f
-# Press Ctrl+C to exit log view
-```
-
-### 5.4 Enable and Start Metrics Timer
-
-```bash
-# Enable timer to run daily
-systemctl enable wmata-metrics.timer
-
-# Start the timer
-systemctl start wmata-metrics.timer
-
-# Check timer status
-systemctl list-timers --all | grep wmata
-
-# Manually trigger metrics computation (optional)
-systemctl start wmata-metrics.service
-
-# Check metrics service status
-systemctl status wmata-metrics.service
-```
-
----
-
-## Phase 6: Monitoring & Backups
-
-### 6.1 Set Up Database Backups
-
-```bash
-# Make backup script executable
-chmod +x /home/wmata/wmata-dashboard/deployment/scripts/backup_db.sh
-
-# Create backups directory
-mkdir -p /home/wmata/backups
-chown wmata:wmata /home/wmata/backups
-
-# Test backup script
-su - wmata
-~/wmata-dashboard/deployment/scripts/backup_db.sh
-exit
-
-# Add to cron (run daily at 3am)
-crontab -e -u wmata
-```
-
-Add this line:
-```
-0 3 * * * /home/wmata/wmata-dashboard/deployment/scripts/backup_db.sh >> /var/log/wmata/backup.log 2>&1
-```
-
-### 6.2 Set Up External Monitoring (UptimeRobot)
-
-1. Sign up at https://uptimerobot.com (free tier)
-2. Click "Add New Monitor"
-3. **Monitor Type**: HTTP(s)
-4. **Friendly Name**: WMATA Dashboard Health
-5. **URL**: `http://YOUR_DROPLET_IP:8000/health` (will add when API is running)
-6. **Monitoring Interval**: 5 minutes
-7. Click "Create Monitor"
-
-Note: For now, you can monitor the collector by checking systemd status. API monitoring will be added when frontend is public.
-
-### 6.3 Configure Email Alerts (Optional)
-
-To receive email alerts when services fail:
-
-```bash
-# Install sendmail
-apt install -y sendmail
-
-# Create systemd drop-in directory
-mkdir -p /etc/systemd/system/wmata-collector.service.d
-
-# Create override file for email alerts
-cat > /etc/systemd/system/wmata-collector.service.d/email-alert.conf << 'EOF'
-[Unit]
-OnFailure=email-alert@%n.service
-
-[Service]
-# Email on failure
-EOF
-
-# Reload systemd
 systemctl daemon-reload
+
+# Enable and start:
+systemctl enable --now wmata-collector.service
+systemctl enable --now wmata-metrics.timer
+systemctl enable --now wmata-backup.timer
+systemctl enable --now wmata-archive-positions.timer
+systemctl enable --now wmata-window-derived.timer
+
+# Verify timers:
+systemctl list-timers --all | grep wmata
 ```
 
-Create email alert service template:
+**Scheduled jobs and their times (Eastern — set TZ=America/New_York on the
+server, or note that OnCalendar= runs in the server's local timezone):**
+
+| Timer | Schedule | Job |
+|---|---|---|
+| wmata-metrics | daily 02:00 | `run_daily_batch.py` |
+| wmata-archive-positions | daily 04:00 | tier-3 VP → S3 parquet (30-day window) |
+| wmata-window-derived | daily 04:30 | tier-2 stop_events/runs 365-day window |
+| wmata-backup | Sun 01:00 | weekly `pg_dump -Fc | xz` → local + optional S3 |
+
+### 5.2 S3 backup configuration
+
+Set `S3_BACKUP_BUCKET` in `/home/wmata/wmata-dashboard/.env`:
+
 ```bash
-cat > /etc/systemd/system/email-alert@.service << 'EOF'
-[Unit]
-Description=Send email alert for %i
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'echo "Service %i failed at $(date)" | sendmail your_email@example.com'
-EOF
+S3_BACKUP_BUCKET=your-s3-bucket-name
 ```
+
+The backup script (`deployment/scripts/backup_db.sh`) uploads to S3 only when
+this variable is set. The `aws` CLI must be installed and credentials
+configured (e.g., via an IAM role attached to the Lightsail instance, or an
+IAM user access key in `~/.aws/credentials` as the `wmata` user).
+
+```bash
+# Install AWS CLI
+sudo apt install -y awscli
+
+# Test S3 access
+aws s3 ls s3://your-s3-bucket-name/
+```
+
+Add an S3 lifecycle rule to expire old dumps (recommended: expire objects
+with prefix `wmata-db-backups/` after 30–90 days).
+
+### 5.3 Reclaim PR #152 pruned columns (post-cutover maintenance)
+
+The `pg_dump | pg_restore` transfer carries five dead `vehicle_positions`
+columns (`vehicle_label`, `bearing`, `trip_start_time`, `schedule_relationship`,
+`occupancy_status`) because `pg_dump` is faithful. After ≥7 clean days on the
+VM, in a quiet window (pause the collector first with SIGINT):
+
+```bash
+# On VM:
+psql -U wmata -d wmata_dashboard <<'SQL'
+ALTER TABLE vehicle_positions
+  DROP COLUMN IF EXISTS vehicle_label,
+  DROP COLUMN IF EXISTS bearing,
+  DROP COLUMN IF EXISTS trip_start_time,
+  DROP COLUMN IF EXISTS schedule_relationship,
+  DROP COLUMN IF EXISTS occupancy_status;
+SQL
+
+# Then reclaim space (ACCESS EXCLUSIVE — collector must be stopped):
+psql -U wmata -d wmata_dashboard -c \
+  "VACUUM (FULL, ANALYZE) vehicle_positions;"
+
+# Restart collector:
+sudo systemctl start wmata-collector.service
+```
+
+### 5.4 Disk resize procedure (when PGDATA approaches capacity)
+
+Lightsail block disks **cannot be resized in place.** To grow the PGDATA disk:
+
+1. Stop Postgres: `sudo systemctl stop postgresql`
+2. Snapshot the current block disk via the Lightsail console.
+3. Create a new, larger disk from the snapshot.
+4. Detach the old disk; attach the new disk to the same mount point.
+5. Start Postgres: `sudo systemctl start postgresql`
+
+Expect one or two such operations during the first year as the DB climbs
+toward the ~105 GB plateau. See
+<https://docs.aws.amazon.com/lightsail/latest/userguide/> for console steps.
 
 ---
 
-## Maintenance
+## 6. Backup / restore drill
 
-### Daily Operations
-
-**Check Service Status**:
+**Create a backup manually:**
 ```bash
-# Check collector
+sudo -u wmata /home/wmata/wmata-dashboard/deployment/scripts/backup_db.sh
+```
+
+**Restore from a local `.sql.xz` backup:**
+```bash
+xz -d < wmata_db_YYYYMMDD_HHMMSS.sql.xz | \
+  pg_restore -U wmata -d wmata_dashboard --no-owner
+```
+
+**Restore from a `pg_dump -Fc` (custom-format) backup:**
+```bash
+pg_restore -U wmata -d wmata_dashboard -Fc wmata_db_YYYYMMDD.dump
+```
+
+Run this drill at least once on a scratch DB before you need it.
+
+---
+
+## 7. Verification checklist (post-cutover)
+
+- [ ] `SELECT COUNT(*) FROM vehicle_positions` matches laptop within minutes
+      of collection start
+- [ ] `journalctl -u wmata-collector -f` shows rows being written every
+      30–60 s
+- [ ] Local API (`uvicorn`) serves correctly through the SSH tunnel
+- [ ] One full nightly batch (`run_daily_batch.py`) completes on the VM
+- [ ] `uv run python scripts/collector_status.py` shows healthy coverage
+
+---
+
+## 8. Rollback
+
+The laptop DB stays intact and authoritative until the VM is proven. See spec
+§7. To revert: SIGINT the VM collector; restart the laptop collector:
+
+```bash
+nohup env PYTHONUNBUFFERED=1 \
+  uv run python scripts/continuous_combined_collector.py \
+  >> logs/collector.log 2>&1 &
+```
+
+The local laptop DB is kept read-only as a fallback for ≥7 days post-cutover.
+
+---
+
+## 9. Day-to-day operations
+
+**Check all service statuses:**
+```bash
 systemctl status wmata-collector
-
-# Check recent logs
+systemctl list-timers --all | grep wmata
 journalctl -u wmata-collector --since "1 hour ago"
-
-# Check data collection
-su - wmata
-cd wmata-dashboard
-uv run python -c "
-from datetime import datetime, timedelta
-from src.database import get_session
-from src.models import VehiclePosition
-db = get_session()
-one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-count = db.query(VehiclePosition).filter(VehiclePosition.timestamp >= one_hour_ago).count()
-print(f'Vehicle positions in last hour: {count}')
-db.close()
-"
 ```
 
-**Restart Services**:
+**Restart collector (e.g., after a code update):**
 ```bash
-# Restart collector (e.g., after code update)
-systemctl restart wmata-collector
-
-# Manually run metrics computation
-systemctl start wmata-metrics
+git -C /home/wmata/wmata-dashboard pull origin main
+uv -C /home/wmata/wmata-dashboard sync --extra postgres
+sudo systemctl restart wmata-collector
 ```
 
-### Weekly Tasks
-
-**Update Code**:
+**Manually trigger a job:**
 ```bash
-su - wmata
-cd wmata-dashboard
-
-# Pull latest changes
-git pull origin main
-
-# Install any new dependencies
-uv sync --extra postgres
-
-# Restart services
-exit
-systemctl restart wmata-collector
+sudo systemctl start wmata-metrics.service       # nightly batch
+sudo systemctl start wmata-backup.service        # manual backup
+sudo systemctl start wmata-archive-positions.service
+sudo systemctl start wmata-window-derived.service
 ```
 
-**Check Disk Usage**:
+**Check disk usage:**
 ```bash
-# Check overall disk usage
-df -h
-
-# Check database size
-du -sh /var/lib/postgresql/
-
-# Check backup size
-du -sh /home/wmata/backups/
-```
-
-### Monthly Tasks
-
-**Update System Packages**:
-```bash
-apt update
-apt upgrade -y
-```
-
-**Review Backups**:
-```bash
-ls -lh /home/wmata/backups/
-```
-
-**Update GTFS Static Data** (if routes/schedules have changed):
-```bash
-su - wmata
-cd wmata-dashboard
-uv run python scripts/reload_gtfs_complete.py
-exit
-systemctl restart wmata-collector
+df -h /mnt/pgdata          # block disk (PGDATA)
+df -h /                    # bundled SSD (OS)
+du -sh /mnt/pgdata/main    # Postgres data dir
 ```
 
 ---
 
-## Troubleshooting
+## 10. References
 
-### Collector Service Won't Start
-
-**Check logs**:
-```bash
-journalctl -u wmata-collector -n 50
-```
-
-**Common issues**:
-- Missing WMATA_API_KEY in .env
-- Database connection failed (check DATABASE_URL)
-- Permission issues (check file ownership)
-
-**Fix**:
-```bash
-# Verify .env file exists and has correct values
-su - wmata
-cat ~/wmata-dashboard/.env
-
-# Test database connection
-uv run python -c "from src.database import get_session; db = get_session(); print('DB OK'); db.close()"
-
-# Check file permissions
-ls -la ~/wmata-dashboard/.env
-```
-
-### No Data Being Collected
-
-**Check API key validity**:
-```bash
-su - wmata
-cd wmata-dashboard
-uv run python -c "
-from src.wmata_collector import WMATADataCollector
-import os
-from dotenv import load_dotenv
-load_dotenv()
-collector = WMATADataCollector(os.getenv('WMATA_API_KEY'))
-vehicles = collector.get_realtime_vehicle_positions()
-print(f'Fetched {len(vehicles)} vehicles')
-"
-```
-
-### Database Connection Errors
-
-**Check PostgreSQL is running**:
-```bash
-systemctl status postgresql
-```
-
-**Test manual connection**:
-```bash
-psql -U wmata -d wmata_dashboard -h localhost
-```
-
-**Reset database password** (if forgotten):
-```bash
-sudo -u postgres psql
-ALTER USER wmata WITH PASSWORD 'new_password';
-\q
-
-# Update .env file with new password
-```
-
-### Out of Disk Space
-
-**Find large files**:
-```bash
-du -sh /* | sort -h
-```
-
-**Clean up old backups manually**:
-```bash
-# Keep only last 7 days
-find /home/wmata/backups/ -name "wmata_db_*.sql.gz" -mtime +7 -delete
-```
-
-**Clean up old logs**:
-```bash
-journalctl --vacuum-time=7d
-```
-
-### High Memory Usage
-
-**Check processes**:
-```bash
-htop  # or: top
-```
-
-**Restart collector if needed**:
-```bash
-systemctl restart wmata-collector
-```
+- **Authoritative spec:** `docs/superpowers/specs/2026-05-28-cloud-migration-phase1-design.md`
+- **Phase F shrink runbook:** `scripts/migrate_drop_phase_f.py`
+- **AWS Lightsail docs:** <https://docs.aws.amazon.com/lightsail/>
+- **Systemd units:** `deployment/systemd/`
+- **Backup script:** `deployment/scripts/backup_db.sh`
+- **NOTES-48** (open until live cutover), **NOTES-49**, **NOTES-50** (later phases)
 
 ---
 
-## Next Steps: When Frontend is Ready
-
-When you're ready to make the frontend public:
-
-1. **Open firewall ports**:
-```bash
-ufw allow 80/tcp
-ufw allow 443/tcp
-```
-
-2. **Install nginx**:
-```bash
-apt install -y nginx
-```
-
-3. **Get domain name** and point to droplet IP
-
-4. **Set up SSL with Let's Encrypt**:
-```bash
-apt install -y certbot python3-certbot-nginx
-certbot --nginx -d your-domain.com
-```
-
-5. **Configure nginx reverse proxy** (example config to create later)
-
-6. **Create systemd service for API** (when serving frontend)
-
----
-
-## Support
-
-- **WMATA API Docs**: https://developer.wmata.com/docs/services/
-- **DigitalOcean Docs**: https://docs.digitalocean.com/
-- **Project Issues**: https://github.com/yourusername/wmata-dashboard/issues
-
----
-
-**Last Updated**: 2025-11-04
-**Deployment Cost**: $4/month (after $200 credit expires)
+**Last Updated:** 2026-06-03
+**Deployment Cost:** ~$17/mo ($12 instance + ~$5 block disk; S3 negligible at this scale)

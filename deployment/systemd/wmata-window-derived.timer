@@ -1,0 +1,21 @@
+[Unit]
+Description=WMATA Dashboard Tier-2 Derived Tables Rolling Window Timer
+Requires=wmata-window-derived.service
+
+[Timer]
+# Run nightly at 04:30 — 30 min after the tier-3 archival job (04:00),
+# so they don't contend for the DB at the same instant.
+# Staggered schedule:
+#   01:00 Sun — wmata-backup (weekly)
+#   02:00     — wmata-metrics (nightly batch)
+#   04:00     — wmata-archive-positions (tier-3)
+#   04:30     — this job (tier-2 window)
+# Note: server timezone should be set to America/New_York.
+OnCalendar=*-*-* 04:30:00
+
+RandomizedDelaySec=5min
+
+Persistent=true
+
+[Install]
+WantedBy=timers.target

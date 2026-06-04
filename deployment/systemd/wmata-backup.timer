@@ -1,0 +1,22 @@
+[Unit]
+Description=WMATA Dashboard Weekly Database Backup Timer
+Requires=wmata-backup.service
+
+[Timer]
+# Run weekly on Sunday at 01:00.
+# Staggered against the nightly jobs:
+#   02:00 — wmata-metrics (nightly batch)
+#   04:00 — wmata-archive-positions (tier-3 VP archival)
+#   04:30 — wmata-window-derived (tier-2 window)
+# Note: server timezone should be set to America/New_York.
+OnCalendar=Sun *-*-* 01:00:00
+
+# Random jitter up to 10 min to soften simultaneous S3 starts if
+# multiple instances were ever run.
+RandomizedDelaySec=10min
+
+# If the system was off at the scheduled time, run on next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
