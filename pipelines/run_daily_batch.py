@@ -74,7 +74,7 @@ PIPELINES: list[dict] = [
         # NOTES-72 Phase E.1 switched the primary trip_update derivation to
         # derive_stop_events_from_state (reads trip_update_state). Phase E.2
         # stopped the collector's snapshot dual-write. Phase F (the
-        # trip-update-state retirement, PR #TBD) deleted the old pipeline and
+        # trip-update-state retirement, PR #155) deleted the old pipeline and
         # its archive job; trip_update_snapshots is dropped via the manual
         # runbook in migrate_drop_phase_f.py.
         "name": "derive_stop_events_from_state",

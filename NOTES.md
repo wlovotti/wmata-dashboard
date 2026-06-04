@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-03. Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #TBD):
+Last edited 2026-06-03. Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #155):
 deleted `derive_stop_events_trip_updates.py`, `compare_old_vs_new_derivation.py`, and
 `archive_trip_update_snapshots.py`; removed the archive housekeeping entry from
 `run_daily_batch.py`; added `pipelines/retain_trip_update_state.py` + launchd timer
