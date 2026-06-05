@@ -16,7 +16,7 @@ EnvironmentFile=/home/wmata/wmata-dashboard/.env
 # own lookback window internally. Pass --lookback-days only for manual
 # catch-up runs (e.g. systemctl start wmata-metrics --property
 # ExecStart="... --lookback-days 14").
-ExecStart=/home/wmata/.local/bin/uv run python pipelines/run_daily_batch.py
+ExecStart=/home/wmata/wmata-dashboard/.venv/bin/python3 pipelines/run_daily_batch.py
 
 # Logging
 StandardOutput=append:/var/log/wmata/metrics.log

@@ -8,8 +8,9 @@ Requires=wmata-backup.service
 #   02:00 — wmata-metrics (nightly batch)
 #   04:00 — wmata-archive-positions (tier-3 VP archival)
 #   04:30 — wmata-window-derived (tier-2 window)
-# Note: server timezone should be set to America/New_York.
-OnCalendar=Sun *-*-* 01:00:00
+# Zone pinned in the line (systemd >= v252) so it fires at 01:00 Eastern
+# regardless of the server clock (UTC).
+OnCalendar=Sun *-*-* 01:00:00 America/New_York
 
 # Random jitter up to 10 min to soften simultaneous S3 starts if
 # multiple instances were ever run.
