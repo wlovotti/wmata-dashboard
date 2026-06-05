@@ -3,10 +3,10 @@ Description=WMATA Dashboard Daily Metrics Timer
 Requires=wmata-metrics.service
 
 [Timer]
-# Run daily at 2:00 AM Eastern Time
-# Note: Server timezone should be set to America/New_York
-OnCalendar=daily
-OnCalendar=*-*-* 02:00:00
+# Run daily at 2:00 AM Eastern Time. The explicit America/New_York suffix
+# (systemd >= v252) pins the zone regardless of the server clock (UTC), and
+# avoids the double-trigger that two OnCalendar lines (daily + 02:00) caused.
+OnCalendar=*-*-* 02:00:00 America/New_York
 
 # Add random delay to avoid load spikes
 RandomizedDelaySec=15min

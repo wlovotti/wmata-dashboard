@@ -6,7 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-03. Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #155):
+Last edited 2026-06-05. NOTES-48 live cutover: collector + Postgres now run on
+AWS Lightsail (PG16) under systemd — the laptop is no longer the live system.
+Fixed the systemd units in the same PR; NOTES-48 stays open for S3 backups,
+retention timers, and laptop retirement. See the rewritten NOTES-48 +
+`docs/DEPLOYMENT.md`.
+Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #155):
 deleted `derive_stop_events_trip_updates.py`, `compare_old_vs_new_derivation.py`, and
 `archive_trip_update_snapshots.py`; removed the archive housekeeping entry from
 `run_daily_batch.py`; added `pipelines/retain_trip_update_state.py` + launchd timer
@@ -163,37 +168,46 @@ footprint that removes the laptop as a single point of failure: a
 small Linux VM running self-hosted Postgres + the collector + the
 existing archive job. API and frontend stay local for now (Phase 3).
 
-Concrete steps:
-1. Provision a small VM (Hetzner CPX21 / DigitalOcean basic / AWS t4g.small;
-   ~$10-15/mo). Needs ≥150 GB disk so the post-dedup ~50 GB equilibrium
-   plus parquet archives and headroom all fit.
-2. Install Postgres (same major version as local — check
-   `src/database.py` and `pyproject.toml`).
-3. `pg_dump -Fc` the local DB, scp the dump, `pg_restore` on the VM.
-   Plan for hours of transfer at consumer-internet upload speed; do it
-   over a weekend or use `pg_dump | ssh | pg_restore` to avoid
-   intermediate disk.
-4. Move the WMATA API key onto the VM via `.env` (NOT in git).
-5. Run the collector under systemd (`Restart=on-failure`,
-   `StandardOutput=append:/var/log/wmata-collector.log`) so it survives
-   crashes and reboots without `caffeinate` / `disablesleep` hacks.
-6. Schedule `pipelines/retain_trip_update_state.py` and
-   `pipelines/run_daily_batch.py` via systemd timers (or cron).
-   (`archive_trip_update_snapshots.py` was deleted in the Phase F
-   retirement — its successor is `retain_trip_update_state.py`.)
-7. Point the local API at the VM's Postgres via SSH tunnel
-   (`ssh -L 5432:localhost:5432 vm` then `DATABASE_URL` to localhost),
-   so dev workflow doesn't change. Note that some pipelines doing bulk
-   writes (`derive_stop_events_*`, etc.) will be slow over a tunnel —
-   acceptable for backfills, run them on the VM for routine work.
-8. Park the local DB read-only as a backup until the cloud copy has
-   ≥7 days of clean operation; only then drop it.
-9. Once stable, `sudo pmset disablesleep 0` to reclaim normal sleep
-   on the laptop.
+**Status (2026-06-05): live cutover complete — the laptop is no longer the
+live system.** The authoritative plan and rationale are the design spec
+(`docs/superpowers/specs/2026-05-28-cloud-migration-phase1-design.md`) and the
+operator runbook (`docs/DEPLOYMENT.md`). The original step list here
+(Hetzner/DO, ≥150 GB, Postgres-matching-local) is superseded by what shipped:
 
-Out of scope for Phase 1: managed Postgres (NOTES-49), public API
-deployment (NOTES-50), automated backups beyond a weekly `pg_dump` to
-S3/B2/R2 (one-line cron, include).
+- **Host:** AWS Lightsail $12/mo (2 GB RAM), us-east-1, Ubuntu 24.04. `PGDATA`
+  on a 64 GB attached block disk; Postgres bound to localhost (verified
+  unreachable from the internet), SSH-key-only, 4 GB swap.
+- **PostgreSQL 16**, deliberately *not* local's 14 — PG14 is EOL Nov 2026 and a
+  14→16 `pg_restore` is routine. Dev + CI stay on 14; a 16→14 restore would
+  NOT work, so never dump from prod to restore locally (see CLAUDE.md).
+- **Cutover:** two-phase, near-zero loss. Bulk `pg_dump -Fc | pg_restore
+  --no-owner` ran while the collector kept collecting; then a delta-sync of the
+  three live tables (`vehicle_positions`, `collector_heartbeats`,
+  `trip_update_state`) plus a `setval` on `vehicle_positions_id_seq` so the
+  resumed collector couldn't collide on ids. ~13 min collection gap; verified
+  laptop == VM row-for-row on the live tables.
+- **systemd (this PR fixes the units):** `wmata-collector` (`Restart=always`,
+  enabled — survives reboots), nightly batch `wmata-metrics.timer` (2 AM ET),
+  weekly `pg_dump` `wmata-backup.timer` (Sun 1 AM ET). Bugs fixed: ExecStart now
+  runs the venv interpreter directly (`uv run` fails writing its cache under
+  `ProtectHome=read-only`); `ReadWritePaths` extended to the JSONL archive + PID
+  file dirs; collector `MemoryMax` 400M→600M (measured ~210 MB baseline); a
+  double-trigger `OnCalendar` removed; both timers zone-pinned to
+  `America/New_York` (the server clock is UTC).
+
+**Remaining before this item closes:**
+1. AWS CLI + IAM credentials → unlocks **S3 off-box backups** (wire
+   `S3_BACKUP_BUCKET` into `wmata-backup`) and **automatic block-disk
+   snapshots** (CLI-only; the Lightsail console can't enable them for disks).
+2. **Retention timers** (`wmata-archive-positions`, `wmata-window-derived`) —
+   deferred because they DELETE data: the tier-3 30-day window would drop the
+   oldest ~4 days of `vehicle_positions` on first run (data starts 2026-05-02),
+   and it archives to S3 (item 1). Enable only with S3 in place + explicit sign-off.
+3. **SSH tunnel** for the local API/frontend → cloud DB (overlaps NOTES-50).
+4. **7-day parallel run**, then retire the laptop DB and `pmset disablesleep 0`.
+
+Out of scope for Phase 1: managed Postgres (NOTES-49), public API deployment
+(NOTES-50).
 
 **2026-05-25 incident note.** Power loss on 2026-05-24 at 12:15 ET
 killed the collector mid-tick and lost ~12.5 hours of WMATA real-time
