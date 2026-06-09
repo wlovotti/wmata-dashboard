@@ -176,6 +176,7 @@ ssh wmata@52.54.130.186 \
 - **Systemd units:** `deployment/systemd/`
 - **Full cloud ops runbook:** `docs/DEPLOYMENT.md`
 - **Collector health check:** `scripts/collector_status.py`
+- **Schema/data migration ritual:** `docs/MIGRATIONS.md`
 - **VM:** AWS Lightsail us-east-1, static IP `52.54.130.186`. Provisioned via
   the `ubuntu` sudo account; app/repo/collector owned by the `wmata` user — all
   deploy work SSHes in as `wmata`. SSH key `~/.ssh/id_ed25519`.

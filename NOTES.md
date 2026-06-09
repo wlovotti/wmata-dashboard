@@ -16,12 +16,14 @@ laptop stopped cleanly at cutover) and opened NOTES-77 (collector `MemoryMax`
 too tight, causing scattered missed heartbeat ticks).
 Closed NOTES-78 — added the deploy runbook (`docs/DEPLOY.md`, PR #160):
 ordered steps for pull → daemon-reload → restart → smoke check, rollback
-procedure, and a one-liner to print the live SHA. Added NOTES-79
-(migration safety ritual — schema/data migrations now run against the single
-irreplaceable copy of WMATA history). Same PR aligned CI Postgres 15→16 to
-match the prod VM (it was a stale third version) and reconciled the
-PG-version claims in `CLAUDE.md`, NOTES-48, and `docs/DEPLOYMENT.md` — all
-three variously said CI/prod ran 14.
+procedure, and a one-liner to print the live SHA. Closed NOTES-79 — added the
+migration safety ritual (`docs/MIGRATIONS.md`, PR #161): backup-first
+checklist, test-on-prod-data step, transaction-wrapping guidance, and the
+`--dry-run` convention for new migration scripts; pointer added to `CLAUDE.md`
+and `docs/DEPLOY.md`. Same PR #159 aligned CI Postgres 15→16 to match the
+prod VM (it was a stale third version) and reconciled the PG-version claims in
+`CLAUDE.md`, NOTES-48, and `docs/DEPLOYMENT.md` — all three variously said
+CI/prod ran 14.
 Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #155):
 deleted `derive_stop_events_trip_updates.py`, `compare_old_vs_new_derivation.py`, and
 `archive_trip_update_snapshots.py`; removed the archive housekeeping entry from
@@ -406,35 +408,3 @@ that made the health check runnable on the VM in the first place.
 
 ---
 
-## NOTES-79. Migration safety ritual for data-plane schema changes
-
-**Severity: medium (irreplaceable prod data — a bad migration runs against the one copy).**
-**Effort: low (mostly process + a backup-first checklist; optional `--dry-run` convention).**
-
-Pre-cutover, `scripts/migrate_*.py` were low-stakes: "prod" was the dev
-laptop and a bad `ALTER` was annoying, not fatal. Now they run against the
-VM's Postgres, which holds the only copy of WMATA history since 2026-05-02 —
-the feed has no replay window, so a destructive or table-locking migration
-is potentially unrecoverable (cf. the global CLAUDE.md rule: never
-DELETE/DROP/ALTER without sign-off). CI's `check_schema_drift.py` validates
-migration SQL against the models, but it runs against an *empty* schema on a
-fresh CI Postgres — it cannot catch "this `ALTER` takes ACCESS EXCLUSIVE and
-locks a multi-GB table for 20 minutes" or "this backfill OOMs the 2 GB
-instance."
-
-Capture a standing ritual (in `CLAUDE.md` or a runbook) for any data-plane
-schema/data migration on the VM: (1) take a backup first and confirm it
-landed; (2) test the migration against a *restored copy of prod data*, not
-just the empty CI schema, to surface lock duration and row-count effects;
-(3) wrap the migration in an explicit transaction you can roll back;
-(4) adopt a `--dry-run` convention on migrate scripts that prints the SQL
-and affected row counts without committing. None of this is novel — it's the
-discipline the laptop-as-prod era let us skip.
-
-### Dependencies
-
-Step (1) overlaps NOTES-48 remaining item 1 (S3 off-box backups) — an
-untested backup is not a safety net. Pairs naturally with the deploy runbook
-(`docs/DEPLOY.md`, PR #160) — both are "operate the VM safely" work.
-
----

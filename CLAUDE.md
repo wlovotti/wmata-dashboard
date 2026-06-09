@@ -177,6 +177,9 @@ uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format gate (
     -v /work/node_modules -w /work mcr.microsoft.com/playwright:v1.60.0-noble
     bash -c "npm ci --silent && npx playwright test --update-snapshots"`
   See `frontend/README.md` for full details.
+- **Schema/data migrations on the VM require a pre-migration ritual:**
+  backup first, test on a restored prod-data copy, wrap in a transaction,
+  and use `--dry-run` if available. See `docs/MIGRATIONS.md`.
 - Project Claude tooling: auto-triggering skills go in
   `.claude/skills/<name>/SKILL.md`, explicit slash commands go in
   `.claude/commands/<name>.md`. Both are checked in.
