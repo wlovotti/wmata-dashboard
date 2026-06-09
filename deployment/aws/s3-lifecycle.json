@@ -1,0 +1,11 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-db-backups",
+      "Filter": { "Prefix": "wmata-db-backups/" },
+      "Status": "Enabled",
+      "Expiration": { "Days": 90 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+    }
+  ]
+}
