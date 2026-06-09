@@ -244,29 +244,84 @@ server, or note that OnCalendar= runs in the server's local timezone):**
 | wmata-window-derived | daily 04:30 | tier-2 stop_events/runs 365-day window |
 | wmata-backup | Sun 01:00 | weekly `pg_dump -Fc | xz` → local + optional S3 |
 
-### 5.2 S3 backup configuration
+### 5.2 S3 off-box backups (AWS S3)
 
-Set `S3_BACKUP_BUCKET` in `/home/wmata/wmata-dashboard/.env`:
+The weekly `wmata-backup` job (`deployment/scripts/backup_db.sh`) uploads each
+`pg_dump` to S3 when `S3_BACKUP_BUCKET` is set, and skips the upload silently
+otherwise (so the script stays locally runnable without AWS). **Validated
+end-to-end against the live bucket on 2026-06-09** (2.0 GiB dump uploaded).
 
-```bash
-S3_BACKUP_BUCKET=your-s3-bucket-name
-```
+**Credentials: Lightsail has no instance roles — you must use an IAM *user*
+access key.** Unlike EC2, a Lightsail *compute instance* cannot have an IAM role
+or instance profile attached — the Lightsail IAM docs state plainly that
+"Lightsail does not support service roles"
+(<https://docs.aws.amazon.com/lightsail/latest/userguide/security_iam_service-with-iam.html>).
+So the VM must carry a long-lived IAM user key. Create a dedicated,
+least-privilege user rather than reusing an admin key, and keep admin
+operations on a trusted workstation (the VM never holds account-wide creds).
 
-The backup script (`deployment/scripts/backup_db.sh`) uploads to S3 only when
-this variable is set. The `aws` CLI must be installed and credentials
-configured (e.g., via an IAM role attached to the Lightsail instance, or an
-IAM user access key in `~/.aws/credentials` as the `wmata` user).
+1. **Create the bucket** in the VM's region (`us-east-1`, to avoid cross-region
+   transfer cost). Block public access and enable versioning:
+   ```bash
+   aws s3api create-bucket --bucket <bucket> --region us-east-1   # us-east-1 takes NO LocationConstraint
+   aws s3api put-public-access-block --bucket <bucket> \
+     --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+   aws s3api put-bucket-versioning --bucket <bucket> \
+     --versioning-configuration Status=Enabled
+   ```
+2. **Create the least-privilege IAM user** using the policy in
+   `deployment/aws/s3-backup-policy.json` (it targets the deployed
+   `wmata-dashboard-backups` bucket — edit the ARNs if you use a different
+   name). It grants only `s3:ListBucket` on the bucket and
+   `s3:PutObject`/`s3:GetObject` on the `wmata-db-backups/` and
+   `wmata-vp-archive/` prefixes — deliberately **no `s3:DeleteObject`**, so a
+   compromised VM cannot wipe its own backups; expiry is the lifecycle rule's
+   job (step 4). `GetObject` is included because the tier-3 archive job
+   (`archive_vehicle_positions.py`) does a `HeadObject` read-back to verify an
+   upload before it deletes rows from Postgres.
+   ```bash
+   aws iam create-user --user-name wmata-vm-backup
+   aws iam put-user-policy --user-name wmata-vm-backup \
+     --policy-name wmata-s3-backup \
+     --policy-document file://deployment/aws/s3-backup-policy.json
+   aws iam create-access-key --user-name wmata-vm-backup   # copy the SecretAccessKey — shown ONCE
+   ```
+3. **On the VM:** install AWS CLI **v2** (the official bundle — *not*
+   `apt install awscli`, which is the older v1 line), then put the key + bucket
+   into the systemd `EnvironmentFile` (`/home/wmata/wmata-dashboard/.env`). Use
+   the `EnvironmentFile`, not `~/.aws/credentials`: the `wmata-backup` unit runs
+   with `ProtectHome=read-only`, and env vars are honored by both the CLI and
+   boto3 via the default credential chain regardless.
+   ```bash
+   sudo apt install -y unzip
+   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+   cd /tmp && unzip -q awscliv2.zip && sudo ./aws/install
 
-```bash
-# Install AWS CLI
-sudo apt install -y awscli
+   # Append creds (as the wmata user; the quoted heredoc protects $/backticks in the secret):
+   tee -a /home/wmata/wmata-dashboard/.env >/dev/null <<'EOF'
+   S3_BACKUP_BUCKET=<bucket>
+   AWS_DEFAULT_REGION=us-east-1
+   AWS_ACCESS_KEY_ID=<AKIA...>
+   AWS_SECRET_ACCESS_KEY=<secret>
+   EOF
+   chmod 600 /home/wmata/wmata-dashboard/.env
 
-# Test S3 access
-aws s3 ls s3://your-s3-bucket-name/
-```
-
-Add an S3 lifecycle rule to expire old dumps (recommended: expire objects
-with prefix `wmata-db-backups/` after 30–90 days).
+   # Smoke-test (empty output + exit 0 = success):
+   set -a; . /home/wmata/wmata-dashboard/.env; set +a
+   aws s3 ls s3://$S3_BACKUP_BUCKET/
+   ```
+4. **Lifecycle rule** — bound storage growth with
+   `deployment/aws/s3-lifecycle.json` (current dumps expire after 90 days;
+   noncurrent versions after 30 — the latter is **required** on a versioned
+   bucket or superseded versions accumulate forever and nothing is reclaimed):
+   ```bash
+   aws s3api put-bucket-lifecycle-configuration \
+     --bucket <bucket> --lifecycle-configuration file://deployment/aws/s3-lifecycle.json
+   ```
+5. **Test the full path:** `sudo systemctl start --no-block wmata-backup.service`,
+   then watch `ls -lh /home/wmata/backups/*.dump.xz` grow (the script logs
+   nothing during the dump — monitor the artifact, not the log), and finally
+   confirm the object landed: `aws s3 ls s3://<bucket>/wmata-db-backups/`.
 
 ### 5.3 Reclaim PR #152 pruned columns (post-cutover maintenance)
 
@@ -307,6 +362,38 @@ Lightsail block disks **cannot be resized in place.** To grow the PGDATA disk:
 Expect one or two such operations during the first year as the DB climbs
 toward the ~105 GB plateau. See
 <https://docs.aws.amazon.com/lightsail/latest/userguide/> for console steps.
+
+### 5.5 Automatic disk snapshots
+
+Daily automatic snapshots of the PGDATA block disk are a same-region,
+fast-restore complement to the off-box S3 dumps (§5.2) — different failure
+domain, so run both. **For block disks the auto-snapshot add-on is CLI/API-only;
+the Lightsail console cannot enable it for disks** (it can for instances).
+Lightsail retains the latest **7** daily auto-snapshots and auto-expires the
+rest; `snapshotTimeOfDay` is **UTC and hour-granular** (`HH:00`). **Enabled
+2026-06-09 at 08:00 UTC** (~04:00 ET — after the 02:00 ET metrics batch's heavy
+writes, so the snapshot captures a consistent post-batch state).
+
+```bash
+# Find the PGDATA disk name:
+aws lightsail get-disks --region us-east-1 \
+  --query 'disks[].{name:name,gb:sizeInGb,attachedTo:attachedTo}' --output table
+
+# Enable daily auto-snapshots at 08:00 UTC:
+aws lightsail enable-add-on --region us-east-1 \
+  --resource-name wmata-pgdata \
+  --add-on-request 'addOnType=AutoSnapshot,autoSnapshotAddOnRequest={snapshotTimeOfDay=08:00}'
+
+# Verify (status settles Enabling -> Enabled within ~1 min):
+aws lightsail get-disk --region us-east-1 --disk-name wmata-pgdata --query 'disk.addOns'
+
+# List snapshots once the first has fired:
+aws lightsail get-auto-snapshots --region us-east-1 --resource-name wmata-pgdata
+```
+
+To restore, create a new disk from an auto-snapshot
+(`aws lightsail create-disk-from-snapshot --use-latest-restorable-auto-snapshot`
+or `--restore-date`), then follow §5.4 to swap it in.
 
 ---
 

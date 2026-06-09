@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-08. NOTES-48 live cutover: collector + Postgres now run on
+Last edited 2026-06-09. NOTES-48 live cutover: collector + Postgres now run on
 AWS Lightsail (PG16) under systemd — the laptop is no longer the live system.
 Fixed the systemd units in the same PR; NOTES-48 stays open for S3 backups,
 retention timers, and laptop retirement. See the rewritten NOTES-48 +
@@ -15,6 +15,20 @@ continuous since cutover; reconciled NOTES-48 item 4 (no parallel collection —
 laptop stopped cleanly at cutover); raised collector MemoryMax 600M→1G (the
 collector MemoryMax raise, PR #162) to eliminate scattered missed heartbeat
 ticks caused by transient allocation peaks hitting the old ceiling.
+2026-06-09 NOTES-48 item 1 DONE — S3 off-box backups + automatic disk snapshots
+are live (this PR documents it). Created the `wmata-dashboard-backups` S3 bucket
+(us-east-1, public access blocked, versioned) and a least-privilege IAM user
+(`wmata-vm-backup`, no `s3:DeleteObject`); AWS CLI v2 + creds wired into the
+`wmata-backup` `EnvironmentFile`; weekly `pg_dump` upload validated end-to-end
+(2.0 GiB landed); 90-day + 30-day-noncurrent lifecycle rule applied; daily
+Lightsail auto-snapshots enabled on the `wmata-pgdata` disk at 08:00 UTC
+(CLI-only — the console can't do disks). Corrected `docs/DEPLOYMENT.md` §5.2,
+which wrongly suggested attaching an IAM role to the Lightsail instance —
+Lightsail has no instance roles ("does not support service roles"), so the VM
+must carry an IAM user key; added §5.5 for disk snapshots and checked in the
+policy/lifecycle JSON under `deployment/aws/`. NOTES-48 stays open for the
+destructive retention timers (item 2 — now S3-unblocked, awaits sign-off), the
+SSH tunnel (item 3), and the laptop soak (item 4, through ~2026-06-12).
 Closed NOTES-78 — added the deploy runbook (`docs/DEPLOY.md`, PR #160):
 ordered steps for pull → daemon-reload → restart → smoke check, rollback
 procedure, and a one-liner to print the live SHA. Closed NOTES-79 — added the
@@ -212,13 +226,23 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
   `America/New_York` (the server clock is UTC).
 
 **Remaining before this item closes:**
-1. AWS CLI + IAM credentials → unlocks **S3 off-box backups** (wire
-   `S3_BACKUP_BUCKET` into `wmata-backup`) and **automatic block-disk
-   snapshots** (CLI-only; the Lightsail console can't enable them for disks).
+1. ~~AWS CLI + IAM credentials → **S3 off-box backups** + **automatic block-disk
+   snapshots**.~~ **DONE 2026-06-09** (see the S3-backups/disk-snapshots PR and
+   `docs/DEPLOYMENT.md` §5.2 + §5.5). Bucket `wmata-dashboard-backups` (us-east-1,
+   versioned, public access blocked); least-privilege IAM user `wmata-vm-backup`
+   (PutObject/GetObject on the `wmata-db-backups/`+`wmata-vp-archive/` prefixes,
+   ListBucket, **no DeleteObject**); AWS CLI v2 + key in the `wmata-backup`
+   `EnvironmentFile`; weekly `pg_dump` upload validated (2.0 GiB); 90-day +
+   30-day-noncurrent lifecycle; daily auto-snapshots on `wmata-pgdata` at
+   08:00 UTC. Note: the tier-3 archive bucket var is `S3_ARCHIVE_BUCKET`
+   (distinct from `S3_BACKUP_BUCKET`); the one bucket serves both via separate
+   prefixes, and the IAM policy already grants the archive prefix.
 2. **Retention timers** (`wmata-archive-positions`, `wmata-window-derived`) —
    deferred because they DELETE data: the tier-3 30-day window would drop the
    oldest ~4 days of `vehicle_positions` on first run (data starts 2026-05-02),
-   and it archives to S3 (item 1). Enable only with S3 in place + explicit sign-off.
+   and it archives to S3. **S3 is now in place (item 1 done), so the only
+   remaining gate is explicit sign-off** — set `S3_ARCHIVE_BUCKET`, dry-run
+   first, then enable.
 3. **SSH tunnel** for the local API/frontend → cloud DB (overlaps NOTES-50).
 4. **Laptop retirement (read-only soak, in progress).** Note: there is *no
    ongoing parallel collection* — the laptop collector was stopped cleanly at
