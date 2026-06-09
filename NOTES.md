@@ -6,11 +6,14 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-05. NOTES-48 live cutover: collector + Postgres now run on
+Last edited 2026-06-08. NOTES-48 live cutover: collector + Postgres now run on
 AWS Lightsail (PG16) under systemd — the laptop is no longer the live system.
 Fixed the systemd units in the same PR; NOTES-48 stays open for S3 backups,
 retention timers, and laptop retirement. See the rewritten NOTES-48 +
-`docs/DEPLOYMENT.md`.
+`docs/DEPLOYMENT.md`. 2026-06-08 health check: VM collector verified healthy +
+continuous since cutover; reconciled NOTES-48 item 4 (no parallel collection —
+laptop stopped cleanly at cutover) and added item 5 (collector `MemoryMax` too
+tight, causing scattered missed heartbeat ticks).
 Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #155):
 deleted `derive_stop_events_trip_updates.py`, `compare_old_vs_new_derivation.py`, and
 `archive_trip_update_snapshots.py`; removed the archive housekeeping entry from
@@ -204,7 +207,25 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
    oldest ~4 days of `vehicle_positions` on first run (data starts 2026-05-02),
    and it archives to S3 (item 1). Enable only with S3 in place + explicit sign-off.
 3. **SSH tunnel** for the local API/frontend → cloud DB (overlaps NOTES-50).
-4. **7-day parallel run**, then retire the laptop DB and `pmset disablesleep 0`.
+4. **Laptop retirement (read-only soak, in progress).** Note: there is *no
+   ongoing parallel collection* — the laptop collector was stopped cleanly at
+   cutover (last write 2026-06-05 01:12 UTC, `"Combined collector stopped
+   successfully!"`), and the cutover already verified laptop == VM row-for-row.
+   What remains is a read-only soak: keep the laptop DB as a cold fallback
+   through ~2026-06-12 (7 days post-cutover), then `sudo pmset disablesleep 0`
+   to let the laptop sleep again. **Verified 2026-06-08:** VM collecting
+   continuously since cutover (`collector_status.py` ✓ healthy; position gaps
+   ≤91s/day; 2026-06-04 counts match the laptop exactly at 917,293 rows);
+   laptop still pinned awake (`SleepDisabled=1`) with nothing to collect.
+5. **Collector `MemoryMax` is too tight.** The unit caps the collector at 600M;
+   on the VM it runs right at the ceiling (~599.5M, ≈460K headroom, ~89M swap
+   peak). The pressure surfaces as a tail of missed 30s heartbeat ticks
+   (2026-06-06 and 06-07 logged ~2,200 heartbeats vs ~2,880 expected; median
+   gap held at 31s and max gap stayed ≤4min — no outage, just scattered slips).
+   No OOM kill yet (3+ day uptime, no restart). Raise `MemoryMax` (the 2 GB
+   instance + 4 GB swap has room), `daemon-reload`, and restart — the unit on
+   disk has already drifted from systemd's loaded copy, so a `daemon-reload` is
+   pending regardless.
 
 Out of scope for Phase 1: managed Postgres (NOTES-49), public API deployment
 (NOTES-50).
