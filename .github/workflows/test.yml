@@ -12,7 +12,9 @@ jobs:
 
     services:
       postgres:
-        image: postgres:15
+        # Pinned to 16 to match the production Lightsail VM (NOTES-48 cutover).
+        # CI is the prod-parity gate; local dev runs 14 for fast logic iteration.
+        image: postgres:16
         env:
           POSTGRES_USER: wmata
           POSTGRES_PASSWORD: wmata

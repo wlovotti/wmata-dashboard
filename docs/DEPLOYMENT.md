@@ -21,7 +21,7 @@ the spec §5 runbook.
 | Plan | $12/mo — 2 GB RAM, 60 GB SSD (OS only), 3 TB bundled transfer |
 | Region | us-east-1 (N. Virginia) — lowest latency to WMATA API |
 | OS | Ubuntu LTS (latest LTS at provision time) |
-| PostgreSQL | **14** (must match local 14.x — `src/database.py` / `pyproject.toml`) |
+| PostgreSQL | **16** (prod + CI; local dev runs 14 — a 14→16 `pg_restore` is routine, 16→14 is not supported) |
 | PGDATA | Attached Lightsail block-storage disk, starts ~50 GB, ~$5/mo |
 | Object storage | AWS S3 private bucket (weekly `pg_dump` + parquet archives) |
 | Firewall | SSH (22) only — ideally restricted to your IP; Postgres never publicly reachable |
@@ -92,11 +92,11 @@ uv --version
 exit
 ```
 
-### 2.5 PostgreSQL 14 — install and move PGDATA to attached disk
+### 2.5 PostgreSQL 16 — install and move PGDATA to attached disk
 
 ```bash
-# Install PostgreSQL 14
-sudo apt install -y postgresql-14 postgresql-client-14
+# Install PostgreSQL 16 (matches the production VM + CI; PG14 is EOL Nov 2026)
+sudo apt install -y postgresql-16 postgresql-client-16
 
 # Stop Postgres before moving PGDATA
 sudo systemctl stop postgresql
@@ -112,9 +112,9 @@ sudo mount /dev/xvdf /mnt/pgdata
 echo '/dev/xvdf /mnt/pgdata ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab
 
 # Move PGDATA
-sudo mv /var/lib/postgresql/14/main /mnt/pgdata/
-sudo ln -s /mnt/pgdata/main /var/lib/postgresql/14/main
-sudo chown -h postgres:postgres /var/lib/postgresql/14/main
+sudo mv /var/lib/postgresql/16/main /mnt/pgdata/
+sudo ln -s /mnt/pgdata/main /var/lib/postgresql/16/main
+sudo chown -h postgres:postgres /var/lib/postgresql/16/main
 
 # Update postgresql.conf if data_directory is set explicitly
 sudo -u postgres psql -c "SHOW data_directory;"   # verify
@@ -127,7 +127,7 @@ sudo systemctl status postgresql
 
 Postgres should only accept connections from localhost (the SSH tunnel delivers
 all client connections through localhost). Edit
-`/etc/postgresql/14/main/pg_hba.conf` and ensure only `127.0.0.1/32` (IPv4)
+`/etc/postgresql/16/main/pg_hba.conf` and ensure only `127.0.0.1/32` (IPv4)
 and `::1/128` (IPv6) local entries exist — remove any `0.0.0.0/0` or public
 entries. Reload after any change:
 

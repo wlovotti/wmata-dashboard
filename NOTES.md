@@ -14,6 +14,13 @@ retention timers, and laptop retirement. See the rewritten NOTES-48 +
 continuous since cutover; reconciled NOTES-48 item 4 (no parallel collection —
 laptop stopped cleanly at cutover) and opened NOTES-77 (collector `MemoryMax`
 too tight, causing scattered missed heartbeat ticks).
+Added NOTES-78 (deploy runbook — no record of which SHA is live on the VM;
+manual `git pull` + `systemctl` invites drift/half-deploys) and NOTES-79
+(migration safety ritual — schema/data migrations now run against the single
+irreplaceable copy of WMATA history). Same PR aligned CI Postgres 15→16 to
+match the prod VM (it was a stale third version) and reconciled the
+PG-version claims in `CLAUDE.md`, NOTES-48, and `docs/DEPLOYMENT.md` — all
+three variously said CI/prod ran 14.
 Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #155):
 deleted `derive_stop_events_trip_updates.py`, `compare_old_vs_new_derivation.py`, and
 `archive_trip_update_snapshots.py`; removed the archive housekeeping entry from
@@ -181,8 +188,10 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
   on a 64 GB attached block disk; Postgres bound to localhost (verified
   unreachable from the internet), SSH-key-only, 4 GB swap.
 - **PostgreSQL 16**, deliberately *not* local's 14 — PG14 is EOL Nov 2026 and a
-  14→16 `pg_restore` is routine. Dev + CI stay on 14; a 16→14 restore would
-  NOT work, so never dump from prod to restore locally (see CLAUDE.md).
+  14→16 `pg_restore` is routine. Local dev stays on 14; CI runs 16 to match
+  prod (aligned from a stale 15 in the PG-16 reconciliation PR — CI is the
+  prod-parity gate); a 16→14 restore would NOT work, so never dump from prod
+  to restore locally (see CLAUDE.md).
 - **Cutover:** two-phase, near-zero loss. Bulk `pg_dump -Fc | pg_restore
   --no-owner` ran while the collector kept collecting; then a delta-sync of the
   three live tables (`vehicle_positions`, `collector_heartbeats`,
@@ -393,5 +402,73 @@ from an OOM kill, and the missed ticks slightly understate coverage in
 Discovered during the 2026-06-08 post-cutover health check. Related: NOTES-48
 (set the 600M value), and the `collector_status.py` portability fix (PR #158)
 that made the health check runnable on the VM in the first place.
+
+---
+
+## NOTES-78. Deploy process / runbook for pushing code to the VM
+
+**Severity: medium (config/code drift — no record of which SHA is live on prod).**
+**Effort: low (a runbook) to medium (if scripted with verification).**
+
+Since the NOTES-48 cutover, code reaches the production VM by hand: `ssh`
+in, `git pull`, and remember to `sudo systemctl daemon-reload` + `restart`
+whatever changed. There is no script, no checklist, and no record of which
+commit is live. This invites three failure modes: (a) **drift** — the VM's
+running code silently diverges from `main` and you can't tell which SHA is
+deployed; (b) **half-deploys** — you pull new code or edit a systemd unit
+but forget the `daemon-reload`/`restart`, so stale code keeps running
+(NOTES-77 already caught the on-disk `wmata-collector.service` drifting from
+systemd's loaded copy — exactly this class of bug); (c) **no rollback** —
+when a deploy breaks the collector, you debug live while the feed clock
+keeps ticking and any gap becomes permanent.
+
+Minimum viable fix is a short `docs/DEPLOY.md` runbook (or a section in
+`docs/DEPLOYMENT.md`): the ordered steps to deploy (pull → which
+`systemctl daemon-reload`/`restart` per changed unit → verify via
+`scripts/collector_status.py` → how to roll back with `git checkout
+<prev-sha>`), plus a one-liner to print the live SHA (`ssh wmata@<vm>
+'git -C ~/wmata-dashboard rev-parse HEAD'`). A later increment is a
+`deploy.sh` that does pull + conditional restart + a post-deploy
+`collector_status.py` smoke check and refuses to deploy a dirty or behind
+tree. The goal is that deploying is boring and repeatable, not improvised
+each time.
+
+### Dependencies
+
+None hard. Pairs naturally with NOTES-79 (migration safety) — both are
+"operate the VM safely" work. A post-deploy smoke check reuses the
+`collector_status.py` health check (runnable on the VM since PR #158).
+
+---
+
+## NOTES-79. Migration safety ritual for data-plane schema changes
+
+**Severity: medium (irreplaceable prod data — a bad migration runs against the one copy).**
+**Effort: low (mostly process + a backup-first checklist; optional `--dry-run` convention).**
+
+Pre-cutover, `scripts/migrate_*.py` were low-stakes: "prod" was the dev
+laptop and a bad `ALTER` was annoying, not fatal. Now they run against the
+VM's Postgres, which holds the only copy of WMATA history since 2026-05-02 —
+the feed has no replay window, so a destructive or table-locking migration
+is potentially unrecoverable (cf. the global CLAUDE.md rule: never
+DELETE/DROP/ALTER without sign-off). CI's `check_schema_drift.py` validates
+migration SQL against the models, but it runs against an *empty* schema on a
+fresh CI Postgres — it cannot catch "this `ALTER` takes ACCESS EXCLUSIVE and
+locks a multi-GB table for 20 minutes" or "this backfill OOMs the 2 GB
+instance."
+
+Capture a standing ritual (in `CLAUDE.md` or a runbook) for any data-plane
+schema/data migration on the VM: (1) take a backup first and confirm it
+landed; (2) test the migration against a *restored copy of prod data*, not
+just the empty CI schema, to surface lock duration and row-count effects;
+(3) wrap the migration in an explicit transaction you can roll back;
+(4) adopt a `--dry-run` convention on migrate scripts that prints the SQL
+and affected row counts without committing. None of this is novel — it's the
+discipline the laptop-as-prod era let us skip.
+
+### Dependencies
+
+Step (1) overlaps NOTES-48 remaining item 1 (S3 off-box backups) — an
+untested backup is not a safety net. Otherwise independent.
 
 ---
