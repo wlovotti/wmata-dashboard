@@ -14,8 +14,9 @@ retention timers, and laptop retirement. See the rewritten NOTES-48 +
 continuous since cutover; reconciled NOTES-48 item 4 (no parallel collection —
 laptop stopped cleanly at cutover) and opened NOTES-77 (collector `MemoryMax`
 too tight, causing scattered missed heartbeat ticks).
-Added NOTES-78 (deploy runbook — no record of which SHA is live on the VM;
-manual `git pull` + `systemctl` invites drift/half-deploys) and NOTES-79
+Closed NOTES-78 — added the deploy runbook (`docs/DEPLOY.md`, PR #160):
+ordered steps for pull → daemon-reload → restart → smoke check, rollback
+procedure, and a one-liner to print the live SHA. Added NOTES-79
 (migration safety ritual — schema/data migrations now run against the single
 irreplaceable copy of WMATA history). Same PR aligned CI Postgres 15→16 to
 match the prod VM (it was a stale third version) and reconciled the
@@ -405,42 +406,6 @@ that made the health check runnable on the VM in the first place.
 
 ---
 
-## NOTES-78. Deploy process / runbook for pushing code to the VM
-
-**Severity: medium (config/code drift — no record of which SHA is live on prod).**
-**Effort: low (a runbook) to medium (if scripted with verification).**
-
-Since the NOTES-48 cutover, code reaches the production VM by hand: `ssh`
-in, `git pull`, and remember to `sudo systemctl daemon-reload` + `restart`
-whatever changed. There is no script, no checklist, and no record of which
-commit is live. This invites three failure modes: (a) **drift** — the VM's
-running code silently diverges from `main` and you can't tell which SHA is
-deployed; (b) **half-deploys** — you pull new code or edit a systemd unit
-but forget the `daemon-reload`/`restart`, so stale code keeps running
-(NOTES-77 already caught the on-disk `wmata-collector.service` drifting from
-systemd's loaded copy — exactly this class of bug); (c) **no rollback** —
-when a deploy breaks the collector, you debug live while the feed clock
-keeps ticking and any gap becomes permanent.
-
-Minimum viable fix is a short `docs/DEPLOY.md` runbook (or a section in
-`docs/DEPLOYMENT.md`): the ordered steps to deploy (pull → which
-`systemctl daemon-reload`/`restart` per changed unit → verify via
-`scripts/collector_status.py` → how to roll back with `git checkout
-<prev-sha>`), plus a one-liner to print the live SHA (`ssh wmata@<vm>
-'git -C ~/wmata-dashboard rev-parse HEAD'`). A later increment is a
-`deploy.sh` that does pull + conditional restart + a post-deploy
-`collector_status.py` smoke check and refuses to deploy a dirty or behind
-tree. The goal is that deploying is boring and repeatable, not improvised
-each time.
-
-### Dependencies
-
-None hard. Pairs naturally with NOTES-79 (migration safety) — both are
-"operate the VM safely" work. A post-deploy smoke check reuses the
-`collector_status.py` health check (runnable on the VM since PR #158).
-
----
-
 ## NOTES-79. Migration safety ritual for data-plane schema changes
 
 **Severity: medium (irreplaceable prod data — a bad migration runs against the one copy).**
@@ -469,6 +434,7 @@ discipline the laptop-as-prod era let us skip.
 ### Dependencies
 
 Step (1) overlaps NOTES-48 remaining item 1 (S3 off-box backups) — an
-untested backup is not a safety net. Otherwise independent.
+untested backup is not a safety net. Pairs naturally with the deploy runbook
+(`docs/DEPLOY.md`, PR #160) — both are "operate the VM safely" work.
 
 ---
