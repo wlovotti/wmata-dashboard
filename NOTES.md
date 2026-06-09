@@ -12,8 +12,8 @@ Fixed the systemd units in the same PR; NOTES-48 stays open for S3 backups,
 retention timers, and laptop retirement. See the rewritten NOTES-48 +
 `docs/DEPLOYMENT.md`. 2026-06-08 health check: VM collector verified healthy +
 continuous since cutover; reconciled NOTES-48 item 4 (no parallel collection —
-laptop stopped cleanly at cutover) and added item 5 (collector `MemoryMax` too
-tight, causing scattered missed heartbeat ticks).
+laptop stopped cleanly at cutover) and opened NOTES-77 (collector `MemoryMax`
+too tight, causing scattered missed heartbeat ticks).
 Closed NOTES-72 Phase F — trip-update snapshot path retirement (PR #155):
 deleted `derive_stop_events_trip_updates.py`, `compare_old_vs_new_derivation.py`, and
 `archive_trip_update_snapshots.py`; removed the archive housekeeping entry from
@@ -217,15 +217,8 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
    continuously since cutover (`collector_status.py` ✓ healthy; position gaps
    ≤91s/day; 2026-06-04 counts match the laptop exactly at 917,293 rows);
    laptop still pinned awake (`SleepDisabled=1`) with nothing to collect.
-5. **Collector `MemoryMax` is too tight.** The unit caps the collector at 600M;
-   on the VM it runs right at the ceiling (~599.5M, ≈460K headroom, ~89M swap
-   peak). The pressure surfaces as a tail of missed 30s heartbeat ticks
-   (2026-06-06 and 06-07 logged ~2,200 heartbeats vs ~2,880 expected; median
-   gap held at 31s and max gap stayed ≤4min — no outage, just scattered slips).
-   No OOM kill yet (3+ day uptime, no restart). Raise `MemoryMax` (the 2 GB
-   instance + 4 GB swap has room), `daemon-reload`, and restart — the unit on
-   disk has already drifted from systemd's loaded copy, so a `daemon-reload` is
-   pending regardless.
+5. **Collector `MemoryMax` tuning** — the 600M cap this item set is too tight
+   on the VM (scattered missed heartbeat ticks). Tracked separately as NOTES-77.
 
 Out of scope for Phase 1: managed Postgres (NOTES-49), public API deployment
 (NOTES-50).
@@ -366,5 +359,39 @@ filtering in the ranking (headway-based dispatching is the right
 intervention specifically for frequent routes) uses the
 WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 `src/frequent_routes.py`.
+
+---
+
+## NOTES-77. VM collector `MemoryMax` is too tight
+
+**Severity: low (no data loss yet — degradation, not outage).**
+
+The `wmata-collector` systemd unit caps the collector at `MemoryMax=600M`
+(raised from 400M during the NOTES-48 cutover). On the Lightsail VM the
+process runs right at that ceiling — `systemctl status` on 2026-06-08 showed
+~599.5M used, ≈460K headroom, ~89M swap peak. The memory pressure surfaces as
+a tail of dropped 30s heartbeat ticks: 2026-06-06 and 06-07 each logged
+~2,200 `collector_heartbeats` vs the ~2,880 a clean 30s cadence yields. It is
+*not* an outage — the median inter-heartbeat gap held at 31s and the max gap
+stayed ≤4 min; `vehicle_positions` fix-gaps stayed ≤91s/day. No OOM kill yet
+(3+ day uptime, no restart). But the collector is one allocation spike away
+from an OOM kill, and the missed ticks slightly understate coverage in
+`src/data_completeness.py`'s minute-bucket signal.
+
+**Fix:**
+1. Raise `MemoryMax` in `deployment/systemd/wmata-collector.service` — the
+   2 GB instance + 4 GB swap has room (try 900M–1G; measured steady-state RSS
+   is ~210–290M, so the 600M cap is being hit by transient peaks, not baseline).
+2. Deploy to the VM, `sudo systemctl daemon-reload`, `sudo systemctl restart
+   wmata-collector`. Note: the on-disk unit has **already drifted from
+   systemd's loaded copy** (`systemctl status` prints the "changed on disk, run
+   daemon-reload" warning), so a `daemon-reload` is pending regardless.
+3. Confirm the fix: after ~2 days, daily `collector_heartbeats` counts should
+   climb toward ~2,880, and `systemctl status` should show real headroom under
+   the new cap.
+
+Discovered during the 2026-06-08 post-cutover health check. Related: NOTES-48
+(set the 600M value), and the `collector_status.py` portability fix (PR #158)
+that made the health check runnable on the VM in the first place.
 
 ---
