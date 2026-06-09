@@ -17,7 +17,7 @@ too tight, causing scattered missed heartbeat ticks).
 Closed NOTES-78 — added the deploy runbook (`docs/DEPLOY.md`, PR #160):
 ordered steps for pull → daemon-reload → restart → smoke check, rollback
 procedure, and a one-liner to print the live SHA. Closed NOTES-79 — added the
-migration safety ritual (`docs/MIGRATIONS.md`, PR #TODO): backup-first
+migration safety ritual (`docs/MIGRATIONS.md`, PR #161): backup-first
 checklist, test-on-prod-data step, transaction-wrapping guidance, and the
 `--dry-run` convention for new migration scripts; pointer added to `CLAUDE.md`
 and `docs/DEPLOY.md`. Same PR #159 aligned CI Postgres 15→16 to match the
