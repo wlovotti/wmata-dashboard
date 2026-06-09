@@ -58,8 +58,20 @@ def _check_process():
 
 
 def _check_sleep_disabled():
-    """Return True if macOS pmset reports SleepDisabled=1, else False."""
-    result = subprocess.run(["pmset", "-g"], capture_output=True, text=True)
+    """Return True if macOS pmset reports SleepDisabled=1, False if not.
+
+    Returns None when sleep state is not a meaningful signal for this host:
+    on the Linux VM (no ``pmset``) systemd manages collector liveness, so
+    there is no lid-close-sleep concept to guard against. Guards on platform
+    first, then defends against a missing binary (``FileNotFoundError``) so
+    the check degrades gracefully instead of crashing the whole report.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(["pmset", "-g"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
     if result.returncode != 0:
         return None
     match = re.search(r"SleepDisabled\s+(\d)", result.stdout)
@@ -102,6 +114,8 @@ def main() -> int:
         print("sleep       disabled (lid-safe)")
     elif sleep_disabled is False:
         print("sleep       ENABLED — laptop will sleep on lid close")
+    elif sys.platform != "darwin":
+        print("sleep       n/a (non-macOS host — systemd manages liveness)")
     else:
         print("sleep       (could not query pmset)")
 
