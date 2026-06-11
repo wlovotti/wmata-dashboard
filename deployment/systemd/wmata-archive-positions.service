@@ -9,6 +9,10 @@ User=wmata
 Group=wmata
 WorkingDirectory=/home/wmata/wmata-dashboard
 Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Without this, Python buffers stdout when systemd redirects it to the log
+# file, and per-day progress lines appear only at process exit — useless for
+# monitoring a long catch-up run (observed on the 2026-06-10 first run).
+Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=/home/wmata/wmata-dashboard/.env
 
 # Tier-3 retention: archive vehicle_positions rows older than 30 days

@@ -9,6 +9,10 @@ User=wmata
 Group=wmata
 WorkingDirectory=/home/wmata/wmata-dashboard
 Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Without this, Python buffers stdout when systemd redirects it to the log
+# file, and progress lines appear only at process exit (see the matching
+# note in wmata-archive-positions.service).
+Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=/home/wmata/wmata-dashboard/.env
 
 # Tier-2 retention: DELETE stop_events and runs rows older than 365 days
