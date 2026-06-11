@@ -58,7 +58,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STAGING_DIR = REPO_ROOT / "archive" / "vehicle_positions"
 TABLE_NAME = "vehicle_positions"
 TS_COLUMN = "timestamp"
-KEY_PREFIX = "vehicle_positions"
+# Must stay under the wmata-vp-archive/ prefix — the wmata-vm-backup IAM
+# user (deployment/aws/s3-backup-policy.json) grants PutObject only there.
+KEY_PREFIX = "wmata-vp-archive"
 
 # The 14 columns the pruned VehiclePosition model persists (PR #152). The five
 # dropped GTFS-RT fields are intentionally excluded.

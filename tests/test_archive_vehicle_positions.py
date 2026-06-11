@@ -174,7 +174,7 @@ def test_orchestrator_happy_path_deletes_after_upload(monkeypatch, tmp_path):
     mod, record = _patch_orchestrator_io(monkeypatch, verify_result=(True, 3), upload_raises=False)
     rc = mod.archive_and_delete(retention_days=30, staging_dir=tmp_path, bucket="b")
     assert rc == 0
-    assert record["uploaded"] == ["vehicle_positions/2020-01-01.parquet"]
+    assert record["uploaded"] == ["wmata-vp-archive/2020-01-01.parquet"]
     assert record["deleted"] == [date(2020, 1, 1)]
 
 
@@ -249,6 +249,6 @@ def test_orchestrator_continues_after_one_day_fails(monkeypatch, tmp_path):
     assert rc == 1  # day 2 failed → overall failure
     assert record["deleted"] == [day1]  # day 1 committed; day 2 never deleted
     assert record["uploaded"] == [
-        "vehicle_positions/2020-01-01.parquet",
-        "vehicle_positions/2020-01-02.parquet",
+        "wmata-vp-archive/2020-01-01.parquet",
+        "wmata-vp-archive/2020-01-02.parquet",
     ]  # loop continued to day 2 after day 1
