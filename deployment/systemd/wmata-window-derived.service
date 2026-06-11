@@ -15,7 +15,10 @@ EnvironmentFile=/home/wmata/wmata-dashboard/.env
 # (spec §3.5). Keeps a full year of granular data hot for drill-down and
 # new-metric backfill. Re-derivation from archived raw inputs is the
 # recovery path if older history is ever needed.
-ExecStart=/home/wmata/.local/bin/uv run python pipelines/window_derived_tables.py --retention-days 365
+# Invoke the venv interpreter directly (not `uv run`) so the unit doesn't
+# need to write a uv cache under the read-only home (same fix as the live
+# units at cutover).
+ExecStart=/home/wmata/wmata-dashboard/.venv/bin/python3 pipelines/window_derived_tables.py --retention-days 365
 
 # Logging
 StandardOutput=append:/var/log/wmata/window-derived.log

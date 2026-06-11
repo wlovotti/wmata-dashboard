@@ -3,15 +3,17 @@ Description=WMATA Dashboard Tier-2 Derived Tables Rolling Window Timer
 Requires=wmata-window-derived.service
 
 [Timer]
-# Run nightly at 04:30 — 30 min after the tier-3 archival job (04:00),
-# so they don't contend for the DB at the same instant.
+# Run nightly at 04:30 Eastern — 30 min after the tier-3 archival job
+# (04:00 ET), so they don't contend for the DB at the same instant.
 # Staggered schedule:
-#   01:00 Sun — wmata-backup (weekly)
-#   02:00     — wmata-metrics (nightly batch)
-#   04:00     — wmata-archive-positions (tier-3)
-#   04:30     — this job (tier-2 window)
-# Note: server timezone should be set to America/New_York.
-OnCalendar=*-*-* 04:30:00
+#   01:00 Sun ET — wmata-backup (weekly)
+#   02:00     ET — wmata-metrics (nightly batch)
+#   04:00     ET — wmata-archive-positions (tier-3)
+#   04:30     ET — this job (tier-2 window)
+# Zone pinned in the line (systemd >= v252) so it fires at 04:30 Eastern
+# regardless of the server clock (UTC) — same pattern as wmata-metrics.timer
+# and wmata-backup.timer.
+OnCalendar=*-*-* 04:30:00 America/New_York
 
 RandomizedDelaySec=5min
 
