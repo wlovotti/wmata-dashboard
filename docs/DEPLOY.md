@@ -4,12 +4,20 @@ Code deployment to the production Lightsail VM (static IP `52.54.130.186`,
 AWS Lightsail us-east-1). SSH key: `~/.ssh/id_ed25519`. After a laptop reboot run
 `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` before connecting.
 
-**Two users — use `wmata`, not `ubuntu`.** `ubuntu` is the Lightsail image's
-default sudo account, used only for first-time provisioning. The app, the repo,
-and the collector are owned by a dedicated `wmata` system user (SSH keys were
-copied to it during provisioning, so `ssh wmata@52.54.130.186` works directly).
-**Every command below runs as `wmata`** — running `git pull` as `ubuntu` would
-fail against the `wmata`-owned repo. This matches `docs/DEPLOYMENT.md` §9.
+**Access model — always SSH as `ubuntu`, use `sudo -u wmata` for service ops.**
+`wmata` is a service account (owns the repo, collector, and data) that has no
+interactive SSH login and no sudo rights — it cannot be SSH'd into directly.
+Humans log in as `ubuntu` (the Lightsail sudo account) and assume the service
+identity for individual operations:
+
+```bash
+# Example: run collector_status as wmata
+ssh ubuntu@52.54.130.186 \
+  'sudo -u wmata sh -c "cd /home/wmata/wmata-dashboard && .venv/bin/python scripts/collector_status.py"'
+```
+
+All deploy commands below run as `ubuntu` with `sudo -u wmata` where needed.
+This matches `docs/DEPLOYMENT.md` §2.2.
 
 Repo path on VM: `/home/wmata/wmata-dashboard`
 
@@ -18,8 +26,8 @@ Repo path on VM: `/home/wmata/wmata-dashboard`
 ## 0. Before you deploy — know the live SHA
 
 ```bash
-ssh wmata@52.54.130.186 \
-  'git -C /home/wmata/wmata-dashboard rev-parse HEAD'
+ssh ubuntu@52.54.130.186 \
+  'sudo -u wmata git -C /home/wmata/wmata-dashboard rev-parse HEAD'
 ```
 
 Record this SHA. If the deploy goes wrong, this is what you roll back to.
@@ -31,17 +39,16 @@ Record this SHA. If the deploy goes wrong, this is what you roll back to.
 All commands run **on the VM** unless noted.
 
 ```bash
-ssh wmata@52.54.130.186
-cd /home/wmata/wmata-dashboard
+ssh ubuntu@52.54.130.186
 
 # Confirm the tree is clean (there should be no local edits on the VM)
-git status
+sudo -u wmata git -C /home/wmata/wmata-dashboard status
 
 # Pull from main
-git pull origin main
+sudo -u wmata git -C /home/wmata/wmata-dashboard pull origin main
 
 # Sync Python dependencies (in case pyproject.toml changed)
-uv sync --extra postgres
+sudo -u wmata sh -c 'cd /home/wmata/wmata-dashboard && uv sync --extra postgres'
 
 # Restart the collector to pick up the new code.
 # The collector is the only always-running service.
@@ -59,25 +66,26 @@ Then run the post-deploy smoke check (see §4).
 
 When a `.service` or `.timer` file under `deployment/systemd/` has changed,
 you must copy the updated unit file(s) to `/etc/systemd/system/` **and**
-reload systemd before restarting.
+reload systemd before restarting. See `docs/DEPLOYMENT.md` §2 for the
+canonical §2 copy + daemon-reload + restart sequence.
 
 ```bash
-ssh wmata@52.54.130.186
-cd /home/wmata/wmata-dashboard
+ssh ubuntu@52.54.130.186
 
-git pull origin main
-uv sync --extra postgres
+sudo -u wmata git -C /home/wmata/wmata-dashboard pull origin main
+sudo -u wmata sh -c 'cd /home/wmata/wmata-dashboard && uv sync --extra postgres'
 
 # Copy whichever unit files changed:
-sudo cp deployment/systemd/wmata-collector.service    /etc/systemd/system/
-sudo cp deployment/systemd/wmata-metrics.service      /etc/systemd/system/
-sudo cp deployment/systemd/wmata-metrics.timer        /etc/systemd/system/
-sudo cp deployment/systemd/wmata-backup.service       /etc/systemd/system/
-sudo cp deployment/systemd/wmata-backup.timer         /etc/systemd/system/
-sudo cp deployment/systemd/wmata-archive-positions.service  /etc/systemd/system/
-sudo cp deployment/systemd/wmata-archive-positions.timer    /etc/systemd/system/
-sudo cp deployment/systemd/wmata-window-derived.service     /etc/systemd/system/
-sudo cp deployment/systemd/wmata-window-derived.timer       /etc/systemd/system/
+REPO=/home/wmata/wmata-dashboard
+sudo cp ${REPO}/deployment/systemd/wmata-collector.service    /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-metrics.service      /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-metrics.timer        /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-backup.service       /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-backup.timer         /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-archive-positions.service  /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-archive-positions.timer    /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-window-derived.service     /etc/systemd/system/
+sudo cp ${REPO}/deployment/systemd/wmata-window-derived.timer       /etc/systemd/system/
 
 # Always reload after copying unit files
 sudo systemctl daemon-reload
@@ -117,17 +125,16 @@ If the deploy breaks the collector, revert to the previous SHA immediately to
 minimise the data gap.
 
 ```bash
-ssh wmata@52.54.130.186
-cd /home/wmata/wmata-dashboard
+ssh ubuntu@52.54.130.186
 
 # Stop the broken collector first (SIGINT for a clean shutdown)
 sudo systemctl stop wmata-collector.service
 
 # Check out the last known-good SHA (recorded in §0)
-git checkout <prev-sha>
+sudo -u wmata git -C /home/wmata/wmata-dashboard checkout <prev-sha>
 
 # If the bad deploy included unit file changes, also restore the old units:
-sudo cp deployment/systemd/wmata-collector.service /etc/systemd/system/
+sudo cp /home/wmata/wmata-dashboard/deployment/systemd/wmata-collector.service /etc/systemd/system/
 sudo systemctl daemon-reload
 
 # Restart on the old code
@@ -145,28 +152,21 @@ before re-attempting the deploy.
 Run this after every deploy (or rollback):
 
 ```bash
-# On the VM:
-cd /home/wmata/wmata-dashboard
-uv run python scripts/collector_status.py
+# From the laptop (no tunnel needed for status):
+ssh ubuntu@52.54.130.186 \
+  'sudo -u wmata sh -c "cd /home/wmata/wmata-dashboard && .venv/bin/python scripts/collector_status.py"'
 ```
 
 Expected healthy output: process alive, sleep-state normal, recent
 `vehicle_positions` rows arriving, no log-level ERROR lines.
-
-If running from the laptop (tunnel not needed for status):
-
-```bash
-ssh wmata@52.54.130.186 \
-  'cd /home/wmata/wmata-dashboard && uv run python scripts/collector_status.py'
-```
 
 ---
 
 ## 5. Check current live SHA at any time
 
 ```bash
-ssh wmata@52.54.130.186 \
-  'git -C /home/wmata/wmata-dashboard rev-parse HEAD'
+ssh ubuntu@52.54.130.186 \
+  'sudo -u wmata git -C /home/wmata/wmata-dashboard rev-parse HEAD'
 ```
 
 ---
@@ -177,6 +177,5 @@ ssh wmata@52.54.130.186 \
 - **Full cloud ops runbook:** `docs/DEPLOYMENT.md`
 - **Collector health check:** `scripts/collector_status.py`
 - **Schema/data migration ritual:** `docs/MIGRATIONS.md`
-- **VM:** AWS Lightsail us-east-1, static IP `52.54.130.186`. Provisioned via
-  the `ubuntu` sudo account; app/repo/collector owned by the `wmata` user — all
-  deploy work SSHes in as `wmata`. SSH key `~/.ssh/id_ed25519`.
+- **VM:** AWS Lightsail us-east-1, static IP `52.54.130.186`. SSH as `ubuntu`
+  (the sudo account); service ops use `sudo -u wmata`. SSH key `~/.ssh/id_ed25519`.

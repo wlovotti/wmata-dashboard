@@ -6,7 +6,7 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-09. NOTES-48 live cutover: collector + Postgres now run on
+Last edited 2026-06-10. NOTES-48 live cutover: collector + Postgres now run on
 AWS Lightsail (PG16) under systemd — the laptop is no longer the live system.
 Fixed the systemd units in the same PR; NOTES-48 stays open for S3 backups,
 retention timers, and laptop retirement. See the rewritten NOTES-48 +
@@ -29,6 +29,10 @@ must carry an IAM user key; added §5.5 for disk snapshots and checked in the
 policy/lifecycle JSON under `deployment/aws/`. NOTES-48 stays open for the
 destructive retention timers (item 2 — now S3-unblocked, awaits sign-off), the
 SSH tunnel (item 3), and the laptop soak (item 4, through ~2026-06-12).
+Closed NOTES-80 (PR #TODO) — hardened the `wmata` service account on the VM
+(no interactive SSH, password locked, no sudo; humans log in as `ubuntu` and
+use `sudo -u wmata`). Updated `docs/DEPLOYMENT.md` §2.2 and `docs/DEPLOY.md`
+to document the hardened access model.
 Closed NOTES-78 — added the deploy runbook (`docs/DEPLOY.md`, PR #160):
 ordered steps for pull → daemon-reload → restart → smoke check, rollback
 procedure, and a one-liner to print the live SHA. Closed NOTES-79 — added the
