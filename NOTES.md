@@ -10,7 +10,12 @@ Last edited 2026-06-10. NOTES-48 live cutover: collector + Postgres now run on
 AWS Lightsail (PG16) under systemd — the laptop is no longer the live system.
 Fixed the systemd units in the same PR; NOTES-48 stays open for S3 backups,
 retention timers, and laptop retirement. See the rewritten NOTES-48 +
-`docs/DEPLOYMENT.md`. 2026-06-08 health check: VM collector verified healthy +
+`docs/DEPLOYMENT.md`.
+NOTES-48 item 2 DONE — retention timers enabled. Fixed `uv run`→venv-interpreter
+bug in both service units, added `archive/vehicle_positions/` to `ReadWritePaths`,
+zone-pinned both timer `OnCalendar` lines to `America/New_York`, and added the
+enablement runbook to `docs/DEPLOYMENT.md` §5.6. Sign-off given + enablement
+performed 2026-06-10. Items 3 and 4 remain open. 2026-06-08 health check: VM collector verified healthy +
 continuous since cutover; reconciled NOTES-48 item 4 (no parallel collection —
 laptop stopped cleanly at cutover); raised collector MemoryMax 600M→1G (the
 collector MemoryMax raise, PR #162) to eliminate scattered missed heartbeat
@@ -241,12 +246,21 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
    08:00 UTC. Note: the tier-3 archive bucket var is `S3_ARCHIVE_BUCKET`
    (distinct from `S3_BACKUP_BUCKET`); the one bucket serves both via separate
    prefixes, and the IAM policy already grants the archive prefix.
-2. **Retention timers** (`wmata-archive-positions`, `wmata-window-derived`) —
+2. ~~**Retention timers** (`wmata-archive-positions`, `wmata-window-derived`) —
    deferred because they DELETE data: the tier-3 30-day window would drop the
    oldest ~4 days of `vehicle_positions` on first run (data starts 2026-05-02),
-   and it archives to S3. **S3 is now in place (item 1 done), so the only
-   remaining gate is explicit sign-off** — set `S3_ARCHIVE_BUCKET`, dry-run
-   first, then enable.
+   and it archives to S3. S3 is now in place (item 1 done), so the only
+   remaining gate is explicit sign-off — set `S3_ARCHIVE_BUCKET`, dry-run
+   first, then enable.~~ **DONE 2026-06-10** — Fixed the latent `uv run`→venv-interpreter
+   bug in both service units (`ExecStart` now uses `.venv/bin/python3`, matching
+   the live units' cutover fix); added `archive/vehicle_positions/` to
+   `ReadWritePaths` in `wmata-archive-positions.service` (the staging parquet
+   dir the script writes before S3 upload); pinned both timer `OnCalendar` lines
+   to `America/New_York` (server clock is UTC). Enablement runbook added to
+   `docs/DEPLOYMENT.md` §5.6 with dry-run commands (run as `sudo -u wmata`), first-run
+   expectations (tier-3 archives ~4 days; tier-2 is a no-op until 2027), and
+   pointer to `docs/DEPLOY.md` §2 for the cp-units + daemon-reload step. Sign-off
+   given 2026-06-10; enablement performed same day per the runbook.
 3. **SSH tunnel** for the local API/frontend → cloud DB (overlaps NOTES-50).
 4. **Laptop retirement (read-only soak, in progress).** Note: there is *no
    ongoing parallel collection* — the laptop collector was stopped cleanly at

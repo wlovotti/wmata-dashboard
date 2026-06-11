@@ -15,7 +15,10 @@ EnvironmentFile=/home/wmata/wmata-dashboard/.env
 # to S3 parquet, then DELETE them from Postgres (spec §3.5).
 # --retention-days 30 matches the spec's short window (the proximity
 # derivation runs within ~1 day of collection; 30 days covers reruns).
-ExecStart=/home/wmata/.local/bin/uv run python pipelines/archive_vehicle_positions.py --retention-days 30
+# Invoke the venv interpreter directly (not `uv run`) so the unit doesn't
+# need to write a uv cache under the read-only home (same fix as the live
+# units at cutover).
+ExecStart=/home/wmata/wmata-dashboard/.venv/bin/python3 pipelines/archive_vehicle_positions.py --retention-days 30
 
 # Logging
 StandardOutput=append:/var/log/wmata/archive-positions.log
@@ -31,7 +34,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/log/wmata /home/wmata/wmata-dashboard/logs
+# archive_vehicle_positions.py stages parquet under archive/vehicle_positions/
+# before uploading to S3, so that directory must also be writable.
+ReadWritePaths=/var/log/wmata /home/wmata/wmata-dashboard/logs /home/wmata/wmata-dashboard/archive
 
 # Archival over S3 can be slow for large catch-up batches; allow up to 2h.
 TimeoutSec=2h

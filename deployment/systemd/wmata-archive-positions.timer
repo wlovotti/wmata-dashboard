@@ -3,14 +3,16 @@ Description=WMATA Dashboard Tier-3 Vehicle Positions Archival Timer
 Requires=wmata-archive-positions.service
 
 [Timer]
-# Run nightly at 04:00.
+# Run nightly at 04:00 Eastern.
 # Staggered against other jobs:
-#   01:00 Sun — wmata-backup (weekly)
-#   02:00     — wmata-metrics (nightly batch)
-#   04:00     — this job (tier-3 archival)
-#   04:30     — wmata-window-derived (tier-2 window)
-# Note: server timezone should be set to America/New_York.
-OnCalendar=*-*-* 04:00:00
+#   01:00 Sun ET — wmata-backup (weekly)
+#   02:00     ET — wmata-metrics (nightly batch)
+#   04:00     ET — this job (tier-3 archival)
+#   04:30     ET — wmata-window-derived (tier-2 window)
+# Zone pinned in the line (systemd >= v252) so it fires at 04:00 Eastern
+# regardless of the server clock (UTC) — same pattern as wmata-metrics.timer
+# and wmata-backup.timer.
+OnCalendar=*-*-* 04:00:00 America/New_York
 
 RandomizedDelaySec=5min
 

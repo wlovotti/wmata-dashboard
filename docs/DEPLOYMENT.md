@@ -420,6 +420,98 @@ To restore, create a new disk from an auto-snapshot
 (`aws lightsail create-disk-from-snapshot --use-latest-restorable-auto-snapshot`
 or `--restore-date`), then follow §5.4 to swap it in.
 
+### 5.6 Enable retention timers (tier-3 VP archival + tier-2 derived-table window)
+
+Two nightly housekeeping jobs keep the DB from growing without bound. They were
+authored on 2026-06-03 but held until (a) S3 was in place (item 1, done
+2026-06-09) and (b) explicit user sign-off was given, because both jobs perform
+destructive `DELETE`s. **Sign-off given 2026-06-10.** The deployment checklist
+below was run on that date.
+
+**What each job does:**
+
+| Unit | Schedule | Action |
+|---|---|---|
+| `wmata-archive-positions` | daily 04:00 ET | Stages `vehicle_positions` rows older than 30 days to local zstd parquet, uploads to `s3://<bucket>/vehicle_positions/<date>.parquet`, verifies the upload, then DELETEs from Postgres. After all deletions, runs a regular (non-FULL) VACUUM. |
+| `wmata-window-derived` | daily 04:30 ET | DELETEs `stop_events` + `runs` rows whose `service_date` is older than 365 days. |
+
+**First-run expectations:**
+
+- **Tier-3 (`wmata-archive-positions`):** on first run, rows older than 30 days are
+  archived. Since collection started 2026-05-02 and the window is 30 days from
+  run date, the first run (2026-06-10) will archive+delete approximately 4 days
+  of `vehicle_positions` (2026-05-02 through ~2026-05-10). Verify the dry-run
+  output lists those dates.
+
+- **Tier-2 (`wmata-window-derived`):** the 365-day window runs from the run date.
+  Since data starts 2026-05-02 and a full year hasn't elapsed, the first run is
+  expected to delete **zero rows**. The script will print `DRY-RUN: would delete
+  {'stop_events': 0, 'runs': 0}`.
+
+**Deployment checklist:**
+
+1. **Set `S3_ARCHIVE_BUCKET` in the EnvironmentFile.** The archive pipeline uses
+   `S3_ARCHIVE_BUCKET` (distinct from `S3_BACKUP_BUCKET`); both can point at the
+   same `wmata-dashboard-backups` bucket, as the IAM user `wmata-vm-backup`
+   already grants the `wmata-vp-archive/` prefix. On the VM (as `ubuntu`):
+
+   ```bash
+   # Append to the wmata EnvironmentFile (the quoted heredoc protects $ in secrets):
+   sudo -u wmata tee -a /home/wmata/wmata-dashboard/.env >/dev/null <<'EOF'
+   S3_ARCHIVE_BUCKET=wmata-dashboard-backups
+   EOF
+   chmod 600 /home/wmata/wmata-dashboard/.env
+   ```
+
+2. **Install unit files per `docs/DEPLOY.md` §2** (copy to `/etc/systemd/system/`
+   + `daemon-reload` + restart — `git pull` on the VM does **not** update installed
+   units). In particular copy the four retention units:
+
+   ```bash
+   REPO=/home/wmata/wmata-dashboard
+   sudo cp ${REPO}/deployment/systemd/wmata-archive-positions.service /etc/systemd/system/
+   sudo cp ${REPO}/deployment/systemd/wmata-archive-positions.timer    /etc/systemd/system/
+   sudo cp ${REPO}/deployment/systemd/wmata-window-derived.service     /etc/systemd/system/
+   sudo cp ${REPO}/deployment/systemd/wmata-window-derived.timer       /etc/systemd/system/
+   sudo systemctl daemon-reload
+   ```
+
+3. **Dry-run both scripts first** (as the `wmata` user via `sudo -u wmata`):
+
+   ```bash
+   # Tier-3: should list ~4 days of vehicle_positions to archive
+   sudo -u wmata sh -c 'cd /home/wmata/wmata-dashboard && \
+     .venv/bin/python3 pipelines/archive_vehicle_positions.py --dry-run --retention-days 30'
+
+   # Tier-2: should show zero rows (data started 2026-05-02, 365-day window not yet reached)
+   sudo -u wmata sh -c 'cd /home/wmata/wmata-dashboard && \
+     .venv/bin/python3 pipelines/window_derived_tables.py --dry-run --retention-days 365'
+   ```
+
+   **Expected tier-3 dry-run output:** lines like
+   `DRY-RUN 2026-05-02: would archive NNN rows → s3://wmata-dashboard-backups/vehicle_positions/2026-05-02.parquet, then DELETE from vehicle_positions`
+   for each expired UTC date (expect ~4 dates from 2026-05-02 to ~2026-05-10).
+   If the bucket name is wrong or `S3_ARCHIVE_BUCKET` is unset, the dry-run still
+   runs (it prints the plan without contacting S3).
+
+   **Expected tier-2 dry-run output:** `DRY-RUN: would delete {'stop_events': 0, 'runs': 0}`
+
+4. **Enable both timers:**
+
+   ```bash
+   sudo systemctl enable --now wmata-archive-positions.timer
+   sudo systemctl enable --now wmata-window-derived.timer
+   ```
+
+5. **Verify:**
+
+   ```bash
+   systemctl list-timers --all | grep wmata
+   ```
+
+   Expected: `wmata-archive-positions.timer` and `wmata-window-derived.timer`
+   listed with next-trigger times at 04:00 ET and 04:30 ET respectively.
+
 ---
 
 ## 6. Backup / restore drill
