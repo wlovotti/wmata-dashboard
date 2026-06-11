@@ -437,16 +437,25 @@ below was run on that date.
 
 **First-run expectations:**
 
-- **Tier-3 (`wmata-archive-positions`):** on first run, rows older than 30 days are
-  archived. Since collection started 2026-05-02 and the window is 30 days from
-  run date, the first run (2026-06-10) will archive+delete approximately 4 days
-  of `vehicle_positions` (2026-05-02 through ~2026-05-10). Verify the dry-run
-  output lists those dates.
+- **Tier-3 (`wmata-archive-positions`):** the window is 30 days back from the
+  *run date*, so the first-run backlog is everything from the start of
+  collection (2026-05-02) up to that cutoff — it grows by a day for every day
+  enablement waits. Verify the dry-run lists exactly that date range before
+  enabling. **Actual first run (2026-06-10):** 10,030,782 rows across 16 UTC
+  dates — the expected 2026-05-03 → 2026-05-12 backlog *plus six phantom dates
+  from October 2025* (~2.26M rows with bogus vehicle-reported timestamps
+  predating collection; see the phantom-timestamp NOTES item). Run time ~1¾ h,
+  dominated by the post-DELETE VACUUM; steady-state nightly runs handle one
+  ~1M-row day and are far shorter. A day already partially past the cutoff is
+  archived **whole** (the script expires whole UTC days), so rows can leave
+  Postgres up to ~24 h before their 30-day birthday — harmless, and they're in
+  S3 first.
 
 - **Tier-2 (`wmata-window-derived`):** the 365-day window runs from the run date.
-  Since data starts 2026-05-02 and a full year hasn't elapsed, the first run is
-  expected to delete **zero rows**. The script will print `DRY-RUN: would delete
-  {'stop_events': 0, 'runs': 0}`.
+  Since data starts 2026-05-02 and a full year hasn't elapsed, runs are
+  expected to delete **zero rows** until 2027. The script will print `DRY-RUN:
+  would delete {'stop_events': 0, 'runs': 0}` (confirmed on the 2026-06-10
+  first run).
 
 **Deployment checklist:**
 
@@ -479,7 +488,7 @@ below was run on that date.
 3. **Dry-run both scripts first** (as the `wmata` user via `sudo -u wmata`):
 
    ```bash
-   # Tier-3: should list ~4 days of vehicle_positions to archive
+   # Tier-3: should list every vehicle_positions day older than 30 days
    sudo -u wmata sh -c 'cd /home/wmata/wmata-dashboard && \
      .venv/bin/python3 pipelines/archive_vehicle_positions.py --dry-run --retention-days 30'
 
@@ -490,9 +499,14 @@ below was run on that date.
 
    **Expected tier-3 dry-run output:** lines like
    `DRY-RUN 2026-05-02: would archive NNN rows → s3://wmata-dashboard-backups/wmata-vp-archive/2026-05-02.parquet, then DELETE from vehicle_positions`
-   for each expired UTC date (expect ~4 dates from 2026-05-02 to ~2026-05-10).
+   for each expired UTC date (everything from the oldest data to the 30-day
+   cutoff — sanity-check the range, and treat dates predating collection as a
+   signal of bogus vehicle timestamps, not a script bug).
    If the bucket name is wrong or `S3_ARCHIVE_BUCKET` is unset, the dry-run still
-   runs (it prints the plan without contacting S3).
+   runs (it prints the plan without contacting S3). **Caveat:** the dry-run never
+   touches S3, so it cannot catch credential/prefix problems — the IAM user only
+   grants the `wmata-vp-archive/` prefix, which is why `KEY_PREFIX` in
+   `pipelines/archive_vehicle_positions.py` must match it (PR #166).
 
    **Expected tier-2 dry-run output:** `DRY-RUN: would delete {'stop_events': 0, 'runs': 0}`
 

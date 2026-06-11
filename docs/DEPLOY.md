@@ -38,6 +38,13 @@ Record this SHA. If the deploy goes wrong, this is what you roll back to.
 
 All commands run **on the VM** unless noted.
 
+> **Run git as the `wmata` user — `sudo -u wmata git ...`, never plain
+> `sudo git ...`.** A root-run pull writes `.git` metadata and the pulled
+> files as root, and every subsequent pull as `wmata` then fails with
+> `cannot open '.git/FETCH_HEAD': Permission denied`. This bit us on
+> 2026-06-10 (98 root-owned files from an earlier root pull). Recovery:
+> `sudo find /home/wmata/wmata-dashboard -not -user wmata -exec chown wmata:wmata {} +`
+
 ```bash
 ssh ubuntu@52.54.130.186
 

@@ -177,6 +177,15 @@ target lists directly.
   WMATA's official. Tracked but not yet scoped — user wants
   comparability with WMATA's scorecard for now.
 
+### Independent of the redesign
+
+- **NOTES-81 Phantom vehicle-reported timestamps.** ~2.26M
+  `vehicle_positions` rows carried October-2025 timestamps predating
+  collection; investigate scope + add a collector-side sanity guard.
+- **NOTES-82 Redundant vehicle_positions indexes.** 9 indexes on the
+  hottest write path; 3 single-column ones are composite-shadowed —
+  measure usage and drop the dead ones.
+
 ---
 
 ## NOTES-20. Tighter rider-experience OTP
@@ -260,7 +269,17 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
    `docs/DEPLOYMENT.md` §5.6 with dry-run commands (run as `sudo -u wmata`), first-run
    expectations (tier-3 archives ~4 days; tier-2 is a no-op until 2027), and
    pointer to `docs/DEPLOY.md` §2 for the cp-units + daemon-reload step. Sign-off
-   given 2026-06-10; enablement performed same day per the runbook.
+   given 2026-06-10; enablement performed same day per the runbook. PR #166
+   (same day) fixed `KEY_PREFIX` to match the IAM grant (`wmata-vp-archive/`,
+   not `vehicle_positions/`) — caught in pre-enablement review; the dry-run
+   can't see S3-permission mismatches. **First run executed + verified
+   2026-06-10:** 10,030,782 rows / 16 UTC dates archived to S3 and deleted,
+   VACUUM clean, post-run dry-run reports zero expired rows; both timers
+   active (04:00 / 04:30 ET). The run surfaced ~2.26M rows with phantom
+   October-2025 timestamps (now NOTES-81) and motivated NOTES-82 (9-index
+   write amplification). Enablement also hit root-owned `.git` files from an
+   earlier root-run pull (fixed via `chown`; warning added to
+   `docs/DEPLOY.md` §1).
 3. **SSH tunnel** for the local API/frontend → cloud DB (overlaps NOTES-50).
 4. **Laptop retirement (read-only soak, in progress).** Note: there is *no
    ongoing parallel collection* — the laptop collector was stopped cleanly at
@@ -418,4 +437,69 @@ WMATA-designated list in `config/frequent_routes.yaml`, loaded via
 
 ---
 
+
+## NOTES-81. Phantom vehicle-reported timestamps in vehicle_positions
+
+**Severity: low (data hygiene; the rows are preserved in S3).**
+
+The 2026-06-10 first run of the tier-3 retention job surfaced six UTC
+dates from **October 2025** in `vehicle_positions` — 2025-10-12, -16,
+-18, -19, -20, -21, totaling ~2.26M rows (2025-10-20 alone had 1.53M
+rows, more than any real collection day) — despite collection starting
+2026-05-02. The `timestamp` column stores the GTFS-RT vehicle-reported
+GPS-fix time, which is unvalidated: stale AVL clocks produce timestamps
+months in the past. All six dates were archived to
+`s3://wmata-dashboard-backups/wmata-vp-archive/2025-10-*.parquet` and
+deleted from Postgres by the retention job, so the live table is clean
+*today* — but nothing stops new phantom rows from accumulating.
+
+Work:
+1. **Collector-side sanity guard** — reject (or store with a flag) any
+   vehicle timestamp more than a few hours away from collection time
+   (`collected_at` exists for exactly this comparison). Log a counter so
+   feed-quality regressions are visible in `collector_status.py`.
+2. **Check downstream contamination** — per-date pipelines only process
+   recent service dates, so the phantom dates were almost certainly
+   never derived into `stop_events`; verify with a quick query against
+   `stop_events`/`runs` for those dates and note the result here.
+3. Optional forensics: the archived parquet files preserve the rows if
+   the "which vehicles / which collection days" question ever matters.
+
+### Dependencies
+
+Independent.
+
+---
+
+## NOTES-82. Redundant indexes on vehicle_positions
+
+**Severity: low (write amplification + maintenance cost).**
+
+Production `vehicle_positions` carries **9 indexes**; the model defines
+all of them, so this is design debt, not drift. Three single-column
+indexes (`ix_vehicle_positions_vehicle_id`, `_route_id`, `_trip_id`,
+from `index=True`) are shadowed by the composites
+(`idx_vehicle_timestamp`, `idx_route_timestamp`, `idx_trip_timestamp`)
+whose leading column serves the same lookups. `_collected_at` usage is
+unknown. Costs observed 2026-06-10: every collector insert (~1M
+rows/day) maintains all 9; the post-retention VACUUM index sweep — the
+dominant cost of the nightly job's first run — scanned all 9.
+
+Work:
+1. Measure on the VM after ≥1 week of normal traffic:
+   `SELECT indexrelname, idx_scan FROM pg_stat_user_indexes WHERE
+   relname = 'vehicle_positions';` (stats accumulate since the last
+   reset — confirm the window before trusting zeros).
+2. Drop confirmed-unused indexes via the migration ritual
+   (`docs/MIGRATIONS.md`): remove `index=True` in `src/models.py` and
+   `DROP INDEX CONCURRENTLY` on the VM in the same change.
+3. Expected win: lower insert overhead and faster nightly VACUUMs;
+   a few GB of disk back.
+
+### Dependencies
+
+Independent. Don't start before ~2026-06-17 so step 1's stats window
+covers a representative week.
+
+---
 
