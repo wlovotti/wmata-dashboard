@@ -432,7 +432,7 @@ below was run on that date.
 
 | Unit | Schedule | Action |
 |---|---|---|
-| `wmata-archive-positions` | daily 04:00 ET | Stages `vehicle_positions` rows older than 30 days to local zstd parquet, uploads to `s3://<bucket>/vehicle_positions/<date>.parquet`, verifies the upload, then DELETEs from Postgres. After all deletions, runs a regular (non-FULL) VACUUM. |
+| `wmata-archive-positions` | daily 04:00 ET | Stages `vehicle_positions` rows older than 30 days to local zstd parquet, uploads to `s3://<bucket>/wmata-vp-archive/<date>.parquet`, verifies the upload, then DELETEs from Postgres. After all deletions, runs a regular (non-FULL) VACUUM. |
 | `wmata-window-derived` | daily 04:30 ET | DELETEs `stop_events` + `runs` rows whose `service_date` is older than 365 days. |
 
 **First-run expectations:**
@@ -489,7 +489,7 @@ below was run on that date.
    ```
 
    **Expected tier-3 dry-run output:** lines like
-   `DRY-RUN 2026-05-02: would archive NNN rows → s3://wmata-dashboard-backups/vehicle_positions/2026-05-02.parquet, then DELETE from vehicle_positions`
+   `DRY-RUN 2026-05-02: would archive NNN rows → s3://wmata-dashboard-backups/wmata-vp-archive/2026-05-02.parquet, then DELETE from vehicle_positions`
    for each expired UTC date (expect ~4 dates from 2026-05-02 to ~2026-05-10).
    If the bucket name is wrong or `S3_ARCHIVE_BUCKET` is unset, the dry-run still
    runs (it prints the plan without contacting S3).
