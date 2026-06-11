@@ -58,12 +58,11 @@ ssh-keygen -t ed25519 -C "wmata-lightsail"
 ### 2.2 Initial server hardening
 
 ```bash
-# SSH in as the default Lightsail user (usually 'ubuntu')
+# SSH in as the default Lightsail user (always 'ubuntu')
 ssh -i ~/.ssh/id_ed25519 ubuntu@<INSTANCE_IP>
 
-# Create application user
+# Create application user (no sudo, no interactive SSH — service account only)
 adduser wmata
-usermod -aG sudo wmata
 rsync --archive --chown=wmata:wmata ~/.ssh /home/wmata
 
 # Disable password login
@@ -72,6 +71,32 @@ sudo systemctl reload sshd
 
 # Verify firewall allows only SSH (Lightsail's built-in firewall handles ingress;
 # optionally add ufw as a second layer for defense-in-depth)
+```
+
+**Access model:** humans always SSH as `ubuntu` (the Lightsail sudo account) and
+assume the service identity via `sudo -u wmata <cmd>` for service-owned
+operations. `wmata` has no interactive SSH login (no `authorized_keys`), no
+usable password (locked with `passwd -l wmata`), and no sudo rights. The systemd
+units run as `User=wmata`, which is unaffected by these restrictions — systemd
+activates the unit directly without going through SSH or PAM login. This leaves a
+full audit trail in the sudo log for any human-initiated service operations.
+
+If you are migrating an existing VM that was provisioned with `wmata` in the
+`sudo` group and an SSH key, harden it like this:
+
+```bash
+# Disable wmata's interactive SSH (rename, don't delete — easier to re-enable if needed)
+sudo mv /home/wmata/.ssh/authorized_keys /home/wmata/.ssh/authorized_keys.disabled
+
+# Lock the wmata password (passwd -S wmata should show 'L' after this)
+sudo passwd -l wmata
+
+# Remove wmata from the sudo group
+sudo deluser wmata sudo
+
+# Verify: 'L' in the second field, no 'sudo' in groups
+sudo passwd -S wmata
+groups wmata
 ```
 
 ### 2.3 System packages
@@ -172,27 +197,27 @@ Follows spec §5 Phase 2 closely:
 kill -INT $(cat logs/collector.pid)
 
 # 2. Stream dump directly to VM (no intermediate file)
-pg_dump -Fc -d wmata_dashboard | ssh wmata@<INSTANCE_IP> \
-  'pg_restore -U wmata -d wmata_dashboard -Fc'
+pg_dump -Fc -d wmata_dashboard | ssh ubuntu@<INSTANCE_IP> \
+  'sudo -u wmata pg_restore -U wmata -d wmata_dashboard -Fc'
 # Expect ~1–3 hours at typical consumer upload speeds for ~28 GB.
 
 # 3. On the VM — verify row counts match laptop:
 #    (run same queries on both sides and compare)
-ssh wmata@<INSTANCE_IP> 'psql -U wmata -d wmata_dashboard \
+ssh ubuntu@<INSTANCE_IP> 'sudo -u wmata psql -U wmata -d wmata_dashboard \
   -c "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 20;"'
 
 # 4. Move WMATA API key to VM .env
-ssh wmata@<INSTANCE_IP> 'nano /home/wmata/wmata-dashboard/.env'
+ssh ubuntu@<INSTANCE_IP> 'sudo -u wmata nano /home/wmata/wmata-dashboard/.env'
 # Set: WMATA_API_KEY=<key>
 #      DATABASE_URL=postgresql://wmata:<password>@localhost/wmata_dashboard
 
 # 5. Start collector on VM under systemd
-ssh wmata@<INSTANCE_IP> 'sudo systemctl enable --now wmata-collector.service'
-ssh wmata@<INSTANCE_IP> 'journalctl -u wmata-collector -f'
+ssh ubuntu@<INSTANCE_IP> 'sudo systemctl enable --now wmata-collector.service'
+ssh ubuntu@<INSTANCE_IP> 'journalctl -u wmata-collector -f'
 # Verify vehicle_positions row count is climbing.
 
 # 6. From laptop — open the SSH tunnel and point local API at VM
-ssh -N -L 5432:localhost:5432 wmata@<INSTANCE_IP> &
+ssh -N -L 5432:localhost:5432 ubuntu@<INSTANCE_IP> &
 # In .env on laptop:
 #   DATABASE_URL=postgresql://wmata:<password>@localhost/wmata_dashboard
 # Then restart the local API:
@@ -399,7 +424,7 @@ or `--restore-date`), then follow §5.4 to swap it in.
 
 ## 6. Backup / restore drill
 
-**Create a backup manually:**
+**Create a backup manually** (run as `ubuntu` on the VM):
 ```bash
 sudo -u wmata /home/wmata/wmata-dashboard/deployment/scripts/backup_db.sh
 ```
@@ -448,17 +473,21 @@ The local laptop DB is kept read-only as a fallback for ≥7 days post-cutover.
 
 ## 9. Day-to-day operations
 
+All commands below are run as `ubuntu` on the VM (`ssh ubuntu@52.54.130.186`).
+Use `sudo -u wmata <cmd>` whenever operating on wmata-owned files or processes.
+See `docs/DEPLOY.md` for the full deploy runbook.
+
 **Check all service statuses:**
 ```bash
-systemctl status wmata-collector
-systemctl list-timers --all | grep wmata
-journalctl -u wmata-collector --since "1 hour ago"
+sudo systemctl status wmata-collector
+sudo systemctl list-timers --all | grep wmata
+sudo journalctl -u wmata-collector --since "1 hour ago"
 ```
 
 **Restart collector (e.g., after a code update):**
 ```bash
-git -C /home/wmata/wmata-dashboard pull origin main
-uv -C /home/wmata/wmata-dashboard sync --extra postgres
+sudo -u wmata git -C /home/wmata/wmata-dashboard pull origin main
+sudo -u wmata sh -c 'cd /home/wmata/wmata-dashboard && uv sync --extra postgres'
 sudo systemctl restart wmata-collector
 ```
 
@@ -490,5 +519,5 @@ du -sh /mnt/pgdata/main    # Postgres data dir
 
 ---
 
-**Last Updated:** 2026-06-03
+**Last Updated:** 2026-06-10
 **Deployment Cost:** ~$17/mo ($12 instance + ~$5 block disk; S3 negligible at this scale)
