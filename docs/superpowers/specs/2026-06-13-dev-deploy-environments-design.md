@@ -122,9 +122,11 @@ and the live state of the latter.
 One script; disposable target; prod snapshot as source.
 
 ```
-bin/refresh-dev-db.sh             # drop+recreate local `wmata_dashboard`, restore latest S3 dump
-bin/refresh-dev-db.sh --scratch   # same, into `wmata_dashboard_scratch` — leaves the dev DB untouched
-bin/refresh-dev-db.sh --from-vm   # fresh pg_dump over the tunnel instead of S3 (for today's data)
+bin/refresh-dev-db.sh                # slim (default): drop+recreate local `wmata_dashboard`, restore S3 dump WITHOUT the raw-feed tables
+bin/refresh-dev-db.sh --full         # include raw-feed tables (vehicle_positions, trip_update_state) so the pipeline can run
+bin/refresh-dev-db.sh --prune-gtfs   # additionally delete is_current=False GTFS history after restore (claws back ~8 GB; transient spike + VACUUM)
+bin/refresh-dev-db.sh --scratch      # restore into `wmata_dashboard_scratch` — leaves the dev DB untouched (combine with --full for pipeline rehearsal)
+bin/refresh-dev-db.sh --from-vm      # fresh pg_dump over the tunnel instead of S3 (for today's data)
 ```
 
 - **Default source: the weekly S3 dump** under
@@ -136,9 +138,30 @@ bin/refresh-dev-db.sh --from-vm   # fresh pg_dump over the tunnel instead of S3 
     admin identity). One-time setup.
   - The script resolves "latest" by listing the prefix and selecting the most
     recent object (exact key-naming confirmed during implementation).
+- **Slim is the default — disk footprint, measured.** The read-only API never
+  queries the raw-feed tables (verified: `vehicle_positions` and
+  `trip_update_state` appear nowhere in `api/`; they are pipeline *input* only).
+  Slim excludes them at restore time via `pg_restore -L` (TOC filter), so those
+  ~14 GB are **never written to disk** — no transient spike. Excluded set:
+  `vehicle_positions`, `trip_update_state`, `timepoint_times`,
+  `collector_heartbeats`. Footprints (from the frozen 2026-06-05 full copy;
+  current VM is smaller post-retention):
+  - **Full** ≈ 31 GiB · **Slim (default)** ≈ 17 GiB · **Slim + `--prune-gtfs`**
+    ≈ 9 GiB.
+- **Accepted consequence of slim:** a slim dev DB **cannot run the derivation
+  pipeline** (no raw inputs). This is fine — pure UI/API/schema work uses slim;
+  pipeline or migration-rehearsal work that touches the pipeline uses `--full`
+  (or `--scratch --full`). See §4.4.
+- **`--prune-gtfs`** deletes `is_current=False` rows from the versioned GTFS
+  tables (`stop_times` is 88% stale history — 30.3M of 34.4M rows — that the app
+  never selects, since every GTFS query filters `is_current=True`). Unlike the
+  table-level slim exclusion, this is a post-restore `DELETE` + `VACUUM FULL`, so
+  the full `stop_times` (~9.4 GB) is materialized transiently before the prune.
+  Opt-in for that reason.
 - **`--scratch`** restores into a *separate database in the same local PG16
   cluster* (`wmata_dashboard_scratch`), isolated for schema/data purposes
-  (migrations are per-database). The dev DB is untouched.
+  (migrations are per-database). The dev DB is untouched. Honors `--full` /
+  `--prune-gtfs`.
 - **`--from-vm`** is the only path that uses the tunnel — a `pg_dump -Fc` over
   `bin/db-tunnel.sh` for when weekly-stale data is not fresh enough.
 - The script must be safe to re-run (idempotent drop+recreate) and must refuse
@@ -148,8 +171,9 @@ bin/refresh-dev-db.sh --from-vm   # fresh pg_dump over the tunnel instead of S3 
 
 1. **Develop** the migration + feature against the **dev DB** (apply migration,
    build feature, iterate normally).
-2. **Rehearse** before prod: `bin/refresh-dev-db.sh --scratch` → apply the
-   migration to the pristine scratch copy → verify with
+2. **Rehearse** before prod: `bin/refresh-dev-db.sh --scratch` (add `--full` if
+   the migration or its verification touches the pipeline / raw-feed tables) →
+   apply the migration to the pristine scratch copy → verify with
    `scripts/check_schema_drift.py` and a pipeline smoke run. This is the
    `docs/MIGRATIONS.md` "test on restored prod data" step, now a one-command
    rehearsal that **does not disturb in-progress dev work**.
@@ -209,8 +233,11 @@ approach" — it was never meant to be the dev loop.
 - Local PostgreSQL 16 cluster running; `wmata_dashboard` restored from a prod
   snapshot; app serves against it with no tunnel running.
 - `bin/refresh-dev-db.sh` reloads the dev DB from the latest S3 dump in one
-  command; `--scratch` produces an isolated `wmata_dashboard_scratch` without
-  touching the dev DB; `--from-vm` works over the tunnel.
+  command; the default (slim) restore excludes the raw-feed tables and lands
+  ~17 GiB with the app fully functional; `--full` includes them so the pipeline
+  can run; `--prune-gtfs` reaches ~9 GiB; `--scratch` produces an isolated
+  `wmata_dashboard_scratch` without touching the dev DB; `--from-vm` works over
+  the tunnel.
 - `VITE_API_URL` and an API settings module exist; default dev behavior is
   unchanged; prod origins are configurable without code edits.
 - `.env` points dev at local PG16; `.env.example` documents both profiles.
@@ -222,8 +249,15 @@ approach" — it was never meant to be the dev loop.
 
 - **Exact S3 backup key-naming** for "latest" resolution — confirm during
   implementation (the weekly `pg_dump` upload path/pattern).
-- **Restore time** for a ~2 GiB custom-format dump into local PG16 — expected
-  to be a few minutes; confirm it is fast enough to make "just re-refresh"
-  genuinely cheap (the premise of the disposability argument).
+- **Restore time** for the ~2 GiB custom-format dump into local PG16 — expected
+  to be a few minutes for the slim default (raw-feed tables skipped at the TOC
+  level, so their data is never restored); confirm it is fast enough to make
+  "just re-refresh" genuinely cheap (the premise of the disposability argument).
+  `--prune-gtfs` adds a `VACUUM FULL` pass — confirm that cost is acceptable.
 - **Local AWS credential setup** must be documented so the refresh script is
   not first-run-when-needed.
+
+**Resolved during review:** dev disk footprint. Measured against the frozen
+2026-06-05 copy: full ≈ 31 GiB, slim ≈ 17 GiB, slim + `--prune-gtfs` ≈ 9 GiB.
+Slim is the default; the user accepted that a slim DB cannot run the derivation
+pipeline (use `--full` for that).
