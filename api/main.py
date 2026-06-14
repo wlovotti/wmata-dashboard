@@ -37,6 +37,7 @@ from api.aggregations import (
     get_schedule_audit,
     get_system_trend_data,
 )
+from api.config import settings
 from src.database import get_session
 from src.models import Corridor, GTFSSnapshot, VehiclePosition
 from src.route_diagnostics import ALL_PERIODS as DIAGNOSTIC_PERIODS
@@ -94,7 +95,7 @@ app = FastAPI(
 # Enable CORS for frontend development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your frontend domain
+    allow_origins=settings.cors_allow_origins,  # dev: ["*"]; prod: set CORS_ALLOW_ORIGINS
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -65,11 +65,17 @@ DATABASE_URL=postgresql:///wmata_test uv run python scripts/migrate_<name>.py
 dropdb wmata_test
 ```
 
-**Alternative — local restore (PG14 only for non-PG16-specific SQL):**
+**Alternative — local scratch DB:**
 
-A `pg_restore` from the prod VM (PG16) into a local PG14 cluster is *not*
-supported — never `pg_dump` from prod to restore locally. Use the VM test DB
-approach above unless you have a local PG16 install.
+Rehearse against a throwaway copy without disturbing your dev DB:
+
+    bin/refresh-dev-db.sh --scratch          # schema-only migrations
+    bin/refresh-dev-db.sh --scratch --full   # if the migration touches the pipeline / raw-feed tables
+
+Apply the migration to `wmata_dashboard_scratch`, then verify with
+`scripts/check_schema_drift.py` and a pipeline smoke run before touching the VM.
+Local dev is now PostgreSQL 16 (matching prod), so a prod snapshot restores
+cleanly — the former 14↔16 restore footgun is retired.
 
 ---
 

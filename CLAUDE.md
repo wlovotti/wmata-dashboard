@@ -11,12 +11,13 @@ cloud setup and `NOTES.md` for the active punch list.
 - **PostgreSQL only.** `src/database.py` requires `DATABASE_URL`; there is
   no SQLite fallback in production. Tests run on SQLite in-memory and set
   `DATABASE_URL=sqlite:///:memory:` via `tests/conftest.py` monkeypatch.
-  **Version skew:** the production Lightsail VM **and CI** run **PostgreSQL
-  16**; local dev runs **14** for fast logic iteration — CI is the
-  prod-parity gate, so a green build exercises prod's engine, not a third
-  version. A 14→16 `pg_restore` is routine (it's how the cloud DB was
-  loaded), but a 16→14 restore is *not* supported — never `pg_dump` from
-  prod to restore into a local 14 cluster.
+  **Uniform PostgreSQL 16.** The production Lightsail VM, CI, **and local
+  dev** all run **PostgreSQL 16** (local upgraded from 14 on 2026-06-14).
+  Local dev loads a recent prod snapshot via `bin/refresh-dev-db.sh` —
+  slim by default (drops the raw-feed tables the read-only API never reads;
+  ~17 GiB), `--full` to include them for pipeline work. See
+  `docs/DEPLOYMENT.md`. The former 14↔16 skew and "never restore 16→14"
+  footgun are retired.
 
 - **Stop_events / runs are the architectural foundation.** Per-route
   metrics (OTP, service-delivered, EWT, bunching, excess-trip-time) are
