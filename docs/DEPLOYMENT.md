@@ -25,7 +25,7 @@ the spec §5 runbook.
 | PGDATA | Attached Lightsail block-storage disk, starts ~50 GB, ~$5/mo |
 | Object storage | AWS S3 private bucket (weekly `pg_dump` + parquet archives) |
 | Firewall | SSH (22) only — ideally restricted to your IP; Postgres never publicly reachable |
-| DB access from laptop | SSH tunnel only: `bin/db-tunnel.sh` (forwards local **5433** → VM 5432; 5433 avoids the local dev Postgres@14 on 5432) |
+| DB access from laptop | Dev uses a local PostgreSQL 16 copy via `bin/refresh-dev-db.sh` (see "Local development data" below). `bin/db-tunnel.sh` (local **5433** → VM 5432) is ops-only — ad-hoc prod `psql` + `--from-vm` refresh |
 
 See spec §3 for the full rationale. See spec §3.5 for the three-tier retention
 model that bounds the DB to a ~105 GB plateau.
@@ -228,6 +228,21 @@ bin/db-tunnel.sh              # or, manually:
 # Then restart the local API:
 uv run uvicorn api.main:app --reload
 ```
+
+### Local development data
+
+Dev runs against a local PostgreSQL 16 copy of the prod dataset, refreshed on
+demand — never against the live VM DB.
+
+    bin/refresh-dev-db.sh              # slim (~17 GiB): everything the API reads, no raw-feed tables
+    bin/refresh-dev-db.sh --full       # add raw-feed tables so the pipeline can run (~31 GiB)
+    bin/refresh-dev-db.sh --prune-gtfs # also drop stale GTFS history (~9 GiB)
+
+It pulls the latest weekly dump from
+`s3://wmata-dashboard-backups/wmata-db-backups/` (needs local AWS creds with
+`s3:GetObject`+`ListBucket` on that prefix). The SSH tunnel (`bin/db-tunnel.sh`)
+is now ops-only — ad-hoc prod `psql` and `bin/refresh-dev-db.sh --from-vm` — not
+the dev DB connection.
 
 ---
 

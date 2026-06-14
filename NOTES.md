@@ -6,7 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-13. Closed NOTES-48 items 3 + 4. Item 4 (laptop
+Last edited 2026-06-14. Landed the dev/deploy environment work: local dev is
+now fully on PostgreSQL 16 (upgraded from 14 on 2026-06-14, so local == CI ==
+prod), and an on-demand `bin/refresh-dev-db.sh` S3 restore replaces the
+tunnel-as-dev-DB setup — `bin/db-tunnel.sh` is demoted to ops-only. This
+retires the 14↔16 skew and recontextualizes NOTES-88 (no longer blocks dev).
+Earlier (2026-06-13): closed NOTES-48 items 3 + 4. Item 4 (laptop
 retirement): soak ran clean to 2026-06-12, `pmset -a disablesleep 0` set
 (`SleepDisabled 0` verified). Item 3 (SSH tunnel): on-demand `bin/db-tunnel.sh`
 (local 5433 → VM 5432, avoiding local PG14 on 5432), `.env` repointed at the
@@ -230,8 +235,9 @@ target lists directly.
 - **NOTES-88 `/api/routes` latency cliff over the SSH tunnel.** The
   scorecard endpoint times out (>90s) when the DB is reached via the
   NOTES-48 tunnel — almost certainly a per-route N+1 amplified by the
-  ~9ms network RTT that was free on the old local socket. Blocks practical
-  remote use of the dashboard (Overview + RouteList) and thus NOTES-84.
+  ~9ms network RTT that was free on the old local socket. Blocks remote
+  use only (Overview + RouteList); fix before public deploy. No longer
+  blocks dev or NOTES-84 now that dev runs on a local socket.
 - **NOTES-83 Blank RouteDetail visual baselines.** Both
   `routedetail-d72-chromium-{darwin,linux}.png` are blank white 1280×720
   images — the CI visual gate for RouteDetail asserts that a blank page
@@ -345,7 +351,9 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
    cutover); `/api/gtfs/freshness` served live VM data (126 routes) in 0.29s.
    **Caveat — see NOTES-88:** `/api/routes` (the scorecard driving Overview +
    RouteList) times out >90s over the tunnel, so the dashboard's main pages are
-   not yet usable remotely; the tunnel itself is sound (RTT ~9ms).
+   not yet usable *remotely*; the tunnel itself is sound (RTT ~9ms). Dev is
+   unaffected now that it runs on a local PG16 socket (the tunnel is demoted
+   to ops-only) — fix before the NOTES-50 public deploy.
 4. ~~**Laptop retirement (read-only soak).**~~ **DONE 2026-06-13.** There was
    *no ongoing parallel collection* — the laptop collector was stopped cleanly
    at cutover (last write 2026-06-05 01:12 UTC, `"Combined collector stopped
@@ -398,7 +406,9 @@ to stop hand-maintaining Postgres, (b) DB grows past ~150 GB and a
 larger VM becomes more expensive than managed, (c) site goes
 semi-public and a single accidental `DROP TABLE` becomes
 unrecoverable. Until one of those, the VM-hosted Postgres from Phase 1
-is fine.
+is fine. Revisit when multi-developer, public launch, or an automated
+migration cadence makes the on-demand `bin/refresh-dev-db.sh` restore
+insufficient (it replaces DB branching until then).
 
 Migration choices, roughly cheapest → most robust:
 - **Neon** (serverless Postgres, branching, generous free tier; cold starts on idle, fine for a low-traffic dashboard).
@@ -435,6 +445,14 @@ Trigger: someone other than the user wants to view the dashboard
 without a screenshare. Until then, running the API + Vite frontend on
 the laptop pointed at the cloud DB is fine and keeps iteration speed
 high.
+
+Seams: the **API** config seam is **done** — `api/config.py` reads
+env-driven CORS (`CORS_ALLOW_ORIGINS`, dev defaults to `["*"]`), so the
+API is deploy-ready. The **frontend** `VITE_API_URL` seam is **deferred
+to this item** (still hardcoded for local dev). The recommended deploy
+**co-locates API + DB in-region**, which resolves NOTES-88 (the
+`/api/routes` N+1 only bites over the high-latency tunnel — back on a
+local/in-region socket it disappears).
 
 Concrete steps:
 1. **API** (`api/main.py`, FastAPI). Deploy options: Fly.io
@@ -733,9 +751,10 @@ baseline-invalidating PR (NOTES-84/85) to amortize the regen.
 
 ## NOTES-88. `/api/routes` latency cliff over the SSH tunnel
 
-**Severity: medium (blocks practical remote use of the dashboard — Overview
-and RouteList both depend on `/api/routes`; surfaced the moment the DB moved
-off the local socket).**
+**Severity: medium (blocks remote use only — Overview and RouteList both
+depend on `/api/routes`; surfaced the moment the DB moved off the local
+socket. Fix before public deploy; dev itself is unaffected now that it runs
+on a local socket).**
 **Effort: medium (likely a query-shape fix in `api/aggregations.py`; unknown
 until the round-trip count is profiled).**
 
@@ -751,6 +770,10 @@ query pattern** (iterating ~126 routes, ×metrics, ×days, plus the server-side
 Unix socket and explodes at ~9ms × thousands of round-trips over the network.
 NOTES-49's "warm path ~37ms" figure was measured against the local socket and
 silently stopped holding at cutover.
+
+Recontextualized 2026-06-14: dev now runs on a local socket (no tunnel), so
+this no longer blocks dev or NOTES-84. It becomes a co-locate-API+DB task for
+the NOTES-50 public deploy.
 
 Work:
 1. Profile the endpoint's query count (SQLAlchemy echo / `pg_stat_statements`
