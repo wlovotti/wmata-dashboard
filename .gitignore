@@ -52,6 +52,9 @@ archive/
 
 # API keys
 **/config.py
+# ...but api/config.py is a secret-free, env-driven settings module (no keys
+# in source — it only reads os.environ), so it is tracked deliberately.
+!api/config.py
 **/*_key.py
 
 # Claude Code (keep .claude/commands/ tracked; ignore runtime + per-dev local config)
