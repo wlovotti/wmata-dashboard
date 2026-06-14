@@ -6,7 +6,29 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-10. NOTES-48 live cutover: collector + Postgres now run on
+Last edited 2026-06-13. Closed NOTES-48 items 3 + 4. Item 4 (laptop
+retirement): soak ran clean to 2026-06-12, `pmset -a disablesleep 0` set
+(`SleepDisabled 0` verified). Item 3 (SSH tunnel): on-demand `bin/db-tunnel.sh`
+(local 5433 → VM 5432, avoiding local PG14 on 5432), `.env` repointed at the
+VM, the three laptop launchd jobs durably disabled, runbook 5432→5433
+collision fixed; verified live VM data through the tunnel (23s-fresh
+positions, `/api/gtfs/freshness` 200 in 0.29s). **With NOTES-48 done except
+the deferred Phase-2/3 items, only the deploy-driven follow-ons remain.**
+Added NOTES-88 — `/api/routes` times out >90s over the tunnel (per-route N+1
+amplified by ~9ms RTT); blocks remote dashboard use + NOTES-84.
+Added NOTES-83..87 from the 2026-06-10 product
+review — NOTES-83 blank RouteDetail visual baselines (medium: the CI gate
+asserts a blank page; both `routedetail-d72-chromium-*.png` are empty
+1280×720 frames); NOTES-84 Overview editorial redesign (big-number
+verdict, system map, movers panel, nav collapse — **not
+subagent-suitable**, needs an interactive design session); NOTES-85
+frontend design-system pass (tokens/type scale replacing `App.css` +
+inline styles — **not subagent-suitable**, sequence after 84); NOTES-86
+system-level weekly narrative reusing the PR #141 offline-LLM-cache
+pattern (code subagent-OK, generation run user-run); NOTES-87 small
+honesty fixes (subtitle, Refresh reload, Off-target empty state — code
+subagent-OK, baseline regen user-run).
+NOTES-48 live cutover: collector + Postgres now run on
 AWS Lightsail (PG16) under systemd — the laptop is no longer the live system.
 Fixed the systemd units in the same PR; NOTES-48 stays open for S3 backups,
 retention timers, and laptop retirement. See the rewritten NOTES-48 +
@@ -148,6 +170,16 @@ proxies instead).
 
 **Information architecture & navigation**
 
+- **NOTES-84 Overview editorial redesign.** Rebuild the Overview as an
+  editorial page (big-number verdict, system map colored by performance,
+  ranked "movers" panel) and collapse the six tool-shaped nav items into
+  question-shaped ones. **Not subagent-suitable** — needs an interactive
+  design session.
+- **NOTES-85 Frontend design-system pass.** Replace the 1,287-line
+  hand-rolled `App.css` + ~200 inline styles with tokens, a type scale,
+  and one chart idiom. **Not subagent-suitable** — aesthetic judgment +
+  full visual-baseline regeneration. Sequence after NOTES-84.
+
 **Diagnostic outputs (route-level + system-wide)**
 
 A new initiative — the dashboard today surfaces metrics; these items
@@ -170,12 +202,22 @@ target lists directly.
   Ranked timepoint-leakage table (% of buses departing > N seconds
   early per timepoint per period) → operational fix targets, no
   capital required.
+- **NOTES-86 System-level weekly narrative.** Extend the NOTES-69 /
+  PR #141 offline-LLM-cache pattern from per-route diagnosis to a
+  system-wide "what happened on the network this week" summary on the
+  Overview. Code is subagent-suitable; the generation run and tone
+  review are not.
 
 ### P5 — Cleanup
 
 - **NOTES-20 Tighter rider-experience OTP.** A stricter window alongside
   WMATA's official. Tracked but not yet scoped — user wants
   comparability with WMATA's scorecard for now.
+- **NOTES-87 Small honesty fixes in the frontend chrome.** Drop the
+  inaccurate "Real-time" subtitle, replace the full-page-reload Refresh
+  button, and give the Off-target panel a useful empty state. Code is
+  subagent-suitable, but the subtitle edit invalidates every Playwright
+  baseline — the regen step is user-run.
 
 ### Independent of the redesign
 
@@ -185,6 +227,16 @@ target lists directly.
 - **NOTES-82 Redundant vehicle_positions indexes.** 9 indexes on the
   hottest write path; 3 single-column ones are composite-shadowed —
   measure usage and drop the dead ones.
+- **NOTES-88 `/api/routes` latency cliff over the SSH tunnel.** The
+  scorecard endpoint times out (>90s) when the DB is reached via the
+  NOTES-48 tunnel — almost certainly a per-route N+1 amplified by the
+  ~9ms network RTT that was free on the old local socket. Blocks practical
+  remote use of the dashboard (Overview + RouteList) and thus NOTES-84.
+- **NOTES-83 Blank RouteDetail visual baselines.** Both
+  `routedetail-d72-chromium-{darwin,linux}.png` are blank white 1280×720
+  images — the CI visual gate for RouteDetail asserts that a blank page
+  renders blank. Diagnose the crash, regenerate real baselines
+  (regen step is user-run).
 
 ---
 
@@ -280,17 +332,31 @@ operator runbook (`docs/DEPLOYMENT.md`). The original step list here
    write amplification). Enablement also hit root-owned `.git` files from an
    earlier root-run pull (fixed via `chown`; warning added to
    `docs/DEPLOY.md` §1).
-3. **SSH tunnel** for the local API/frontend → cloud DB (overlaps NOTES-50).
-4. **Laptop retirement (read-only soak, in progress).** Note: there is *no
-   ongoing parallel collection* — the laptop collector was stopped cleanly at
-   cutover (last write 2026-06-05 01:12 UTC, `"Combined collector stopped
-   successfully!"`), and the cutover already verified laptop == VM row-for-row.
-   What remains is a read-only soak: keep the laptop DB as a cold fallback
-   through ~2026-06-12 (7 days post-cutover), then `sudo pmset disablesleep 0`
-   to let the laptop sleep again. **Verified 2026-06-08:** VM collecting
-   continuously since cutover (`collector_status.py` ✓ healthy; position gaps
-   ≤91s/day; 2026-06-04 counts match the laptop exactly at 917,293 rows);
-   laptop still pinned awake (`SleepDisabled=1`) with nothing to collect.
+3. ~~**SSH tunnel** for the local API/frontend → cloud DB (overlaps NOTES-50).~~
+   **DONE 2026-06-13.** On-demand tunnel via `bin/db-tunnel.sh` (local **5433**
+   → VM 5432; 5433 deliberately avoids the local dev Postgres@14 on 5432 — the
+   spec/runbook's `5432:5432` was a collision, now fixed in `docs/DEPLOYMENT.md`).
+   Local `.env` `DATABASE_URL` points at `...@localhost:5433/...` with the
+   local-PG14 URL preserved as a commented fallback. The three laptop launchd
+   jobs (`daily-batch`, `gtfs-reload`, `retain-trip-update-state`) were booted
+   out + durably disabled first (`.plist` files retained) so they can't
+   double-run/delete against the VM. **Verified 2026-06-13:** `vehicle_positions`
+   through the tunnel was 23s fresh (vs the local DB frozen at the 2026-06-05
+   cutover); `/api/gtfs/freshness` served live VM data (126 routes) in 0.29s.
+   **Caveat — see NOTES-88:** `/api/routes` (the scorecard driving Overview +
+   RouteList) times out >90s over the tunnel, so the dashboard's main pages are
+   not yet usable remotely; the tunnel itself is sound (RTT ~9ms).
+4. ~~**Laptop retirement (read-only soak).**~~ **DONE 2026-06-13.** There was
+   *no ongoing parallel collection* — the laptop collector was stopped cleanly
+   at cutover (last write 2026-06-05 01:12 UTC, `"Combined collector stopped
+   successfully!"`), and the cutover already verified laptop == VM
+   row-for-row. The 7-day read-only soak (laptop DB as cold fallback) ran to
+   completion: **verified 2026-06-08** VM collecting continuously since cutover
+   (`collector_status.py` ✓ healthy; position gaps ≤91s/day; 2026-06-04 counts
+   match the laptop exactly at 917,293 rows). Soak window closed 2026-06-12 with
+   no fallback needed; on 2026-06-13 `sudo pmset -a disablesleep 0` released the
+   lid-open pin (`pmset -g` now reports `SleepDisabled 0`), so the laptop sleeps
+   normally again and is no longer a live-system dependency in any form.
 5. **Collector `MemoryMax` tuning** — the 600M cap this item set was too tight
    on the VM (scattered missed heartbeat ticks); raised to 1G in the collector
    MemoryMax raise (PR #162).
@@ -500,6 +566,205 @@ Work:
 
 Independent. Don't start before ~2026-06-17 so step 1's stats window
 covers a representative week.
+
+---
+
+## NOTES-83. Blank RouteDetail visual-regression baselines
+
+**Severity: medium (the CI visual gate for RouteDetail asserts nothing —
+visual regressions on that page ship silently).**
+**Effort: low** *(medium if the root cause is a real fixture-path crash
+rather than a stale capture)*.
+
+Both checked-in baselines
+(`frontend/tests/e2e/routedetail.spec.js-snapshots/routedetail-d72-chromium-darwin.png`
+and `-linux.png`) are entirely blank white 1280×720 images. The spec
+(`routedetail.spec.js`) waits for the "30-Day Trend" text to be visible
+and then takes a `fullPage: true` screenshot, yet the baseline is an
+empty viewport-sized frame — so at capture time the page was blank and
+≤720px tall. Most likely something (RouteMap/leaflet under fixtures, or
+a crash after the visibility check) blanks the page, and a
+`--update-snapshots` run enshrined it; CI stays green because the page
+consistently re-blanks the same way. Overview, RouteList, and Segments
+baselines are all healthy, so the harness itself works.
+
+Work: (1) run the spec headed/traced locally to see what the page
+actually looks like at capture time; (2) fix the crash or add the
+missing fixture; (3) regenerate BOTH baseline sets per the
+`frontend/README.md` procedure (macOS local + Linux via Docker).
+
+**Subagent note:** diagnosis and the code fix are subagent-suitable;
+the baseline regeneration (macOS + Docker Playwright runs) is user-run —
+the subagent should document the regen commands in the PR body instead
+of running them.
+
+---
+
+## NOTES-84. Overview editorial redesign
+
+**Severity: medium (product value — the core "how is the network doing /
+what's getting worse" question is answered only implicitly today).**
+**Effort: high (multi-PR; spans IA, new map surface, and baselined pages).**
+
+The 2026-06-10 product review found the Overview has the right
+ingredients (HealthPulse, 30-day trends, contributors panel, What
+changed) but renders them as a thin banner, four noisy daily-granularity
+sparklines, and three equal-weight tables — nothing is a headline, and
+the user must do the analyst's synthesis themselves. Rebuild the
+Overview as an *editorial* page:
+
+- **A big-number verdict** with plain-language framing ("75% on time
+  this week, down 2 pts"), not a one-line banner.
+- **A system map** (leaflet + `/api/routes/{id}/shapes` already exist)
+  with routes colored by performance — the most direct answer to
+  "where is it going badly."
+- **A "movers" panel** ranking worsening routes using the existing
+  `deltas` block (PR #125) — promote "getting worse" to the top fold.
+- **Trend smoothing** — 7-day rolling line with daily points ghosted,
+  replacing the raw daily squiggles.
+- **Nav collapse** — Overview / Routes / Blocks / Targets / Schedule
+  audit / Segments (`frontend/src/App.jsx`) is tool-shaped; collapse to
+  roughly Overview / Routes / Diagnostics with the rest as drill-downs.
+
+Constraint: trend framing must stay inside the post-cutover-clean window
+(pre-2026-05-25 partial-day aggregates are contaminated; collection
+starts 2026-05-02), so "getting worse" means weeks-over-weeks for now.
+
+**Not subagent-suitable.** This is design work — it needs an interactive
+brainstorming/design session with the user (layout, what gets demoted,
+visual tone), and it invalidates the Overview/RouteList visual baselines
+(regen is user-run). A subagent dispatched cold will produce another
+accretion, which is the problem being fixed.
+
+### Dependencies
+
+NOTES-48 item 3 (SSH tunnel) so the site is viewable locally during
+iteration. Sequence before NOTES-85 (don't restyle panels that are about
+to be rearranged); both touch the same files, so don't stack PRs.
+
+---
+
+## NOTES-85. Frontend design-system pass
+
+**Severity: low (polish — but the generic internal-tool look is a stated
+user dissatisfaction).**
+**Effort: medium-high (touches every component; no behavior change).**
+
+The frontend has no design language: one hand-rolled 1,287-line
+`App.css` plus ~200 inline `style={{}}` blocks scattered across
+components (RouteDiagnosisPanel alone has 54). Every panel made its own
+micro-decisions on color, spacing, and type, which is why the UI reads
+as generic and slightly inconsistent. Recharts and leaflet are already
+in the dependency tree — the gap is deliberate tokens, not libraries.
+
+Work: define CSS custom-property tokens (color roles, spacing scale,
+type scale), one chart idiom (axis/grid/tooltip conventions applied to
+every recharts instance), and migrate components off inline styles.
+Decide deliberately whether to stay hand-rolled or adopt a utility/
+component layer — that choice is the user's.
+
+**Not subagent-suitable.** Aesthetic decisions need the user in the
+loop, and the pass invalidates all Playwright visual baselines on both
+platforms (regen is user-run). The mechanical migration *after* the
+tokens are agreed could be subagent work, but not the design itself.
+
+### Dependencies
+
+After NOTES-84 — restyling panels the redesign is about to rearrange is
+wasted work, and the two would conflict on the same files (no stacked
+PRs).
+
+---
+
+## NOTES-86. System-level weekly narrative
+
+**Severity: low.**
+**Effort: medium (the pattern already exists end-to-end for routes).**
+
+Every Overview surface speaks in metric acronyms (OTP, EWT, bunching)
+with no translation into consequences — "EWT 73s" doesn't drive
+anything home; "riders on frequent routes waited about a minute longer
+than scheduled, 12% worse than two weeks ago" does. The machinery for
+this already exists: the NOTES-69 route-diagnosis narrative (PR #141)
+generates LLM summaries offline via CLI, caches them in
+`route_diagnosis_narrative`, and serves them read-only — Claude is never
+called at request time. Extend that exact pattern to one system-level
+weekly narrative ("what happened on the network this week") sourced
+from `system_metrics_daily` + the contributors/deltas data, cached in a
+sibling table, rendered as the Overview's lede.
+
+**Subagent note:** the code (CLI extension, cache table, endpoint,
+panel) is subagent-suitable. The narrative *generation run* (live LLM
+call) and the editorial tone review of the output are user-run — the
+subagent should ship the machinery with a documented generation command,
+not invoke it.
+
+### Dependencies
+
+Independent, but the rendered placement should land after (or inside)
+the NOTES-84 Overview redesign so the lede has a home; coordinate to
+avoid same-file PR stacking on `Overview.jsx`.
+
+---
+
+## NOTES-87. Small honesty fixes in the frontend chrome
+
+**Severity: low (trust erosion, individually trivial).**
+**Effort: low.**
+
+Three small dishonesties surfaced in the 2026-06-10 product review:
+
+1. The header subtitle says "Real-time transit performance metrics"
+   (`frontend/src/App.jsx`) but the dashboard is daily-batch — say what
+   it is ("Daily bus network performance" or similar).
+2. The Refresh button is a bare `window.location.reload()` — either
+   refetch data in place or drop the button.
+3. The Off-target panel renders empty unless `config/route_targets.yaml`
+   has hand-edited overrides — the empty state should explain that (it
+   partially does) or the panel should hide until targets exist.
+
+**Subagent note:** the code is subagent-suitable, but item 1 changes the
+header on every baselined page, invalidating all Playwright baselines on
+both platforms — the regen step is user-run; document it in the PR body
+rather than running it. Consider bundling with another
+baseline-invalidating PR (NOTES-84/85) to amortize the regen.
+
+---
+
+## NOTES-88. `/api/routes` latency cliff over the SSH tunnel
+
+**Severity: medium (blocks practical remote use of the dashboard — Overview
+and RouteList both depend on `/api/routes`; surfaced the moment the DB moved
+off the local socket).**
+**Effort: medium (likely a query-shape fix in `api/aggregations.py`; unknown
+until the round-trip count is profiled).**
+
+Discovered 2026-06-13 while verifying the NOTES-48 tunnel. With the API
+pointed at the VM through the SSH tunnel, `/api/routes` times out (>90s, no
+response), while light single-query endpoints are instant
+(`/api/gtfs/freshness` returned in 0.29s). Measured tunnel round-trip
+latency is only ~9ms and single aggregate queries are fast (count over
+`route_metrics_daily_overlay` 782ms; a 30-day windowed query 126ms), so this
+is not a slow VM or a slow link — it's almost certainly a per-route **N+1
+query pattern** (iterating ~126 routes, ×metrics, ×days, plus the server-side
+`deltas` block from PR #125) that was free on the old sub-millisecond local
+Unix socket and explodes at ~9ms × thousands of round-trips over the network.
+NOTES-49's "warm path ~37ms" figure was measured against the local socket and
+silently stopped holding at cutover.
+
+Work:
+1. Profile the endpoint's query count (SQLAlchemy echo / `pg_stat_statements`
+   on the VM) to confirm the N+1 and find the loop in `api/aggregations.py`.
+2. Collapse the per-route loop into one (or a few) set-based queries —
+   `GROUP BY route_id` over the window rather than a query per route.
+3. Re-verify over the tunnel: target a cold `/api/routes` well under a few
+   seconds. The server-side 60s cache only helps the second caller; the
+   first (and the cache-miss after TTL) must be fast on its own.
+
+### Dependencies
+
+Blocks NOTES-84 (Overview redesign) in practice — the page it redesigns
+won't load remotely until this is fixed. Independent of the other items.
 
 ---
 

@@ -25,7 +25,7 @@ the spec §5 runbook.
 | PGDATA | Attached Lightsail block-storage disk, starts ~50 GB, ~$5/mo |
 | Object storage | AWS S3 private bucket (weekly `pg_dump` + parquet archives) |
 | Firewall | SSH (22) only — ideally restricted to your IP; Postgres never publicly reachable |
-| DB access from laptop | SSH tunnel only: `ssh -L 5432:localhost:5432 <vm>` |
+| DB access from laptop | SSH tunnel only: `bin/db-tunnel.sh` (forwards local **5433** → VM 5432; 5433 avoids the local dev Postgres@14 on 5432) |
 
 See spec §3 for the full rationale. See spec §3.5 for the three-tier retention
 model that bounds the DB to a ~105 GB plateau.
@@ -217,9 +217,14 @@ ssh ubuntu@<INSTANCE_IP> 'journalctl -u wmata-collector -f'
 # Verify vehicle_positions row count is climbing.
 
 # 6. From laptop — open the SSH tunnel and point local API at VM
-ssh -N -L 5432:localhost:5432 ubuntu@<INSTANCE_IP> &
+#    Use local port 5433, NOT 5432: the laptop's dev Postgres@14 keeps 5432
+#    bound (CLAUDE.md keeps local on 14 for fast iteration), so forwarding
+#    5432 would collide. bin/db-tunnel.sh wraps this (5433 -> VM 5432) and
+#    re-adds the SSH key from the keychain after a reboot.
+bin/db-tunnel.sh              # or, manually:
+# ssh -N -L 5433:localhost:5432 ubuntu@<INSTANCE_IP> &
 # In .env on laptop:
-#   DATABASE_URL=postgresql://wmata:<password>@localhost/wmata_dashboard
+#   DATABASE_URL=postgresql://wmata:<password>@localhost:5433/wmata_dashboard
 # Then restart the local API:
 uv run uvicorn api.main:app --reload
 ```
