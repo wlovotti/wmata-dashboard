@@ -92,6 +92,26 @@ def eastern_day_bounds_utc(date):
     return start, end
 
 
+def service_date_position_window_utc(service_date):
+    """Return (start, end) naive-UTC bounds for GTFS-RT positions on one service date.
+
+    start is Eastern midnight of ``service_date``; end is Eastern midnight
+    two days later — a ~48h window. GTFS service days extend past midnight
+    (stop_times hours can exceed 24), so a service date's positions can land
+    on the next calendar day; two full Eastern days covers any real WMATA
+    service with slack.
+
+    Use this to bound `vehicle_positions.timestamp` whenever filtering by
+    `trip_start_date`: trip_start_date has no index, and an unbounded
+    filter forces a full-table seq scan (the 2026-06/07 nightly-batch
+    outage). The bound also excludes rows whose timestamp is garbage
+    months outside the service day (NOTES-81 phantom rows).
+    """
+    start = eastern_midnight_as_utc(service_date)
+    end = eastern_midnight_as_utc(service_date + timedelta(days=2))
+    return start, end
+
+
 def to_eastern_sql(naive_utc_col):
     """SQLAlchemy expression: convert a naive-UTC timestamp column to naive Eastern.
 

@@ -6,7 +6,16 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-06-14. Landed the dev/deploy environment work: local dev is
+Last edited 2026-07-09. Added NOTES-89..91 from the 2026-07-09 prod incident
+diagnosis (nightly batch dead since 6/4 via unbounded `vehicle_positions`
+seq scans — fixed in the same PR; GTFS stale since 5/31 because the weekly
+reload died with the laptop): NOTES-89 VM GTFS reload timer (high severity —
+this exact incident recurs at every WMATA service change without it),
+NOTES-90 feed-expiry alarm in `/api/gtfs/freshness`, NOTES-91 nightly-batch
+failure alerting (five weeks of silent `Failed with result 'timeout'`).
+Updated NOTES-82 with incident context (bounded query now uses
+`idx_route_timestamp`; the audit should NOT add a `trip_start_date` index).
+Earlier (2026-06-14): Landed the dev/deploy environment work: local dev is
 now fully on PostgreSQL 16 (upgraded from 14 on 2026-06-14, so local == CI ==
 prod), and an on-demand `bin/refresh-dev-db.sh` S3 restore replaces the
 tunnel-as-dev-DB setup — `bin/db-tunnel.sh` is demoted to ops-only. This
@@ -224,6 +233,27 @@ target lists directly.
   subagent-suitable, but the subtitle edit invalidates every Playwright
   baseline — the regen step is user-run.
 
+### Production reliability (2026-07 incident follow-ups)
+
+The 2026-07-09 diagnosis found the nightly batch dead since 6/4 (unbounded
+`vehicle_positions` scans — fixed) and GTFS stale since 5/31 (the weekly
+reload was a laptop launchd job, retired with the laptop). These items
+prevent recurrence; the catch-up re-derivation itself is an ops runbook in
+the fixing PR, not a NOTES item.
+
+- **NOTES-89 GTFS reload automation on the VM.** Weekly
+  `wmata-gtfs-reload.service`/`.timer` running
+  `scripts/reload_gtfs_complete.py`, mirroring the retired laptop launchd
+  cadence (Sundays 08:00 UTC). Without it, schedule staleness recurs at
+  every WMATA service change.
+- **NOTES-90 Feed-expiry alarm in `/api/gtfs/freshness`.** Compare
+  `feed_info.feed_end_date` to Eastern today and surface expired/expiring
+  state — turns silent schedule staleness into a visible signal.
+- **NOTES-91 Nightly-batch failure alerting.** The batch failed every
+  night for five weeks while systemd dutifully logged it. Add an
+  externally-visible alarm (dead man's switch on `MAX(service_date)` in
+  `runs`, or `OnFailure=` push) so pipeline death is loud.
+
 ### Independent of the redesign
 
 - **NOTES-81 Phantom vehicle-reported timestamps.** ~2.26M
@@ -231,7 +261,10 @@ target lists directly.
   collection; investigate scope + add a collector-side sanity guard.
 - **NOTES-82 Redundant vehicle_positions indexes.** 9 indexes on the
   hottest write path; 3 single-column ones are composite-shadowed —
-  measure usage and drop the dead ones.
+  measure usage and drop the dead ones. 2026-07 incident note: the
+  derive pipelines now bound their scans to use `idx_route_timestamp`;
+  do NOT add a `(route_id, trip_start_date)` index — it would deepen
+  the write amplification this item exists to reduce.
 - **NOTES-88 `/api/routes` latency cliff over the SSH tunnel.** The
   scorecard endpoint times out (>90s) when the DB is reached via the
   NOTES-48 tunnel — almost certainly a per-route N+1 amplified by the
@@ -788,6 +821,71 @@ Work:
 
 Blocks NOTES-84 (Overview redesign) in practice — the page it redesigns
 won't load remotely until this is fixed. Independent of the other items.
+
+---
+
+## NOTES-89. GTFS reload automation on the VM
+
+**Severity: high (without it, schedule staleness recurs at every WMATA
+service change — the 2026-06/07 incident's second root cause; feed
+S1000249 expired 2026-06-20 and nothing noticed).**
+**Effort: medium (systemd service + timer + runbook; the reload script
+itself already exists and ran weekly on the laptop for months).**
+
+The weekly GTFS refresh (`scripts/reload_gtfs_complete.py`) ran as a laptop
+launchd job (`gtfs-reload`, Sundays 08:00 UTC) and was durably disabled
+2026-06-13 during laptop retirement — but the NOTES-48 cutover never created
+a VM equivalent, so the last reload anywhere was 2026-05-31. When WMATA's
+service change took effect ~2026-06-21, only 32% of live GTFS-RT trip_ids
+matched the stale `trips` table and proximity stop_events collapsed from
+~110k/day to a few hundred.
+
+Work: add `deployment/systemd/wmata-gtfs-reload.service` + `.timer`
+(weekly, Sunday 08:00 UTC, zone-pinned like the retention timers), running
+the reload as the `wmata` user with the venv interpreter (not `uv run` —
+same fix as the other units). Deploy section must cite `docs/DEPLOY.md` §2
+(cp units + daemon-reload); a `git pull` alone does not install timers.
+Verify a manual first run end-to-end before enabling the timer.
+
+---
+
+## NOTES-90. Feed-expiry alarm in `/api/gtfs/freshness`
+
+**Severity: medium (pure observability — turns silent schedule staleness
+into a visible signal; NOTES-89 is the actual fix).**
+**Effort: low (one endpoint change + a small frontend surface).**
+
+`feed_info.feed_end_date` is a machine-checkable "schedule is stale" signal
+that sat expired for three weeks unnoticed. Extend `/api/gtfs/freshness` to
+compare `feed_end_date` (YYYYMMDD string) against Eastern today
+(`src/timezones.eastern_today`) and return an explicit
+`expired` / `expiring_soon` (≤7 days) / `ok` status plus the raw dates.
+Surface it in the dashboard chrome (a warning banner is enough) so a stale
+feed is visible without ssh.
+
+---
+
+## NOTES-91. Nightly-batch failure alerting
+
+**Severity: high (the batch failed every night for five weeks —
+2026-06-04 → 2026-07-09 — while systemd logged `Failed with result
+'timeout'` to a journal nobody reads; all downstream metrics silently
+froze at 2026-06-03).**
+**Effort: medium (mechanism needs a design decision: dead man's switch vs
+push-on-failure; the check itself is trivial).**
+
+Two complementary shapes, pick at least one:
+1. **Dead man's switch on data freshness** — a daily check that
+   `MAX(service_date)` in `runs` is ≥ yesterday-minus-1; alarm when it
+   lags. Catches every failure mode (timeout, crash, hang, silent
+   zero-row runs) including ones systemd can't see.
+2. **`OnFailure=` unit** on `wmata-metrics.service` firing a
+   notification (email via SES, or a simple webhook). Catches unit-level
+   failure immediately but misses "exited 0 but derived nothing".
+
+The freshness check is strictly stronger and DB-only; the OnFailure hook
+is faster. Whatever fires must reach the user off-box (the five-week gap
+proves on-box logging is not alerting).
 
 ---
 

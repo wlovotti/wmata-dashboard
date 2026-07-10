@@ -42,7 +42,7 @@ from pipelines.stop_events_common import (
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.models import Route, Stop, StopEvent, StopTime, Trip, VehiclePosition
-from src.timezones import eastern_today, utcnow_naive
+from src.timezones import eastern_today, service_date_position_window_utc, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
 PROXIMITY_THRESHOLD_M = 50.0
@@ -72,11 +72,20 @@ def derive_proximity_stop_events(
     # service-date N and run past midnight produce positions on calendar day
     # N+1, but they belong to service date N. trip_start_date is the canonical
     # disambiguator, sourced from the RT TripDescriptor.
+    #
+    # The timestamp bounds are load-bearing: trip_start_date has no index, so
+    # without them Postgres seq-scans all of vehicle_positions per route
+    # (~35s/route on prod — the 2026-06/07 nightly-batch outage). Bounded,
+    # the query uses idx_route_timestamp. The window is generous (~48h) so
+    # past-midnight service is never dropped.
+    window_start, window_end = service_date_position_window_utc(service_date)
     positions = (
         db.query(VehiclePosition)
         .filter(
             VehiclePosition.route_id == route_id,
             VehiclePosition.trip_start_date == trip_start_date_str,
+            VehiclePosition.timestamp >= window_start,
+            VehiclePosition.timestamp < window_end,
         )
         .order_by(VehiclePosition.timestamp)
         .all()
