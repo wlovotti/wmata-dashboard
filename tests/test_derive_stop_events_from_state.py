@@ -132,6 +132,66 @@ def test_derive_emits_skipped_stops(pg_session):
 
 
 @pytest.mark.integration
+def test_derive_ignores_phantom_timestamp_positions_for_attribution(pg_session):
+    """A trip whose only vehicle_position has a timestamp months outside the
+    service day is NOT attributed to that service date, even when
+    trip_start_date matches.
+
+    Regression for the timestamp-window fix: service-date attribution reads
+    vehicle_positions by (route_id, trip_start_date) and must bound the scan
+    by timestamp both for index use and to reject NOTES-81 phantom rows.
+    """
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T1", route_id="R1", direction_id=0, is_current=True),
+            StopTime(
+                trip_id="T1",
+                stop_sequence=1,
+                stop_id="S1",
+                arrival_time="14:05:00",
+                departure_time="14:05:30",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T1",
+                route_id="R1",
+                trip_start_date="20260517",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2025, 10, 15, 12, 0, 0),  # phantom, not 2026-05-17
+            ),
+            TripUpdateState(
+                trip_id="T1",
+                stop_sequence=1,
+                service_date=date(2026, 5, 17),
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
+                last_predicted_arrival_ts=datetime(2026, 5, 17, 14, 6, 30),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    result = derive_for_route_date(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 5, 17),
+        target_table_name="stop_events",
+    )
+    pg_session.commit()
+
+    assert result["note"] == "No vehicle_positions for any current trip on this service_date"
+    events = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T1")).scalars().all()
+    assert events == []
+
+
+@pytest.mark.integration
 def test_derive_sets_derived_at_on_state_rows(pg_session):
     """After derivation, the source state rows have derived_at set."""
     from pipelines.derive_stop_events_from_state import derive_for_route_date

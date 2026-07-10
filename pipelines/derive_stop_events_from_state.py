@@ -31,7 +31,7 @@ from pipelines.stop_events_common import parse_gtfs_time_to_dt
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.models import Route, StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
-from src.timezones import eastern_today, utcnow_naive
+from src.timezones import eastern_today, service_date_position_window_utc, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
 # Chunk size for the per-state-row derived_at UPDATE. The UPDATE filters on
@@ -91,13 +91,19 @@ def derive_for_route_date(
         return _empty(route_id, service_date_str, start_ts, "No current trips for route")
 
     # Service-date attribution: a trip ran today iff a vehicle_position
-    # with matching trip_start_date exists.
+    # with matching trip_start_date exists. The timestamp bounds are
+    # load-bearing: trip_start_date has no index, so without them this is a
+    # full-table seq scan per route (see derive_stop_events.py for the full
+    # story — same fix, same ~48h window).
+    window_start, window_end = service_date_position_window_utc(service_date)
     vp_trip_ids = {
         row[0]
         for row in db.query(VehiclePosition.trip_id)
         .filter(
             VehiclePosition.route_id == route_id,
             VehiclePosition.trip_start_date == trip_start_date_str,
+            VehiclePosition.timestamp >= window_start,
+            VehiclePosition.timestamp < window_end,
         )
         .distinct()
         .all()
