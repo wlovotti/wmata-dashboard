@@ -12,7 +12,7 @@ from datetime import date, datetime
 import pytest
 from sqlalchemy import select
 
-from src.models import Stop, StopEvent, StopTime, Trip, VehiclePosition
+from src.models import GTFSSnapshot, Stop, StopEvent, StopTime, Trip, VehiclePosition
 
 # Coordinates shared by the test stop and all test positions — within the
 # 50m proximity threshold by construction.
@@ -109,3 +109,67 @@ def test_derive_keeps_past_midnight_positions_and_drops_phantom_timestamps(pg_se
         .all()
     )
     assert phantom_events == []
+
+
+@pytest.mark.integration
+def test_derive_with_gtfs_snapshot_id_uses_historical_schedule(pg_session):
+    """gtfs_snapshot_id derives against a superseded GTFS snapshot; without
+    it, trips that exist only in that old snapshot are invisible.
+
+    This is the backfill path for service dates whose schedule has since
+    been replaced by a reload (e.g. 2026-06-11..20 against snapshot 12).
+    """
+    from pipelines.derive_stop_events import derive_proximity_stop_events
+
+    pg_session.add_all(
+        [
+            GTFSSnapshot(snapshot_id=1, snapshot_date=datetime(2026, 5, 3, 18, 30, 0)),
+            Trip(
+                trip_id="T_HIST",
+                route_id="R1",
+                direction_id=0,
+                snapshot_id=1,
+                is_current=False,
+            ),
+            Stop(
+                stop_id="S1",
+                stop_name="Old Stop",
+                stop_lat=STOP_LAT,
+                stop_lon=STOP_LON,
+                snapshot_id=1,
+                is_current=False,
+            ),
+            StopTime(
+                trip_id="T_HIST",
+                stop_sequence=1,
+                stop_id="S1",
+                arrival_time="10:00:00",
+                departure_time="10:00:30",
+                snapshot_id=1,
+                is_current=False,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_HIST",
+                route_id="R1",
+                trip_start_date="20260611",
+                latitude=STOP_LAT,
+                longitude=STOP_LON,
+                timestamp=datetime(2026, 6, 11, 14, 0, 0),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    # Without the flag, the old-snapshot trip is invisible (no current GTFS).
+    result = derive_proximity_stop_events(pg_session, route_id="R1", service_date=date(2026, 6, 11))
+    assert result["rows_written"] == 0
+
+    # With the flag, the historical schedule is used and the event lands.
+    result = derive_proximity_stop_events(
+        pg_session, route_id="R1", service_date=date(2026, 6, 11), gtfs_snapshot_id=1
+    )
+    pg_session.commit()
+    assert result["rows_written"] == 1
+    event = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T_HIST")).scalar_one()
+    assert event.observed_arrival_ts == datetime(2026, 6, 11, 14, 0, 0)

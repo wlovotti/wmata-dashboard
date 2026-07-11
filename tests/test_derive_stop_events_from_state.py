@@ -5,7 +5,7 @@ from datetime import date, datetime
 import pytest
 from sqlalchemy import select
 
-from src.models import StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
+from src.models import GTFSSnapshot, StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
 
 
 @pytest.mark.parametrize(
@@ -189,6 +189,77 @@ def test_derive_ignores_phantom_timestamp_positions_for_attribution(pg_session):
     assert result["note"] == "No vehicle_positions for any current trip on this service_date"
     events = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T1")).scalars().all()
     assert events == []
+
+
+@pytest.mark.integration
+def test_derive_with_gtfs_snapshot_id_uses_historical_schedule(pg_session):
+    """gtfs_snapshot_id lets from_state derive against a superseded GTFS
+    snapshot — the backfill path for dates older than the current reload."""
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            GTFSSnapshot(snapshot_id=1, snapshot_date=datetime(2026, 5, 3, 18, 30, 0)),
+            Trip(
+                trip_id="T_HIST",
+                route_id="R1",
+                direction_id=0,
+                snapshot_id=1,
+                is_current=False,
+            ),
+            StopTime(
+                trip_id="T_HIST",
+                stop_sequence=1,
+                stop_id="S1",
+                arrival_time="14:05:00",
+                departure_time="14:05:30",
+                snapshot_id=1,
+                is_current=False,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_HIST",
+                route_id="R1",
+                trip_start_date="20260611",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 6, 11, 14, 0, 0),
+            ),
+            TripUpdateState(
+                trip_id="T_HIST",
+                stop_sequence=1,
+                service_date=date(2026, 6, 11),
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 6, 11, 14, 6, 0),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 6, 11, 14, 6, 0),
+                last_predicted_arrival_ts=datetime(2026, 6, 11, 14, 6, 30),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    # Without the flag: the trip only exists in the old snapshot → no events.
+    result = derive_for_route_date(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 6, 11),
+        target_table_name="stop_events",
+    )
+    assert result["note"] == "No current trips for route"
+
+    # With the flag: derived against the historical schedule.
+    derive_for_route_date(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 6, 11),
+        target_table_name="stop_events",
+        gtfs_snapshot_id=1,
+    )
+    pg_session.commit()
+    event = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T_HIST")).scalar_one()
+    assert event.observed_arrival_ts == datetime(2026, 6, 11, 14, 6, 30)
 
 
 @pytest.mark.integration

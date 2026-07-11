@@ -41,6 +41,7 @@ from pipelines.stop_events_common import (
 )
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
+from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, Stop, StopEvent, StopTime, Trip, VehiclePosition
 from src.timezones import eastern_today, service_date_position_window_utc, utcnow_naive
 from src.upsert_helpers import upsert_rows
@@ -55,6 +56,7 @@ def derive_proximity_stop_events(
     service_date: date_type,
     proximity_m: float = PROXIMITY_THRESHOLD_M,
     verbose: bool = False,
+    gtfs_snapshot_id: int | None = None,
 ) -> dict:
     """Materialize stop_events for one (route_id, service_date) with source='proximity'.
 
@@ -100,8 +102,12 @@ def derive_proximity_stop_events(
             "elapsed_sec": round(time.time() - start_ts, 2),
         }
 
-    # Trips for this route (current GTFS only) — direction lookup + filter unknowns
-    trips = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
+    # Trips for this route (one GTFS version) — direction lookup + filter unknowns
+    trips = (
+        db.query(Trip)
+        .filter(Trip.route_id == route_id, gtfs_version_filter(Trip, gtfs_snapshot_id))
+        .all()
+    )
     trip_direction = {t.trip_id: t.direction_id for t in trips}
     if not trip_direction:
         return {
@@ -117,7 +123,9 @@ def derive_proximity_stop_events(
     # Stops served by this route's current trips
     trip_ids = [t.trip_id for t in trips]
     stop_times = (
-        db.query(StopTime).filter(StopTime.trip_id.in_(trip_ids), StopTime.is_current).all()
+        db.query(StopTime)
+        .filter(StopTime.trip_id.in_(trip_ids), gtfs_version_filter(StopTime, gtfs_snapshot_id))
+        .all()
     )
     stop_ids_for_route = {st.stop_id for st in stop_times}
     if not stop_ids_for_route:
@@ -131,7 +139,11 @@ def derive_proximity_stop_events(
             "note": "No stop_times for this route's trips",
         }
 
-    stops = db.query(Stop).filter(Stop.stop_id.in_(stop_ids_for_route), Stop.is_current).all()
+    stops = (
+        db.query(Stop)
+        .filter(Stop.stop_id.in_(stop_ids_for_route), gtfs_version_filter(Stop, gtfs_snapshot_id))
+        .all()
+    )
     if not stops:
         return {
             "route_id": route_id,
@@ -280,6 +292,7 @@ def derive_for_routes(
     route_ids: list[str],
     service_date: date_type,
     proximity_m: float = PROXIMITY_THRESHOLD_M,
+    gtfs_snapshot_id: int | None = None,
 ) -> list[dict]:
     """Drive `derive_proximity_stop_events` over a list of routes, one date."""
     return run_route_date_grid(
@@ -289,6 +302,7 @@ def derive_for_routes(
         [service_date],
         proximity_m=proximity_m,
         verbose=True,
+        gtfs_snapshot_id=gtfs_snapshot_id,
     )
 
 
@@ -313,6 +327,16 @@ def main():
         default=PROXIMITY_THRESHOLD_M,
         help=f"Match radius around each stop (default: {PROXIMITY_THRESHOLD_M} m).",
     )
+    parser.add_argument(
+        "--gtfs-snapshot-id",
+        type=int,
+        default=None,
+        help=(
+            "Derive against this historical GTFS snapshot instead of the "
+            "current one — for backfilling service dates whose schedule has "
+            "since been superseded by a reload (see gtfs_snapshots table)."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.route and not args.all_routes:
@@ -331,10 +355,21 @@ def main():
         if args.route:
             route_ids = [args.route]
         else:
-            route_ids = [r.route_id for r in db.query(Route).filter(Route.is_current).all()]
-            print(f"Processing {len(route_ids)} current routes for {service_date.isoformat()}...")
+            route_ids = [
+                r.route_id
+                for r in db.query(Route)
+                .filter(gtfs_version_filter(Route, args.gtfs_snapshot_id))
+                .all()
+            ]
+            print(f"Processing {len(route_ids)} routes for {service_date.isoformat()}...")
 
-        results = derive_for_routes(db, route_ids, service_date, proximity_m=args.proximity_meters)
+        results = derive_for_routes(
+            db,
+            route_ids,
+            service_date,
+            proximity_m=args.proximity_meters,
+            gtfs_snapshot_id=args.gtfs_snapshot_id,
+        )
 
         total_positions = sum(r["positions"] for r in results)
         total_matched = sum(r["matched_to_stop"] for r in results)
