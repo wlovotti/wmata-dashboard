@@ -24,6 +24,7 @@ from src.batch_iterator import run_route_date_grid
 from src.bunching import compute_bunching_for_route_date
 from src.database import get_session
 from src.date_ranges import iter_eastern_dates, iter_recent_eastern_dates
+from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, RouteHeadwayMetrics
 from src.timezones import eastern_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
@@ -137,6 +138,16 @@ def main():
     )
     parser.add_argument("--start-date", help="Start of backfill range (inclusive), YYYY-MM-DD.")
     parser.add_argument("--end-date", help="End of backfill range (inclusive), YYYY-MM-DD.")
+    parser.add_argument(
+        "--gtfs-snapshot-id",
+        type=int,
+        default=None,
+        help=(
+            "List routes from this historical GTFS snapshot instead of the "
+            "current one (bunching itself reads runs, not the schedule) — "
+            "for backfilling dates whose schedule has been superseded."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.route and not args.all_routes:
@@ -173,8 +184,13 @@ def main():
         if args.route:
             route_ids = [args.route]
         else:
-            route_ids = [r.route_id for r in db.query(Route).filter(Route.is_current).all()]
-            print(f"Processing {len(route_ids)} current routes × {len(service_dates)} dates...")
+            route_ids = [
+                r.route_id
+                for r in db.query(Route)
+                .filter(gtfs_version_filter(Route, args.gtfs_snapshot_id))
+                .all()
+            ]
+            print(f"Processing {len(route_ids)} routes × {len(service_dates)} dates...")
 
         results = materialize_for_routes(db, route_ids, service_dates)
 

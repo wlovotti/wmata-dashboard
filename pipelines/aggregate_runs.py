@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
+from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, Run, StopEvent, StopTime
 from src.timezones import eastern_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
@@ -190,6 +191,7 @@ def aggregate_runs_for_route_date(
     route_id: str,
     service_date: date_type,
     verbose: bool = False,
+    gtfs_snapshot_id: int | None = None,
 ) -> dict:
     """Materialize runs for one (route_id, service_date) from stop_events.
 
@@ -230,7 +232,7 @@ def aggregate_runs_for_route_date(
             func.min(StopTime.stop_sequence),
             func.max(StopTime.stop_sequence),
         )
-        .filter(StopTime.trip_id.in_(trip_ids), StopTime.is_current)
+        .filter(StopTime.trip_id.in_(trip_ids), gtfs_version_filter(StopTime, gtfs_snapshot_id))
         .group_by(StopTime.trip_id)
         .all()
     ):
@@ -292,6 +294,7 @@ def aggregate_for_routes(
     db: Session,
     route_ids: list[str],
     service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
 ) -> list[dict]:
     """Drive `aggregate_runs_for_route_date` over a list of routes, one date."""
     return run_route_date_grid(
@@ -300,6 +303,7 @@ def aggregate_for_routes(
         route_ids,
         [service_date],
         verbose=True,
+        gtfs_snapshot_id=gtfs_snapshot_id,
     )
 
 
@@ -320,6 +324,16 @@ def main():
         "--date",
         help="Service date in YYYY-MM-DD form (Eastern). Defaults to today (Eastern).",
     )
+    parser.add_argument(
+        "--gtfs-snapshot-id",
+        type=int,
+        default=None,
+        help=(
+            "Join schedule counts from this historical GTFS snapshot instead "
+            "of the current one — for backfilling service dates whose "
+            "schedule has since been superseded by a reload."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.route and not args.all_routes:
@@ -338,10 +352,17 @@ def main():
         if args.route:
             route_ids = [args.route]
         else:
-            route_ids = [r.route_id for r in db.query(Route).filter(Route.is_current).all()]
-            print(f"Processing {len(route_ids)} current routes for {service_date.isoformat()}...")
+            route_ids = [
+                r.route_id
+                for r in db.query(Route)
+                .filter(gtfs_version_filter(Route, args.gtfs_snapshot_id))
+                .all()
+            ]
+            print(f"Processing {len(route_ids)} routes for {service_date.isoformat()}...")
 
-        results = aggregate_for_routes(db, route_ids, service_date)
+        results = aggregate_for_routes(
+            db, route_ids, service_date, gtfs_snapshot_id=args.gtfs_snapshot_id
+        )
 
         total_events = sum(r["stop_events"] for r in results)
         total_written = sum(r["rows_written"] for r in results)

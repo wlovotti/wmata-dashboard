@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from pipelines.stop_events_common import parse_gtfs_time_to_dt
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
+from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
 from src.timezones import eastern_today, service_date_position_window_utc, utcnow_naive
 from src.upsert_helpers import upsert_rows
@@ -63,6 +64,7 @@ def derive_for_route_date(
     service_date: date_type,
     target_table_name: str = "stop_events",
     verbose: bool = False,
+    gtfs_snapshot_id: int | None = None,
 ) -> dict:
     """Materialize stop_events for one (route, service_date) from trip_update_state.
 
@@ -85,7 +87,11 @@ def derive_for_route_date(
     if verbose:
         print(f"  → {route_id} {service_date_str} (from trip_update_state)")
 
-    trips = db.query(Trip).filter(Trip.route_id == route_id, Trip.is_current).all()
+    trips = (
+        db.query(Trip)
+        .filter(Trip.route_id == route_id, gtfs_version_filter(Trip, gtfs_snapshot_id))
+        .all()
+    )
     trip_direction = {t.trip_id: t.direction_id for t in trips}
     if not trip_direction:
         return _empty(route_id, service_date_str, start_ts, "No current trips for route")
@@ -120,7 +126,11 @@ def derive_for_route_date(
     # Schedule lookup (trip_id, stop_sequence) -> stop_id + scheduled times.
     schedule_index: dict[tuple[str, int], dict] = {}
     for st in (
-        db.query(StopTime).filter(StopTime.trip_id.in_(active_trip_ids), StopTime.is_current).all()
+        db.query(StopTime)
+        .filter(
+            StopTime.trip_id.in_(active_trip_ids), gtfs_version_filter(StopTime, gtfs_snapshot_id)
+        )
+        .all()
     ):
         schedule_index[(st.trip_id, st.stop_sequence)] = {
             "stop_id": st.stop_id,
@@ -299,6 +309,16 @@ def main() -> int:
         choices=["stop_events"],
         help="Output table (default: stop_events). Only stop_events is supported.",
     )
+    parser.add_argument(
+        "--gtfs-snapshot-id",
+        type=int,
+        default=None,
+        help=(
+            "Derive against this historical GTFS snapshot instead of the "
+            "current one — for backfilling service dates whose schedule has "
+            "since been superseded by a reload (see gtfs_snapshots table)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.route and args.all_routes:
@@ -313,7 +333,12 @@ def main() -> int:
         if args.route:
             route_ids = [args.route]
         else:
-            route_ids = [r.route_id for r in db.query(Route).filter(Route.is_current).all()]
+            route_ids = [
+                r.route_id
+                for r in db.query(Route)
+                .filter(gtfs_version_filter(Route, args.gtfs_snapshot_id))
+                .all()
+            ]
         results = run_route_date_grid(
             derive_for_route_date,
             db,
@@ -321,6 +346,7 @@ def main() -> int:
             [service_date],
             verbose=True,
             target_table_name=args.target_table,
+            gtfs_snapshot_id=args.gtfs_snapshot_id,
         )
         for r in results:
             print(r)
