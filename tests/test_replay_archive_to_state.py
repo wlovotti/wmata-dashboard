@@ -194,6 +194,150 @@ def test_replay_does_not_touch_other_dates(tmp_path, pg_session):
 
 
 @pytest.mark.integration
+def test_replay_preserves_last_prediction_when_feed_nullifies(tmp_path, pg_session):
+    """A trailing null-prediction snapshot must not erase the last estimate.
+
+    WMATA nullifies predictions right at arrival. The fold must keep the
+    last non-null predicted_arrival_ts (and its snapshot_ts) while still
+    advancing final_snapshot_ts / final_schedule_relationship to the very
+    last snapshot — the same conditional semantics the live collector's
+    ON CONFLICT CASE expressions implement per-poll.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",
+        [
+            _row("2026-05-18 22:00:00", "T_NULLPRED", 1, "2026-05-18 22:05:00"),
+            _row("2026-05-18 22:04:30", "T_NULLPRED", 1, None),  # arrival nullification
+        ],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_NULLPRED")
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_NULLPRED").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 22, 4, 30)
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 22, 5)
+    assert state.last_pred_snapshot_ts == datetime(2026, 5, 18, 22, 0)
+
+
+@pytest.mark.integration
+def test_replay_keeps_last_non_null_vehicle_id(tmp_path, pg_session):
+    """vehicle_id follows last-non-null-wins across the snapshot sequence."""
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",
+        [
+            _row("2026-05-18 22:00:00", "T_VEH", 1, "2026-05-18 22:05:00", vehicle_id="V_A"),
+            _row("2026-05-18 22:01:00", "T_VEH", 1, "2026-05-18 22:06:00", vehicle_id=None),
+        ],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_VEH"))
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_VEH").one()
+    assert state.vehicle_id == "V_A"  # null did not clobber
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 22, 1)
+
+
+@pytest.mark.integration
+def test_replay_orders_by_snapshot_ts_across_files(tmp_path, pg_session):
+    """Overlapping per-process files fold by snapshot_ts, not filename order.
+
+    A collector restart produces two per-process files whose name sort
+    order does not match chronology. The fold must let the latest
+    snapshot_ts win regardless of which file it came from.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    # Later-named file carries the EARLIER snapshot.
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.111.9.jsonl.zst",
+        [_row("2026-05-18 22:00:00", "T_ORDER", 1, "2026-05-18 22:05:00")],
+    )
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.222.1.jsonl.zst",
+        [_row("2026-05-18 23:30:00", "T_ORDER", 1, "2026-05-18 23:35:00")],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_ORDER")
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_ORDER").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 23, 30)
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 23, 35)
+
+
+@pytest.mark.integration
+def test_replay_conflict_with_existing_row_preserves_prediction(tmp_path, pg_session):
+    """Folding respects ON CONFLICT semantics against pre-existing DB rows.
+
+    If the DB already holds a row with a non-null prediction and the
+    replayed sequence for that key contains only null predictions, the
+    existing prediction must survive (CASE keeps table value when
+    excluded.last_predicted_arrival_ts is null).
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",
+        [_row("2026-05-18 23:00:00", "T_EXIST", 1, None)],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_EXIST")
+    )
+    pg_session.add(
+        TripUpdateState(
+            trip_id="T_EXIST",
+            stop_sequence=1,
+            service_date=date(2026, 5, 18),
+            stop_id="S1",
+            vehicle_id="V1",
+            final_snapshot_ts=datetime(2026, 5, 18, 22, 0),
+            last_pred_snapshot_ts=datetime(2026, 5, 18, 22, 0),
+            last_predicted_arrival_ts=datetime(2026, 5, 18, 22, 5),
+        )
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_EXIST").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 23, 0)  # advanced
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 22, 5)  # preserved
+
+
+@pytest.mark.integration
 def test_replay_finds_legacy_single_daily_filename(tmp_path, pg_session):
     """Older archive files use ``YYYY-MM-DD.jsonl.zst`` (no pid suffix).
 

@@ -140,9 +140,13 @@ def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:
             "vehicle_id": r["vehicle_id"],
             "final_snapshot_ts": r["snapshot_ts"],
             "final_schedule_relationship": r["schedule_relationship"],
-            "last_pred_snapshot_ts": r["snapshot_ts"]
-            if r["predicted_arrival_ts"] is not None
-            else None,
+            # Callers replaying pre-folded state (replay_archive_to_state)
+            # pass an explicit last_pred_snapshot_ts that may differ from
+            # snapshot_ts (prediction seen at t1, final state at t2). The
+            # live collector omits the key, keeping per-poll semantics.
+            "last_pred_snapshot_ts": r["last_pred_snapshot_ts"]
+            if "last_pred_snapshot_ts" in r
+            else (r["snapshot_ts"] if r["predicted_arrival_ts"] is not None else None),
             "last_predicted_arrival_ts": r["predicted_arrival_ts"],
         }
         for r in rows

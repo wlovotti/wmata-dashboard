@@ -81,22 +81,36 @@ def replay_archive_for_date(
     db: Session,
     target_date: date_type,
     archive_root: Path = DEFAULT_ARCHIVE_ROOT,
+    chunk_size: int = 5000,
 ) -> int:
     """Replay all archive files for ``target_date`` into trip_update_state.
 
     Globs both the per-process pattern (``{date}.*.jsonl.zst`` — current,
     from PR #132) and the legacy single-file pattern
-    (``{date}.jsonl.zst`` — pre-PR #132). Each line is decoded, parsed
-    into the collector's row shape, and pushed through
-    ``upsert_trip_update_state``.
+    (``{date}.jsonl.zst`` — pre-PR #132).
 
-    **Batching:** rows are flushed to the UPSERT helper whenever the
-    snapshot_ts changes. WMATA's GTFS-RT feed emits each (trip_id,
-    stop_sequence) at most once per snapshot, so a "one snapshot per
-    batch" boundary guarantees no within-batch duplicate keys — which
-    would otherwise trip Postgres's "ON CONFLICT DO UPDATE command cannot
-    affect row a second time" error. Cross-snapshot accumulation is
-    handled by ON CONFLICT in the helper itself.
+    **Fold-then-upsert:** a full day of the WMATA TripUpdates feed is
+    ~10M raw lines (every future stop republished on every ~30s poll),
+    but only ~150k distinct (trip_id, stop_sequence) keys. Replaying
+    line-by-line through per-snapshot UPSERT statements takes hours per
+    date (measured ~7h on the production Lightsail box, 2026-07-12).
+    Instead, the accumulation semantics — which the live collector
+    expresses as ON CONFLICT CASE expressions applied poll-by-poll —
+    are a deterministic fold, so this replays them in memory:
+
+    - ``final_snapshot_ts`` / ``final_schedule_relationship`` /
+      ``stop_id``: from the row with the greatest snapshot_ts.
+    - ``last_pred_snapshot_ts`` / ``last_predicted_arrival_ts``: from
+      the greatest-snapshot_ts row whose predicted_arrival_ts is
+      non-null (WMATA nullifies predictions at arrival; the last
+      meaningful estimate must survive).
+    - ``vehicle_id``: last non-null across the sequence.
+
+    Rows are ordered by snapshot_ts (not file order) so overlapping
+    per-process files from a collector restart fold correctly. The
+    folded rows (one per key) then go through the same
+    ``upsert_trip_update_state`` helper in chunks, preserving the
+    conditional ON CONFLICT semantics against any pre-existing DB rows.
 
     Rows whose computed service_date doesn't match ``target_date`` are
     silently skipped — defensive against midnight-crossing files that
@@ -107,11 +121,12 @@ def replay_archive_for_date(
             responsible for committing or rolling back.
         target_date: The service date to replay (Eastern calendar day).
         archive_root: Directory holding the JSONL.zst files.
+        chunk_size: Folded rows per UPSERT statement.
 
     Returns:
         The number of snapshot lines that matched ``target_date`` and
-        were enqueued for UPSERT (note: not the row-count in state —
-        many snapshots collapse to one state row by design).
+        were folded (note: not the row-count in state — many snapshots
+        collapse to one state row by design).
     """
     pattern_per_proc = f"{target_date.isoformat()}.*.jsonl.zst"
     pattern_legacy = f"{target_date.isoformat()}.jsonl.zst"
@@ -127,48 +142,66 @@ def replay_archive_for_date(
         print(f"  - {p.name}")
 
     total = 0
-    batch: list[dict] = []
-    batch_snapshot_ts = None
-
-    def _flush() -> None:
-        if batch:
-            upsert_trip_update_state(db, batch)
+    # Fold state per (trip_id, stop_sequence); service_date is fixed to
+    # target_date by the filter below. "_vehicle_ts" / "_pred_ts" track
+    # which snapshot each conditional field last came from so ordering
+    # is by snapshot_ts, not file iteration order.
+    folded: dict[tuple[str, int], dict] = {}
 
     for p in paths:
         for raw in _iter_jsonl_zst(p):
             if raw.get("stop_sequence") is None:
                 continue
             snapshot_ts = _parse_dt(raw["snapshot_ts"])
-            row = {
-                "trip_id": raw["trip_id"],
-                "stop_sequence": raw["stop_sequence"],
-                "service_date": _service_date_for_row(
-                    {
-                        "trip_start_date": raw.get("trip_start_date"),
-                        "snapshot_ts": snapshot_ts,
-                    }
-                ),
-                "stop_id": raw["stop_id"],
-                "vehicle_id": raw.get("vehicle_id"),
-                "snapshot_ts": snapshot_ts,
-                "predicted_arrival_ts": _parse_dt(raw.get("predicted_arrival_ts")),
-                "schedule_relationship": raw.get("schedule_relationship"),
-            }
-            if row["service_date"] != target_date:
+            service_date = _service_date_for_row(
+                {
+                    "trip_start_date": raw.get("trip_start_date"),
+                    "snapshot_ts": snapshot_ts,
+                }
+            )
+            if service_date != target_date:
                 continue
 
-            # Flush on snapshot_ts boundary so a single batch never contains
-            # duplicate (trip_id, stop_sequence, service_date) keys.
-            if batch_snapshot_ts is not None and snapshot_ts != batch_snapshot_ts:
-                _flush()
-                batch = []
-            batch_snapshot_ts = snapshot_ts
-            batch.append(row)
+            vehicle_id = raw.get("vehicle_id")
+            predicted_arrival_ts = _parse_dt(raw.get("predicted_arrival_ts"))
+            key = (raw["trip_id"], raw["stop_sequence"])
+            cur = folded.get(key)
+            if cur is None:
+                cur = {
+                    "trip_id": raw["trip_id"],
+                    "stop_sequence": raw["stop_sequence"],
+                    "service_date": target_date,
+                    "stop_id": raw["stop_id"],
+                    "vehicle_id": vehicle_id,
+                    "snapshot_ts": snapshot_ts,
+                    "schedule_relationship": raw.get("schedule_relationship"),
+                    "predicted_arrival_ts": None,
+                    "last_pred_snapshot_ts": None,
+                    "_vehicle_ts": snapshot_ts if vehicle_id is not None else None,
+                }
+                folded[key] = cur
+            else:
+                if snapshot_ts >= cur["snapshot_ts"]:
+                    cur["snapshot_ts"] = snapshot_ts
+                    cur["stop_id"] = raw["stop_id"]
+                    cur["schedule_relationship"] = raw.get("schedule_relationship")
+                if vehicle_id is not None and (
+                    cur["_vehicle_ts"] is None or snapshot_ts >= cur["_vehicle_ts"]
+                ):
+                    cur["vehicle_id"] = vehicle_id
+                    cur["_vehicle_ts"] = snapshot_ts
+            if predicted_arrival_ts is not None and (
+                cur["last_pred_snapshot_ts"] is None or snapshot_ts >= cur["last_pred_snapshot_ts"]
+            ):
+                cur["predicted_arrival_ts"] = predicted_arrival_ts
+                cur["last_pred_snapshot_ts"] = snapshot_ts
             total += 1
 
-    _flush()
+    rows_out = [{k: v for k, v in cur.items() if not k.startswith("_")} for cur in folded.values()]
+    for i in range(0, len(rows_out), chunk_size):
+        upsert_trip_update_state(db, rows_out[i : i + chunk_size])
 
-    print(f"Replayed {total} snapshot rows for {target_date}.")
+    print(f"Replayed {total} snapshot rows for {target_date} ({len(rows_out)} state rows).")
     return total
 
 
