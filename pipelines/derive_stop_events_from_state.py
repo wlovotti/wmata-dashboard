@@ -244,6 +244,13 @@ def derive_for_route_date(
         # form (trip_id.in_(set) AND stop_sequence.in_(set)) would mark
         # cross-product rows as derived.
         #
+        # The service_date predicate binds the full natural key. GTFS
+        # trip_ids recur every service day, so without it this UPDATE
+        # phantom-stamps derived_at on OTHER dates' rows for the same
+        # trips — and takes row locks on today's live rows, deadlocking
+        # against the collector's concurrent upsert (three dates failed
+        # this way during the 2026-07 backfill).
+        #
         # Chunked into _STATE_UPDATE_CHUNK_SIZE batches: a single UPDATE
         # over the whole list blows past Postgres's max_stack_depth on
         # large routes (see the constant's docstring).
@@ -257,7 +264,10 @@ def derive_for_route_date(
         for chunk in _iter_chunks(derived_keys, _STATE_UPDATE_CHUNK_SIZE):
             db.execute(
                 update(TripUpdateState)
-                .where(tuple_(TripUpdateState.trip_id, TripUpdateState.stop_sequence).in_(chunk))
+                .where(
+                    TripUpdateState.service_date == service_date,
+                    tuple_(TripUpdateState.trip_id, TripUpdateState.stop_sequence).in_(chunk),
+                )
                 .values(derived_at=derived_at)
             )
         db.commit()

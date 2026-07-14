@@ -264,22 +264,45 @@ def test_derive_with_gtfs_snapshot_id_uses_historical_schedule(pg_session):
 
 @pytest.mark.integration
 def test_derive_sets_derived_at_on_state_rows(pg_session):
-    """After derivation, the source state rows have derived_at set."""
+    """After derivation, the source state rows have derived_at set — but ONLY
+    for the derived service_date.
+
+    GTFS trip_ids recur every service day, so the derived_at UPDATE must bind
+    the full (trip_id, stop_sequence, service_date) natural key. Without the
+    service_date predicate it phantom-stamps other dates' rows for the same
+    trip and takes row locks on the collector's live rows (the 2026-07
+    backfill deadlocked against the collector three times this way).
+    """
     from pipelines.derive_stop_events_from_state import derive_for_route_date
 
     _seed_minimal_route(pg_session)
-    pg_session.add(
-        TripUpdateState(
-            trip_id="T1",
-            stop_sequence=1,
-            service_date=date(2026, 5, 17),
-            stop_id="S1",
-            vehicle_id="V1",
-            final_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
-            final_schedule_relationship="SCHEDULED",
-            last_pred_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
-            last_predicted_arrival_ts=datetime(2026, 5, 17, 14, 6, 30),
-        )
+    pg_session.add_all(
+        [
+            TripUpdateState(
+                trip_id="T1",
+                stop_sequence=1,
+                service_date=date(2026, 5, 17),
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
+                last_predicted_arrival_ts=datetime(2026, 5, 17, 14, 6, 30),
+            ),
+            # Same (trip_id, stop_sequence) on the NEXT service day — the
+            # recurring-trip_id case. Deriving 5/17 must not touch it.
+            TripUpdateState(
+                trip_id="T1",
+                stop_sequence=1,
+                service_date=date(2026, 5, 18),
+                stop_id="S1",
+                vehicle_id="V2",
+                final_snapshot_ts=datetime(2026, 5, 18, 14, 6, 0),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 5, 18, 14, 6, 0),
+                last_predicted_arrival_ts=datetime(2026, 5, 18, 14, 6, 30),
+            ),
+        ]
     )
     pg_session.commit()
 
@@ -291,7 +314,18 @@ def test_derive_sets_derived_at_on_state_rows(pg_session):
     )
     pg_session.commit()
 
-    row = pg_session.execute(
-        select(TripUpdateState).where(TripUpdateState.trip_id == "T1")
+    derived_row = pg_session.execute(
+        select(TripUpdateState).where(
+            TripUpdateState.trip_id == "T1",
+            TripUpdateState.service_date == date(2026, 5, 17),
+        )
     ).scalar_one()
-    assert row.derived_at is not None
+    assert derived_row.derived_at is not None
+
+    other_date_row = pg_session.execute(
+        select(TripUpdateState).where(
+            TripUpdateState.trip_id == "T1",
+            TripUpdateState.service_date == date(2026, 5, 18),
+        )
+    ).scalar_one()
+    assert other_date_row.derived_at is None
