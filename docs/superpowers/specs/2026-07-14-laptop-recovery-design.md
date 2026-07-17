@@ -52,7 +52,24 @@ stalls again. Consequences for the phases:
   alerting PR (NOTES-91) proceeds immediately — it never depended on the
   job's outcome.
 
-## 3. Load-bearing facts (verified 2026-07-14 via tunnel)
+## 2b. Revision 2026-07-17 — the disk pulled the kill-switch
+
+Root disk hit 100% at ~04:05 UTC on 7/17 (undrained archive + logs; second
+wedge in five days): the recovery job died mid-7/01 (`ENOSPC`, log truncated
+mid-line at 04:16) and the collector wedged silently for 9.2 h
+(04:05–13:15 UTC — permanent raw-data loss, added to the postmortem tally).
+Remediation same session: ~11 GB of already-derived archive dates
+(6/05–6/14) **moved** to `/mnt/pgdata/archive-overflow/` (root now 81%),
+journal vacuumed, collector restarted and verified beating, 2 GB swapfile
+recreated. Job log's total `FAILED` count is 3 = exactly the known
+deadlock trio; no hidden failures across the entire run.
+
+The job is NOT restarted. Final VM tally: **6/13–6/30 rebuilt and
+verified; 7/01 state replayed but derivation partial.** Phase 2 scope is
+therefore: replay 7/02–7/03 (rsync those dates), derive 7/01–7/11, the
+6/15/16/18 re-runs, the catch-up sweep, and the 6/11–6/12 fold-in.
+Note for Phase 1/4: rsync must ALSO pull `archive-overflow/` on the
+pgdata volume — the archive is now split across two directories on the VM.
 
 - `vehicle_positions` on prod covers trip_start_date 6/12 → today; every
   recovery date present (~500–770 k rows/weekday).
