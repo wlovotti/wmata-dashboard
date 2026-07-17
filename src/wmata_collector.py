@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from src.archive_writer import JsonlArchiveWriter
 from src.database import get_session, init_db
+from src.deadman import ping_healthcheck
 from src.models import CollectorHeartbeat, Route, Shape, Stop, StopTime, Trip, VehiclePosition
 from src.timezones import eastern_date_from_naive_utc, from_epoch_naive_utc, utcnow_naive
 from src.upsert_helpers import upsert_trip_update_state
@@ -55,6 +56,7 @@ class WMATADataCollector:
         api_key,
         db_session: Session = None,
         archive_root: Path | str | None = None,
+        healthcheck_url: str | None = None,
     ):
         """Construct a collector.
 
@@ -64,11 +66,15 @@ class WMATADataCollector:
         of the live archive — every instantiation opens a writer, so
         leaving the default path causes per-process orphan files to
         accumulate under the real archive on every test run.
+
+        ``healthcheck_url``: dead-man endpoint pinged once per successful
+        trip-update tick; None disables (NOTES-91).
         """
         self.api_key = api_key
         self.headers = {"api_key": api_key}
         self.gtfs_data = {}
         self.db = db_session
+        self._healthcheck_url = healthcheck_url
 
         # Cold archive: raw rows go to compressed JSONL daily files.
         # Path mirrors the archive layout under REPO_ROOT / "archive" / ...
@@ -653,6 +659,11 @@ class WMATADataCollector:
 
         # Single commit covers both the state upsert and the heartbeat.
         self.db.commit()
+
+        # Dead-man ping: fires only when the tick's archive+upsert+heartbeat
+        # all committed — a wedged collector goes silent and the alerting
+        # service pages on the missing ping (NOTES-91).
+        ping_healthcheck(self._healthcheck_url)
 
         print(
             f"  Upserted {len(upsert_payload)} of {len(rows)} trip update rows "
