@@ -9,7 +9,7 @@ are churn.
 Last edited 2026-07-17. Shrunk NOTES-91: collector dead-man ping shipped
 (`src/deadman.py`, PR #173); the batch-alerting half is superseded by the
 2026-07-13 Path 2a decision to make derivation a manual laptop action
-(see `docs/POSTMORTEM_2026-07.md`).
+(see the July 2026 incident postmortem, draft; lands with the recovery docs).
 Earlier (2026-07-09). Added NOTES-89..91 from the 2026-07-09 prod incident
 diagnosis (nightly batch dead since 6/4 via unbounded `vehicle_positions`
 seq scans — fixed in the same PR; GTFS stale since 5/31 because the weekly
@@ -876,12 +876,12 @@ feed is visible without ssh.
 per-tick trip-update commit, not the nightly batch — the collector is the
 process meant to run unattended 24/7, so it's the higher-value target.
 The original ask (alarm on nightly-batch death specifically) is superseded
-by the Path 2a migration decision (2026-07-13,
-`docs/POSTMORTEM_2026-07.md`): derivation becomes a manual laptop action
-rather than a scheduled batch, so there's no unattended batch process left
-to page on. The equivalent freshness signal for the new architecture (an
-S3-upload-staleness alarm) lands with the stateless-collector rewrite —
-tracked there, not here.
+by the Path 2a migration decision (2026-07-13; see the July 2026 incident
+postmortem, draft; lands with the recovery docs): derivation becomes a
+manual laptop action rather than a scheduled batch, so there's no unattended
+batch process left to page on. The equivalent freshness signal for the new
+architecture (an S3-upload-staleness alarm) lands with the stateless-collector
+rewrite — tracked there, not here.
 
 ---
 
