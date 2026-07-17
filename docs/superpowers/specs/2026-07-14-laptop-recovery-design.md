@@ -20,7 +20,7 @@ roughly a day, and under Path 2a it is the destination anyway.
 | # | Decision | Choice |
 |---|----------|--------|
 | 1 | Plan scope | Recovery + interim pull; stateless-collector rewrite is a separate follow-up plan |
-| 2 | VM recovery job | Kill now (SIGINT), before the sync |
+| 2 | VM recovery job | ~~Kill now (SIGINT), before the sync~~ **REVISED 2026-07-16: let it finish** (see Revision note below) |
 | 3 | Interim raw-feed pull | rsync JSONL from VM + per-date VP `COPY` over tunnel (no B2 fast-track) |
 | 4 | Local derivation cadence | Manual, on demand (`--lookback-days` self-catch-up) |
 | 5 | 6/11–6/12 dirty dates | Fold into this recovery (final, optional phase step) |
@@ -31,6 +31,26 @@ not actually "pure" — S3 VP parquet coverage stops ~6/12 (the archive timer
 archives >30-day-old rows and last ran 7/12), so raw VP for the recovery
 window exists only in the VM Postgres. The purist rebuildability property
 (VP as files) is deliverable only by the collector rewrite.
+
+## 2a. Revision 2026-07-16 — let the VM job finish
+
+The kill rationale (13 h/date, worsening) stopped holding: by 7/16 the
+job had rebuilt 6/23–6/30, all passing the verification bands, at ~3 h/date
+average (with high variance, 0.7–11.6 h). User decision: let it run to
+completion (est. ~7/18–19 for 7/01–7/11), keeping the kill available if it
+stalls again. Consequences for the phases:
+
+- **Phase 0** becomes: wait for job completion, then verify the full
+  6/13–7/11 range against the bands and capture the log's `FAILED` count.
+- **Phase 1** is unchanged (sync runs against a quiet box after the job
+  ends), but the rsync scope shrinks to 6/11–6/12 only — every other
+  date's state travels in the dump or is already derived.
+- **Phase 2** reduces to: the 6/15/16/18 re-runs (`--gtfs-snapshot-id 12`),
+  the `--lookback-days` catch-up sweep for 7/12→now, and the 6/11–6/12
+  fold-in. The 6/24–7/03 replay/derive loop evaporates.
+- Phases 3–4 and all repo deliverables are unchanged. The dead-man
+  alerting PR (NOTES-91) proceeds immediately — it never depended on the
+  job's outcome.
 
 ## 3. Load-bearing facts (verified 2026-07-14 via tunnel)
 
