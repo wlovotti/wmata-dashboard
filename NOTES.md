@@ -7,7 +7,7 @@ NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
 Last edited 2026-07-17. Shrunk NOTES-91: collector dead-man ping shipped
-(`src/deadman.py`, this PR); the batch-alerting half is superseded by the
+(`src/deadman.py`, PR #173); the batch-alerting half is superseded by the
 2026-07-13 Path 2a decision to make derivation a manual laptop action
 (see `docs/POSTMORTEM_2026-07.md`).
 Earlier (2026-07-09). Added NOTES-89..91 from the 2026-07-09 prod incident
@@ -254,7 +254,7 @@ the fixing PR, not a NOTES item.
   `feed_info.feed_end_date` to Eastern today and surface expired/expiring
   state — turns silent schedule staleness into a visible signal.
 - **NOTES-91 Nightly-batch failure alerting.** Collector dead-man ping
-  shipped (this PR, `src/deadman.py`); the batch-alerting half is
+  shipped (PR #173, `src/deadman.py`); the batch-alerting half is
   superseded by the Path 2a migration to manual laptop derivation — see
   item body.
 
@@ -872,7 +872,7 @@ feed is visible without ssh.
 ## NOTES-91. Nightly-batch failure alerting
 
 **Status: mechanism 1 shipped (collector), mechanism 2 superseded.**
-`src/deadman.py`'s dead-man ping (this PR) is wired into the collector's
+`src/deadman.py`'s dead-man ping (PR #173) is wired into the collector's
 per-tick trip-update commit, not the nightly batch — the collector is the
 process meant to run unattended 24/7, so it's the higher-value target.
 The original ask (alarm on nightly-batch death specifically) is superseded
