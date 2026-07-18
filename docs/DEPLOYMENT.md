@@ -11,6 +11,20 @@ from anything here.
 open). This document covers the target topology; the live cutover steps are in
 the spec §5 runbook.
 
+> **⚠️ Topology change 2026-07-18 (Path 2a, July-incident recovery):** the
+> **laptop's local PostgreSQL 16 (`wmata_dashboard`) is now the system of
+> record**; the VM no longer runs derivation. `wmata-metrics.timer` and
+> `wmata-window-derived.timer` are stopped AND disabled — do not re-enable
+> them. The VM's remaining jobs are the collector (with dead-man ping,
+> `COLLECTOR_HEALTHCHECK_URL` in its `.env`), `wmata-backup.timer`, and
+> `wmata-archive-positions.timer`. The raw JSONL archive on the VM is split
+> across `/home/wmata/wmata-dashboard/archive/raw_snapshots/` **and**
+> `/mnt/pgdata/archive-overflow/` (2026-07-17 disk-full remediation) —
+> rsync both. Interim freshness: run `bin/pull-and-derive.sh` on the laptop
+> (needs `bin/db-tunnel.sh` up). The stateless-collector rewrite (VM →
+> S3-only, no VM Postgres) is a separate follow-up plan. See
+> `docs/superpowers/specs/2026-07-14-laptop-recovery-design.md`.
+
 ---
 
 ## 1. Target topology (summary)

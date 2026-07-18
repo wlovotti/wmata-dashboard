@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from api.aggregations import (
     _latest_service_date_with_stop_events,
@@ -134,7 +135,7 @@ async def health_check():
         db = get_session()
         try:
             # Test database connection with a simple query
-            db.execute("SELECT 1").scalar()
+            db.execute(text("SELECT 1")).scalar()
             health_status["checks"]["database"] = {
                 "status": "healthy",
                 "message": "Database connection successful",
