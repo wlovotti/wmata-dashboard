@@ -1,7 +1,11 @@
 # Laptop recovery completion — design
 
 **Date:** 2026-07-14
-**Status:** Approved (user-reviewed design; spec pending review)
+**Status:** Executed 2026-07-18. Phase 1 sync + local driver ran clean
+(FAILED=0, ~3 h wall); 6/13–7/17 verified in expected bands; the 6/17
+rebuild-from-raw spot check matched the primary exactly (runs and
+stop_events, both sources); 6/11–6/12 folded in with snapshot 12; VM
+demoted to collector + backup + VP-archive timers only.
 **Context:** July 2026 incident recovery (see `docs/POSTMORTEM_2026-07.md`);
 Path 2a architecture decision (2026-07-13). This plan starts Path 2a early:
 the VM's recovery derivation job is abandoned in favor of finishing on the
