@@ -6,7 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-07-18 (second edit). Closed NOTES-92: both rollup
+Last edited 2026-07-18 (third edit). Added NOTES-95: the
+stateless-collector rewrite now has a tracking item — it was previously
+referenced only as a dangling "tracked there" pointer in NOTES-91 while
+four postmortem actions (staleness alarm, cutover job inventory,
+downsize, retention-chore replacement) were deferred to it with no home.
+Earlier same day: Closed NOTES-92: both rollup
 pipelines accept `--gtfs-snapshot-id` (threaded through
 `compute_service_delivered*` and `fetch_scheduled_cell_hours_for_routes`
 via `gtfs_version_filter`); June 6/11–6/20 rollups re-run with snapshot 12
@@ -274,7 +279,13 @@ the fixing PR, not a NOTES item.
   no-op masked missing files during the 7/18 fold-in.
 - **NOTES-94 VP-path dead-man coverage.** Second healthcheck ping from
   `_save_vehicle_positions` so a VP-only failure can't starve
-  proximity-source derivation while the TU check stays green.
+  proximity-source derivation while the TU check stays green. Subsumed
+  by NOTES-95's staleness alarm if the rewrite lands first.
+- **NOTES-95 Stateless-collector rewrite (Path 2a, second half).** VM
+  becomes poll → JSONL → S3 + staleness alarm; no Postgres, smallest
+  tier; laptop pulls from S3. Carries four deferred items as acceptance
+  criteria (staleness alarm, cutover job inventory, downsize, retention
+  chores replaced by upload). Needs its own spec/plan cycle.
 
 ### Independent of the redesign
 
@@ -899,7 +910,7 @@ postmortem, draft; lands with the recovery docs): derivation becomes a
 manual laptop action rather than a scheduled batch, so there's no unattended
 batch process left to page on. The equivalent freshness signal for the new
 architecture (an S3-upload-staleness alarm) lands with the stateless-collector
-rewrite — tracked there, not here.
+rewrite — tracked as NOTES-95.
 
 ---
 
@@ -933,6 +944,55 @@ derivation (origin OTP, segment slips; see the vehicle-positions-necessity
 note). Add a second healthchecks.io check pinged from
 `_save_vehicle_positions` via a `COLLECTOR_VP_HEALTHCHECK_URL` env var,
 same fire-on-commit-success pattern.
+
+---
+
+## NOTES-95. Stateless-collector rewrite (Path 2a, second half)
+
+**Severity: medium (the current interim topology works but carries
+manual chores and a full Postgres on a 2 GB box that no longer needs
+one).**
+**Effort: high (its own brainstorm → spec → plan cycle; do not start as
+a side-task).**
+
+Complete the Path 2a architecture decided 2026-07-13 and half-executed
+2026-07-18 (see `docs/POSTMORTEM_2026-07.md`, "Architecture decision").
+Target: the VM polls WMATA → writes raw zstd JSONL for both feeds →
+uploads to S3 on a short cadence → pings a healthcheck. No Postgres, no
+timers beyond the upload loop, smallest Lightsail tier. The laptop pulls
+from S3 (not rsync-over-ssh) and derives on demand.
+
+Four items are explicitly deferred TO this rewrite and land with it —
+they are its acceptance criteria, not separate work:
+
+1. **S3-upload-staleness alarm** (NOTES-91's successor): the dead-man
+   signal becomes "newest object in the raw prefix is older than N
+   minutes," replacing the DB-commit ping. Covers both feeds by
+   construction, which also subsumes NOTES-94 (VP-path coverage) if the
+   rewrite lands first.
+2. **Cutover job inventory** (postmortem lesson #3): the rewrite spec
+   must enumerate every recurring job on both machines — what runs
+   where, how each is verified — and the cutover follows that checklist.
+   This incident's RC2 and both disk fills were cutover-gap failures.
+3. **Instance downsize** (lesson #6): once Postgres leaves the box,
+   drop to the smallest tier; the 2 GB instance and its swap/OOM
+   mitigations stop mattering.
+4. **Upload replaces retention chores** (lesson #5): the hourly S3
+   upload obsoletes the VM's 14-day JSONL buffer pruning, the
+   `wmata-archive-positions` timer, the weekly `pg_dump` backup (no DB
+   to back up), and `bin/pull-and-derive.sh`'s rsync+tunnel path
+   (pull from S3 instead).
+
+Also fold in: laptop-side GTFS reload cadence (NOTES-89's home after
+the VM DB retires — the weekly reload targets the laptop DB, likely as
+a step in the pull-and-derive flow) and the collector VP-timestamp
+sanity guard (NOTES-81) if the collector is being rewritten anyway.
+
+Interim state until this lands (documented in DEPLOYMENT.md's 2026-07-18
+banner): VM = collector + backup + VP-archive timers with hc-ping
+dead-man; laptop = system of record with 30-day JSONL working set;
+S3 `raw-jsonl-archive/` = permanent raw store, appended by manual
+laptop-side sync.
 
 ---
 
