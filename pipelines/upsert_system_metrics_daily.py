@@ -39,11 +39,21 @@ def main() -> int:
     # per-route. The flag exists so `pipelines/run_daily_batch.py` can
     # dispatch every per-date pipeline with the same args.
     parser.add_argument("--all-routes", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--gtfs-snapshot-id",
+        type=int,
+        default=None,
+        help=(
+            "Pin the scheduled side (service-delivered denominators, EWT SWT "
+            "pools) to a historical GTFS snapshot when backfilling a date "
+            "whose schedule has been superseded; default reads is_current"
+        ),
+    )
     args = parser.parse_args()
 
     db = get_session()
     try:
-        result = upsert_system_metrics_for_date(db, args.date)
+        result = upsert_system_metrics_for_date(db, args.date, args.gtfs_snapshot_id)
         return 0 if result is not None else 1
     finally:
         db.close()

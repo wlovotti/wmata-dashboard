@@ -88,6 +88,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.frequent_routes import DEFAULT_GATE_SEC, get_cell_hour_gate_sec
+from src.gtfs_versioning import gtfs_version_filter
 from src.models import Calendar, GTFSSnapshot, StopEvent, StopTime, Trip
 from src.time_periods import is_hour_in_period
 
@@ -502,6 +503,7 @@ def fetch_scheduled_cell_hours_for_routes(
     db: Session,
     day_type: str,
     route_ids: list[str] | None = None,
+    gtfs_snapshot_id: int | None = None,
 ) -> dict[str, dict[CellHour, list[float]]]:
     """Vectorized scheduled-headway-per-(direction, stop, hour) for every route.
 
@@ -516,9 +518,17 @@ def fetch_scheduled_cell_hours_for_routes(
     SQL pass + Python pairing; the cache invalidates automatically when
     `reload_gtfs_complete.py` writes a new `gtfs_snapshots` row, so no
     manual flush is needed after a GTFS refresh.
+
+    Pass `gtfs_snapshot_id` to pin the schedule to a historical snapshot
+    (backfill); the default reads the live `is_current` snapshot. Explicit
+    snapshots cache under their own id — historical snapshot rows never
+    change, so those entries never need invalidating.
     """
     if route_ids is None:
-        snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+        if gtfs_snapshot_id is not None:
+            snapshot_id = gtfs_snapshot_id
+        else:
+            snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
         cache_key = (day_type, snapshot_id)
         with _schedule_cache_lock:
             cached = _schedule_cache.get(cache_key)
@@ -538,9 +548,9 @@ def fetch_scheduled_cell_hours_for_routes(
         .join(StopTime, StopTime.trip_id == Trip.trip_id)
         .join(Calendar, Calendar.service_id == Trip.service_id)
         .filter(
-            Trip.is_current,
-            StopTime.is_current,
-            Calendar.is_current,
+            gtfs_version_filter(Trip, gtfs_snapshot_id),
+            gtfs_version_filter(StopTime, gtfs_snapshot_id),
+            gtfs_version_filter(Calendar, gtfs_snapshot_id),
             field == 1,
         )
     )
