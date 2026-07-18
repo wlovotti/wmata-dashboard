@@ -2,9 +2,14 @@
 # scripts/local_recovery_2026_07.sh — one-time Phase 2 driver for the July
 # 2026 recovery (spec docs/superpowers/specs/2026-07-14-laptop-recovery-
 # design.md rev 2b). Scope: replay 7/02-7/03; derive 7/01-7/11; re-run the
-# 6/15/16/18 deadlock trio (snapshot 12); catch-up sweep; 6/11-6/12 fold-in.
-# Housekeeping (cleanup_trip_update_state) runs ONLY in the final sweep,
-# after all backfill derivation — it deletes >7-day un-derived state rows.
+# 6/15/16/18 deadlock trio (snapshot 12); 6/11-6/12 fold-in; catch-up sweep.
+# The fold-in must run BEFORE the sweep: run_daily_batch.py's --lookback-days
+# window targets zero-run dates and would otherwise derive 6/12 against
+# is_current (the wrong schedule for June) before the snapshot-12 fold-in
+# gets a chance to claim it — and pipelines are pure upserts, so the sweep
+# can't be undone by a later fold-in. Housekeeping (cleanup_trip_update_state)
+# runs ONLY in the final sweep, after all backfill derivation — it deletes
+# >7-day un-derived state rows.
 set -uo pipefail   # deliberately NOT -e: per-date guards continue past failures
 
 LOG="logs/local_recovery_$(date +%Y%m%dT%H%M%S).log"
@@ -63,15 +68,15 @@ for d in 2026-06-15 2026-06-16 2026-06-18; do
   derive_date "$d" "$STATE_PIPELINES" 12 || echo "date $d had failures — continuing" | tee -a "$LOG"
 done
 
-echo "=== Phase D: catch-up sweep (7/12 -> now; housekeeping runs here) ===" | tee -a "$LOG"
-run "daily batch sweep" uv run python pipelines/run_daily_batch.py --lookback-days 35
-
-echo "=== Phase E: 6/11-6/12 fold-in (snapshot 12) ===" | tee -a "$LOG"
+echo "=== Phase D: 6/11-6/12 fold-in (snapshot 12) ===" | tee -a "$LOG"
 for d in 2026-06-11 2026-06-12; do
   run "vp-parquet $d" uv run python pipelines/load_vp_from_parquet.py --date "$d" || continue
   run "replay $d" uv run python pipelines/replay_archive_to_state.py --date "$d" || continue
   derive_date "$d" "$ALL_PIPELINES" 12 || echo "date $d had failures — continuing" | tee -a "$LOG"
 done
+
+echo "=== Phase E: catch-up sweep (7/12 -> now; housekeeping runs here) ===" | tee -a "$LOG"
+run "daily batch sweep" uv run python pipelines/run_daily_batch.py --lookback-days 35
 
 echo "=== Verification: runs per date ===" | tee -a "$LOG"
 psql -d wmata_dashboard -c "
