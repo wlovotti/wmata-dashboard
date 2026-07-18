@@ -203,7 +203,10 @@ def main() -> None:
 
     # Single collector instance shared across ticks. The DB session is
     # rebound per tick inside run_one_tick.
-    collector = WMATADataCollector(API_KEY)
+    collector = WMATADataCollector(
+        API_KEY,
+        healthcheck_url=os.environ.get("COLLECTOR_HEALTHCHECK_URL"),
+    )
 
     tick_idx = 0
     try:

@@ -6,7 +6,11 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-07-09. Added NOTES-89..91 from the 2026-07-09 prod incident
+Last edited 2026-07-17. Shrunk NOTES-91: collector dead-man ping shipped
+(`src/deadman.py`, PR #173); the batch-alerting half is superseded by the
+2026-07-13 Path 2a decision to make derivation a manual laptop action
+(see the July 2026 incident postmortem, draft; lands with the recovery docs).
+Earlier (2026-07-09). Added NOTES-89..91 from the 2026-07-09 prod incident
 diagnosis (nightly batch dead since 6/4 via unbounded `vehicle_positions`
 seq scans — fixed in the same PR; GTFS stale since 5/31 because the weekly
 reload died with the laptop): NOTES-89 VM GTFS reload timer (high severity —
@@ -249,10 +253,10 @@ the fixing PR, not a NOTES item.
 - **NOTES-90 Feed-expiry alarm in `/api/gtfs/freshness`.** Compare
   `feed_info.feed_end_date` to Eastern today and surface expired/expiring
   state — turns silent schedule staleness into a visible signal.
-- **NOTES-91 Nightly-batch failure alerting.** The batch failed every
-  night for five weeks while systemd dutifully logged it. Add an
-  externally-visible alarm (dead man's switch on `MAX(service_date)` in
-  `runs`, or `OnFailure=` push) so pipeline death is loud.
+- **NOTES-91 Nightly-batch failure alerting.** Collector dead-man ping
+  shipped (PR #173, `src/deadman.py`); the batch-alerting half is
+  superseded by the Path 2a migration to manual laptop derivation — see
+  item body.
 
 ### Independent of the redesign
 
@@ -867,25 +871,17 @@ feed is visible without ssh.
 
 ## NOTES-91. Nightly-batch failure alerting
 
-**Severity: high (the batch failed every night for five weeks —
-2026-06-04 → 2026-07-09 — while systemd logged `Failed with result
-'timeout'` to a journal nobody reads; all downstream metrics silently
-froze at 2026-06-03).**
-**Effort: medium (mechanism needs a design decision: dead man's switch vs
-push-on-failure; the check itself is trivial).**
-
-Two complementary shapes, pick at least one:
-1. **Dead man's switch on data freshness** — a daily check that
-   `MAX(service_date)` in `runs` is ≥ yesterday-minus-1; alarm when it
-   lags. Catches every failure mode (timeout, crash, hang, silent
-   zero-row runs) including ones systemd can't see.
-2. **`OnFailure=` unit** on `wmata-metrics.service` firing a
-   notification (email via SES, or a simple webhook). Catches unit-level
-   failure immediately but misses "exited 0 but derived nothing".
-
-The freshness check is strictly stronger and DB-only; the OnFailure hook
-is faster. Whatever fires must reach the user off-box (the five-week gap
-proves on-box logging is not alerting).
+**Status: mechanism 1 shipped (collector), mechanism 2 superseded.**
+`src/deadman.py`'s dead-man ping (PR #173) is wired into the collector's
+per-tick trip-update commit, not the nightly batch — the collector is the
+process meant to run unattended 24/7, so it's the higher-value target.
+The original ask (alarm on nightly-batch death specifically) is superseded
+by the Path 2a migration decision (2026-07-13; see the July 2026 incident
+postmortem, draft; lands with the recovery docs): derivation becomes a
+manual laptop action rather than a scheduled batch, so there's no unattended
+batch process left to page on. The equivalent freshness signal for the new
+architecture (an S3-upload-staleness alarm) lands with the stateless-collector
+rewrite — tracked there, not here.
 
 ---
 

@@ -94,3 +94,43 @@ def test_collector_writes_jsonl_archive(pg_session, tmp_path):
     # Glob for the date prefix rather than an exact name.
     matches = list(tmp_path.glob("2026-05-17.*.jsonl.zst"))
     assert len(matches) == 1, f"Expected 1 archive file, found: {matches}"
+
+
+@pytest.mark.integration
+def test_save_trip_updates_pings_healthcheck_after_commit(pg_session, tmp_path, monkeypatch):
+    """The dead-man ping fires exactly once per successful tick, after commit.
+
+    Wedge protection: the ping must be tied to the same success condition as
+    the collector_heartbeats write (2026-07-17 incident: process alive 9h,
+    zero heartbeats — an unconditional ping would have masked it).
+    """
+    import src.wmata_collector as wc
+
+    pings = []
+    monkeypatch.setattr(wc, "ping_healthcheck", lambda url: pings.append(url))
+    collector = wc.WMATADataCollector(
+        api_key="unused",
+        db_session=pg_session,
+        archive_root=tmp_path,
+        healthcheck_url="https://hc-ping.example/uuid",
+    )
+    rows = [
+        {
+            "trip_id": "T1",
+            "stop_id": "S1",
+            "stop_sequence": 1,
+            "route_id": "R1",
+            "vehicle_id": "V1",
+            "snapshot_ts": datetime(2026, 5, 17, 14, 0, 0),
+            "predicted_arrival_ts": datetime(2026, 5, 17, 14, 5, 0),
+            "predicted_departure_ts": datetime(2026, 5, 17, 14, 5, 30),
+            "schedule_relationship": "SCHEDULED",
+            "collected_at": datetime(2026, 5, 17, 14, 0, 5),
+            "trip_start_date": "20260517",
+        }
+    ]
+    try:
+        collector._save_trip_updates(rows)
+        assert pings == ["https://hc-ping.example/uuid"]
+    finally:
+        collector.close()

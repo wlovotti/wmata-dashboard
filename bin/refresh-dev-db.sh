@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# bin/refresh-dev-db.sh — materialize a disposable local copy of the prod
-# dataset for development. See docs/superpowers/specs/2026-06-13-dev-deploy-
-# environments-design.md §4.3.
+# bin/refresh-dev-db.sh — restore a local copy of the prod dataset for development.
+# Path 2a (2026-07): wmata_dashboard is now the primary system of record and will
+# NOT be dropped without explicit acknowledgment.
+# See docs/superpowers/specs/2026-06-13-dev-deploy-environments-design.md §4.3.
 #
-#   bin/refresh-dev-db.sh                # slim (default): drop+recreate the dev DB,
-#                                        #   restore the latest S3 dump WITHOUT the raw-feed tables (~17 GiB)
-#   bin/refresh-dev-db.sh --full         # include raw-feed tables so the pipeline can run (~31 GiB)
+#   bin/refresh-dev-db.sh                # REFUSING: wmata_dashboard is primary (use --scratch or --clobber-primary)
+#   bin/refresh-dev-db.sh --scratch      # slim (default): restore into wmata_dashboard_scratch, leaving primary untouched
+#   bin/refresh-dev-db.sh --scratch --full  # include raw-feed tables so the pipeline can run (~31 GiB)
+#   bin/refresh-dev-db.sh --clobber-primary # drop+recreate wmata_dashboard, restore the latest S3 dump (~17 GiB slim)
 #   bin/refresh-dev-db.sh --prune-gtfs   # after restore, delete is_current=False stop_times history (~9 GiB; VACUUM FULL)
-#   bin/refresh-dev-db.sh --scratch      # restore into wmata_dashboard_scratch, leaving the dev DB untouched
 #   bin/refresh-dev-db.sh --from-vm      # source a fresh pg_dump over the tunnel (bin/db-tunnel.sh) instead of S3
 #
-# Slim excludes the raw-feed tables at the pg_restore TOC level, so their data
-# is never written to disk (no transient spike). The read-only API never reads
+# Slim (default) excludes the raw-feed tables at the pg_restore TOC level, so their
+# data is never written to disk (no transient spike). The read-only API never reads
 # them; only the collector/pipeline does. A slim DB therefore CANNOT run the
 # derivation pipeline — use --full for that.
 set -euo pipefail
@@ -25,16 +26,25 @@ VM_DB_USER="${REFRESH_VM_DB_USER:-wmata}"
 # Raw-feed tables the read-only API never queries (verified: no inbound FKs).
 EXCLUDE_TABLES=(vehicle_positions trip_update_state timepoint_times collector_heartbeats)
 
-MODE_FULL=0; MODE_SCRATCH=0; MODE_PRUNE_GTFS=0; MODE_FROM_VM=0
+MODE_FULL=0; MODE_SCRATCH=0; MODE_PRUNE_GTFS=0; MODE_FROM_VM=0; MODE_CLOBBER=0
 for arg in "$@"; do
   case "$arg" in
-    --full)       MODE_FULL=1 ;;
-    --scratch)    MODE_SCRATCH=1 ;;
-    --prune-gtfs) MODE_PRUNE_GTFS=1 ;;
-    --from-vm)    MODE_FROM_VM=1 ;;
+    --full)             MODE_FULL=1 ;;
+    --scratch)          MODE_SCRATCH=1 ;;
+    --prune-gtfs)       MODE_PRUNE_GTFS=1 ;;
+    --from-vm)          MODE_FROM_VM=1 ;;
+    --clobber-primary)  MODE_CLOBBER=1 ;;
     *) echo "Unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
+
+# Path 2a (2026-07): local wmata_dashboard is the PRIMARY database, not a
+# disposable dev copy. Refuse to drop it unless explicitly told to.
+if [ "$MODE_SCRATCH" -eq 0 ] && [ "$MODE_CLOBBER" -eq 0 ]; then
+  echo "REFUSING: 'wmata_dashboard' is the system of record (Path 2a, 2026-07)." >&2
+  echo "Use --scratch for disposable restores, or --clobber-primary to really replace it." >&2
+  exit 3
+fi
 
 # Hard safety rail: only ever target the two known local DB names.
 if [ "$MODE_SCRATCH" -eq 1 ]; then
