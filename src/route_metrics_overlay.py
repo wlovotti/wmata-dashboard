@@ -33,7 +33,11 @@ from src.service_delivered import compute_service_delivered_for_routes
 from src.timezones import utcnow_naive
 
 
-def compute_route_metrics_overlay_for_date(db: Session, service_date: date_type) -> list[dict]:
+def compute_route_metrics_overlay_for_date(
+    db: Session,
+    service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
+) -> list[dict]:
     """Compute per-route sufficient statistics for one service_date.
 
     Returns one dict per route that has any data on the date (scheduled
@@ -42,13 +46,22 @@ def compute_route_metrics_overlay_for_date(db: Session, service_date: date_type)
     no presence in any of the four sources are not emitted — they'd
     contribute null/zero rows to the overlay without changing the
     aggregator's output.
+
+    `gtfs_snapshot_id` pins the scheduled side (EWT SWT pools,
+    service-delivered denominators) to a historical GTFS snapshot when
+    backfilling; the default reads the live `is_current` snapshot. OTP and
+    bunching counts are observed-side only and unaffected.
     """
     day_type = _day_type_for(service_date)
     service_date_iso = service_date.isoformat()
 
     # Fetch scheduled cell-hours once for this day_type (module-level cache
     # hits on the second call). EWT and bunching share it.
-    sched_by_day_type = {day_type: fetch_scheduled_cell_hours_for_routes(db, day_type)}
+    sched_by_day_type = {
+        day_type: fetch_scheduled_cell_hours_for_routes(
+            db, day_type, gtfs_snapshot_id=gtfs_snapshot_id
+        )
+    }
 
     # Shared observed-stop_events pull (EWT + bunching consume it).
     observed_rows = fetch_observed_stop_events_for_window(db, [service_date])
@@ -65,7 +78,12 @@ def compute_route_metrics_overlay_for_date(db: Session, service_date: date_type)
         sched_by_day_type=sched_by_day_type,
         observed_rows=observed_rows,
     )
-    sd_by_route = {r["route_id"]: r for r in compute_service_delivered_for_routes(db, service_date)}
+    sd_by_route = {
+        r["route_id"]: r
+        for r in compute_service_delivered_for_routes(
+            db, service_date, gtfs_snapshot_id=gtfs_snapshot_id
+        )
+    }
     otp_by_route = {r["route_id"]: r for r in compute_otp_split_for_routes(db, service_date)}
 
     ewt_by_route = ewt_by_date.get(service_date_iso, {})
@@ -119,13 +137,20 @@ def compute_route_metrics_overlay_for_date(db: Session, service_date: date_type)
     return rows
 
 
-def upsert_route_metrics_for_date(db: Session, service_date: date_type) -> int | None:
+def upsert_route_metrics_for_date(
+    db: Session,
+    service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
+) -> int | None:
     """Compute and upsert overlay rows for every route active on `service_date`.
 
     Idempotent: re-runs against the same date replace the prior rows in
     place. Returns the number of rows written, or None if computation
     raised (matching `upsert_system_metrics_for_date`'s soft-fail contract
     so the daily-batch wrapper can log and continue).
+
+    `gtfs_snapshot_id` pins the scheduled side to a historical GTFS
+    snapshot (backfill); see `compute_route_metrics_overlay_for_date`.
 
     The completeness guard acts as a *flagger*, not a *gate*: partial days
     are persisted with ``data_quality='partial'`` and their raw
@@ -149,7 +174,7 @@ def upsert_route_metrics_for_date(db: Session, service_date: date_type) -> int |
         )
 
     try:
-        rows = compute_route_metrics_overlay_for_date(db, service_date)
+        rows = compute_route_metrics_overlay_for_date(db, service_date, gtfs_snapshot_id)
     except Exception as exc:
         print(f"  ✗ Route metrics overlay compute failed for {service_date.isoformat()}: {exc}")
         return None

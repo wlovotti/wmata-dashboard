@@ -6,14 +6,18 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-07-18. July recovery executed on the laptop (spec
+Last edited 2026-07-18 (second edit). Closed NOTES-92: both rollup
+pipelines accept `--gtfs-snapshot-id` (threaded through
+`compute_service_delivered*` and `fetch_scheduled_cell_hours_for_routes`
+via `gtfs_version_filter`); June 6/11–6/20 rollups re-run with snapshot 12
+in the closing PR's deploy step.
+Earlier same day: July recovery executed on the laptop (spec
 2026-07-14, Status line has the tally); local `wmata_dashboard` is now the
 system of record and the VM is demoted to collector + backup + VP-archive
-(DEPLOYMENT.md banner). Added NOTES-92 (snapshot-aware rollups — June
-6/11–6/20 rollup rows are approximate until re-run), NOTES-93 (loud
-zero-file replay — silent no-op bit the 7/18 fold-in), NOTES-94 (VP-path
-dead-man coverage). Fixed the `/health` endpoint's SQLAlchemy-2.x
-`text("SELECT 1")` regression in the same PR.
+(DEPLOYMENT.md banner). Added NOTES-92..94; NOTES-93 (loud
+zero-file replay — silent no-op bit the 7/18 fold-in) and NOTES-94
+(VP-path dead-man coverage) remain open. Fixed the `/health` endpoint's
+SQLAlchemy-2.x `text("SELECT 1")` regression.
 Earlier (2026-07-17). Shrunk NOTES-91: collector dead-man ping shipped
 (`src/deadman.py`, PR #173); the batch-alerting half is superseded by the
 2026-07-13 Path 2a decision to make derivation a manual laptop action
@@ -265,10 +269,6 @@ the fixing PR, not a NOTES item.
   shipped (PR #173, `src/deadman.py`); the batch-alerting half is
   superseded by the Path 2a migration to manual laptop derivation — see
   item body.
-- **NOTES-92 Snapshot-aware rollup pipelines.** The two rollup pipelines
-  hardcode `is_current` on scheduled-side reads; June 6/11–6/20 rollups
-  were computed against snapshot 15 and need a re-run with the flag once
-  it exists.
 - **NOTES-93 Loud zero-file replay.** `replay_archive_to_state` exits 0
   when no archive files match the date — make it an error; the silent
   no-op masked missing files during the 7/18 fold-in.
@@ -900,26 +900,6 @@ manual laptop action rather than a scheduled batch, so there's no unattended
 batch process left to page on. The equivalent freshness signal for the new
 architecture (an S3-upload-staleness alarm) lands with the stateless-collector
 rewrite — tracked there, not here.
-
----
-
-## NOTES-92. Snapshot-aware rollup pipelines (+ re-run June rollups)
-
-**Severity: medium (June 2026 rollup rows have scheduled-side denominators
-computed against the wrong GTFS snapshot).**
-**Effort: medium (thread `--gtfs-snapshot-id` through two pipelines' reads,
-then re-run ~10 dates).**
-
-PR #170 added `--gtfs-snapshot-id` to the derive/bunching pipelines but NOT
-to `upsert_system_metrics_daily` / `upsert_route_metrics_overlay`, whose
-scheduled-side reads are hardcoded to `is_current=True`
-(`src/service_delivered.py` route-profile query, `src/ewt.py` SWT query).
-During the July recovery, June dates 6/11–6/20 were derived with snapshot 12
-(correct) but their rollups read snapshot 15's schedule (wrong): scheduled
-trip counts and SWT denominators are off wherever the two schedules differ.
-Fix: accept the flag in both pipelines, pass it down to the two reads, then
-re-run both rollups for 6/11–6/20 with `--gtfs-snapshot-id 12`. Until then,
-treat June service-delivered % and EWT-vs-SWT rollups as approximate.
 
 ---
 

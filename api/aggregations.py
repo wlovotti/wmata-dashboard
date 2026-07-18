@@ -1977,7 +1977,9 @@ def _system_otp_series(db: Session, dates: list[date_type]) -> dict[str, float |
 
 
 def _system_service_delivered_series(
-    db: Session, dates: list[date_type]
+    db: Session,
+    dates: list[date_type],
+    gtfs_snapshot_id: int | None = None,
 ) -> dict[str, float | None]:
     """System-level service-delivered per service_date.
 
@@ -2010,7 +2012,7 @@ def _system_service_delivered_series(
         if d_iso not in dates_with_runs:
             out[d_iso] = None
             continue
-        rows = compute_service_delivered_for_routes(db, d)
+        rows = compute_service_delivered_for_routes(db, d, gtfs_snapshot_id=gtfs_snapshot_id)
         scheduled = 0
         delivered = 0
         for r in rows:
@@ -2026,6 +2028,7 @@ def _system_ewt_and_bunching_for_date(
     db: Session,
     service_date: date_type,
     sched_by_day_type: dict[str, dict],
+    gtfs_snapshot_id: int | None = None,
 ) -> tuple[float | None, float | None]:
     """Pooled EWT and bunching across all routes for one service date.
 
@@ -2049,7 +2052,9 @@ def _system_ewt_and_bunching_for_date(
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
     if day_type not in sched_by_day_type:
-        sched_by_day_type[day_type] = fetch_scheduled_cell_hours_for_routes(db, day_type)
+        sched_by_day_type[day_type] = fetch_scheduled_cell_hours_for_routes(
+            db, day_type, gtfs_snapshot_id=gtfs_snapshot_id
+        )
     sched_by_route = sched_by_day_type[day_type]
 
     obs_q = (

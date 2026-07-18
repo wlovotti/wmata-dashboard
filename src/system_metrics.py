@@ -22,7 +22,11 @@ from src.models import SystemMetricsDaily
 from src.timezones import utcnow_naive
 
 
-def compute_system_metrics_for_date(db: Session, service_date: date_type) -> dict:
+def compute_system_metrics_for_date(
+    db: Session,
+    service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
+) -> dict:
     """Compute system-level OTP / service-delivered / EWT / bunching for one date.
 
     Returns a dict with keys `otp_percentage`, `service_delivered_ratio`,
@@ -33,6 +37,11 @@ def compute_system_metrics_for_date(db: Session, service_date: date_type) -> dic
     Args:
         db: SQLAlchemy session bound to the metrics database.
         service_date: Eastern operational date to compute for.
+        gtfs_snapshot_id: Pin the scheduled side (service-delivered
+            denominators, EWT SWT pools) to a historical GTFS snapshot when
+            backfilling a date whose schedule has been superseded; the
+            default reads the live `is_current` snapshot. OTP and bunching
+            are observed-side only and unaffected.
 
     Returns:
         Dict shaped like a single row of `system_metrics_daily` (minus
@@ -47,10 +56,10 @@ def compute_system_metrics_for_date(db: Session, service_date: date_type) -> dic
     )
 
     otp_by_date = _system_otp_series(db, [service_date])
-    sd_by_date = _system_service_delivered_series(db, [service_date])
+    sd_by_date = _system_service_delivered_series(db, [service_date], gtfs_snapshot_id)
     sched_by_day_type: dict[str, dict] = {}
     ewt_seconds, bunching_rate = _system_ewt_and_bunching_for_date(
-        db, service_date, sched_by_day_type
+        db, service_date, sched_by_day_type, gtfs_snapshot_id
     )
 
     iso = service_date.isoformat()
@@ -62,7 +71,11 @@ def compute_system_metrics_for_date(db: Session, service_date: date_type) -> dic
     }
 
 
-def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict | None:
+def upsert_system_metrics_for_date(
+    db: Session,
+    service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
+) -> dict | None:
     """Compute and upsert one row of `system_metrics_daily` for `service_date`.
 
     Re-runs against the same date overwrite the prior row in place — the
@@ -80,6 +93,9 @@ def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict
     Args:
         db: Database session.
         service_date: Eastern service date to compute and store.
+        gtfs_snapshot_id: Optional historical GTFS snapshot to pin the
+            scheduled side to (backfill); see
+            `compute_system_metrics_for_date`.
 
     Returns:
         The metrics dict written (includes ``data_quality`` and
@@ -101,7 +117,7 @@ def upsert_system_metrics_for_date(db: Session, service_date: date_type) -> dict
         )
 
     try:
-        metrics = compute_system_metrics_for_date(db, service_date)
+        metrics = compute_system_metrics_for_date(db, service_date, gtfs_snapshot_id)
     except Exception as exc:
         print(f"  ✗ System metrics compute failed for {service_date.isoformat()}: {exc}")
         return None

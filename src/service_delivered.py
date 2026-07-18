@@ -65,6 +65,7 @@ from datetime import date as date_type
 from sqlalchemy import case, distinct, func
 from sqlalchemy.orm import Session
 
+from src.gtfs_versioning import gtfs_version_filter
 from src.models import Calendar, CalendarDate, Run, Trip
 
 # Day-of-week column on `Calendar` for each Python weekday (Mon=0..Sun=6).
@@ -105,8 +106,16 @@ def _day_type_for(service_date: date_type) -> str:
     return "weekday"
 
 
-def _scheduled_trip_ids_query(db: Session, route_id: str, service_date: date_type):
+def _scheduled_trip_ids_query(
+    db: Session,
+    route_id: str,
+    service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
+):
     """Subquery yielding GTFS trip_ids scheduled for `route_id` on `service_date`.
+
+    `gtfs_snapshot_id` pins the schedule to a historical GTFS snapshot
+    (backfill); the default reads the live `is_current` snapshot.
 
     Used to filter the delivered-trips numerator: a real-time-only ADDED trip
     that's in `runs` but not in GTFS shouldn't count toward "service
@@ -133,7 +142,7 @@ def _scheduled_trip_ids_query(db: Session, route_id: str, service_date: date_typ
     base_service_ids = (
         db.query(Calendar.service_id)
         .filter(
-            Calendar.is_current,
+            gtfs_version_filter(Calendar, gtfs_snapshot_id),
             weekday_field == 1,
             Calendar.start_date <= service_date_str,
             Calendar.end_date >= service_date_str,
@@ -143,7 +152,7 @@ def _scheduled_trip_ids_query(db: Session, route_id: str, service_date: date_typ
     removed_service_ids = (
         db.query(CalendarDate.service_id)
         .filter(
-            CalendarDate.is_current,
+            gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
             CalendarDate.date == service_date_str,
             CalendarDate.exception_type == 2,
         )
@@ -152,7 +161,7 @@ def _scheduled_trip_ids_query(db: Session, route_id: str, service_date: date_typ
     added_service_ids = (
         db.query(CalendarDate.service_id)
         .filter(
-            CalendarDate.is_current,
+            gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
             CalendarDate.date == service_date_str,
             CalendarDate.exception_type == 1,
         )
@@ -161,7 +170,7 @@ def _scheduled_trip_ids_query(db: Session, route_id: str, service_date: date_typ
 
     return db.query(Trip.trip_id).filter(
         Trip.route_id == route_id,
-        Trip.is_current,
+        gtfs_version_filter(Trip, gtfs_snapshot_id),
         (
             (
                 Trip.service_id.in_(db.query(base_service_ids.c.service_id))
@@ -176,6 +185,7 @@ def compute_service_delivered(
     db: Session,
     route_id: str,
     service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
 ) -> dict:
     """Compute service-delivered ratio for one (route, service_date).
 
@@ -183,11 +193,12 @@ def compute_service_delivered(
     delivered_trips, ratio}`. `ratio` is `None` when `scheduled_trips == 0`
     (no schedule for this route on this day_type — the route may not run
     Sundays, etc.) so callers can distinguish "didn't run any" from "wasn't
-    supposed to run any."
+    supposed to run any." `gtfs_snapshot_id` pins the scheduled side to a
+    historical GTFS snapshot (backfill); default is the live snapshot.
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
-    scheduled_trip_ids_q = _scheduled_trip_ids_query(db, route_id, service_date)
+    scheduled_trip_ids_q = _scheduled_trip_ids_query(db, route_id, service_date, gtfs_snapshot_id)
 
     scheduled = scheduled_trip_ids_q.distinct().count()
 
@@ -252,6 +263,7 @@ def compute_service_delivered_for_routes(
     db: Session,
     service_date: date_type,
     route_ids: list[str] | None = None,
+    gtfs_snapshot_id: int | None = None,
 ) -> list[dict]:
     """Compute service-delivered ratio for every route with a schedule
     or any runs on `service_date`.
@@ -261,7 +273,9 @@ def compute_service_delivered_for_routes(
     that has runs on the date — so a route that's running unscheduled
     service still surfaces (delivered>0, scheduled=0, ratio=None) and a
     scheduled route with 0 delivered surfaces (ratio=0). Returns one dict
-    per route, sorted by route_id.
+    per route, sorted by route_id. `gtfs_snapshot_id` pins the scheduled
+    side to a historical GTFS snapshot (backfill); default is the live
+    snapshot.
     """
     service_date_str = service_date.isoformat()
     if route_ids is None:
@@ -275,7 +289,7 @@ def compute_service_delivered_for_routes(
             sid
             for (sid,) in db.query(Calendar.service_id)
             .filter(
-                Calendar.is_current,
+                gtfs_version_filter(Calendar, gtfs_snapshot_id),
                 weekday_field == 1,
                 Calendar.start_date <= gtfs_date_str,
                 Calendar.end_date >= gtfs_date_str,
@@ -287,7 +301,7 @@ def compute_service_delivered_for_routes(
             sid
             for (sid,) in db.query(CalendarDate.service_id)
             .filter(
-                CalendarDate.is_current,
+                gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
                 CalendarDate.date == gtfs_date_str,
                 CalendarDate.exception_type == 1,
             )
@@ -298,7 +312,7 @@ def compute_service_delivered_for_routes(
             sid
             for (sid,) in db.query(CalendarDate.service_id)
             .filter(
-                CalendarDate.is_current,
+                gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
                 CalendarDate.date == gtfs_date_str,
                 CalendarDate.exception_type == 2,
             )
@@ -312,7 +326,7 @@ def compute_service_delivered_for_routes(
                 r
                 for (r,) in db.query(Trip.route_id)
                 .filter(
-                    Trip.is_current,
+                    gtfs_version_filter(Trip, gtfs_snapshot_id),
                     Trip.service_id.in_(active_service_ids),
                 )
                 .distinct()
@@ -328,4 +342,4 @@ def compute_service_delivered_for_routes(
             .all()
         }
         route_ids = sorted(from_gtfs | from_runs)
-    return [compute_service_delivered(db, r, service_date) for r in route_ids]
+    return [compute_service_delivered(db, r, service_date, gtfs_snapshot_id) for r in route_ids]
