@@ -676,20 +676,33 @@ class WMATADataCollector:
         # UPSERT into trip_update_state — rows missing stop_sequence can't be
         # keyed in state (it's part of the PK), so we drop them from the payload.
         # Archived rows are unaffected by this filter.
-        upsert_payload = [
-            {
+        #
+        # Some agencies' feeds (observed on SFMTA/511.org, not WMATA) publish
+        # more than one stop_time_update at the same stop_sequence within a
+        # single trip/poll (e.g. a trip that revisits a stop_sequence value
+        # for two different physical stops). Postgres's ON CONFLICT DO UPDATE
+        # raises CardinalityViolation if the same conflict target
+        # (trip_id, stop_sequence, service_date) appears twice within one
+        # INSERT statement, so dedupe by that key here — keeping the
+        # last-seen row per key, consistent with this method's existing
+        # "latest poll wins" semantics — before handing rows to the upsert.
+        upsert_by_key: dict[tuple, dict] = {}
+        for r in rows:
+            if r.get("stop_sequence") is None:
+                continue
+            service_date = _service_date_for_row(r, self.service_date_tz)
+            key = (r["trip_id"], r["stop_sequence"], service_date)
+            upsert_by_key[key] = {
                 "trip_id": r["trip_id"],
                 "stop_sequence": r["stop_sequence"],
-                "service_date": _service_date_for_row(r, self.service_date_tz),
+                "service_date": service_date,
                 "stop_id": r["stop_id"],
                 "vehicle_id": r.get("vehicle_id"),
                 "snapshot_ts": r["snapshot_ts"],
                 "predicted_arrival_ts": r.get("predicted_arrival_ts"),
                 "schedule_relationship": r.get("schedule_relationship"),
             }
-            for r in rows
-            if r.get("stop_sequence") is not None
-        ]
+        upsert_payload = list(upsert_by_key.values())
         if upsert_payload:
             upsert_trip_update_state(self.db, upsert_payload)
 

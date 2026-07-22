@@ -64,6 +64,65 @@ def test_save_trip_updates_writes_state_and_heartbeat(pg_session, tmp_path):
 
 
 @pytest.mark.integration
+def test_save_trip_updates_dedupes_duplicate_key_within_one_poll(pg_session, tmp_path):
+    """Two rows sharing (trip_id, stop_sequence, service_date) in one poll
+    must not crash the upsert.
+
+    Observed on the SFMTA/511.org feed (unlike WMATA's): a single trip can
+    report the same ``stop_sequence`` twice in one snapshot for two
+    different physical stops. Postgres's ON CONFLICT DO UPDATE raises
+    CardinalityViolation if the same conflict target appears twice within
+    one INSERT statement, so ``_save_trip_updates`` must dedupe by that key
+    before upserting — keeping the last-seen row, consistent with its
+    existing "latest poll wins" semantics.
+    """
+    from src.wmata_collector import WMATADataCollector
+
+    collector = WMATADataCollector(api_key="unused", db_session=pg_session, archive_root=tmp_path)
+
+    rows = [
+        {
+            "trip_id": "T1",
+            "stop_id": "S_FIRST",
+            "stop_sequence": 44,
+            "route_id": "R1",
+            "vehicle_id": "V1",
+            "snapshot_ts": datetime(2026, 5, 17, 14, 0, 0),
+            "predicted_arrival_ts": datetime(2026, 5, 17, 14, 5, 0),
+            "predicted_departure_ts": None,
+            "schedule_relationship": "UNSET",
+            "trip_start_date": "20260517",
+        },
+        {
+            "trip_id": "T1",
+            "stop_id": "S_SECOND",
+            "stop_sequence": 44,
+            "route_id": "R1",
+            "vehicle_id": "V1",
+            "snapshot_ts": datetime(2026, 5, 17, 14, 0, 0),
+            "predicted_arrival_ts": datetime(2026, 5, 17, 14, 6, 0),
+            "predicted_departure_ts": None,
+            "schedule_relationship": "UNSET",
+            "trip_start_date": "20260517",
+        },
+    ]
+    try:
+        collector._save_trip_updates(rows)  # must not raise CardinalityViolation
+
+        states = (
+            (pg_session.execute(select(TripUpdateState).filter_by(trip_id="T1", stop_sequence=44)))
+            .scalars()
+            .all()
+        )
+        assert len(states) == 1
+        # Last row in the batch wins.
+        assert states[0].stop_id == "S_SECOND"
+        assert states[0].last_predicted_arrival_ts == datetime(2026, 5, 17, 14, 6, 0)
+    finally:
+        collector.close()
+
+
+@pytest.mark.integration
 def test_collector_writes_jsonl_archive(pg_session, tmp_path):
     """_save_trip_updates appends rows to the JSONL archive."""
     from src.wmata_collector import WMATADataCollector
