@@ -63,6 +63,12 @@ class WMATADataCollector:
         db_session: Session = None,
         archive_root: Path | str | None = None,
         healthcheck_url: str | None = None,
+        *,
+        tu_feed_url: str | None = None,
+        vp_feed_url: str | None = None,
+        request_params: dict | None = None,
+        service_date_tz: str = "America/New_York",
+        heartbeat_name: str = "combined",
     ):
         """Construct a collector.
 
@@ -75,12 +81,38 @@ class WMATADataCollector:
 
         ``healthcheck_url``: dead-man endpoint pinged once per successful
         trip-update tick; None disables (NOTES-91).
+
+        ``tu_feed_url`` / ``vp_feed_url``: override the trip-updates /
+        vehicle-positions GTFS-RT feed URLs. ``None`` (the default) keeps
+        the WMATA endpoints, so existing call sites are unaffected.
+
+        ``request_params``: extra query params sent with every
+        ``requests.get`` call to either feed (e.g. a 511.org ``api_key`` +
+        ``agency`` pair for the SFMTA sidecar). ``None`` sends no query
+        params, matching current WMATA behavior (auth is header-based).
+
+        ``service_date_tz``: IANA tz name used to infer ``service_date``
+        from ``snapshot_ts`` when a row has no usable
+        ``trip_start_date`` (see ``_service_date_for_row``). Defaults to
+        Eastern (WMATA's zone).
+
+        ``heartbeat_name``: ``collector_name`` written to
+        ``collector_heartbeats`` by ``_save_trip_updates``. Defaults to
+        ``"combined"`` (WMATA's existing collector).
         """
         self.api_key = api_key
         self.headers = {"api_key": api_key}
         self.gtfs_data = {}
         self.db = db_session
         self._healthcheck_url = healthcheck_url
+
+        # Feed parameterization (SFMTA sidecar, spec 2026-07-21): None keeps
+        # the WMATA defaults so existing call sites are untouched.
+        self.tu_feed_url = tu_feed_url or f"{BASE_URL}/bus-gtfsrt-tripupdates.pb"
+        self.vp_feed_url = vp_feed_url or f"{BASE_URL}/bus-gtfsrt-vehiclepositions.pb"
+        self.request_params = request_params
+        self.service_date_tz = service_date_tz
+        self.heartbeat_name = heartbeat_name
 
         # Cold archive: raw rows go to compressed JSONL daily files.
         # Path mirrors the archive layout under REPO_ROOT / "archive" / ...
@@ -413,10 +445,12 @@ class WMATADataCollector:
         print("\nFetching real-time vehicle positions...")
         sys.stdout.flush()
 
-        url = f"{BASE_URL}/bus-gtfsrt-vehiclepositions.pb"
+        url = self.vp_feed_url
 
         try:
-            response = requests.get(url, headers=self.headers, timeout=timeout)
+            response = requests.get(
+                url, headers=self.headers, params=self.request_params, timeout=timeout
+            )
 
             if response.status_code != 200:
                 print(f"✗ Error fetching vehicle positions: {response.status_code}")
@@ -523,10 +557,12 @@ class WMATADataCollector:
         print("\nFetching real-time trip updates...")
         sys.stdout.flush()
 
-        url = f"{BASE_URL}/bus-gtfsrt-tripupdates.pb"
+        url = self.tu_feed_url
 
         try:
-            response = requests.get(url, headers=self.headers, timeout=timeout)
+            response = requests.get(
+                url, headers=self.headers, params=self.request_params, timeout=timeout
+            )
 
             if response.status_code != 200:
                 print(f"✗ Error fetching trip updates: {response.status_code}")
@@ -644,7 +680,7 @@ class WMATADataCollector:
             {
                 "trip_id": r["trip_id"],
                 "stop_sequence": r["stop_sequence"],
-                "service_date": _service_date_for_row(r),
+                "service_date": _service_date_for_row(r, self.service_date_tz),
                 "stop_id": r["stop_id"],
                 "vehicle_id": r.get("vehicle_id"),
                 "snapshot_ts": r["snapshot_ts"],
@@ -661,7 +697,7 @@ class WMATADataCollector:
         # minute-buckets of collector activity without reading snapshot rows.
         # Use the snapshot_ts from the first row as the tick timestamp.
         tick_ts = rows[0]["snapshot_ts"]
-        self.db.add(CollectorHeartbeat(ts=tick_ts, collector_name="combined"))
+        self.db.add(CollectorHeartbeat(ts=tick_ts, collector_name=self.heartbeat_name))
 
         # Single commit covers both the state upsert and the heartbeat.
         self.db.commit()
