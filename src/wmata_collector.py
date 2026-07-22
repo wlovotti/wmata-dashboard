@@ -665,6 +665,12 @@ class WMATADataCollector:
         Note: ``trip_update_snapshots`` is no longer written to by this
         method (Phase E.2 cutover, PR #151). The table is dropped via the
         manual runbook in ``scripts/migrate_drop_phase_f.py``.
+
+        The returned/printed row count is post-dedupe (by conflict key
+        ``(trip_id, stop_sequence, service_date)``), so for agencies whose
+        feed repeats a ``stop_sequence`` within one trip/poll (observed on
+        SFMTA/511.org), the reported count can undercount that poll's raw
+        ``stop_time_updates`` — the archive still holds every raw row.
         """
         if not rows:
             return 0
@@ -683,9 +689,13 @@ class WMATADataCollector:
         # for two different physical stops). Postgres's ON CONFLICT DO UPDATE
         # raises CardinalityViolation if the same conflict target
         # (trip_id, stop_sequence, service_date) appears twice within one
-        # INSERT statement, so dedupe by that key here — keeping the
-        # last-seen row per key, consistent with this method's existing
-        # "latest poll wins" semantics — before handing rows to the upsert.
+        # INSERT statement, so dedupe by that key here before handing rows
+        # to the upsert. Same-poll duplicate conflict keys (511/Muni repeats
+        # stop_sequence within a trip, ~0.24% of rows): keep the last row in
+        # feed order — an arbitrary tie-break within one snapshot, NOT the
+        # cross-poll "latest wins" semantics documented above (both
+        # colliding rows share one snapshot_ts, so neither is more "latest"
+        # than the other). Both raw rows remain in the archive regardless.
         upsert_by_key: dict[tuple, dict] = {}
         for r in rows:
             if r.get("stop_sequence") is None:
