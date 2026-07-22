@@ -15,16 +15,22 @@ from src.archive_writer import JsonlArchiveWriter
 from src.database import get_session, init_db
 from src.deadman import ping_healthcheck
 from src.models import CollectorHeartbeat, Route, Shape, Stop, StopTime, Trip, VehiclePosition
-from src.timezones import eastern_date_from_naive_utc, from_epoch_naive_utc, utcnow_naive
+from src.timezones import (
+    from_epoch_naive_utc,
+    local_date_from_naive_utc,
+    utcnow_naive,
+)
 from src.upsert_helpers import upsert_trip_update_state
 
 
-def _service_date_for_row(row: dict):
-    """Return the Eastern service_date for a trip-update row.
+def _service_date_for_row(row: dict, tz_name: str = "America/New_York"):
+    """Return the local-zone service_date for a trip-update row.
 
     Prefers ``trip_start_date`` (YYYYMMDD string from GTFS-RT
     ``tripDescriptor.start_date``) when present and parseable; otherwise
-    falls back to the Eastern calendar day of ``snapshot_ts``.
+    falls back to the agency-local calendar day of ``snapshot_ts``
+    (``tz_name``, default Eastern — WMATA's zone — so all existing call
+    sites keep their behavior).
 
     Module-level (not a method) so the replay tool can reuse it without
     pulling in the WMATADataCollector context.
@@ -35,17 +41,17 @@ def _service_date_for_row(row: dict):
             return datetime.strptime(raw, "%Y%m%d").date()
         except ValueError:
             pass  # fall through to snapshot_ts inference
-    return eastern_date_from_naive_utc(row["snapshot_ts"])
+    return local_date_from_naive_utc(row["snapshot_ts"], tz_name)
 
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Your WMATA API key from environment
+# Your WMATA API key from environment. May legitimately be absent on
+# hosts that only run other agencies' collectors (e.g. the SFMTA
+# sidecar) — callers that need it (main() below, WMATA scripts) must
+# check for None themselves.
 API_KEY = os.getenv("WMATA_API_KEY")
-
-if not API_KEY:
-    raise ValueError("WMATA_API_KEY not found in environment variables")
 
 BASE_URL = "https://api.wmata.com/gtfs"
 
@@ -705,6 +711,9 @@ class WMATADataCollector:
 
 
 def main():
+    if not API_KEY:
+        raise ValueError("WMATA_API_KEY not found in environment variables")
+
     # Initialize database
     print("Initializing database...")
     init_db()
