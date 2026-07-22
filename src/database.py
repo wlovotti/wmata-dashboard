@@ -28,7 +28,7 @@ def get_engine(db_url: str | None = None):
     - max_overflow: Additional connections allowed when pool is full
     - pool_recycle: Recycle connections after 1 hour
     """
-    url = db_url or DATABASE_URL
+    url = db_url or os.getenv("DATABASE_URL")
     engine_kwargs = {"echo": False}
 
     # Apply pool parameters only for non-SQLite databases (PostgreSQL, etc.)
