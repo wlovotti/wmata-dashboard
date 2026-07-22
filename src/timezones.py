@@ -112,6 +112,17 @@ def service_date_position_window_utc(service_date):
     return start, end
 
 
+def local_date_from_naive_utc(naive_utc_dt, tz_name):
+    """Return the calendar date of a naive-UTC datetime in an arbitrary IANA zone.
+
+    Timezone-generic sibling of ``eastern_date_from_naive_utc`` for
+    multi-agency service-date fallback (an SF trip observed at 05:30 UTC
+    belongs to the *previous* Pacific service date). ``tz_name`` is an
+    IANA name like ``America/Los_Angeles``.
+    """
+    return naive_utc_dt.replace(tzinfo=UTC).astimezone(ZoneInfo(tz_name)).date()
+
+
 def to_eastern_sql(naive_utc_col):
     """SQLAlchemy expression: convert a naive-UTC timestamp column to naive Eastern.
 

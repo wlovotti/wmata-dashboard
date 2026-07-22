@@ -1,0 +1,26 @@
+# SFMTA (Muni) via 511.org — MTC's regional clearinghouse, the only
+# first-party GTFS-RT source for Muni. Default token cap: 60 req/rolling
+# hour; cadences below budget 50/hr (TU 120s + VP 180s) leaving 10/hr
+# slack for retries and ad-hoc calls. See spec
+# docs/superpowers/specs/2026-07-21-sfmta-comparison-design.md.
+name: sfmta
+display_name: SFMTA (Muni)
+timezone: America/Los_Angeles
+api:
+  key_env: SFMTA_API_KEY
+  auth: query
+  trip_updates_url: https://api.511.org/transit/tripupdates
+  vehicle_positions_url: https://api.511.org/transit/vehiclepositions
+  extra_params:
+    agency: SF
+collector:
+  tick_sec: 60
+  trip_updates_every_ticks: 2
+  vehicle_positions_every_ticks: 3
+  archive_dir: archive/sfmta_raw_snapshots
+  pid_file: logs/sfmta_collector.pid
+  heartbeat_name: sfmta-combined
+database:
+  url_env: SFMTA_DATABASE_URL
+healthcheck:
+  url_env: SFMTA_COLLECTOR_HEALTHCHECK_URL

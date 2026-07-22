@@ -1,0 +1,24 @@
+# Documents the WMATA collector's current implicit settings. NOT yet
+# consumed by scripts/continuous_combined_collector.py (that migration is
+# the NOTES-95 multi-agency rewrite); exists so every implicit assumption
+# is written down and tested loadable.
+name: wmata
+display_name: WMATA Metrobus
+timezone: America/New_York
+api:
+  key_env: WMATA_API_KEY
+  auth: header
+  trip_updates_url: https://api.wmata.com/gtfs/bus-gtfsrt-tripupdates.pb
+  vehicle_positions_url: https://api.wmata.com/gtfs/bus-gtfsrt-vehiclepositions.pb
+  extra_params: {}
+collector:
+  tick_sec: 30
+  trip_updates_every_ticks: 1
+  vehicle_positions_every_ticks: 2
+  archive_dir: archive/raw_snapshots
+  pid_file: logs/collector.pid
+  heartbeat_name: combined
+database:
+  url_env: DATABASE_URL
+healthcheck:
+  url_env: COLLECTOR_HEALTHCHECK_URL

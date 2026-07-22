@@ -15,16 +15,22 @@ from src.archive_writer import JsonlArchiveWriter
 from src.database import get_session, init_db
 from src.deadman import ping_healthcheck
 from src.models import CollectorHeartbeat, Route, Shape, Stop, StopTime, Trip, VehiclePosition
-from src.timezones import eastern_date_from_naive_utc, from_epoch_naive_utc, utcnow_naive
+from src.timezones import (
+    from_epoch_naive_utc,
+    local_date_from_naive_utc,
+    utcnow_naive,
+)
 from src.upsert_helpers import upsert_trip_update_state
 
 
-def _service_date_for_row(row: dict):
-    """Return the Eastern service_date for a trip-update row.
+def _service_date_for_row(row: dict, tz_name: str = "America/New_York"):
+    """Return the local-zone service_date for a trip-update row.
 
     Prefers ``trip_start_date`` (YYYYMMDD string from GTFS-RT
     ``tripDescriptor.start_date``) when present and parseable; otherwise
-    falls back to the Eastern calendar day of ``snapshot_ts``.
+    falls back to the agency-local calendar day of ``snapshot_ts``
+    (``tz_name``, default Eastern — WMATA's zone — so all existing call
+    sites keep their behavior).
 
     Module-level (not a method) so the replay tool can reuse it without
     pulling in the WMATADataCollector context.
@@ -35,17 +41,17 @@ def _service_date_for_row(row: dict):
             return datetime.strptime(raw, "%Y%m%d").date()
         except ValueError:
             pass  # fall through to snapshot_ts inference
-    return eastern_date_from_naive_utc(row["snapshot_ts"])
+    return local_date_from_naive_utc(row["snapshot_ts"], tz_name)
 
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Your WMATA API key from environment
+# Your WMATA API key from environment. May legitimately be absent on
+# hosts that only run other agencies' collectors (e.g. the SFMTA
+# sidecar) — callers that need it (main() below, WMATA scripts) must
+# check for None themselves.
 API_KEY = os.getenv("WMATA_API_KEY")
-
-if not API_KEY:
-    raise ValueError("WMATA_API_KEY not found in environment variables")
 
 BASE_URL = "https://api.wmata.com/gtfs"
 
@@ -57,6 +63,12 @@ class WMATADataCollector:
         db_session: Session = None,
         archive_root: Path | str | None = None,
         healthcheck_url: str | None = None,
+        *,
+        tu_feed_url: str | None = None,
+        vp_feed_url: str | None = None,
+        request_params: dict | None = None,
+        service_date_tz: str = "America/New_York",
+        heartbeat_name: str = "combined",
     ):
         """Construct a collector.
 
@@ -69,12 +81,38 @@ class WMATADataCollector:
 
         ``healthcheck_url``: dead-man endpoint pinged once per successful
         trip-update tick; None disables (NOTES-91).
+
+        ``tu_feed_url`` / ``vp_feed_url``: override the trip-updates /
+        vehicle-positions GTFS-RT feed URLs. ``None`` (the default) keeps
+        the WMATA endpoints, so existing call sites are unaffected.
+
+        ``request_params``: extra query params sent with every
+        ``requests.get`` call to either feed (e.g. a 511.org ``api_key`` +
+        ``agency`` pair for the SFMTA sidecar). ``None`` sends no query
+        params, matching current WMATA behavior (auth is header-based).
+
+        ``service_date_tz``: IANA tz name used to infer ``service_date``
+        from ``snapshot_ts`` when a row has no usable
+        ``trip_start_date`` (see ``_service_date_for_row``). Defaults to
+        Eastern (WMATA's zone).
+
+        ``heartbeat_name``: ``collector_name`` written to
+        ``collector_heartbeats`` by ``_save_trip_updates``. Defaults to
+        ``"combined"`` (WMATA's existing collector).
         """
         self.api_key = api_key
         self.headers = {"api_key": api_key}
         self.gtfs_data = {}
         self.db = db_session
         self._healthcheck_url = healthcheck_url
+
+        # Feed parameterization (SFMTA sidecar, spec 2026-07-21): None keeps
+        # the WMATA defaults so existing call sites are untouched.
+        self.tu_feed_url = tu_feed_url or f"{BASE_URL}/bus-gtfsrt-tripupdates.pb"
+        self.vp_feed_url = vp_feed_url or f"{BASE_URL}/bus-gtfsrt-vehiclepositions.pb"
+        self.request_params = request_params
+        self.service_date_tz = service_date_tz
+        self.heartbeat_name = heartbeat_name
 
         # Cold archive: raw rows go to compressed JSONL daily files.
         # Path mirrors the archive layout under REPO_ROOT / "archive" / ...
@@ -407,10 +445,12 @@ class WMATADataCollector:
         print("\nFetching real-time vehicle positions...")
         sys.stdout.flush()
 
-        url = f"{BASE_URL}/bus-gtfsrt-vehiclepositions.pb"
+        url = self.vp_feed_url
 
         try:
-            response = requests.get(url, headers=self.headers, timeout=timeout)
+            response = requests.get(
+                url, headers=self.headers, params=self.request_params, timeout=timeout
+            )
 
             if response.status_code != 200:
                 print(f"✗ Error fetching vehicle positions: {response.status_code}")
@@ -517,10 +557,12 @@ class WMATADataCollector:
         print("\nFetching real-time trip updates...")
         sys.stdout.flush()
 
-        url = f"{BASE_URL}/bus-gtfsrt-tripupdates.pb"
+        url = self.tu_feed_url
 
         try:
-            response = requests.get(url, headers=self.headers, timeout=timeout)
+            response = requests.get(
+                url, headers=self.headers, params=self.request_params, timeout=timeout
+            )
 
             if response.status_code != 200:
                 print(f"✗ Error fetching trip updates: {response.status_code}")
@@ -623,6 +665,12 @@ class WMATADataCollector:
         Note: ``trip_update_snapshots`` is no longer written to by this
         method (Phase E.2 cutover, PR #151). The table is dropped via the
         manual runbook in ``scripts/migrate_drop_phase_f.py``.
+
+        The returned/printed row count is post-dedupe (by conflict key
+        ``(trip_id, stop_sequence, service_date)``), so for agencies whose
+        feed repeats a ``stop_sequence`` within one trip/poll (observed on
+        SFMTA/511.org), the reported count can undercount that poll's raw
+        ``stop_time_updates`` — the archive still holds every raw row.
         """
         if not rows:
             return 0
@@ -634,20 +682,37 @@ class WMATADataCollector:
         # UPSERT into trip_update_state — rows missing stop_sequence can't be
         # keyed in state (it's part of the PK), so we drop them from the payload.
         # Archived rows are unaffected by this filter.
-        upsert_payload = [
-            {
+        #
+        # Some agencies' feeds (observed on SFMTA/511.org, not WMATA) publish
+        # more than one stop_time_update at the same stop_sequence within a
+        # single trip/poll (e.g. a trip that revisits a stop_sequence value
+        # for two different physical stops). Postgres's ON CONFLICT DO UPDATE
+        # raises CardinalityViolation if the same conflict target
+        # (trip_id, stop_sequence, service_date) appears twice within one
+        # INSERT statement, so dedupe by that key here before handing rows
+        # to the upsert. Same-poll duplicate conflict keys (511/Muni repeats
+        # stop_sequence within a trip, ~0.24% of rows): keep the last row in
+        # feed order — an arbitrary tie-break within one snapshot, NOT the
+        # cross-poll "latest wins" semantics documented above (both
+        # colliding rows share one snapshot_ts, so neither is more "latest"
+        # than the other). Both raw rows remain in the archive regardless.
+        upsert_by_key: dict[tuple, dict] = {}
+        for r in rows:
+            if r.get("stop_sequence") is None:
+                continue
+            service_date = _service_date_for_row(r, self.service_date_tz)
+            key = (r["trip_id"], r["stop_sequence"], service_date)
+            upsert_by_key[key] = {
                 "trip_id": r["trip_id"],
                 "stop_sequence": r["stop_sequence"],
-                "service_date": _service_date_for_row(r),
+                "service_date": service_date,
                 "stop_id": r["stop_id"],
                 "vehicle_id": r.get("vehicle_id"),
                 "snapshot_ts": r["snapshot_ts"],
                 "predicted_arrival_ts": r.get("predicted_arrival_ts"),
                 "schedule_relationship": r.get("schedule_relationship"),
             }
-            for r in rows
-            if r.get("stop_sequence") is not None
-        ]
+        upsert_payload = list(upsert_by_key.values())
         if upsert_payload:
             upsert_trip_update_state(self.db, upsert_payload)
 
@@ -655,7 +720,7 @@ class WMATADataCollector:
         # minute-buckets of collector activity without reading snapshot rows.
         # Use the snapshot_ts from the first row as the tick timestamp.
         tick_ts = rows[0]["snapshot_ts"]
-        self.db.add(CollectorHeartbeat(ts=tick_ts, collector_name="combined"))
+        self.db.add(CollectorHeartbeat(ts=tick_ts, collector_name=self.heartbeat_name))
 
         # Single commit covers both the state upsert and the heartbeat.
         self.db.commit()
@@ -705,6 +770,9 @@ class WMATADataCollector:
 
 
 def main():
+    if not API_KEY:
+        raise ValueError("WMATA_API_KEY not found in environment variables")
+
     # Initialize database
     print("Initializing database...")
     init_db()

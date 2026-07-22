@@ -1,0 +1,44 @@
+[Unit]
+Description=SFMTA (Muni) Sidecar Data Collector
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=wmata
+Group=wmata
+WorkingDirectory=/home/wmata/wmata-dashboard
+Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/home/wmata/wmata-dashboard/.env
+
+# Invoke the venv interpreter directly (not `uv run`) — same rationale as
+# wmata-collector.service.
+ExecStart=/home/wmata/wmata-dashboard/.venv/bin/python3 scripts/sfmta_collector.py
+
+# Restart policy
+Restart=always
+RestartSec=5s
+
+# Logging
+StandardOutput=append:/var/log/wmata/sfmta-collector.log
+StandardError=append:/var/log/wmata/sfmta-collector-error.log
+SyslogIdentifier=sfmta-collector
+
+# Resource limits (2 GB RAM instance + 4 GB swap). 1G mirrors
+# wmata-collector.service; SFMTA baseline not yet measured (smaller fleet,
+# coarser cadence — expect lower).
+MemoryMax=1G
+CPUQuota=50%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The collector writes a PID file under logs/ and the JSONL cold-archive under
+# archive/sfmta_raw_snapshots/ — both must be writable despite ProtectHome=read-only.
+ReadWritePaths=/var/log/wmata /home/wmata/wmata-dashboard/logs /home/wmata/wmata-dashboard/archive
+
+[Install]
+WantedBy=multi-user.target
