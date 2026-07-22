@@ -659,5 +659,75 @@ du -sh /mnt/pgdata/main    # Postgres data dir
 
 ---
 
+## 11. SFMTA (Muni) sidecar collector
+
+A second, independent collector for SFMTA (Muni) GTFS-RT via 511.org — a
+comparison-agency sidecar, not part of the WMATA data plane. It runs as its
+own systemd unit against its **own database** (`sfmta_dashboard`), on the
+same VM, sharing nothing with the WMATA collector except the box itself and
+(optionally) the same `.env` file for its own separately-namespaced vars. See
+`docs/superpowers/specs/2026-07-21-sfmta-comparison-design.md` for the design
+rationale and `scripts/sfmta_collector.py` for the entrypoint.
+
+### 11.1 Create the database
+
+```bash
+sudo -u postgres createdb -O wmata sfmta_dashboard
+```
+
+Uses the existing `wmata` role — no new database user needed.
+
+### 11.2 Add environment variables
+
+Add these three to the VM's `/home/wmata/wmata-dashboard/.env` (see
+`.env.example` for the annotated template):
+
+```bash
+SFMTA_API_KEY=<your 511.org token>
+SFMTA_DATABASE_URL=postgresql://wmata:<password>@localhost:5432/sfmta_dashboard
+SFMTA_COLLECTOR_HEALTHCHECK_URL=<healthchecks.io ping URL, once created — see 11.4>
+```
+
+**Never point `SFMTA_DATABASE_URL` at `wmata_dashboard`** — the two agencies'
+data must stay in separate databases.
+
+### 11.3 Install and start the unit
+
+Follow **`docs/DEPLOY.md` §2** ("Deploy with systemd unit changes") for the
+copy-to-`/etc/systemd/system/` + `daemon-reload` + enable/start sequence —
+add `deployment/systemd/sfmta-collector.service` to the list of units copied.
+(This document's own §2 is VM provisioning, not the unit-install step —
+`docs/DEPLOY.md` §2 is the canonical reference for that, per NOTES-77.)
+
+```bash
+sudo systemctl enable --now sfmta-collector.service
+```
+
+### 11.4 Verify
+
+```bash
+# Tail recent logs for startup errors:
+journalctl -u sfmta-collector -n 20
+
+# Confirm heartbeats are landing in the sidecar DB:
+sudo -u wmata psql -d sfmta_dashboard -c "SELECT max(ts) FROM collector_heartbeats"
+```
+
+Expect a `max(ts)` within the last tick interval (60 s) of "now".
+
+### 11.5 Operator steps (manual, not part of any script)
+
+- **Create the healthchecks.io check** (a separate check from WMATA's
+  dead-man ping — one per agency) and set its ping URL as
+  `SFMTA_COLLECTOR_HEALTHCHECK_URL` in the VM `.env`, then restart the unit
+  to pick it up.
+- **Send the 511.org rate-increase request** — the default token cap is
+  60 req/rolling-hour; email
+  `511sfbaydeveloperresources@googlegroups.com` to request a higher limit if
+  the collector's budget gets tight. **Do not include the API key itself in
+  that email.**
+
+---
+
 **Last Updated:** 2026-06-10
 **Deployment Cost:** ~$17/mo ($12 instance + ~$5 block disk; S3 negligible at this scale)
