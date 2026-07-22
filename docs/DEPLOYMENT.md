@@ -713,7 +713,9 @@ journalctl -u sfmta-collector -n 20
 sudo -u wmata psql -d sfmta_dashboard -c "SELECT max(ts) FROM collector_heartbeats"
 ```
 
-Expect a `max(ts)` within the last tick interval (60 s) of "now".
+Expect a `max(ts)` within the last ~2–3 minutes of "now" (heartbeats are
+written only on trip-update ticks every 120 s, and the timestamp reflects
+the feed-header snapshot, which can lag further).
 
 ### 11.5 Operator steps (manual, not part of any script)
 
@@ -729,5 +731,5 @@ Expect a `max(ts)` within the last tick interval (60 s) of "now".
 
 ---
 
-**Last Updated:** 2026-06-10
+**Last Updated:** 2026-07-21
 **Deployment Cost:** ~$17/mo ($12 instance + ~$5 block disk; S3 negligible at this scale)

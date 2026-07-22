@@ -5,7 +5,7 @@ assumes GTFS-RT tripDescriptor.trip_id values exist in the static GTFS
 trips.txt. This spike measures that overlap for Muni BEFORE any pipeline
 work builds on it (spec 2026-07-21 §1: go/no-go gate, threshold 80%).
 
-Manual one-shot (uses 3 of the 60/hr request budget):
+Manual one-shot (uses 2 of the 60/hr request budget):
 
     uv run python scripts/sfmta_feed_spike.py
 
