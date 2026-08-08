@@ -21,13 +21,18 @@
 # decoupled from the VM (the whole point of the cloud migration). A 24/7
 # tunnel only makes sense once the API is publicly deployed (NOTES-50).
 #
-# Env overrides:
-#   VM_HOST   default ubuntu@52.54.130.186
+# Env:
+#   VM_HOST   required — SSH destination for the VM, e.g. user@host.
+#             Set it in your shell profile or ~/.ssh/config alias; it is
+#             deliberately not defaulted here (public repo).
 #   LOCAL_PORT default 5433
 #   REMOTE_PORT default 5432
 set -euo pipefail
 
-VM_HOST="${VM_HOST:-ubuntu@52.54.130.186}"
+if [[ -z "${VM_HOST:-}" ]]; then
+  echo "VM_HOST is not set. Export it first, e.g.: export VM_HOST=user@vm-host" >&2
+  exit 1
+fi
 LOCAL_PORT="${LOCAL_PORT:-5433}"
 REMOTE_PORT="${REMOTE_PORT:-5432}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
