@@ -441,7 +441,7 @@ DATABASE_URL=postgresql://localhost:5432/wmata_dashboard
 
 # OPS ONLY: cloud VM over the SSH tunnel (open bin/db-tunnel.sh first; forwards
 # local 5433 -> VM 5432). Use for ad-hoc prod psql, not the dev loop.
-# DATABASE_URL=postgresql://wmata:5K18cmKVj0q4sr@localhost:5433/wmata_dashboard
+# DATABASE_URL=postgresql://wmata:<vm-password>@localhost:5433/wmata_dashboard
 ```
 
 - [ ] **Step 2: Verify the app serves against local PG16 with no tunnel**
