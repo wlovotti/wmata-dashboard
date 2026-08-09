@@ -14,7 +14,9 @@ set -euo pipefail
 VM="ubuntu@52.54.130.186"
 REMOTE_ARCHIVE="/home/wmata/wmata-dashboard/archive/raw_snapshots"
 REMOTE_OVERFLOW="/mnt/pgdata/archive-overflow"
+REMOTE_ARCHIVE_SFMTA="/home/wmata/wmata-dashboard/archive/sfmta_raw_snapshots"
 LOCAL_ARCHIVE="${LOCAL_ARCHIVE:-archive/raw_snapshots}"
+LOCAL_ARCHIVE_SFMTA="${LOCAL_ARCHIVE_SFMTA:-archive/sfmta_raw_snapshots}"
 TUNNEL_PORT="${TUNNEL_PORT:-5433}"
 LOOKBACK_DAYS="${1:-14}"
 : "${VM_DB_URL:?Set VM_DB_URL (see the commented tunnel line in .env)}"
@@ -22,11 +24,14 @@ LOOKBACK_DAYS="${1:-14}"
 if ! lsof -nP -iTCP:"${TUNNEL_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Tunnel not up. Run bin/db-tunnel.sh first." >&2; exit 1
 fi
-mkdir -p "$LOCAL_ARCHIVE"
+mkdir -p "$LOCAL_ARCHIVE" "$LOCAL_ARCHIVE_SFMTA"
 
 echo "== rsync raw TU archive (both dirs — rev 2b split) =="
 rsync -av --rsync-path="sudo rsync" "$VM:$REMOTE_ARCHIVE/" "$LOCAL_ARCHIVE/"
 rsync -av --rsync-path="sudo rsync" "$VM:$REMOTE_OVERFLOW/" "$LOCAL_ARCHIVE/"
+
+echo "== rsync raw SFMTA archive (single copy on the VM) =="
+rsync -av --rsync-path="sudo rsync" "$VM:$REMOTE_ARCHIVE_SFMTA/" "$LOCAL_ARCHIVE_SFMTA/"
 
 echo "== pull vehicle_positions delta over tunnel =="
 VP_COLS="id, vehicle_id, route_id, trip_id, latitude, longitude, speed, current_stop_sequence, stop_id, current_status, direction_id, trip_start_date, timestamp, collected_at"
