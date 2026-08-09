@@ -2233,6 +2233,32 @@ def test_gtfs_freshness_endpoint_status_ok_beyond_7_days(client, db_session):
     assert body["feed_end_date"] == ok_date.strftime("%Y%m%d")
 
 
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_status_null_on_malformed_feed_end_date(client, db_session):
+    """Malformed `feed_end_date` → `status: None` via 200, not a 500.
+
+    `feed_info.feed_end_date` is written straight from an unvalidated CSV
+    field, so a stray non-digit or wrong-length value must not crash the
+    endpoint that the app-wide banner now polls on every page load.
+    """
+    from src.models import FeedInfo
+
+    db_session.add(
+        FeedInfo(
+            feed_publisher_name="WMATA",
+            feed_start_date="20260101",
+            feed_end_date="not-a-date",
+            feed_version="2026-01-01",
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is None
+
+
 # ---------------------------------------------------------------------------
 # Block-level cascade view (NOTES-45)
 #

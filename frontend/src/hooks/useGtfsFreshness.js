@@ -4,6 +4,13 @@ import { useEffect, useState } from 'react'
 // mirrors the pattern RouteList used before this hook existed (NOTES-90).
 let _cachedGtfsFreshness = null
 
+// Module-level in-flight promise so concurrent mounts in the same tick
+// (e.g. App.jsx's chrome banner and RouteList's footer both mounting when
+// the app loads directly at /routes) share a single request instead of
+// each firing its own — the cache alone can't dedupe that case because
+// neither mount has committed a result yet when the other's effect runs.
+let _fetchPromise = null
+
 /**
  * Fetch `/api/gtfs/freshness` once per session and share the result across
  * every component that needs it (the app-chrome expiry banner and
@@ -20,17 +27,22 @@ function useGtfsFreshness() {
   const [gtfsFreshness, setGtfsFreshness] = useState(_cachedGtfsFreshness)
 
   useEffect(() => {
-    fetch('/api/gtfs/freshness')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data) {
-          setGtfsFreshness(data)
-          _cachedGtfsFreshness = data
-        }
-      })
-      .catch(() => {
-        // Swallow — this is informational; don't surface to the user.
-      })
+    if (_cachedGtfsFreshness !== null) {
+      return
+    }
+
+    if (!_fetchPromise) {
+      _fetchPromise = fetch('/api/gtfs/freshness')
+        .then((res) => (res.ok ? res.json() : null))
+        .catch(() => null)
+    }
+
+    _fetchPromise.then((data) => {
+      if (data) {
+        setGtfsFreshness(data)
+        _cachedGtfsFreshness = data
+      }
+    })
   }, [])
 
   return gtfsFreshness

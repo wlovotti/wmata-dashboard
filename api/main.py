@@ -183,11 +183,18 @@ def _feed_expiry_status(feed_end_date: str | None) -> str | None:
     it hasn't verified).
 
     `feed_end_date` is zero-padded 8-char YYYYMMDD per the GTFS spec (unlike
-    the unpadded `arrival_time` gotcha), so a direct `strptime` is safe.
+    the unpadded `arrival_time` gotcha), so a direct `strptime` is normally
+    safe — but the column is written straight from an unvalidated CSV field
+    (`scripts/reload_gtfs_complete.py`, `scripts/init_database.py`), so a
+    malformed value is treated the same as a missing one rather than
+    raising and 500ing the endpoint.
     """
     if not feed_end_date:
         return None
-    end_date = datetime.strptime(feed_end_date, "%Y%m%d").date()
+    try:
+        end_date = datetime.strptime(feed_end_date, "%Y%m%d").date()
+    except (ValueError, TypeError):
+        return None
     today = eastern_today()
     if end_date < today:
         return "expired"
