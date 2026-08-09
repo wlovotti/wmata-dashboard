@@ -9,6 +9,7 @@ import { test, expect } from '@playwright/test'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
+import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -43,16 +44,17 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({ json: fixture('targets.json') })
     }
     if (url.includes('/api/gtfs/freshness')) {
-      // feed_end_date is far in the future so `status` is always `ok` —
-      // the NOTES-90 expiry banner must never render in visual baselines.
-      return route.fulfill({
-        json: {
-          loaded_at: '2026-05-15T10:00:00',
-          feed_version: '2026-05-15',
-          feed_start_date: '20260101',
-          feed_end_date: '20991231',
-          status: 'ok',
-        },
+      // NOTE: `snapshot_date` is deliberately omitted here (unlike the real
+      // API contract) — RouteList's freshness footer only renders when
+      // `snapshot_date` is present, and stubbing it in would change the
+      // routelist visual baseline (darwin + linux) as a side effect of an
+      // unrelated review follow-up. Rendering the footer for real in this
+      // baseline is deferred to a PR that regenerates both platforms'
+      // screenshots on purpose. `feed_version` is still included since it's
+      // real API-contract data the RouteList component reads (just gated
+      // behind `snapshot_date`, so it has no visible effect here).
+      return fulfillGtfsFreshness(route, {
+        feed_version: '2026-05-15',
       })
     }
 

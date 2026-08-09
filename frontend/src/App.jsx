@@ -12,6 +12,21 @@ import SegmentDiagnostic from './components/SegmentDiagnostic'
 import useGtfsFreshness from './hooks/useGtfsFreshness'
 import './App.css'
 
+// Format a raw GTFS YYYYMMDD string (e.g. `feed_end_date`) as a
+// human-readable date, mirroring RouteList's `formatSnapshotDate` (which
+// formats ISO timestamps, not this bare-digits GTFS convention). Falls
+// back to the raw string if it doesn't parse as an 8-digit date so the
+// banner degrades gracefully instead of hiding the value.
+function formatFeedDate(yyyymmdd) {
+  if (!yyyymmdd || !/^\d{8}$/.test(yyyymmdd)) return yyyymmdd
+  const year = Number(yyyymmdd.slice(0, 4))
+  const month = Number(yyyymmdd.slice(4, 6))
+  const day = Number(yyyymmdd.slice(6, 8))
+  const d = new Date(year, month - 1, day)
+  if (Number.isNaN(d.getTime())) return yyyymmdd
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
 // Feed-expiry alarm (NOTES-90): renders only when the schedule is already
 // expired or expiring within 7 days — silent (returns null) for `ok` or an
 // unknown status (no feed_info row yet), so it never shows on a healthy or
@@ -21,10 +36,11 @@ function GtfsExpiryBanner({ freshness }) {
     return null
   }
   const tint = freshness.status === 'expired' ? 'gtfs-expiry-banner-red' : 'gtfs-expiry-banner-yellow'
+  const feedEndDate = formatFeedDate(freshness.feed_end_date)
   const message =
     freshness.status === 'expired'
-      ? `GTFS schedule EXPIRED as of ${freshness.feed_end_date}`
-      : `GTFS schedule expires soon (${freshness.feed_end_date})`
+      ? `GTFS schedule EXPIRED as of ${feedEndDate}`
+      : `GTFS schedule expires soon (${feedEndDate})`
   return (
     <div className={`gtfs-expiry-banner ${tint}`} role="status">
       {message}

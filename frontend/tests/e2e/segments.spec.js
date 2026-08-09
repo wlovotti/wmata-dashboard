@@ -7,6 +7,7 @@ import { test, expect } from '@playwright/test'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
+import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -22,16 +23,7 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({ json: fixture('segments.json') })
     }
     if (url.includes('/api/gtfs/freshness')) {
-      // feed_end_date is far in the future so `status` is always `ok` —
-      // the NOTES-90 expiry banner (rendered app-wide in App.jsx chrome)
-      // must never appear in visual baselines.
-      return route.fulfill({
-        json: {
-          feed_start_date: '20260101',
-          feed_end_date: '20991231',
-          status: 'ok',
-        },
-      })
+      return fulfillGtfsFreshness(route)
     }
     await route.continue()
   })
