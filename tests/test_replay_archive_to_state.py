@@ -337,6 +337,39 @@ def test_replay_conflict_with_existing_row_preserves_prediction(tmp_path, pg_ses
     assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 22, 5)  # preserved
 
 
+@pytest.mark.smoke
+def test_replay_raises_on_zero_files(tmp_path, db_session):
+    """Zero matching archive files must raise, not silently return 0.
+
+    NOTES-93: a missing rsync turned "the archive isn't here yet" into a
+    clean-looking exit-0 during the recovery driver's fold-in phase, the
+    failure guard never tripped, and derivation ran against empty state.
+    No DB write happens on this path, so the in-memory SQLite
+    ``db_session`` fixture is enough — this never touches Postgres.
+    """
+    from pipelines.replay_archive_to_state import NoArchiveFilesFoundError, replay_archive_for_date
+
+    empty_dir = tmp_path / "raw_snapshots"
+    empty_dir.mkdir()
+
+    with pytest.raises(NoArchiveFilesFoundError):
+        replay_archive_for_date(db_session, target_date=date(2026, 5, 18), archive_root=empty_dir)
+
+
+@pytest.mark.smoke
+def test_replay_allow_empty_returns_zero_without_raising(tmp_path, db_session):
+    """``allow_empty=True`` is the documented opt-out for a genuinely-empty date."""
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    empty_dir = tmp_path / "raw_snapshots"
+    empty_dir.mkdir()
+
+    count = replay_archive_for_date(
+        db_session, target_date=date(2026, 5, 18), archive_root=empty_dir, allow_empty=True
+    )
+    assert count == 0
+
+
 @pytest.mark.integration
 def test_replay_finds_legacy_single_daily_filename(tmp_path, pg_session):
     """Older archive files use ``YYYY-MM-DD.jsonl.zst`` (no pid suffix).

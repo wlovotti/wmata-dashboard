@@ -6,7 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-08-08. Closed NOTES-98: added `bin/prune-vm-archive.sh`,
+Last edited 2026-08-09. Closed NOTES-93: `replay_archive_to_state.py`
+now raises `NoArchiveFilesFoundError` (CLI exit 1) when the archive
+glob matches zero files for `--date`, instead of silently returning 0;
+`--allow-empty` opts back into the old behavior for genuinely-empty
+dates — see PR #TODO.
+Earlier same day: Closed NOTES-98: added `bin/prune-vm-archive.sh`,
 a laptop-side verify-then-prune drain for the VM's raw JSONL archive —
 run manually after each `aws s3 sync` step (docs/DEPLOYMENT.md), it
 deletes VM-side files older than a safety window only after confirming
@@ -292,9 +297,6 @@ the fixing PR, not a NOTES item.
   shipped (PR #173, `src/deadman.py`); the batch-alerting half is
   superseded by the Path 2a migration to manual laptop derivation — see
   item body.
-- **NOTES-93 Loud zero-file replay.** `replay_archive_to_state` exits 0
-  when no archive files match the date — make it an error; the silent
-  no-op masked missing files during the 7/18 fold-in.
 - **NOTES-94 VP-path dead-man coverage.** Second healthcheck ping from
   `_save_vehicle_positions` so a VP-only failure can't starve
   proximity-source derivation while the TU check stays green. Subsumed
@@ -929,22 +931,6 @@ manual laptop action rather than a scheduled batch, so there's no unattended
 batch process left to page on. The equivalent freshness signal for the new
 architecture (an S3-upload-staleness alarm) lands with the stateless-collector
 rewrite — tracked as NOTES-95.
-
----
-
-## NOTES-93. `replay_archive_to_state` must fail loudly on zero files
-
-**Severity: medium (silent no-op masks missing archive data — bit us
-2026-07-18).**
-**Effort: low.**
-
-`pipelines/replay_archive_to_state.py --date D` exits 0 when NO archive
-files match the date. During the recovery driver's fold-in phase this
-turned "the 6/11–6/12 JSONL hasn't been rsynced yet" into a clean-looking
-success, the failure guard never tripped, and derivation ran against empty
-state. Exit non-zero (or require an explicit `--allow-empty`) when the
-file glob matches nothing — a replay with no input is almost always an
-operator error, and the whole June incident started with silent no-ops.
 
 ---
 
