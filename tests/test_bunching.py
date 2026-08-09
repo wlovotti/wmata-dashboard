@@ -23,6 +23,7 @@ from src.bunching import (
     CAUSE_TRAILER_EARLY_ONLY,
     CAUSE_UNKNOWN,
     _cell_hour_threshold_sec,
+    _eastern_hour,
     classify_bunched_pair,
     compute_bunching_cause_breakdown,
     compute_bunching_for_route_date,
@@ -719,3 +720,82 @@ class TestComputeBunchingCauseBreakdown:
         assert result["breakdown"][CAUSE_LEADER_LATE_ONLY]["pct"] == pytest.approx(2 / 3, abs=1e-3)
         assert result["breakdown"][CAUSE_NEITHER_OFF]["count"] == 1
         assert result["breakdown"][CAUSE_NEITHER_OFF]["pct"] == pytest.approx(1 / 3, abs=1e-3)
+
+
+class TestEasternHourTzName:
+    """NOTES-103: `_eastern_hour` accepts `tz_name`, defaulting to Eastern."""
+
+    def test_defaults_to_eastern(self):
+        # 2026-04-14 11:00 UTC = 7:00 AM EDT (UTC-4 in April).
+        assert _eastern_hour(datetime(2026, 4, 14, 11, 0, 0)) == 7
+
+    def test_pacific_late_afternoon_buckets_correctly(self):
+        # 2026-04-15 00:00 UTC = 17:00 (5pm) PDT the prior day (UTC-7 in
+        # April) — diverges from the Eastern reading (20:00 / 8pm) for the
+        # same instant, proving this isn't hardcoded to Eastern anymore.
+        assert _eastern_hour(datetime(2026, 4, 15, 0, 0, 0), tz_name="America/Los_Angeles") == 17
+        assert _eastern_hour(datetime(2026, 4, 15, 0, 0, 0)) == 20
+
+
+class TestSfmtaShapedPacificBunching:
+    """NOTES-103 regression: an SFMTA-shaped fixture (schedule and observed
+    both anchored to a real 7am Pacific service) must produce a
+    `total_headways` count that isn't suspiciously near zero when
+    `tz_name="America/Los_Angeles"` is passed through.
+
+    Before the fix, the scheduled cell-hour key (GTFS clock hour 7, always
+    agency-local) and the observed cell-hour key (hardcoded Eastern) landed
+    3 hours apart for an April Pacific/Eastern UTC-offset pair, so
+    `_cell_hour_threshold_sec` never found a match and every observed pair
+    was silently dropped from both `bunching_count` and `total_headways`.
+    """
+
+    def test_pacific_tz_name_produces_non_degenerate_total(self, db_session):
+        """Observed arrivals at 7:00/7:10/7:20/7:30 PDT (= 14:00/14:10/14:20/
+        14:30 UTC) must produce 3 total_headways in the hour-7 cell when
+        `tz_name="America/Los_Angeles"` is passed.
+        """
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S1")
+        _seed_schedule_at_7am(db_session)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"T_obs_{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 14, minute, 0),
+            )
+
+        rows = compute_bunching_for_route_date(
+            db_session, ROUTE, SERVICE_DATE, tz_name="America/Los_Angeles"
+        )
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["total_headways"] == 3
+        assert am["bunching_count"] == 0
+        assert am["bunching_rate"] == pytest.approx(0.0)
+
+    def test_eastern_default_on_same_fixture_is_degenerate(self, db_session):
+        """Same fixture without `tz_name` — reproduces the NOTES-103 bug: the
+        observed side buckets by Eastern hour (10, not 7), the cell-hour
+        lookup misses the scheduled side's threshold entirely, and
+        `total_headways` collapses to zero despite real, on-time service.
+        """
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S1")
+        _seed_schedule_at_7am(db_session)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"T_obs_{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 14, minute, 0),
+            )
+
+        rows = compute_bunching_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["total_headways"] == 0
+        assert am["bunching_rate"] is None

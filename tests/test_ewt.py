@@ -120,6 +120,29 @@ class TestEasternHour:
         # 2026-04-14 04:00 UTC = 0:00 AM EDT — boundary into Night bucket.
         assert _eastern_hour(datetime(2026, 4, 14, 4, 0, 0)) == 0
 
+    def test_defaults_to_eastern_when_tz_name_omitted(self):
+        # Same as test_edt_summer — confirms the new tz_name param defaults
+        # to Eastern so every existing WMATA call site is byte-for-byte
+        # unaffected by NOTES-103.
+        assert _eastern_hour(datetime(2026, 4, 14, 11, 0, 0)) == 7
+
+    def test_pacific_late_afternoon_buckets_correctly(self):
+        # 2026-04-15 00:00 UTC = 17:00 (5pm) PDT the prior day (UTC-7 in
+        # April) — a late-afternoon Pacific hour that would land somewhere
+        # else entirely (20:00 / 8pm) if this were mistakenly bucketed as
+        # Eastern. This is the NOTES-103 regression case.
+        assert _eastern_hour(datetime(2026, 4, 15, 0, 0, 0), tz_name="America/Los_Angeles") == 17
+        # Sanity: the same instant read as Eastern (the old hardcoded
+        # behavior) gives a different, wrong hour — proving the two zones
+        # actually diverge for this timestamp rather than coincidentally
+        # agreeing.
+        assert _eastern_hour(datetime(2026, 4, 15, 0, 0, 0)) == 20
+
+    def test_pacific_pdt_dst_boundary(self):
+        # 2026-01-15 20:00 UTC = 12:00 PM PST (UTC-8 in January, before PDT
+        # starts) — confirms zoneinfo's DST handling isn't hardcoded either.
+        assert _eastern_hour(datetime(2026, 1, 15, 20, 0, 0), tz_name="America/Los_Angeles") == 12
+
 
 class TestIsCellHourFrequent:
     """Cell-hour frequent classifier — mean scheduled headway ≤ gate_sec (default 900s)."""
@@ -696,3 +719,82 @@ class TestComputeEwtHeadlineForRoutePeriodFilter:
         # Only the 5am cell qualifies → 1 frequent cell-hour, 3 scheduled headways.
         assert result["frequent_cell_hours"] == 1
         assert result["n_scheduled_headways"] == 3
+
+
+class TestSfmtaShapedPacificHourBucketing:
+    """NOTES-103 regression: an SFMTA-shaped fixture (GTFS schedule and
+    observed arrivals both anchored to a real 7am *Pacific* service, the
+    way SFMTA's actual data looks) must produce a non-degenerate EWT
+    cell-hour join when `tz_name="America/Los_Angeles"` is passed through.
+
+    Before the fix, the scheduled side was always agency-local (GTFS clock
+    time, hour 7) while the observed side was bucketed by hardcoded
+    Eastern — for an April UTC offset of Pacific(-7)/Eastern(-4), the two
+    sides disagree by 3 hours and the cell-hour join silently produces
+    zero observed headways, even though the schedule and the observed
+    arrivals are, in wall-clock reality, the same 7am service.
+    """
+
+    def _seed_pacific_frequent_cell_at_7am(self, db_session) -> None:
+        """Schedule identical in shape to `_seed_frequent_cell_at_7am` — GTFS
+        clock time is agency-local by construction, so the fixture doesn't
+        need to change for Pacific; only the *observed* UTC offset does.
+        """
+        _seed_route(db_session)
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S1")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00", "07:30:00"]):
+            trip_id = f"T{i + 1}"
+            _seed_trip(db_session, trip_id, ROUTE)
+            _seed_stop_time(db_session, trip_id, "S1", t)
+
+    def test_pacific_tz_name_produces_non_degenerate_join(self, db_session):
+        """Observed arrivals at 7:00/7:10/7:20/7:30 PDT (= 14:00/14:10/14:20/
+        14:30 UTC, April so PDT is UTC-7) must pair into 3 observed
+        headways in the hour-7 cell when `tz_name="America/Los_Angeles"`.
+        """
+        self._seed_pacific_frequent_cell_at_7am(db_session)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"T{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 14, minute, 0),
+            )
+
+        rows = compute_ewt_for_route_date(
+            db_session, ROUTE, SERVICE_DATE, tz_name="America/Los_Angeles"
+        )
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        # Non-degenerate: the observed side actually joined the scheduled
+        # side's hour-7 cell, not zero.
+        assert am["frequent_cell_hours"] == 1
+        assert am["n_observed_headways"] == 3
+        assert am["n_scheduled_headways"] == 3
+        assert am["awt_seconds"] == pytest.approx(300.0)
+        assert am["ewt_seconds"] == pytest.approx(0.0)
+
+    def test_eastern_default_on_same_fixture_is_degenerate(self, db_session):
+        """Same fixture, but *without* passing `tz_name` — reproduces the
+        NOTES-103 bug: the observed side buckets by Eastern hour (10, not
+        7), misses the scheduled side's hour-7 cell entirely, and the join
+        collapses to zero observed headways despite real, on-time service.
+        This is the regression the fix closes — pinned here so it can't
+        silently come back.
+        """
+        self._seed_pacific_frequent_cell_at_7am(db_session)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"T{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 14, minute, 0),
+            )
+
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["frequent_cell_hours"] == 1
+        assert am["n_observed_headways"] == 0
+        assert am["awt_seconds"] is None

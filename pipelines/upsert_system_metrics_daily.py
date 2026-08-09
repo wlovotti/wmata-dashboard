@@ -14,8 +14,9 @@ agency-local (window: see ``upsert_system_metrics_for_date``'s
 ``src.data_completeness.agency_coverage_threshold`` — an agency whose
 collector cadence doesn't poll every feed on every tick, e.g. SFMTA,
 can never reach the flat 80% WMATA threshold even under perfect
-collection). The metric computation itself is still Eastern-hardcoded
-for hour-of-day bucketing (NOTES-103).
+collection). The EWT/bunching hour-of-day bucketing inside the metric
+computation itself is also agency-local, via the same ``tz_name`` (the
+agency-local hour bucketing fix, PR #190).
 
 Usage:
   uv run python -m pipelines.upsert_system_metrics_daily --date 2026-05-08

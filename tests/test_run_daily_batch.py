@@ -142,8 +142,8 @@ def test_run_pipeline_default_agency_omits_nothing_new(tmp_path, monkeypatch):
 
 
 def test_run_housekeeping_pipeline_takes_no_agency_flag(tmp_path, monkeypatch):
-    """Housekeeping pipelines aren't agency-aware yet (NOTES-103 follow-up
-    territory) -- run_batch guards them to WMATA-only instead (see
+    """Housekeeping pipelines aren't agency-aware yet -- run_batch guards
+    them to WMATA-only instead (see
     test_run_batch_skips_housekeeping_for_non_default_agency), so the
     subprocess command line itself carries no --agency flag."""
     import pipelines.run_daily_batch as run_daily_batch_module

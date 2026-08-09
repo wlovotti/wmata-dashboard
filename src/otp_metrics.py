@@ -31,26 +31,48 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from src.ewt import _hour_in_zone
 from src.models import Run, StopEvent
 from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
 from src.time_periods import ALL_HOURS, is_hour_in_period
 
 UTC = ZoneInfo("UTC")
-EASTERN = ZoneInfo("America/New_York")
 
 
-def _eastern_hour(ts: datetime | None) -> int | None:
-    """Return the Eastern hour-of-day for a naive-UTC timestamp, or None.
+def _eastern_hour(ts: datetime | None, tz_name: str = "America/New_York") -> int | None:
+    """Return the local hour-of-day for a naive-UTC timestamp, or None.
+
+    Convenience wrapper for single-call (non-loop) use — constructs a
+    fresh ``ZoneInfo(tz_name)`` per call. Hot loops should call
+    `_local_hour_or_none` directly with a ``ZoneInfo`` built once outside
+    the loop (see `compute_otp_split`).
 
     Stop_event and Run timestamps are naive UTC by storage convention
-    (timezones.py). We re-attach UTC, convert to Eastern, take the hour.
+    (timezones.py). We re-attach UTC, convert to `tz_name`, take the hour.
     `zoneinfo` handles DST correctly. Returns None if `ts` is None — the
     caller decides whether a missing timestamp means "exclude" (when
     filtering) or "include" (when no filter set).
+
+    `tz_name` (NOTES-103 multi-agency) defaults to Eastern so every existing
+    WMATA call site is unaffected. See `src.ewt._eastern_hour` — the two are
+    identical implementations (modulo the None-passthrough) kept as separate
+    module-private functions.
     """
     if ts is None:
         return None
-    return ts.replace(tzinfo=UTC).astimezone(EASTERN).hour
+    return _hour_in_zone(ts, ZoneInfo(tz_name))
+
+
+def _local_hour_or_none(ts: datetime | None, tz: ZoneInfo) -> int | None:
+    """Return the local hour-of-day in a pre-built zone, or None for a None ts.
+
+    Loop-friendly sibling of `_eastern_hour` — takes an already-constructed
+    ``ZoneInfo`` so a hot loop (one call per row) hoists the
+    ``ZoneInfo(tz_name)`` construction once instead of paying it per row.
+    """
+    if ts is None:
+        return None
+    return _hour_in_zone(ts, tz)
 
 
 def _bucket_deviation(dev_sec: int) -> str:
@@ -90,6 +112,7 @@ def compute_otp_split(
     route_id: str,
     service_date: date_type,
     period_key: str = ALL_HOURS,
+    tz_name: str = "America/New_York",
 ) -> dict:
     """Compute origin / destination / all-timepoints OTP for one (route, date).
 
@@ -99,16 +122,26 @@ def compute_otp_split(
     distinguishing absence from a real 0% on-time.
 
     `period_key` (NOTES-41) restricts which observed timestamps contribute:
-      - origin: filter by Eastern hour of the run's `first_obs_ts`
-      - destination: filter by Eastern hour of the run's `last_obs_ts`
-      - all_timepoints: filter by Eastern hour of `stop_events.observed_arrival_ts`
+      - origin: filter by local hour of the run's `first_obs_ts`
+      - destination: filter by local hour of the run's `last_obs_ts`
+      - all_timepoints: filter by local hour of `stop_events.observed_arrival_ts`
     Default `all` keeps every hour. Filtering happens in Python after the
     fetch to keep test parity with SQLite (production Postgres could push
     the predicate via `to_eastern_sql`, but the deviation lists are short
     enough that the round-trip cost dominates either way).
+
+    `tz_name` (NOTES-103 multi-agency) is the local zone the hour bucketing
+    above uses; defaults to Eastern. Only exercised when `period_key !=
+    ALL_HOURS` — the unfiltered default path (what
+    `system_metrics_daily.otp_percentage` / `service_delivered_ratio`
+    actually consume) never calls the hour helper at all, so it's
+    unaffected by this parameter either way.
     """
     service_date_str = service_date.isoformat()
     no_filter = period_key == ALL_HOURS
+    # Constructed once per call (not per row) — see `_local_hour_or_none`.
+    # Cheap even when `no_filter` is True and it goes unused.
+    tz = ZoneInfo(tz_name)
 
     # Origin: proximity runs only (TU has 0% origin coverage by design).
     # Pull `first_obs_ts` alongside dev_sec so we can apply the period filter
@@ -129,7 +162,7 @@ def compute_otp_split(
         origin_devs = [
             d
             for d, ts in origin_rows
-            if (h := _eastern_hour(ts)) is not None and is_hour_in_period(h, period_key)
+            if (h := _local_hour_or_none(ts, tz)) is not None and is_hour_in_period(h, period_key)
         ]
 
     # Destination: trip_update runs only (proximity has ~1% destination coverage).
@@ -150,7 +183,7 @@ def compute_otp_split(
         destination_devs = [
             d
             for d, ts in destination_rows
-            if (h := _eastern_hour(ts)) is not None and is_hour_in_period(h, period_key)
+            if (h := _local_hour_or_none(ts, tz)) is not None and is_hour_in_period(h, period_key)
         ]
 
     # All timepoints: proximity stop_events directly (position-derived,
@@ -172,7 +205,7 @@ def compute_otp_split(
         all_devs = [
             d
             for d, ts in all_rows
-            if (h := _eastern_hour(ts)) is not None and is_hour_in_period(h, period_key)
+            if (h := _local_hour_or_none(ts, tz)) is not None and is_hour_in_period(h, period_key)
         ]
 
     return {
@@ -189,12 +222,16 @@ def compute_otp_split_for_routes(
     db: Session,
     service_date: date_type,
     route_ids: list[str] | None = None,
+    tz_name: str = "America/New_York",
 ) -> list[dict]:
     """Compute the OTP split for every route with stop_events on `service_date`.
 
     Pass `route_ids` to restrict; default scans all routes that have any
     proximity stop_events on the day. Returns one dict per route, sorted
     by route_id.
+
+    `tz_name` (NOTES-103 multi-agency) is forwarded to `compute_otp_split`
+    for every route; defaults to Eastern.
     """
     service_date_str = service_date.isoformat()
     if route_ids is None:
@@ -205,4 +242,4 @@ def compute_otp_split_for_routes(
             .distinct()
             .all()
         )
-    return [compute_otp_split(db, r, service_date) for r in route_ids]
+    return [compute_otp_split(db, r, service_date, tz_name=tz_name) for r in route_ids]

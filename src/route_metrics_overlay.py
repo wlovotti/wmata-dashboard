@@ -37,6 +37,7 @@ def compute_route_metrics_overlay_for_date(
     db: Session,
     service_date: date_type,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
 ) -> list[dict]:
     """Compute per-route sufficient statistics for one service_date.
 
@@ -51,6 +52,11 @@ def compute_route_metrics_overlay_for_date(
     service-delivered denominators) to a historical GTFS snapshot when
     backfilling; the default reads the live `is_current` snapshot. OTP and
     bunching counts are observed-side only and unaffected.
+
+    `tz_name` (NOTES-103 multi-agency) buckets the EWT/bunching observed
+    side, and the OTP period-filter hour (unused here — the OTP call below
+    is always unfiltered), by the agency's own local hour; defaults to
+    Eastern.
     """
     day_type = _day_type_for(service_date)
     service_date_iso = service_date.isoformat()
@@ -71,12 +77,14 @@ def compute_route_metrics_overlay_for_date(
         [service_date],
         sched_by_day_type=sched_by_day_type,
         observed_rows=observed_rows,
+        tz_name=tz_name,
     )
     bunching_by_date = compute_bunching_headline_for_routes_multi_date(
         db,
         [service_date],
         sched_by_day_type=sched_by_day_type,
         observed_rows=observed_rows,
+        tz_name=tz_name,
     )
     sd_by_route = {
         r["route_id"]: r
@@ -84,7 +92,9 @@ def compute_route_metrics_overlay_for_date(
             db, service_date, gtfs_snapshot_id=gtfs_snapshot_id
         )
     }
-    otp_by_route = {r["route_id"]: r for r in compute_otp_split_for_routes(db, service_date)}
+    otp_by_route = {
+        r["route_id"]: r for r in compute_otp_split_for_routes(db, service_date, tz_name=tz_name)
+    }
 
     ewt_by_route = ewt_by_date.get(service_date_iso, {})
     bunching_by_route = bunching_by_date.get(service_date_iso, {})
@@ -160,11 +170,12 @@ def upsert_route_metrics_for_date(
     rather than showing a silent gap in the trend strip. Complete days
     receive ``data_quality='complete'``.
 
-    ``tz_name`` (NOTES-100 multi-agency; default Eastern) only widens the
-    completeness guard's coverage window to the agency's own local day —
-    `compute_route_metrics_overlay_for_date` (OTP/EWT/bunching
-    hour-of-day bucketing) is still Eastern-hardcoded (tracked
-    separately, NOTES-103).
+    ``tz_name`` (NOTES-100 multi-agency; default Eastern) widens the
+    completeness guard's coverage window to the agency's own local day AND
+    (as of NOTES-103) is forwarded into
+    `compute_route_metrics_overlay_for_date` so EWT/bunching hour-of-day
+    bucketing agrees with the agency's own local clock rather than always
+    Eastern.
 
     ``completeness_threshold`` (NOTES-100 multi-agency): ``None`` (the
     default) uses ``src.data_completeness.MIN_COVERAGE_FOR_MATERIALIZATION``
@@ -196,7 +207,9 @@ def upsert_route_metrics_for_date(
         )
 
     try:
-        rows = compute_route_metrics_overlay_for_date(db, service_date, gtfs_snapshot_id)
+        rows = compute_route_metrics_overlay_for_date(
+            db, service_date, gtfs_snapshot_id, tz_name=tz_name
+        )
     except Exception as exc:
         print(f"  ✗ Route metrics overlay compute failed for {service_date.isoformat()}: {exc}")
         return None

@@ -26,6 +26,7 @@ def compute_system_metrics_for_date(
     db: Session,
     service_date: date_type,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
 ) -> dict:
     """Compute system-level OTP / service-delivered / EWT / bunching for one date.
 
@@ -36,12 +37,18 @@ def compute_system_metrics_for_date(
 
     Args:
         db: SQLAlchemy session bound to the metrics database.
-        service_date: Eastern operational date to compute for.
+        service_date: Operational date (in `tz_name`) to compute for.
         gtfs_snapshot_id: Pin the scheduled side (service-delivered
             denominators, EWT SWT pools) to a historical GTFS snapshot when
             backfilling a date whose schedule has been superseded; the
             default reads the live `is_current` snapshot. OTP and bunching
             are observed-side only and unaffected.
+        tz_name: IANA timezone name (NOTES-103 multi-agency; default
+            Eastern). Only affects `ewt_seconds` / `bunching_rate` — both
+            bucket observed headways by local hour-of-day and must agree
+            with the agency-local hour the scheduled side (GTFS clock
+            time) already uses. `otp_percentage` / `service_delivered_ratio`
+            don't bucket by hour at all and are unaffected either way.
 
     Returns:
         Dict shaped like a single row of `system_metrics_daily` (minus
@@ -59,7 +66,7 @@ def compute_system_metrics_for_date(
     sd_by_date = _system_service_delivered_series(db, [service_date], gtfs_snapshot_id)
     sched_by_day_type: dict[str, dict] = {}
     ewt_seconds, bunching_rate = _system_ewt_and_bunching_for_date(
-        db, service_date, sched_by_day_type, gtfs_snapshot_id
+        db, service_date, sched_by_day_type, gtfs_snapshot_id, tz_name=tz_name
     )
 
     iso = service_date.isoformat()
@@ -99,11 +106,11 @@ def upsert_system_metrics_for_date(
             scheduled side to (backfill); see
             `compute_system_metrics_for_date`.
         tz_name: IANA timezone name (NOTES-100 multi-agency; default
-            Eastern). Only widens the completeness guard's coverage
-            window to the agency's own local day —
-            `compute_system_metrics_for_date` (OTP/EWT/bunching
-            hour-of-day bucketing) is still Eastern-hardcoded
-            (tracked separately, NOTES-103).
+            Eastern). Widens the completeness guard's coverage window to
+            the agency's own local day AND (as of NOTES-103) is forwarded
+            into `compute_system_metrics_for_date` so EWT/bunching
+            hour-of-day bucketing agrees with the agency's own local
+            clock rather than always Eastern.
         completeness_threshold: Minimum coverage fraction to count as
             "complete" (NOTES-100 multi-agency). ``None`` (the default)
             uses ``src.data_completeness.MIN_COVERAGE_FOR_MATERIALIZATION``
@@ -142,7 +149,9 @@ def upsert_system_metrics_for_date(
         )
 
     try:
-        metrics = compute_system_metrics_for_date(db, service_date, gtfs_snapshot_id)
+        metrics = compute_system_metrics_for_date(
+            db, service_date, gtfs_snapshot_id, tz_name=tz_name
+        )
     except Exception as exc:
         print(f"  ✗ System metrics compute failed for {service_date.isoformat()}: {exc}")
         return None

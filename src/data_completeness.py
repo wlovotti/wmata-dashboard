@@ -56,11 +56,16 @@ def agency_coverage_threshold(cfg: AgencyConfig) -> float:
 
     It is NOT true for an agency that polls both TripUpdates and
     VehiclePositions less than once per tick (NOTES-100 follow-up):
-    the collector heartbeat fires only on ticks where it actually
-    polled something (see the collector's heartbeat-write call sites),
-    so the *theoretical maximum* achievable coverage is the fraction of
-    ticks, over one full LCM cycle of the two polling periods, on which
-    at least one feed is polled. For SFMTA
+    ``_coverage_minutes`` counts the *union* of ``collector_heartbeats``
+    and ``vehicle_positions.timestamp`` minute-buckets, and a
+    ``collector_heartbeats`` row is only written from the TripUpdates
+    poll path (``src/wmata_collector.py:_save_trip_updates``) — so a
+    tick only contributes a covered minute when TripUpdates polls that
+    tick (via the heartbeat) *or* VehiclePositions polls that tick (via
+    its own row landing in the union). So the *theoretical maximum*
+    achievable coverage is the fraction of ticks, over one full LCM
+    cycle of the two polling periods, on which at least one of the two
+    feeds is scheduled to poll. For SFMTA
     (``trip_updates_every_ticks=2``, ``vehicle_positions_every_ticks=3``)
     that ceiling is 4/6 ≈ 66.7% -- meaning the flat 0.80 threshold can
     NEVER be satisfied, even by a perfectly healthy SFMTA day with zero

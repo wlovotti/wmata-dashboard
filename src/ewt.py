@@ -92,7 +92,6 @@ from src.gtfs_versioning import gtfs_version_filter
 from src.models import Calendar, GTFSSnapshot, StopEvent, StopTime, Trip
 from src.time_periods import is_hour_in_period
 
-EASTERN = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 
 # Module-level default for callers that don't have a route_id in hand
@@ -136,22 +135,46 @@ def _day_type_for(service_date: date_type) -> str:
     return "weekday"
 
 
-def _eastern_hour(ts: datetime) -> int:
-    """Return the Eastern hour-of-day for a naive-UTC stop_event timestamp.
+def _hour_in_zone(ts: datetime, tz: ZoneInfo) -> int:
+    """Return the local hour-of-day for a naive-UTC timestamp in a pre-built zone.
 
     Stop_event timestamps are naive UTC by storage convention (timezones.py).
-    We re-attach UTC, convert to Eastern, and take the hour. zoneinfo handles
+    We re-attach UTC, convert to ``tz``, and take the hour. zoneinfo handles
     DST transitions correctly.
+
+    Takes an already-constructed ``ZoneInfo`` rather than a ``tz_name``
+    string so hot loops (one call per stop_event row) can hoist the
+    ``ZoneInfo(tz_name)`` construction once per enclosing function instead
+    of paying it on every row — `_eastern_hour` below is the convenience
+    single-call wrapper for call sites outside a loop.
     """
-    return ts.replace(tzinfo=UTC).astimezone(EASTERN).hour
+    return ts.replace(tzinfo=UTC).astimezone(tz).hour
 
 
-def _period_for_hour(eastern_hour: int) -> str:
-    """Map an Eastern hour-of-day (0..23) to its time_period label."""
+def _eastern_hour(ts: datetime, tz_name: str = "America/New_York") -> int:
+    """Return the local hour-of-day for a naive-UTC stop_event timestamp.
+
+    Convenience wrapper around `_hour_in_zone` for single-call (non-loop)
+    use — constructs a fresh ``ZoneInfo(tz_name)`` per call. Hot loops
+    should call `_hour_in_zone` directly with a ``ZoneInfo`` built once
+    outside the loop.
+
+    ``tz_name`` (NOTES-103 multi-agency) defaults to Eastern so every
+    existing WMATA call site is unaffected. Despite the name (kept for the
+    many existing call sites, including cross-module ones in
+    ``api/aggregations.py``), this is the agency-local hour, not
+    necessarily Eastern — pass the agency's own IANA zone (e.g.
+    ``"America/Los_Angeles"`` for SFMTA) for a non-Eastern agency.
+    """
+    return _hour_in_zone(ts, ZoneInfo(tz_name))
+
+
+def _period_for_hour(hour: int) -> str:
+    """Map an agency-local hour-of-day (0..23) to its time_period label."""
     for label, start, end in EWT_TIME_PERIODS:
-        if start <= eastern_hour < end:
+        if start <= hour < end:
             return label
-    raise ValueError(f"Eastern hour {eastern_hour} out of 0..23 range")
+    raise ValueError(f"hour {hour} out of 0..23 range")
 
 
 def _parse_gtfs_time_to_seconds(t: str) -> int:
@@ -185,15 +208,19 @@ def compute_awt(headways_seconds: list[float]) -> float | None:
 
 
 def _observed_headways_by_cell_hour(
-    db: Session, route_id: str, service_date_str: str
+    db: Session,
+    route_id: str,
+    service_date_str: str,
+    tz_name: str = "America/New_York",
 ) -> dict[CellHour, list[float]]:
-    """Compute observed headways per (direction, stop, eastern_hour) cell.
+    """Compute observed headways per (direction, stop, local_hour) cell.
 
     Returns `{(direction, stop, hour): [headway_sec, ...]}` where each
     headway is the gap between two consecutive observed arrivals at the same
-    (direction, stop), bucketed by the **earlier** arrival's Eastern hour.
-    Source is restricted to `trip_update` (the primary derivation, PR #43)
-    so each actual arrival contributes exactly one row.
+    (direction, stop), bucketed by the **earlier** arrival's local hour in
+    `tz_name` (NOTES-103 multi-agency; defaults to Eastern). Source is
+    restricted to `trip_update` (the primary derivation, PR #43) so each
+    actual arrival contributes exactly one row.
     """
     rows = (
         db.query(StopEvent.direction_id, StopEvent.stop_id, StopEvent.observed_arrival_ts)
@@ -207,6 +234,7 @@ def _observed_headways_by_cell_hour(
         .all()
     )
 
+    tz = ZoneInfo(tz_name)
     by_cell_hour: dict[CellHour, list[float]] = defaultdict(list)
     prev_key: tuple[int, str] | None = None
     prev_ts: datetime | None = None
@@ -215,7 +243,7 @@ def _observed_headways_by_cell_hour(
         if prev_key == key and prev_ts is not None:
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
-                by_cell_hour[(direction_id, stop_id, _eastern_hour(prev_ts))].append(delta)
+                by_cell_hour[(direction_id, stop_id, _hour_in_zone(prev_ts, tz))].append(delta)
         prev_key = key
         prev_ts = ts
     return by_cell_hour
@@ -289,6 +317,7 @@ def compute_ewt_for_route_date(
     db: Session,
     route_id: str,
     service_date: date_type,
+    tz_name: str = "America/New_York",
 ) -> list[dict]:
     """Compute EWT for one (route, service_date), one row per time_period.
 
@@ -298,12 +327,17 @@ def compute_ewt_for_route_date(
     the corresponding pool is empty. All five time_periods are emitted even
     when the route has no frequent cells in any of them — callers can filter
     by `frequent_cell_hours > 0` to drop the empty rows.
+
+    `tz_name` (NOTES-103 multi-agency) buckets the *observed* side by the
+    agency's own local hour; defaults to Eastern. The *scheduled* side is
+    always agency-local by construction (GTFS clock time), so this only
+    matters for non-Eastern agencies.
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
 
     sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
-    obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str)
+    obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str, tz_name)
     gate_sec = get_cell_hour_gate_sec(route_id)
 
     obs_pool: dict[str, list[float]] = defaultdict(list)
@@ -352,6 +386,7 @@ def compute_ewt_for_routes(
     db: Session,
     service_date: date_type,
     route_ids: list[str] | None = None,
+    tz_name: str = "America/New_York",
 ) -> list[dict]:
     """Compute EWT for every route seen in `stop_events` on the date, or pass
     `route_ids` to restrict. Returns a flat list — one dict per (route,
@@ -359,6 +394,9 @@ def compute_ewt_for_routes(
     in `EWT_TIME_PERIODS`. Routes with no frequent cell-hours produce
     placeholder rows (all metrics None, frequent_cell_hours=0) so callers can
     distinguish "evaluated, not frequent" from "not evaluated."
+
+    `tz_name` (NOTES-103 multi-agency) is forwarded to
+    `compute_ewt_for_route_date` for every route; defaults to Eastern.
     """
     service_date_str = service_date.isoformat()
     if route_ids is None:
@@ -371,7 +409,7 @@ def compute_ewt_for_routes(
         )
     out: list[dict] = []
     for r in route_ids:
-        out.extend(compute_ewt_for_route_date(db, r, service_date))
+        out.extend(compute_ewt_for_route_date(db, r, service_date, tz_name))
     return out
 
 
@@ -441,6 +479,7 @@ def compute_ewt_headline_for_route(
     route_id: str,
     service_date: date_type,
     period_key: str = "all",
+    tz_name: str = "America/New_York",
 ) -> dict:
     """Single-route EWT collapsed to one rider-weighted number for the day.
 
@@ -450,12 +489,16 @@ def compute_ewt_headline_for_route(
     every cell where service is actually frequent" — non-frequent cell-hours
     drop out by the same gating used in the per-period variant.
 
-    `period_key` (NOTES-41) restricts which Eastern hours feed the pool —
+    `period_key` (NOTES-41) restricts which local hours feed the pool —
     e.g. `am_peak` keeps only cell-hours with hour in [6, 10). `late`
     wraps midnight so 22..23 and 0..5 both qualify. Default `all` keeps
     every hour. Note this filters the cell-hour bucket, NOT the originating
     arrival time inside it — but `_eastern_hour` already buckets each
     headway by the earlier arrival's clock hour, so it's the same thing.
+    The bucket's hour is the *scheduled* side's GTFS clock hour (always
+    agency-local); `tz_name` (NOTES-103 multi-agency) controls which local
+    hour the *observed* side buckets into so the two sides key-match for
+    non-Eastern agencies. Defaults to Eastern.
 
     Returns the same dict shape as one period row from `compute_ewt_for_route_date`,
     minus the `time_period` key.
@@ -464,7 +507,7 @@ def compute_ewt_headline_for_route(
     day_type = _day_type_for(service_date)
 
     sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
-    obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str)
+    obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str, tz_name)
     gate_sec = get_cell_hour_gate_sec(route_id)
 
     obs_pool: list[float] = []
@@ -592,6 +635,7 @@ def compute_ewt_headline_for_routes(
     service_date: date_type,
     route_ids: list[str] | None = None,
     sched_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] | None = None,
+    tz_name: str = "America/New_York",
 ) -> dict[str, dict]:
     """Vectorized headline EWT for all routes — two SQL passes, no per-route loop.
 
@@ -602,6 +646,9 @@ def compute_ewt_headline_for_routes(
 
     Pass `sched_by_route_cell_hour` to skip the scheduled fetch — used by the
     scorecard path to share scheduled data with bunching.
+
+    `tz_name` (NOTES-103 multi-agency) buckets the observed side by the
+    agency's own local hour; defaults to Eastern.
 
     Returns `{route_id: headline_dict}`. Routes with no scheduled service on
     the day_type don't appear; routes with scheduled service but no observed
@@ -636,6 +683,7 @@ def compute_ewt_headline_for_routes(
     if route_ids is not None:
         obs_q = obs_q.filter(StopEvent.route_id.in_(route_ids))
 
+    tz = ZoneInfo(tz_name)
     obs_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -647,7 +695,7 @@ def compute_ewt_headline_for_routes(
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
                 obs_by_route_cell_hour[route_id][
-                    (direction_id, stop_id, _eastern_hour(prev_ts))
+                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
                 ].append(delta)
         prev_key = key
         prev_ts = ts
@@ -728,6 +776,7 @@ def compute_ewt_headline_for_routes_multi_date(
     sched_by_day_type: dict[str, dict[str, dict[CellHour, list[float]]]] | None = None,
     route_ids: list[str] | None = None,
     observed_rows: list[tuple] | None = None,
+    tz_name: str = "America/New_York",
 ) -> dict[str, dict[str, dict]]:
     """Multi-date headline EWT — one SQL pull for the whole window.
 
@@ -741,6 +790,9 @@ def compute_ewt_headline_for_routes_multi_date(
     scorecard path so EWT and bunching share one pull. Pass
     `sched_by_day_type` to share schedule fetches the same way. Both are
     auto-fetched when None.
+
+    `tz_name` (NOTES-103 multi-agency) buckets the observed side by the
+    agency's own local hour; defaults to Eastern.
 
     Pairing is strictly within `(service_date, route, direction, stop)` —
     consecutive arrivals never cross a day boundary, so the headway list
@@ -763,6 +815,7 @@ def compute_ewt_headline_for_routes_multi_date(
     # `{(service_date_str, route_id): {cell_hour: [headways]}}` — pairing is
     # reset every time the (service_date, route, direction, stop) key changes,
     # so per-(date, route) pools never cross day boundaries.
+    tz = ZoneInfo(tz_name)
     obs_by_date_route_cell_hour: dict[tuple[str, str], dict[CellHour, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -774,7 +827,7 @@ def compute_ewt_headline_for_routes_multi_date(
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
                 obs_by_date_route_cell_hour[(service_date_str, route_id)][
-                    (direction_id, stop_id, _eastern_hour(prev_ts))
+                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
                 ].append(delta)
         prev_key = key
         prev_ts = ts

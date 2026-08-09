@@ -266,10 +266,11 @@ def test_upsert_system_metrics_forwards_tz_name_to_completeness_guard(
     America/Los_Angeles) must have its coverage window checked against
     its own local day, not silently against Eastern.
 
-    Only the completeness *guard's window* is agency-aware here; the
-    metric computation itself (OTP/EWT/bunching hour-of-day bucketing)
-    is still Eastern-hardcoded (tracked separately, NOTES-103) — this
-    test only pins down the guard's plumbing.
+    This test only pins down the guard's plumbing (via the monkeypatched
+    completeness functions below); it doesn't assert on the metric
+    computation's own EWT/bunching hour-of-day bucketing, which is
+    exercised separately (see the agency-local hour bucketing fix,
+    PR #190).
     """
     seen_tz_names = []
 
