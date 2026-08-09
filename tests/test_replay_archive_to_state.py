@@ -341,11 +341,9 @@ def test_replay_conflict_with_existing_row_preserves_prediction(tmp_path, pg_ses
 def test_replay_raises_on_zero_files(tmp_path, db_session):
     """Zero matching archive files must raise, not silently return 0.
 
-    NOTES-93: a missing rsync turned "the archive isn't here yet" into a
-    clean-looking exit-0 during the recovery driver's fold-in phase, the
-    failure guard never tripped, and derivation ran against empty state.
-    No DB write happens on this path, so the in-memory SQLite
-    ``db_session`` fixture is enough — this never touches Postgres.
+    See ``NoArchiveFilesFoundError`` (NOTES-93). No DB write happens on
+    this path, so the in-memory SQLite ``db_session`` fixture is enough
+    — this never touches Postgres.
     """
     from pipelines.replay_archive_to_state import NoArchiveFilesFoundError, replay_archive_for_date
 

@@ -138,10 +138,8 @@ def replay_archive_for_date(
         archive_root: Directory holding the JSONL.zst files.
         chunk_size: Folded rows per UPSERT statement.
         allow_empty: When ``True``, a zero-file glob match returns 0
-            instead of raising ``NoArchiveFilesFoundError``. Default
-            ``False`` — see NOTES-93: a silent zero-file no-op during
-            the recovery driver's fold-in phase masked a missing
-            rsync and let derivation run against empty state.
+            instead of raising — see ``NoArchiveFilesFoundError``
+            (NOTES-93).
 
     Returns:
         The number of snapshot lines that matched ``target_date`` and
@@ -254,8 +252,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Exit 0 instead of erroring when the archive glob matches zero "
-            "files for --date. Off by default (NOTES-93): a missing rsync "
-            "or typo'd date should fail loudly, not silently no-op."
+            "files for --date. Off by default — see NoArchiveFilesFoundError "
+            "(NOTES-93)."
         ),
     )
     args = parser.parse_args()
@@ -267,7 +265,6 @@ def main() -> int:
         replay_archive_for_date(db, target_date, archive_root, allow_empty=args.allow_empty)
         db.commit()
     except NoArchiveFilesFoundError as e:
-        db.rollback()
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     finally:
