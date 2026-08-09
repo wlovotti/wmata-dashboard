@@ -24,7 +24,7 @@ the spec §5 runbook.
 > `/home/wmata/wmata-dashboard/archive/sfmta_raw_snapshots/`, which is a
 > **single copy** on the VM until synced — `bin/pull-and-derive.sh` pulls
 > it into a separate local `archive/sfmta_raw_snapshots/` dir alongside
-> the WMATA rsync (fixed 2026-08-08, the SFMTA sync-path fix). Interim freshness: run
+> the WMATA rsync (fixed 2026-08-08, PR #182). Interim freshness: run
 > `bin/pull-and-derive.sh` on the laptop (needs `bin/db-tunnel.sh` up).
 > The stateless-collector rewrite (VM → S3-only, no VM Postgres) is a
 > separate follow-up plan. See

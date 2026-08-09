@@ -10,7 +10,7 @@ Last edited 2026-08-08. Closed NOTES-97: `bin/pull-and-derive.sh` now
 rsyncs `archive/sfmta_raw_snapshots/` alongside the WMATA archive dirs,
 and `s3://wmata-dashboard-backups/raw-jsonl-archive/sfmta/` was created
 and backfilled manually from the laptop the same day (IAM `PutObject`
-grant confirmed working by that sync) — see the SFMTA sync-path fix PR.
+grant confirmed working by that sync) — see PR #182.
 Earlier same day: Added NOTES-97 — SFMTA raw snapshots
 (`archive/sfmta_raw_snapshots/`, writing since 7/22) have no sync path:
 `bin/pull-and-derive.sh` rsyncs only `raw_snapshots` and no S3 prefix
@@ -1055,7 +1055,7 @@ The "VM's 14-day JSONL buffer pruning" that NOTES-95 lists among the
 retention chores was never actually installed — a 2026-08-08 check found
 `archive/raw_snapshots/` holding contiguous files back to 2026-07-03
 (34 GB) plus 5.7 GB of SFMTA snapshots (that sync path has since been
-fixed — the SFMTA sync-path fix PR), totaling 40 GB of the
+fixed — PR #182), totaling 40 GB of the
 58 GB root disk. The manual laptop-side sync is the only drain, and it
 copies without deleting. At ~1.3 GB/day combined growth (WMATA ~0.95 +
 SFMTA ~0.34), the disk fills in days-to-weeks whenever the sync lapses —
