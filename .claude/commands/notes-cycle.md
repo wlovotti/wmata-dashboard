@@ -4,8 +4,10 @@ description: Use when closing a NOTES.md punch-list item as a PR — the user na
 
 This command drives one iteration of the NOTES.md cycle: read NOTES.md →
 confirm next task → dispatch a subagent to implement → parent reviews
-the diff → watch CI → prompt for merge → cleanup. Two human checkpoints
-(task confirmation, merge approval). Everything else autonomous.
+the diff → watch CI → prompt for merge → cleanup. Task confirmation may
+be satisfied by the user naming the item at invocation (the parent
+echoes the resolved title before dispatch instead of asking); merge
+approval is never skippable. Everything else autonomous.
 
 The skill is composable: run it standalone for one cycle, or under
 `/loop /notes-cycle` for autonomous back-to-back cycles. Under `/loop`
@@ -80,8 +82,12 @@ The user may pick the recommended, an alternate, or "Other" with a
 different NOTES-N. Capture the chosen NOTES-N for the rest of the cycle.
 
 If the user already named a specific NOTES-N when invoking the command
-(check ARGUMENTS), that satisfies this checkpoint — skip the question
-and proceed with their pick.
+(check ARGUMENTS), that satisfies this checkpoint — skip the question,
+but still echo a one-line confirmation of the resolved item before
+dispatching: "Closing NOTES-N: <item title> — scope: <small/mechanical
+or medium+/design-ambiguous>". This is a mistype guard, not a second
+question — proceed to the scope gate and Step 4 immediately after
+echoing it, without waiting for a reply.
 
 **Scope gate (applies to whichever item was chosen):** classify the
 item before dispatching.
@@ -307,9 +313,12 @@ session history but reduce context size.
 - **The parent thread stays slim.** Heavy file reads, edits, test
   output, and lint logs all live in the subagent and don't bloat the
   parent's context across `/loop` iterations.
-- **Two human checkpoints, always.** Task selection and merge approval
-  are non-skippable — wrong-task selection and unintended merges are
-  the highest-cost mistakes, so they're cheap to confirm.
+- **Task confirmation can be pre-satisfied; merge approval never is.**
+  A user-named NOTES-N at invocation satisfies task confirmation, but
+  the parent still echoes the resolved item title before dispatch as a
+  mistype guard. Merge approval has no such shortcut — it always waits
+  for an explicit answer, since an unintended merge is the highest-cost
+  mistake in the cycle.
 - **No auto-retry on CI failure.** A red CI is a signal to think, not
   to grind. The user decides whether to fix or abandon.
 - **No unreviewed merges.** The parent reads the full PR diff (step

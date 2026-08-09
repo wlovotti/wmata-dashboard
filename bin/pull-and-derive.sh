@@ -11,6 +11,9 @@
 # not this script.
 set -euo pipefail
 
+# Archive layout duplicated in bin/prune-vm-archive.sh and
+# docs/DEPLOYMENT.md ("Manual S3 sync") — adding a new archive dir?
+# update all three.
 VM="ubuntu@52.54.130.186"
 REMOTE_ARCHIVE="/home/wmata/wmata-dashboard/archive/raw_snapshots"
 REMOTE_OVERFLOW="/mnt/pgdata/archive-overflow"

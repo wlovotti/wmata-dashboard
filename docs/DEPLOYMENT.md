@@ -39,7 +39,8 @@ the spec §5 runbook.
 > local dir up separately, e.g.
 > `aws s3 sync archive/raw_snapshots/ s3://wmata-dashboard-backups/raw-jsonl-archive/` and
 > `aws s3 sync archive/sfmta_raw_snapshots/ s3://wmata-dashboard-backups/raw-jsonl-archive/sfmta/`,
-> then run `bin/prune-vm-archive.sh` (dry-run first to review what it would
+> then `export VM_HOST=ubuntu@<vm-ip>` (same convention as `bin/db-tunnel.sh`)
+> and run `bin/prune-vm-archive.sh` (dry-run first to review what it would
 > delete, then again with `--delete`) to verify each VM-side file against
 > its synced S3 object and drain the ones older than the safety window —
 > the sync step above only copies, it never deletes the VM-side originals.
