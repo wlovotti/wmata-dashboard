@@ -12,6 +12,7 @@ from collections.abc import Callable
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from threading import Event, Lock
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -31,7 +32,7 @@ from src.bunching import (
 from src.diagnosis_hash import compute_profile_hash
 from src.ewt import (
     _day_type_for,
-    _eastern_hour,
+    _hour_in_zone,
     _is_cell_hour_frequent,
     compute_awt,
     compute_ewt_for_route_date,
@@ -1693,16 +1694,16 @@ def _compute_otp_per_day_with_filters(
         .all()
     )
 
+    # Eastern hour-of-day, same naive-UTC → local convention used elsewhere
+    # (DST-aware via zoneinfo). Hoisted once outside the loop rather than
+    # reconstructed (and re-imported) per row.
+    eastern_tz = ZoneInfo("America/New_York")
     counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # [on_time, total]
     for service_date, dev, ts in rows:
         if ts is None:
             continue
-        # Reuse the OTP eastern-hour helper: same naive-UTC → Eastern
-        # convention used elsewhere, DST-aware via zoneinfo.
-        from src.otp_metrics import _eastern_hour as _otp_eastern_hour
-
-        h = _otp_eastern_hour(ts)
-        if h is None or not is_hour_in_period(h, period_key):
+        h = _hour_in_zone(ts, eastern_tz)
+        if not is_hour_in_period(h, period_key):
             continue
         counts[service_date][1] += 1
         if OTP_EARLY_SEC <= dev <= OTP_LATE_SEC:
@@ -2084,6 +2085,7 @@ def _system_ewt_and_bunching_for_date(
     # Two parallel observed pools per (route, direction, stop, hour):
     #   - ewt: every observed pair (matches src/ewt.py)
     #   - bun: only schedule_relationship='SCHEDULED' (matches src/bunching.py)
+    tz = ZoneInfo(tz_name)
     obs_ewt: dict[tuple[str, int, str, int], list[float]] = defaultdict(list)
     obs_bun: dict[tuple[str, int, str, int], list[float]] = defaultdict(list)
 
@@ -2098,9 +2100,9 @@ def _system_ewt_and_bunching_for_date(
         if prev_key_ewt == key and prev_ts_ewt is not None:
             delta = (ts - prev_ts_ewt).total_seconds()
             if delta > 0:
-                obs_ewt[
-                    (route_id, direction_id, stop_id, _eastern_hour(prev_ts_ewt, tz_name))
-                ].append(delta)
+                obs_ewt[(route_id, direction_id, stop_id, _hour_in_zone(prev_ts_ewt, tz))].append(
+                    delta
+                )
         prev_key_ewt = key
         prev_ts_ewt = ts
         # Bunching pool: SCHEDULED only — keeps its own consecutive-arrival walk so
@@ -2110,7 +2112,7 @@ def _system_ewt_and_bunching_for_date(
                 delta_b = (ts - prev_ts_bun).total_seconds()
                 if delta_b > 0:
                     obs_bun[
-                        (route_id, direction_id, stop_id, _eastern_hour(prev_ts_bun, tz_name))
+                        (route_id, direction_id, stop_id, _hour_in_zone(prev_ts_bun, tz))
                     ].append(delta_b)
             prev_key_bun = key
             prev_ts_bun = ts
@@ -3307,6 +3309,9 @@ def compute_route_stop_diagnostics(
         for stop_id, _seq, _name in stops:
             valid_keys.add((d, stop_id))
 
+    # Hoisted once outside the loop rather than reconstructed per row.
+    eastern_tz = ZoneInfo("America/New_York")
+
     for (
         d_id,
         s_id,
@@ -3340,8 +3345,8 @@ def compute_route_stop_diagnostics(
             ref_ts = obs_ts if obs_ts is not None else sched_ts
             if ref_ts is None:
                 continue
-            h = _eastern_hour(ref_ts)
-            if h is None or not is_hour_in_period(h, period):
+            h = _hour_in_zone(ref_ts, eastern_tz)
+            if not is_hour_in_period(h, period):
                 continue
 
         if source == "proximity":

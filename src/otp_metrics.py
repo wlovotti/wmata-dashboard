@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from src.ewt import _hour_in_zone
 from src.models import Run, StopEvent
 from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
 from src.time_periods import ALL_HOURS, is_hour_in_period
@@ -40,6 +41,11 @@ UTC = ZoneInfo("UTC")
 
 def _eastern_hour(ts: datetime | None, tz_name: str = "America/New_York") -> int | None:
     """Return the local hour-of-day for a naive-UTC timestamp, or None.
+
+    Convenience wrapper for single-call (non-loop) use — constructs a
+    fresh ``ZoneInfo(tz_name)`` per call. Hot loops should call
+    `_local_hour_or_none` directly with a ``ZoneInfo`` built once outside
+    the loop (see `compute_otp_split`).
 
     Stop_event and Run timestamps are naive UTC by storage convention
     (timezones.py). We re-attach UTC, convert to `tz_name`, take the hour.
@@ -54,7 +60,19 @@ def _eastern_hour(ts: datetime | None, tz_name: str = "America/New_York") -> int
     """
     if ts is None:
         return None
-    return ts.replace(tzinfo=UTC).astimezone(ZoneInfo(tz_name)).hour
+    return _hour_in_zone(ts, ZoneInfo(tz_name))
+
+
+def _local_hour_or_none(ts: datetime | None, tz: ZoneInfo) -> int | None:
+    """Return the local hour-of-day in a pre-built zone, or None for a None ts.
+
+    Loop-friendly sibling of `_eastern_hour` — takes an already-constructed
+    ``ZoneInfo`` so a hot loop (one call per row) hoists the
+    ``ZoneInfo(tz_name)`` construction once instead of paying it per row.
+    """
+    if ts is None:
+        return None
+    return _hour_in_zone(ts, tz)
 
 
 def _bucket_deviation(dev_sec: int) -> str:
@@ -121,6 +139,9 @@ def compute_otp_split(
     """
     service_date_str = service_date.isoformat()
     no_filter = period_key == ALL_HOURS
+    # Constructed once per call (not per row) — see `_local_hour_or_none`.
+    # Cheap even when `no_filter` is True and it goes unused.
+    tz = ZoneInfo(tz_name)
 
     # Origin: proximity runs only (TU has 0% origin coverage by design).
     # Pull `first_obs_ts` alongside dev_sec so we can apply the period filter
@@ -141,7 +162,7 @@ def compute_otp_split(
         origin_devs = [
             d
             for d, ts in origin_rows
-            if (h := _eastern_hour(ts, tz_name)) is not None and is_hour_in_period(h, period_key)
+            if (h := _local_hour_or_none(ts, tz)) is not None and is_hour_in_period(h, period_key)
         ]
 
     # Destination: trip_update runs only (proximity has ~1% destination coverage).
@@ -162,7 +183,7 @@ def compute_otp_split(
         destination_devs = [
             d
             for d, ts in destination_rows
-            if (h := _eastern_hour(ts, tz_name)) is not None and is_hour_in_period(h, period_key)
+            if (h := _local_hour_or_none(ts, tz)) is not None and is_hour_in_period(h, period_key)
         ]
 
     # All timepoints: proximity stop_events directly (position-derived,
@@ -184,7 +205,7 @@ def compute_otp_split(
         all_devs = [
             d
             for d, ts in all_rows
-            if (h := _eastern_hour(ts, tz_name)) is not None and is_hour_in_period(h, period_key)
+            if (h := _local_hour_or_none(ts, tz)) is not None and is_hour_in_period(h, period_key)
         ]
 
     return {

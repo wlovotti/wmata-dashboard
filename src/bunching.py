@@ -81,6 +81,7 @@ from sqlalchemy.orm import Session
 from src.ewt import (
     EWT_TIME_PERIODS,
     _day_type_for,
+    _hour_in_zone,
     _period_for_hour,
     _scheduled_headways_by_cell_hour,
     fetch_scheduled_cell_hours_for_routes,
@@ -105,17 +106,23 @@ BUNCHING_ABSOLUTE_FLOOR_SEC = 120.0
 # `src/analytics.py:calculate_headways_batch`.
 MAX_OBSERVED_HEADWAY_SEC = 120 * 60
 
-CellHour = tuple[int, str, int]  # (direction_id, stop_id, eastern_hour)
+CellHour = tuple[int, str, int]  # (direction_id, stop_id, hour)
 
 
 def _eastern_hour(ts: datetime, tz_name: str = "America/New_York") -> int:
     """Return the local hour-of-day for a naive-UTC stop_event timestamp.
 
+    Convenience wrapper for single-call (non-loop) use — constructs a
+    fresh ``ZoneInfo(tz_name)`` per call. Hot loops should call
+    `src.ewt._hour_in_zone` directly with a ``ZoneInfo`` built once outside
+    the loop (see `_scheduled_observed_headways_by_cell_hour` and the
+    vectorized headline functions below).
+
     `tz_name` (NOTES-103 multi-agency) defaults to Eastern so every existing
     WMATA call site is unaffected. See `src.ewt._eastern_hour` — the two are
     identical implementations kept as separate module-private functions.
     """
-    return ts.replace(tzinfo=UTC).astimezone(ZoneInfo(tz_name)).hour
+    return _hour_in_zone(ts, ZoneInfo(tz_name))
 
 
 def _scheduled_observed_headways_by_cell_hour(
@@ -147,6 +154,7 @@ def _scheduled_observed_headways_by_cell_hour(
         .all()
     )
 
+    tz = ZoneInfo(tz_name)
     by_cell_hour: dict[CellHour, list[float]] = defaultdict(list)
     prev_key: tuple[int, str] | None = None
     prev_ts: datetime | None = None
@@ -155,7 +163,7 @@ def _scheduled_observed_headways_by_cell_hour(
         if prev_key == key and prev_ts is not None:
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
-                by_cell_hour[(direction_id, stop_id, _eastern_hour(prev_ts, tz_name))].append(delta)
+                by_cell_hour[(direction_id, stop_id, _hour_in_zone(prev_ts, tz))].append(delta)
         prev_key = key
         prev_ts = ts
     return by_cell_hour
@@ -393,6 +401,7 @@ def compute_bunching_headline_for_routes(
     if route_ids is not None:
         obs_q = obs_q.filter(StopEvent.route_id.in_(route_ids))
 
+    tz = ZoneInfo(tz_name)
     obs_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -404,7 +413,7 @@ def compute_bunching_headline_for_routes(
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
                 obs_by_route_cell_hour[route_id][
-                    (direction_id, stop_id, _eastern_hour(prev_ts, tz_name))
+                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
                 ].append(delta)
         prev_key = key
         prev_ts = ts
@@ -479,6 +488,7 @@ def compute_bunching_headline_for_routes_multi_date(
     if observed_rows is None:
         observed_rows = fetch_observed_stop_events_for_window(db, service_dates, route_ids)
 
+    tz = ZoneInfo(tz_name)
     obs_by_date_route_cell_hour: dict[tuple[str, str], dict[CellHour, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -495,7 +505,7 @@ def compute_bunching_headline_for_routes_multi_date(
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
                 obs_by_date_route_cell_hour[(service_date_str, route_id)][
-                    (direction_id, stop_id, _eastern_hour(prev_ts, tz_name))
+                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
                 ].append(delta)
         prev_key = key
         prev_ts = ts
@@ -695,6 +705,11 @@ def _bunched_pairs_with_deviations(
             sched_cache[day_type] = cached
         return cached
 
+    # Eastern-only (not threaded with tz_name): this feeds
+    # `compute_bunching_cause_breakdown` (NOTES-42), a live-API decomposition
+    # outside NOTES-103's confirmed blast radius — see that fix's PR body.
+    eastern_tz = ZoneInfo("America/New_York")
+
     out: list[dict] = []
     prev_key: tuple[str, int, str] | None = None
     prev_ts: datetime | None = None
@@ -704,7 +719,7 @@ def _bunched_pairs_with_deviations(
         if prev_key == key and prev_ts is not None:
             delta = (ts - prev_ts).total_seconds()
             if 0 < delta <= MAX_OBSERVED_HEADWAY_SEC:
-                hour = _eastern_hour(prev_ts)
+                hour = _hour_in_zone(prev_ts, eastern_tz)
                 sched = _sched_for_date(service_date)
                 threshold = _cell_hour_threshold_sec(sched.get((direction_id, stop_id, hour), []))
                 if threshold is not None and delta < threshold:

@@ -135,12 +135,29 @@ def _day_type_for(service_date: date_type) -> str:
     return "weekday"
 
 
+def _hour_in_zone(ts: datetime, tz: ZoneInfo) -> int:
+    """Return the local hour-of-day for a naive-UTC timestamp in a pre-built zone.
+
+    Stop_event timestamps are naive UTC by storage convention (timezones.py).
+    We re-attach UTC, convert to ``tz``, and take the hour. zoneinfo handles
+    DST transitions correctly.
+
+    Takes an already-constructed ``ZoneInfo`` rather than a ``tz_name``
+    string so hot loops (one call per stop_event row) can hoist the
+    ``ZoneInfo(tz_name)`` construction once per enclosing function instead
+    of paying it on every row — `_eastern_hour` below is the convenience
+    single-call wrapper for call sites outside a loop.
+    """
+    return ts.replace(tzinfo=UTC).astimezone(tz).hour
+
+
 def _eastern_hour(ts: datetime, tz_name: str = "America/New_York") -> int:
     """Return the local hour-of-day for a naive-UTC stop_event timestamp.
 
-    Stop_event timestamps are naive UTC by storage convention (timezones.py).
-    We re-attach UTC, convert to ``tz_name``, and take the hour. zoneinfo
-    handles DST transitions correctly.
+    Convenience wrapper around `_hour_in_zone` for single-call (non-loop)
+    use — constructs a fresh ``ZoneInfo(tz_name)`` per call. Hot loops
+    should call `_hour_in_zone` directly with a ``ZoneInfo`` built once
+    outside the loop.
 
     ``tz_name`` (NOTES-103 multi-agency) defaults to Eastern so every
     existing WMATA call site is unaffected. Despite the name (kept for the
@@ -149,15 +166,15 @@ def _eastern_hour(ts: datetime, tz_name: str = "America/New_York") -> int:
     necessarily Eastern — pass the agency's own IANA zone (e.g.
     ``"America/Los_Angeles"`` for SFMTA) for a non-Eastern agency.
     """
-    return ts.replace(tzinfo=UTC).astimezone(ZoneInfo(tz_name)).hour
+    return _hour_in_zone(ts, ZoneInfo(tz_name))
 
 
-def _period_for_hour(eastern_hour: int) -> str:
-    """Map an Eastern hour-of-day (0..23) to its time_period label."""
+def _period_for_hour(hour: int) -> str:
+    """Map an agency-local hour-of-day (0..23) to its time_period label."""
     for label, start, end in EWT_TIME_PERIODS:
-        if start <= eastern_hour < end:
+        if start <= hour < end:
             return label
-    raise ValueError(f"Eastern hour {eastern_hour} out of 0..23 range")
+    raise ValueError(f"hour {hour} out of 0..23 range")
 
 
 def _parse_gtfs_time_to_seconds(t: str) -> int:
@@ -217,6 +234,7 @@ def _observed_headways_by_cell_hour(
         .all()
     )
 
+    tz = ZoneInfo(tz_name)
     by_cell_hour: dict[CellHour, list[float]] = defaultdict(list)
     prev_key: tuple[int, str] | None = None
     prev_ts: datetime | None = None
@@ -225,7 +243,7 @@ def _observed_headways_by_cell_hour(
         if prev_key == key and prev_ts is not None:
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
-                by_cell_hour[(direction_id, stop_id, _eastern_hour(prev_ts, tz_name))].append(delta)
+                by_cell_hour[(direction_id, stop_id, _hour_in_zone(prev_ts, tz))].append(delta)
         prev_key = key
         prev_ts = ts
     return by_cell_hour
@@ -665,6 +683,7 @@ def compute_ewt_headline_for_routes(
     if route_ids is not None:
         obs_q = obs_q.filter(StopEvent.route_id.in_(route_ids))
 
+    tz = ZoneInfo(tz_name)
     obs_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -676,7 +695,7 @@ def compute_ewt_headline_for_routes(
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
                 obs_by_route_cell_hour[route_id][
-                    (direction_id, stop_id, _eastern_hour(prev_ts, tz_name))
+                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
                 ].append(delta)
         prev_key = key
         prev_ts = ts
@@ -796,6 +815,7 @@ def compute_ewt_headline_for_routes_multi_date(
     # `{(service_date_str, route_id): {cell_hour: [headways]}}` — pairing is
     # reset every time the (service_date, route, direction, stop) key changes,
     # so per-(date, route) pools never cross day boundaries.
+    tz = ZoneInfo(tz_name)
     obs_by_date_route_cell_hour: dict[tuple[str, str], dict[CellHour, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -807,7 +827,7 @@ def compute_ewt_headline_for_routes_multi_date(
             delta = (ts - prev_ts).total_seconds()
             if delta > 0:
                 obs_by_date_route_cell_hour[(service_date_str, route_id)][
-                    (direction_id, stop_id, _eastern_hour(prev_ts, tz_name))
+                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
                 ].append(delta)
         prev_key = key
         prev_ts = ts

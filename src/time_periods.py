@@ -90,7 +90,7 @@ def get_period(key: str) -> TimePeriod | None:
 
 
 def is_hour_in_period(hour: int, period_key: str) -> bool:
-    """Return True iff `hour` (Eastern, 0-23) falls within the period.
+    """Return True iff `hour` (agency-local, 0-23) falls within the period.
 
     `ALL_HOURS` returns True for every valid hour. `Late` (22-6) wraps
     midnight: 22, 23, 0, 1, 2, 3, 4, 5 all qualify; 6 does not (end-exclusive).

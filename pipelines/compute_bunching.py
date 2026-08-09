@@ -9,8 +9,12 @@ the prior rows via the unique constraint.
 Multi-agency (NOTES-100): pass ``--agency`` (matching a
 ``config/agencies/<agency>.yaml``) to compute against a non-WMATA
 database with the correct service-date timezone for the ``--date``-less
-default. Omitting it keeps the WMATA/Eastern default. Note:
-``--days`` without an explicit ``--date`` still resolves via
+default AND (as of the agency-local hour bucketing fix, PR #190) for the
+bunching computation's own observed-side hour-of-day bucketing —
+``cfg.timezone`` is threaded into ``materialize_for_routes`` /
+``materialize_bunching_for_route_date`` / ``compute_bunching_for_route_date``.
+Omitting ``--agency`` keeps the WMATA/Eastern default. Note: ``--days``
+without an explicit ``--date`` still resolves via
 ``iter_recent_eastern_dates`` (Eastern-hardcoded) — always pass
 ``--date`` explicitly for a non-WMATA backfill.
 
@@ -45,15 +49,23 @@ def materialize_bunching_for_route_date(
     route_id: str,
     service_date: date_type,
     verbose: bool = False,
+    tz_name: str = "America/New_York",
 ) -> dict:
     """Compute and upsert bunching rows for one (route, service_date).
 
     Returns counters describing the run. Always writes five rows (one per
     time_period) even when the route has no eligible observations — empty
     rows let consumers distinguish "evaluated" from "not evaluated."
+
+    `tz_name` (NOTES-103 multi-agency; default Eastern) is forwarded to
+    `compute_bunching_for_route_date` so the observed side buckets by the
+    agency's own local hour, matching the scheduled side (always
+    agency-local, GTFS clock time). Without this, a non-Eastern agency's
+    cell-hour join is degenerate — see the agency-local hour bucketing
+    fix, PR #190.
     """
     start_ts = time.time()
-    rows = compute_bunching_for_route_date(db, route_id, service_date)
+    rows = compute_bunching_for_route_date(db, route_id, service_date, tz_name=tz_name)
 
     computed_at = utcnow_naive()
     insert_rows = [
@@ -115,14 +127,20 @@ def materialize_for_routes(
     db: Session,
     route_ids: list[str],
     service_dates: list[date_type],
+    tz_name: str = "America/New_York",
 ) -> list[dict]:
-    """Drive `materialize_bunching_for_route_date` over a (routes × dates) grid."""
+    """Drive `materialize_bunching_for_route_date` over a (routes × dates) grid.
+
+    `tz_name` (NOTES-103 multi-agency; default Eastern) is forwarded to
+    every per-(route, date) call.
+    """
     return run_route_date_grid(
         materialize_bunching_for_route_date,
         db,
         route_ids,
         service_dates,
         verbose=True,
+        tz_name=tz_name,
     )
 
 
@@ -223,7 +241,7 @@ def main():
             ]
             print(f"Processing {len(route_ids)} routes × {len(service_dates)} dates...")
 
-        results = materialize_for_routes(db, route_ids, service_dates)
+        results = materialize_for_routes(db, route_ids, service_dates, tz_name=cfg.timezone)
 
         rows_written = sum(r["rows_written"] for r in results)
         bunched_total = sum(r["bunched_total"] for r in results)
