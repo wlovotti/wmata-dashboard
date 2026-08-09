@@ -10,7 +10,7 @@ Last edited 2026-08-08. Closed NOTES-98: added `bin/prune-vm-archive.sh`,
 a laptop-side verify-then-prune drain for the VM's raw JSONL archive —
 run manually after each `aws s3 sync` step (docs/DEPLOYMENT.md), it
 deletes VM-side files older than a safety window only after confirming
-a byte-size-matching S3 copy exists — see PR #TODO.
+a byte-size-matching S3 copy exists — see PR #183.
 Earlier same day: Closed NOTES-97: `bin/pull-and-derive.sh` now
 rsyncs `archive/sfmta_raw_snapshots/` alongside the WMATA archive dirs,
 and `s3://wmata-dashboard-backups/raw-jsonl-archive/sfmta/` was created
