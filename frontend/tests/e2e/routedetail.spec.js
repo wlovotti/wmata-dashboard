@@ -9,6 +9,7 @@ import { test, expect } from '@playwright/test'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
+import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -61,6 +62,9 @@ test.beforeEach(async ({ page }) => {
     if (url.includes('/api/routes/D72')) {
       // Catch-all for any other D72 sub-routes.
       return route.fulfill({ json: EMPTY_OBJECT })
+    }
+    if (url.includes('/api/gtfs/freshness')) {
+      return fulfillGtfsFreshness(route)
     }
 
     await route.continue()

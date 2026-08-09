@@ -9,10 +9,48 @@ import ActiveBlocks from './components/ActiveBlocks'
 import Targets from './components/Targets'
 import ScheduleAudit from './components/ScheduleAudit'
 import SegmentDiagnostic from './components/SegmentDiagnostic'
+import useGtfsFreshness from './hooks/useGtfsFreshness'
 import './App.css'
+
+// Format a raw GTFS YYYYMMDD string (e.g. `feed_end_date`) as a
+// human-readable date, mirroring RouteList's `formatSnapshotDate` (which
+// formats ISO timestamps, not this bare-digits GTFS convention). Falls
+// back to the raw string if it doesn't parse as an 8-digit date so the
+// banner degrades gracefully instead of hiding the value.
+function formatFeedDate(yyyymmdd) {
+  if (!yyyymmdd || !/^\d{8}$/.test(yyyymmdd)) return yyyymmdd
+  const year = Number(yyyymmdd.slice(0, 4))
+  const month = Number(yyyymmdd.slice(4, 6))
+  const day = Number(yyyymmdd.slice(6, 8))
+  const d = new Date(year, month - 1, day)
+  if (Number.isNaN(d.getTime())) return yyyymmdd
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+// Feed-expiry alarm (NOTES-90): renders only when the schedule is already
+// expired or expiring within 7 days — silent (returns null) for `ok` or an
+// unknown status (no feed_info row yet), so it never shows on a healthy or
+// freshly-initialized DB.
+function GtfsExpiryBanner({ freshness }) {
+  if (!freshness || (freshness.status !== 'expired' && freshness.status !== 'expiring_soon')) {
+    return null
+  }
+  const tint = freshness.status === 'expired' ? 'gtfs-expiry-banner-red' : 'gtfs-expiry-banner-yellow'
+  const feedEndDate = formatFeedDate(freshness.feed_end_date)
+  const message =
+    freshness.status === 'expired'
+      ? `GTFS schedule EXPIRED as of ${feedEndDate}`
+      : `GTFS schedule expires soon (${feedEndDate})`
+  return (
+    <div className={`gtfs-expiry-banner ${tint}`} role="status">
+      {message}
+    </div>
+  )
+}
 
 function App() {
   const [refreshing, setRefreshing] = useState(false)
+  const gtfsFreshness = useGtfsFreshness()
 
   const handleRefresh = () => {
     setRefreshing(true)
@@ -41,6 +79,7 @@ function App() {
               </button>
             </div>
           </div>
+          <GtfsExpiryBanner freshness={gtfsFreshness} />
           <nav className="primary-nav" aria-label="Primary">
             <NavLink to="/" end className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
               Overview

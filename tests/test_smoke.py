@@ -7,7 +7,7 @@ These should run fast (<10s) and fail fast if something is fundamentally broken.
 Run with: pytest -m smoke
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -15,6 +15,7 @@ from sqlalchemy import text
 from src.models import (
     Calendar,
     CollectorHeartbeat,
+    FeedInfo,
     Route,
     RouteServiceProfile,
     Run,
@@ -23,6 +24,7 @@ from src.models import (
     Trip,
 )
 from src.service_profile import compute_route_service_profile
+from src.timezones import eastern_today
 
 
 @pytest.mark.smoke
@@ -2108,6 +2110,110 @@ def test_gtfs_freshness_endpoint_returns_newest_snapshot(client, db_session):
     assert body["routes_count"] == 305
     assert body["stops_count"] == 10050
     assert body["trips_count"] == 20100
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_status_null_when_no_feed_info(client):
+    """
+    No `feed_info` row (fresh DB, never reloaded) → `status` is null.
+
+    Distinguishes "we don't know" from "ok" — a banner keyed off a
+    default-ok status would silently hide a schedule that was never
+    loaded in the first place.
+    """
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is None
+    assert body["feed_end_date"] is None
+    assert body["feed_start_date"] is None
+
+
+def _add_feed_info(db_session, feed_end_date):
+    """Add a `FeedInfo` row so freshness-status tests only need to vary
+    `feed_end_date`; publisher/start-date/version are fixed placeholders.
+    """
+    db_session.add(
+        FeedInfo(
+            feed_publisher_name="WMATA",
+            feed_start_date="20260101",
+            feed_end_date=feed_end_date,
+            feed_version="2026-01-01",
+        )
+    )
+    db_session.commit()
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_status_expired(client, db_session):
+    """`feed_end_date` before Eastern today → `status: expired`."""
+    expired_date = eastern_today() - timedelta(days=10)
+    _add_feed_info(db_session, expired_date.strftime("%Y%m%d"))
+
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "expired"
+    assert body["feed_end_date"] == expired_date.strftime("%Y%m%d")
+    assert body["feed_start_date"] == "20260101"
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_status_expiring_soon_boundary_today(client, db_session):
+    """`feed_end_date` == Eastern today → `expiring_soon` (0 days out).
+
+    `expired` means the last valid service date has already passed
+    (`feed_end_date < today`); a feed valid through today itself is the
+    0-day edge of "expiring soon," per the spec's inclusive ≤7-day rule.
+    """
+    today = eastern_today()
+    _add_feed_info(db_session, today.strftime("%Y%m%d"))
+
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "expiring_soon"
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_status_expiring_soon_boundary_7_days(client, db_session):
+    """`feed_end_date` exactly 7 days out (inclusive) → `expiring_soon`."""
+    boundary_date = eastern_today() + timedelta(days=7)
+    _add_feed_info(db_session, boundary_date.strftime("%Y%m%d"))
+
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "expiring_soon"
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_status_ok_beyond_7_days(client, db_session):
+    """`feed_end_date` 8+ days out → `ok`."""
+    ok_date = eastern_today() + timedelta(days=8)
+    _add_feed_info(db_session, ok_date.strftime("%Y%m%d"))
+
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["feed_end_date"] == ok_date.strftime("%Y%m%d")
+
+
+@pytest.mark.smoke
+def test_gtfs_freshness_endpoint_status_null_on_malformed_feed_end_date(client, db_session):
+    """Malformed `feed_end_date` → `status: None` via 200, not a 500.
+
+    `feed_info.feed_end_date` is written straight from an unvalidated CSV
+    field, so a stray non-digit or wrong-length value must not crash the
+    endpoint that the app-wide banner now polls on every page load.
+    """
+    _add_feed_info(db_session, "not-a-date")
+
+    response = client.get("/api/gtfs/freshness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is None
 
 
 # ---------------------------------------------------------------------------

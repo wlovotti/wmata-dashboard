@@ -6,7 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-08-09. Closed NOTES-93: `replay_archive_to_state.py`
+Last edited 2026-08-09. Closed NOTES-90: `/api/gtfs/freshness` now
+returns an explicit `expired` / `expiring_soon` (≤7 days) / `ok` status
+plus the raw `feed_start_date`/`feed_end_date`, computed against Eastern
+today; the dashboard chrome (`App.jsx`) surfaces a warning banner when
+the schedule is expired or expiring soon — see PR #185.
+Earlier same day: Closed NOTES-93: `replay_archive_to_state.py`
 now raises `NoArchiveFilesFoundError` (CLI exit 1) when the archive
 glob matches zero files for `--date`, instead of silently returning 0;
 `--allow-empty` opts back into the old behavior for genuinely-empty
@@ -290,9 +295,6 @@ the fixing PR, not a NOTES item.
   `scripts/reload_gtfs_complete.py`, mirroring the retired laptop launchd
   cadence (Sundays 08:00 UTC). Without it, schedule staleness recurs at
   every WMATA service change.
-- **NOTES-90 Feed-expiry alarm in `/api/gtfs/freshness`.** Compare
-  `feed_info.feed_end_date` to Eastern today and surface expired/expiring
-  state — turns silent schedule staleness into a visible signal.
 - **NOTES-91 Nightly-batch failure alerting.** Collector dead-man ping
   shipped (PR #173, `src/deadman.py`); the batch-alerting half is
   superseded by the Path 2a migration to manual laptop derivation — see
@@ -899,22 +901,6 @@ the reload as the `wmata` user with the venv interpreter (not `uv run` —
 same fix as the other units). Deploy section must cite `docs/DEPLOY.md` §2
 (cp units + daemon-reload); a `git pull` alone does not install timers.
 Verify a manual first run end-to-end before enabling the timer.
-
----
-
-## NOTES-90. Feed-expiry alarm in `/api/gtfs/freshness`
-
-**Severity: medium (pure observability — turns silent schedule staleness
-into a visible signal; NOTES-89 is the actual fix).**
-**Effort: low (one endpoint change + a small frontend surface).**
-
-`feed_info.feed_end_date` is a machine-checkable "schedule is stale" signal
-that sat expired for three weeks unnoticed. Extend `/api/gtfs/freshness` to
-compare `feed_end_date` (YYYYMMDD string) against Eastern today
-(`src/timezones.eastern_today`) and return an explicit
-`expired` / `expiring_soon` (≤7 days) / `ok` status plus the raw dates.
-Surface it in the dashboard chrome (a warning banner is enough) so a stale
-feed is visible without ssh.
 
 ---
 

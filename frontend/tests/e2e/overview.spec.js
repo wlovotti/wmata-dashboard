@@ -17,6 +17,7 @@ import { test, expect } from '@playwright/test'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
+import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -50,6 +51,9 @@ test.beforeEach(async ({ page }) => {
     }
     if (url.includes('/api/targets')) {
       return route.fulfill({ json: fixture('targets.json') })
+    }
+    if (url.includes('/api/gtfs/freshness')) {
+      return fulfillGtfsFreshness(route)
     }
 
     // Fall through to actual network for anything unmatched.
