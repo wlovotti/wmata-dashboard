@@ -31,8 +31,12 @@ To close, per date in 2026-06-14 → 2026-07-03:
    `bin/pull-and-derive.sh` warns June dates must not go through its
    default path): `derive_stop_events_from_state --all-routes --date <D>
    --gtfs-snapshot-id 12`, then `aggregate_runs`, `compute_bunching`,
-   and `upsert_system_metrics_daily` for the same date with the same
-   pin.
+   `upsert_system_metrics_daily`, and `upsert_route_metrics_overlay`
+   for the same date with the same pin — matching
+   `scripts/local_recovery_2026_07.sh`'s `STATE_PIPELINES` convention
+   (all five, not just the first four; the per-route overlay table
+   would otherwise silently stay stale for these dates even after the
+   system-wide rollup is fixed).
 
 Known wrinkle: 2026-06-19 (Juneteenth) has the documented SD=0.38
 artifact (GTFS lacks holiday calendar_dates exceptions) — the backfill

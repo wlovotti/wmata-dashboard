@@ -12,8 +12,10 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy import text
 
+from src.agency_config import load_agency_config
 from src.data_completeness import (
     MIN_COVERAGE_FOR_MATERIALIZATION,
+    agency_coverage_threshold,
     coverage_pct_for_date,
     expected_minutes_for_date,
     is_date_sufficiently_complete,
@@ -158,3 +160,65 @@ def test_coverage_pct_uses_tz_name_window_not_eastern(pg_session):
     eastern_pct = coverage_pct_for_date(pg_session, TEST_DATE, tz_name="America/New_York")
     assert pacific_pct == pytest.approx(1 / 1440)
     assert eastern_pct == 0.0
+
+
+@pytest.mark.smoke
+def test_agency_coverage_threshold_wmata_matches_flat_constant():
+    """WMATA polls TripUpdates every tick (trip_updates_every_ticks=1), so
+    every tick is 'active' and the theoretical coverage ceiling is 100% --
+    the agency-aware threshold must equal today's flat 0.80 constant
+    exactly, or every existing WMATA day's completeness classification
+    would silently shift.
+    """
+    cfg = load_agency_config("wmata")
+    assert agency_coverage_threshold(cfg) == pytest.approx(MIN_COVERAGE_FOR_MATERIALIZATION)
+
+
+@pytest.mark.smoke
+def test_agency_coverage_threshold_sfmta_is_cadence_capped():
+    """SFMTA polls TripUpdates every 2nd tick and VehiclePositions every 3rd
+    tick (both configured in config/agencies/sfmta.yaml) -- neither feed is
+    polled on every tick, so a heartbeat that only fires on ticks where
+    something was actually polled can never reach 100% minute-coverage
+    even under perfect collection. Over the LCM(2, 3) = 6-tick cycle, ticks
+    2, 3, 4, 6 are active (TU: 2,4,6; VP: 3,6) -- 4/6 = 66.7% ceiling.
+    The flat 0.80 threshold is literally unreachable for this agency; the
+    cadence-aware threshold must be well below it.
+    """
+    cfg = load_agency_config("sfmta")
+    threshold = agency_coverage_threshold(cfg)
+    assert threshold == pytest.approx(0.80 * (4 / 6))
+    assert threshold < MIN_COVERAGE_FOR_MATERIALIZATION
+
+
+@pytest.mark.smoke
+def test_agency_coverage_threshold_keeps_relative_safety_margin():
+    """The agency-aware threshold is MIN_COVERAGE_FOR_MATERIALIZATION scaled
+    by the agency's own cadence ceiling -- same "80% of achievable" safety
+    margin philosophy as the original flat constant, just relative to what
+    THIS agency's cadence can actually deliver instead of assuming 100%."""
+    from src.agency_config import AgencyConfig
+
+    # A hypothetical agency polling both feeds on every 4th tick: ceiling
+    # is exactly 1/4 (only tick 4 of every 4-tick cycle is active).
+    cfg = AgencyConfig(
+        name="hypothetical",
+        display_name="Hypothetical Transit",
+        timezone="America/New_York",
+        api_key_env="X",
+        auth_style="header",
+        trip_updates_url="",
+        vehicle_positions_url="",
+        extra_params={},
+        static_gtfs_url="",
+        static_gtfs_params={},
+        tick_sec=60,
+        trip_updates_every_ticks=4,
+        vehicle_positions_every_ticks=4,
+        archive_dir="",
+        pid_file="",
+        heartbeat_name="",
+        database_url_env="X_DATABASE_URL",
+        healthcheck_url_env="X_HEALTHCHECK_URL",
+    )
+    assert agency_coverage_threshold(cfg) == pytest.approx(MIN_COVERAGE_FOR_MATERIALIZATION * 0.25)

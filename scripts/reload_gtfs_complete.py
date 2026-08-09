@@ -96,6 +96,26 @@ def parse_csv(zip_file: zipfile.ZipFile, filename: str) -> list[dict]:
     return list(reader)
 
 
+def _require_field(row: dict, field: str, context: str) -> str:
+    """Fetch a required GTFS field, raising a clear error naming what's missing.
+
+    A bare ``row[field]`` raises a raw, contextless ``KeyError: 'field'``
+    if an agency's GTFS export omits the whole column -- e.g. `agency_id`
+    in `agency.txt`, which GTFS treats as only *conditionally* required
+    (optional for a single-agency feed, which some non-WMATA exports are).
+    Wrapping the lookup turns that into an actionable error naming the
+    field and the row it came from, instead of a bare stack trace pointing
+    at a dict literal deep in `apply_gtfs_to_db`.
+    """
+    try:
+        return row[field]
+    except KeyError:
+        raise RuntimeError(
+            f"GTFS row missing required field {field!r} ({context}). "
+            f"Row keys present: {sorted(row.keys())}"
+        ) from None
+
+
 def _download_and_parse_gtfs(cfg: AgencyConfig) -> dict[str, list[dict]]:
     """Download ``cfg``'s static GTFS zip and return a dict keyed by filename stem.
 
@@ -189,9 +209,15 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
     # get refreshed.
     print("\n→ Upserting agencies...")
     for agency_data in gtfs_data["agency"]:
-        existing = db.query(Agency).filter_by(agency_id=agency_data["agency_id"]).one_or_none()
+        # agency_id is GTFS-"conditionally required" -- optional when
+        # agency.txt has exactly one row, required otherwise. A raw
+        # `agency_data["agency_id"]` KeyError with no context is a common
+        # single-agency-feed footgun; _require_field names the field.
+        agency_id = _require_field(agency_data, "agency_id", "agency.txt")
+        agency_name = _require_field(agency_data, "agency_name", "agency.txt")
+        existing = db.query(Agency).filter_by(agency_id=agency_id).one_or_none()
         if existing is not None:
-            existing.agency_name = agency_data["agency_name"]
+            existing.agency_name = agency_name
             existing.agency_url = agency_data.get("agency_url")
             existing.agency_timezone = agency_data.get("agency_timezone")
             existing.agency_lang = agency_data.get("agency_lang")
@@ -201,8 +227,8 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
         else:
             db.add(
                 Agency(
-                    agency_id=agency_data["agency_id"],
-                    agency_name=agency_data["agency_name"],
+                    agency_id=agency_id,
+                    agency_name=agency_name,
                     agency_url=agency_data.get("agency_url"),
                     agency_timezone=agency_data.get("agency_timezone"),
                     agency_lang=agency_data.get("agency_lang"),
@@ -241,14 +267,16 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
 
     print("→ Loading stops...")
     for stop_data in gtfs_data["stops"]:
+        stop_id = stop_data["stop_id"]
+        context = f"stops.txt, stop_id={stop_id!r}"
         db.add(
             Stop(
-                stop_id=stop_data["stop_id"],
+                stop_id=stop_id,
                 stop_code=stop_data.get("stop_code"),
-                stop_name=stop_data["stop_name"],
+                stop_name=_require_field(stop_data, "stop_name", context),
                 stop_desc=stop_data.get("stop_desc"),
-                stop_lat=float(stop_data["stop_lat"]),
-                stop_lon=float(stop_data["stop_lon"]),
+                stop_lat=float(_require_field(stop_data, "stop_lat", context)),
+                stop_lon=float(_require_field(stop_data, "stop_lon", context)),
                 zone_id=stop_data.get("zone_id"),
                 stop_url=stop_data.get("stop_url"),
                 snapshot_id=snapshot_id,
@@ -375,6 +403,39 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
             )
         )
     print(f"  ✓ Loaded {len(gtfs_data['feed_info'])} feed_info records")
+
+    # `shapes` has no snapshot_id/is_current columns (unversioned, same as
+    # feed_info/timepoints) -- truncate-then-reinsert, NOT the
+    # `init_database.py` one-time "skip if any exist" seed behavior. Before
+    # this, a database that only ever went through `reload_gtfs_complete.py`
+    # (never `init_database.py`) had a permanently empty `shapes` table with
+    # no recovery path -- `init_database.py` refuses to run once a snapshot
+    # exists (NOTES-100 follow-up).
+    print("→ Loading shapes...")
+    db.execute(text("DELETE FROM shapes"))
+    batch = []
+    total_shapes = len(gtfs_data["shapes"])
+    for i, shape_data in enumerate(gtfs_data["shapes"]):
+        batch.append(
+            Shape(
+                shape_id=shape_data["shape_id"],
+                shape_pt_lat=float(shape_data["shape_pt_lat"]),
+                shape_pt_lon=float(shape_data["shape_pt_lon"]),
+                shape_pt_sequence=int(shape_data["shape_pt_sequence"]),
+                shape_dist_traveled=float(shape_data["shape_dist_traveled"])
+                if shape_data.get("shape_dist_traveled")
+                else None,
+            )
+        )
+        if len(batch) >= 10000:
+            db.bulk_save_objects(batch)
+            batch = []
+            percent = ((i + 1) / total_shapes) * 100
+            print(f"\r    Progress: {percent:.1f}% ({i + 1:,}/{total_shapes:,})", end="")
+            sys.stdout.flush()
+    if batch:
+        db.bulk_save_objects(batch)
+    print(f"\r  ✓ Loaded {total_shapes:,} shapes")
 
     print("→ Loading timepoints...")
     db.execute(text("DELETE FROM timepoint_times"))

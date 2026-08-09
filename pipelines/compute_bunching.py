@@ -178,6 +178,16 @@ def main():
         parser.error("--days and --start-date/--end-date are mutually exclusive")
     if (args.start_date is None) != (args.end_date is None):
         parser.error("--start-date and --end-date must be used together")
+    if args.days is not None and args.date is None and args.agency != "wmata":
+        # --days without --date resolves via iter_recent_eastern_dates,
+        # which is hardcoded to eastern_today() (see module docstring) --
+        # silently using Eastern "today" for a non-WMATA agency's backfill
+        # window would compute the wrong date range. Always pass --date
+        # explicitly alongside --days for a non-default agency.
+        parser.error(
+            "--days without --date is Eastern-hardcoded and unsafe for "
+            f"--agency {args.agency!r} — pass --date explicitly alongside --days"
+        )
 
     load_dotenv()
     cfg = load_agency_config(args.agency)

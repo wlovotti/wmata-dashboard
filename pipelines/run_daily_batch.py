@@ -42,11 +42,25 @@ Multi-agency (NOTES-100): pass `--agency` (matching a
 (derive_stop_events*, aggregate_runs, compute_bunching,
 upsert_system_metrics_daily, upsert_route_metrics_overlay) against a
 non-WMATA database with the correct service-date timezone. The
-non-date-scoped HOUSEKEEPING_PIPELINES below are NOT agency-aware yet
-(they always target `DATABASE_URL`, i.e. WMATA) — `run_batch` skips them
-entirely for any agency other than the default so a non-WMATA run can
-never silently touch the WMATA database. Omitting `--agency` keeps
+non-date-scoped HOUSEKEEPING_PIPELINES below are skipped entirely for
+any agency other than the default: three of the four
+(refresh_route_diagnostic_profile, refresh_cross_route_segments,
+refresh_corridor_slip) are NOT agency-aware and always target
+`DATABASE_URL` (WMATA); the fourth, `cleanup_trip_update_state.py`, IS
+agency-aware but needs its own separate invocation/schedule per agency
+(`cleanup_trip_update_state.py --agency sfmta`) rather than running
+here, so `run_batch` skips the whole group rather than a non-WMATA run
+silently touching the WMATA database. Omitting `--agency` keeps
 today's WMATA/Eastern behavior, including housekeeping, unchanged.
+
+WARNING (NOTES-103): the six per-date pipelines above are correct for
+`otp_percentage` and `service_delivered_ratio` for any agency, but
+`ewt_seconds` and `bunching_rate` are hardcoded to Eastern hour-of-day
+bucketing internally and will be WRONG for a Pacific (or any non-Eastern)
+agency until NOTES-103 lands — see that item for the full analysis.
+`run_daily_batch.py --agency sfmta` runs today and writes rows, it just
+writes wrong EWT/bunching numbers alongside correct OTP/service-delivered
+ones.
 
 Usage:
   uv run python pipelines/run_daily_batch.py
@@ -343,10 +357,14 @@ def run_batch(
     ``agency`` (NOTES-100 multi-agency) is forwarded to every per-date
     pipeline invocation as `--agency <agency>`. HOUSEKEEPING_PIPELINES
     are skipped entirely for any non-default agency: they're global
-    (not per-route/per-date), aren't agency-aware yet, and always target
-    `DATABASE_URL` (WMATA) — running them under `--agency sfmta` would
-    silently operate on the wrong database rather than the SFMTA sidecar
-    the caller intended. This isn't counted as a failure.
+    (not per-route/per-date); three of the four aren't agency-aware and
+    always target `DATABASE_URL` (WMATA) — running them under `--agency
+    sfmta` would silently operate on the wrong database rather than the
+    SFMTA sidecar the caller intended. The fourth,
+    `cleanup_trip_update_state.py`, IS agency-aware but is deliberately
+    not invoked from this loop for a non-default agency either — see the
+    skip-message text this function emits for why. This isn't counted
+    as a failure.
     """
     failure_count = 0
     # results[date][pipeline_name] = exit_code, used for skipping downstream
@@ -407,13 +425,27 @@ def run_batch(
     # still notices, but a metrics-redesign pipeline failure is the priority
     # signal.
     #
-    # NOTES-100: skipped entirely for non-default agencies -- see run_batch's
-    # docstring for why (not agency-aware, always targets DATABASE_URL).
+    # NOTES-100: the WHOLE loop below is skipped for non-default agencies,
+    # not run with a substituted --agency. Three of the four housekeeping
+    # pipelines (refresh_route_diagnostic_profile,
+    # refresh_cross_route_segments, refresh_corridor_slip) aren't
+    # agency-aware and always target DATABASE_URL. The fourth,
+    # cleanup_trip_update_state.py, IS agency-aware (accepts --agency) --
+    # for the default agency it still runs below via
+    # run_housekeeping_pipeline (which passes no --agency flag, so it
+    # keeps defaulting to wmata, unchanged). For a non-default agency it's
+    # NOT invoked here at all: it needs its own schedule/invocation with
+    # `--agency <agency>` (never the default -- that would prune WMATA's
+    # table, not the agency's own) so that agency's trip_update_state
+    # table stays bounded.
     if agency != DEFAULT_AGENCY:
         log_handle.write(
-            f"\nSKIP housekeeping for agency={agency!r} — not agency-aware yet "
-            f"(would target DATABASE_URL/{DEFAULT_AGENCY} regardless of --agency); "
-            "run housekeeping separately with the default agency if needed.\n"
+            f"\nSKIP housekeeping for agency={agency!r} — refresh_route_diagnostic_profile / "
+            "refresh_cross_route_segments / refresh_corridor_slip are not agency-aware yet "
+            f"(would target DATABASE_URL/{DEFAULT_AGENCY} regardless of --agency). "
+            "cleanup_trip_update_state.py IS agency-aware but is not invoked from here for a "
+            f"non-default agency -- run `cleanup_trip_update_state.py --agency {agency}` "
+            "on its own schedule to keep this agency's trip_update_state table bounded.\n"
         )
         log_handle.flush()
         return failure_count

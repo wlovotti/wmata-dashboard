@@ -288,3 +288,54 @@ def test_upsert_system_metrics_forwards_tz_name_to_completeness_guard(
     upsert_system_metrics_for_date(db_session, target_date, tz_name="America/Los_Angeles")
 
     assert seen_tz_names == ["America/Los_Angeles", "America/Los_Angeles"]
+
+
+@pytest.mark.smoke
+def test_upsert_system_metrics_forwards_completeness_threshold(
+    db_session, sample_routes, monkeypatch
+):
+    """NOTES-100: ``completeness_threshold`` reaches the completeness guard.
+    WMATA's flat 80% is unreachable for an agency whose collector cadence
+    doesn't poll every feed on every tick (SFMTA) -- callers must be able
+    to override it, and the override must actually flow through, not just
+    be accepted and dropped.
+    """
+    seen_thresholds = []
+
+    def _fake_is_complete(db, service_date, threshold=0.80, tz_name="America/New_York"):
+        seen_thresholds.append(threshold)
+        return True
+
+    monkeypatch.setattr(
+        "src.data_completeness.coverage_pct_for_date", lambda db, service_date, tz_name=None: 1.0
+    )
+    monkeypatch.setattr("src.data_completeness.is_date_sufficiently_complete", _fake_is_complete)
+
+    target_date = eastern_today() - timedelta(days=6)
+    upsert_system_metrics_for_date(db_session, target_date, completeness_threshold=0.5333)
+
+    assert seen_thresholds == [0.5333]
+
+
+@pytest.mark.smoke
+def test_upsert_system_metrics_default_threshold_is_the_flat_constant(
+    db_session, sample_routes, monkeypatch
+):
+    """Omitting completeness_threshold keeps today's WMATA behavior unchanged."""
+    from src.data_completeness import MIN_COVERAGE_FOR_MATERIALIZATION
+
+    seen_thresholds = []
+
+    def _fake_is_complete(db, service_date, threshold=0.80, tz_name="America/New_York"):
+        seen_thresholds.append(threshold)
+        return True
+
+    monkeypatch.setattr(
+        "src.data_completeness.coverage_pct_for_date", lambda db, service_date, tz_name=None: 1.0
+    )
+    monkeypatch.setattr("src.data_completeness.is_date_sufficiently_complete", _fake_is_complete)
+
+    target_date = eastern_today() - timedelta(days=7)
+    upsert_system_metrics_for_date(db_session, target_date)
+
+    assert seen_thresholds == [MIN_COVERAGE_FOR_MATERIALIZATION]

@@ -8,9 +8,14 @@ derivation pipelines have committed their stop_events / runs rows.
 
 Multi-agency (NOTES-100): pass ``--agency`` (matching a
 ``config/agencies/<agency>.yaml``) to upsert into a non-WMATA database;
-only the completeness guard's coverage window becomes agency-local (see
-``upsert_system_metrics_for_date``'s ``tz_name`` docstring) — the metric
-computation itself is still Eastern-hardcoded (NOTES-103).
+the completeness guard's coverage window AND its threshold become
+agency-local (window: see ``upsert_system_metrics_for_date``'s
+``tz_name`` docstring; threshold: see
+``src.data_completeness.agency_coverage_threshold`` — an agency whose
+collector cadence doesn't poll every feed on every tick, e.g. SFMTA,
+can never reach the flat 80% WMATA threshold even under perfect
+collection). The metric computation itself is still Eastern-hardcoded
+for hour-of-day bucketing (NOTES-103).
 
 Usage:
   uv run python -m pipelines.upsert_system_metrics_daily --date 2026-05-08
@@ -25,6 +30,7 @@ from datetime import date as date_type
 from datetime import datetime
 
 from src.agency_config import load_agency_config, resolve_agency_db_url
+from src.data_completeness import agency_coverage_threshold
 from src.database import get_session
 from src.system_metrics import upsert_system_metrics_for_date
 
@@ -72,7 +78,11 @@ def main() -> int:
     db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         result = upsert_system_metrics_for_date(
-            db, args.date, args.gtfs_snapshot_id, tz_name=cfg.timezone
+            db,
+            args.date,
+            args.gtfs_snapshot_id,
+            tz_name=cfg.timezone,
+            completeness_threshold=agency_coverage_threshold(cfg),
         )
         return 0 if result is not None else 1
     finally:

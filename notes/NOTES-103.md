@@ -1,10 +1,10 @@
 # NOTES-103. EWT/OTP/bunching hour-of-day bucketing hardcodes Eastern
 
-**Severity: medium** *(SFMTA metrics will compute without error, but
-peak/off-peak time-period classification and the EWT frequent-route
-cell-hour gate will be silently wrong by a fixed 3h offset — a
-correctness bug, not a crash, so it won't surface until someone
-eyeballs Muni rush-hour numbers against the clock).*
+**Severity: high** *(corrected from an earlier "medium" draft that
+understated the blast radius — see below. Two of NOTES-99's four
+headline KPIs — EWT and bunching rate — are actively wrong for SFMTA,
+not just a peak/off-peak label cosmetic. OTP and service-delivered are
+unaffected and safe to trust.)*
 **Effort: medium** *(three separate private `_eastern_hour(ts)` helpers
 — `src/ewt.py`, `src/otp_metrics.py`, `src/bunching.py` — each called
 from several places inside their module; needs a `tz_name` parameter
@@ -12,11 +12,14 @@ threaded from the public `compute_ewt_*` / `compute_bunching_*`
 functions down through every internal call site, with test coverage
 for a Pacific-zone case per module).*
 
-The SFMTA derivation rollout (NOTES-100) made `stop_events`/`runs`
-service-date attribution and the ingest-completeness guard correctly
-agency-local (Pacific for SFMTA), but three separate metric-computation
-modules still bucket UTC timestamps into "hour of day" via a
-module-level constant:
+## Confirmed blast radius (not just time-period labels)
+
+The SFMTA derivation rollout (NOTES-100 / PR #189) made `stop_events`/
+`runs` service-date attribution, the schedule-anchor parser
+(`stop_events.scheduled_arrival_ts`), and the ingest-completeness guard
+correctly agency-local (Pacific for SFMTA). But three separate
+metric-computation modules still bucket UTC timestamps into "hour of
+day" via a module-level constant:
 
 ```python
 EASTERN = ZoneInfo("America/New_York")
@@ -25,25 +28,59 @@ def _eastern_hour(ts):
     return ts.replace(tzinfo=UTC).astimezone(EASTERN).hour
 ```
 
-This exists independently in `src/ewt.py` (`_eastern_hour`, used by
-the per-cell-hour EWT pools and the `FREQUENT_HEADWAY_MAX_SEC`
-data-driven frequent-route gate), `src/otp_metrics.py` (`_eastern_hour`,
-used for period-of-day OTP splits), and `src/bunching.py`
-(`_eastern_hour`, used for per-cell-hour bunching thresholds). None of
-it is reached by `src/timezones.py`, so NOTES-100's timezone audit
-(scoped to `src/timezones.py` call sites) didn't touch it.
+**This is worse than a mislabeled time-period for EWT and bunching
+rate specifically**, because the *scheduled* side of both computations
+is bucketed by a *different, correct* clock:
 
-Effect for SFMTA (Pacific, UTC-7/-8): every timestamp's "hour" comes
-out 3h later than the true Pacific hour. A 5pm PT bus (peak) buckets as
-8pm PT-equivalent-Eastern-clock (off-peak) internally. Time-of-day
-splits (AM peak / midday / PM peak / evening / night in
-`src/time_periods.py`, if it's driven by the same clock — audit that
-too) and the EWT frequent-route cell-hour gate (`src/ewt.py:
-FREQUENT_HEADWAY_MAX_SEC` applied per cell-hour) will silently
-misclassify which hours are "frequent" and which period each
-observation falls in.
+- `src/ewt.py:_scheduled_headways_by_cell_hour` buckets scheduled
+  headways by `(parsed_seconds // 3600) % 24` — GTFS clock-time
+  seconds-since-midnight, i.e. the agency's **own local hour** (Pacific
+  for SFMTA GTFS). This is already correct.
+- `src/ewt.py:_observed_headways_by_cell_hour` and
+  `src/bunching.py:_scheduled_observed_headways_by_cell_hour` bucket
+  *observed* headways by `_eastern_hour(prev_ts)` — hardcoded Eastern,
+  3h off for SFMTA.
 
-To close:
+`compute_ewt_for_route_date` joins these two pools **by cell-hour
+key** (`(direction, stop, hour)`). For WMATA the keys agree (both
+Eastern) so the join works. For SFMTA the keys are 3h apart, so:
+
+- **EWT**: `compute_ewt_for_route_date` pairs a cell-hour's *scheduled*
+  headways (correct Pacific hour, e.g. 17) with *observed* headways
+  keyed at hour 17 in `obs_by_cell_hour` — but that dict was built with
+  Eastern hours, so hour-17 observed headways are actually from ~14:00
+  Pacific (2pm), not 5pm. EWT ends up comparing AM/midday observed
+  service against PM-peak scheduled headways (or vice versa) for every
+  cell — not a rounding error, a wrong pairing.
+- **Bunching rate**: `compute_bunching_for_route_date` looks up
+  `sched_by_cell_hour.get(cell_hour, [])` where `cell_hour` comes from
+  the *Eastern*-keyed `obs_by_cell_hour`. Since the scheduled dict is
+  Pacific-keyed, this lookup misses almost every cell (`threshold is
+  None`), and the cell is `continue`d out of **both**
+  `bunching_count` and `total_headways` — i.e. bunching rate is
+  computed from whatever sliver of cells happen to collide by
+  coincidence, not "no data" (which would show as `None`) but a
+  silently-thin, silently-biased sample that still returns a number.
+
+`src/otp_metrics.py`'s `_eastern_hour` only gates the **period-filtered**
+branch of `compute_otp_split` (`period_key != "all"`); the default,
+no-filter path — which is what `system_metrics_daily.otp_percentage`
+and `service_delivered_ratio` actually use
+(`api/aggregations.py:_system_otp_series`,
+`_system_service_delivered_series`) — never calls it. **OTP and
+service-delivered are safe for SFMTA today; EWT and bunching rate are
+not**, until this item closes.
+
+**Do not trust or publish SFMTA EWT / bunching-rate numbers — from
+`system_metrics_daily`, `route_metrics_daily_overlay`, or
+`route_headway_metrics` — until this closes.** Any SFMTA dates
+backfilled before the fix lands must be re-derived afterward (re-run
+`aggregate_runs` → `compute_bunching` → `upsert_system_metrics_daily`
+→ `upsert_route_metrics_overlay` for those dates once the fix is in;
+`derive_stop_events*` output itself is unaffected and doesn't need
+re-running).
+
+## To close
 
 1. Add a `tz_name: str = "America/New_York"` parameter to each of the
    three `_eastern_hour` functions (or consolidate to one shared
@@ -62,9 +99,19 @@ To close:
    docstrings) into `compute_system_metrics_for_date` /
    `compute_route_metrics_overlay_for_date`.
 4. Add a Pacific-zone test per module proving a late-afternoon Pacific
-   timestamp buckets into the correct local hour, not Eastern's.
+   timestamp buckets into the correct local hour, not Eastern's —
+   plus a regression test that an SFMTA-shaped fixture (schedule and
+   observations both anchored Pacific) produces a non-degenerate EWT
+   cell-hour join and a bunching `total_headways` that isn't
+   suspiciously near zero.
+5. **Re-derive** any SFMTA service dates that were backfilled before
+   this fix lands (see blast-radius note above) — `aggregate_runs`,
+   `compute_bunching`, `upsert_system_metrics_daily`, and
+   `upsert_route_metrics_overlay` all need to re-run for those dates;
+   `derive_stop_events`/`derive_stop_events_from_state` do not.
 
-Blocks trustworthy SFMTA EWT/peak-period numbers; does not block
-NOTES-99's page from loading (OTP/service-delivered/bunching *rate*
-computations elsewhere don't bucket by hour) but any hour-of-day-based
-comparison built on top should wait for this.
+Blocks trustworthy SFMTA EWT and bunching-rate numbers specifically —
+does not block NOTES-99's page from loading with OTP and
+service-delivered, and does not block the raw backfill (item 4 of the
+now-closed NOTES-100) from running, since `stop_events`/`runs` derivation
+itself is correct today.

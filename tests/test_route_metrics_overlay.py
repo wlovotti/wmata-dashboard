@@ -115,6 +115,30 @@ def test_upsert_route_metrics_forwards_tz_name_to_completeness_guard(db_session,
     assert seen_tz_names == ["America/Los_Angeles", "America/Los_Angeles"]
 
 
+@pytest.mark.smoke
+def test_upsert_route_metrics_forwards_completeness_threshold(db_session, monkeypatch):
+    """NOTES-100: ``completeness_threshold`` reaches the completeness guard
+    (mirrors the equivalent test in tests/test_system_metrics.py)."""
+    from src.data_completeness import MIN_COVERAGE_FOR_MATERIALIZATION
+
+    seen_thresholds = []
+
+    def _fake_is_complete(db, service_date, threshold=0.80, tz_name="America/New_York"):
+        seen_thresholds.append(threshold)
+        return True
+
+    monkeypatch.setattr(
+        "src.data_completeness.coverage_pct_for_date", lambda db, service_date, tz_name=None: 1.0
+    )
+    monkeypatch.setattr("src.data_completeness.is_date_sufficiently_complete", _fake_is_complete)
+
+    target = date(2026, 5, 6)
+    upsert_route_metrics_for_date(db_session, target, completeness_threshold=0.5333)
+    upsert_route_metrics_for_date(db_session, date(2026, 5, 7))
+
+    assert seen_thresholds == [0.5333, MIN_COVERAGE_FOR_MATERIALIZATION]
+
+
 def test_hydrate_overlay_row_shape():
     """The hydrated bundle exposes both sufficient stats AND derived fields.
 

@@ -162,3 +162,96 @@ def test_cleanup_ignores_derived_at(pg_session):
         ).scalars()
     }
     assert remaining == {"T_derived_recent"}
+
+
+@pytest.mark.integration
+def test_cleanup_tz_name_changes_cutoff(pg_session, monkeypatch):
+    """NOTES-100: tz_name changes which calendar day 'today' resolves to,
+    hence the retention cutoff. Fixes "today" to a known date per zone
+    (via monkeypatch, not the real clock) so the boundary math is exact
+    rather than dependent on when the suite happens to run.
+    """
+    import pipelines.cleanup_trip_update_state as cleanup_module
+
+    fixed_dates = {
+        "America/New_York": date(2026, 7, 23),
+        "America/Los_Angeles": date(2026, 7, 22),  # a day behind at this instant
+    }
+    monkeypatch.setattr(cleanup_module, "local_today", lambda tz_name: fixed_dates[tz_name])
+
+    from pipelines.cleanup_trip_update_state import run_cleanup
+
+    # A row dated 2026-07-22 (yesterday Eastern, but "today" Pacific).
+    pg_session.add(_make_state_row("T_tz_boundary", 1, service_date=date(2026, 7, 22)))
+    pg_session.commit()
+
+    # retention_days=0, Eastern: cutoff is 2026-07-23, so 07-22 is strictly
+    # older and gets deleted.
+    run_cleanup(pg_session, retention_days=0, tz_name="America/New_York")
+    pg_session.commit()
+    remaining = {
+        r.trip_id
+        for r in pg_session.execute(
+            select(TripUpdateState).where(TripUpdateState.trip_id == "T_tz_boundary")
+        ).scalars()
+    }
+    assert remaining == set()
+
+    # Re-seed and repeat with Pacific: cutoff is 2026-07-22, so a
+    # service_date of 07-22 is NOT strictly older and survives.
+    pg_session.add(_make_state_row("T_tz_boundary", 1, service_date=date(2026, 7, 22)))
+    pg_session.commit()
+    run_cleanup(pg_session, retention_days=0, tz_name="America/Los_Angeles")
+    pg_session.commit()
+    remaining = {
+        r.trip_id
+        for r in pg_session.execute(
+            select(TripUpdateState).where(TripUpdateState.trip_id == "T_tz_boundary")
+        ).scalars()
+    }
+    assert remaining == {"T_tz_boundary"}
+
+
+def test_main_targets_agency_database(db_session, monkeypatch):
+    """--agency threads through to the DB session resolution, matching
+    every other NOTES-100 pipeline entry point -- this closes the gap
+    where a WMATA-only cleanup run against `--agency sfmta` would have
+    silently pruned the WMATA table instead (see run_daily_batch.py's
+    corrected housekeeping-skip message)."""
+    import sys
+
+    import pipelines.cleanup_trip_update_state as cleanup_module
+
+    monkeypatch.setenv("SFMTA_DATABASE_URL", "postgresql:///sfmta_test")
+    seen_db_urls = []
+
+    def _fake_get_session(db_url=None):
+        seen_db_urls.append(db_url)
+        return db_session
+
+    monkeypatch.setattr(cleanup_module, "get_session", _fake_get_session)
+    monkeypatch.setattr(sys, "argv", ["cleanup_trip_update_state.py", "--agency", "sfmta"])
+
+    cleanup_module.main()
+
+    assert seen_db_urls == ["postgresql:///sfmta_test"]
+
+
+def test_main_default_agency_is_wmata(db_session, monkeypatch):
+    """Omitting --agency keeps today's DATABASE_URL behavior unchanged."""
+    import sys
+
+    import pipelines.cleanup_trip_update_state as cleanup_module
+
+    seen_db_urls = []
+
+    def _fake_get_session(db_url=None):
+        seen_db_urls.append(db_url)
+        return db_session
+
+    monkeypatch.setattr(cleanup_module, "get_session", _fake_get_session)
+    monkeypatch.setattr(sys, "argv", ["cleanup_trip_update_state.py"])
+
+    cleanup_module.main()
+
+    assert len(seen_db_urls) == 1  # resolve_agency_db_url(wmata_cfg) — whatever DATABASE_URL is
