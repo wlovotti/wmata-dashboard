@@ -1,4 +1,4 @@
-"""Tier-2 retention: 365-day rolling window for `stop_events` and `runs` (NOTES-48 §3.5).
+"""Tier-2 retention: 365-day rolling window for `stop_events` and `runs` (cloud-migration retention plan §3.5).
 
 These are the granular *derived* tables. Every metric is computed from them and
 the answer lands in a tiny tier-1 rollup, so the granular rows are intermediate,

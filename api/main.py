@@ -477,7 +477,7 @@ async def get_route_trend(
 @app.get("/api/system/trend")
 async def get_system_trend(metric: str = "otp", days: int = 30):
     """
-    System-level trend rollup for the home-page trend strip (NOTES-36).
+    System-level trend rollup for the home-page trend strip (home-page system trend strip).
 
     Returns 30 days (or `days`) of one system metric — OTP / service-delivered
     / EWT / bunching — plus a `prior_window_value` summarizing the immediately

@@ -1,15 +1,15 @@
 # AWS Lightsail Operator Runbook
 
-WMATA Dashboard — cloud migration Phase 1 (NOTES-48).
+WMATA Dashboard — cloud migration Phase 1 (NOTES-48, closed 2026-06-13).
 
 **Authoritative design spec:** `docs/superpowers/specs/2026-05-28-cloud-migration-phase1-design.md`
 This runbook is a field-operator summary derived from the spec. The spec is the
 canonical record of *why* each decision was made — read §3 before deviating
 from anything here.
 
-**Status:** infrastructure deployed once live migration completes (NOTES-48 is
-open). This document covers the target topology; the live cutover steps are in
-the spec §5 runbook.
+**Status:** live cutover completed 2026-06-05; Phase 1 closed 2026-06-13.
+This document covers the deployed topology; the cutover steps that produced it
+are in the spec §5 runbook.
 
 > **⚠️ Topology change 2026-07-18 (Path 2a, July-incident recovery):** the
 > **laptop's local PostgreSQL 16 (`wmata_dashboard`) is now the system of
@@ -675,7 +675,7 @@ du -sh /mnt/pgdata/main    # Postgres data dir
 - **AWS Lightsail docs:** <https://docs.aws.amazon.com/lightsail/>
 - **Systemd units:** `deployment/systemd/`
 - **Backup script:** `deployment/scripts/backup_db.sh`
-- **NOTES-48** (open until live cutover), **NOTES-49**, **NOTES-50** (later phases)
+- **NOTES-49**, **NOTES-50** (later phases; Phase 1 / NOTES-48 closed 2026-06-13)
 
 ---
 

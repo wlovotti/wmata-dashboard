@@ -1,4 +1,4 @@
-"""Tier-3 retention: archive aged `vehicle_positions` to S3 parquet, then DELETE (NOTES-48 §3.5).
+"""Tier-3 retention: archive aged `vehicle_positions` to S3 parquet, then DELETE (cloud-migration retention plan §3.5).
 
 `vehicle_positions` is the raw GPS feed and the project's largest table. It is
 the only tier with a SHORT in-DB window (30 days) because its single live

@@ -1,4 +1,4 @@
-"""Tests for pipelines.window_derived_tables (tier-2 365-day windowing, NOTES-48).
+"""Tests for pipelines.window_derived_tables (tier-2 365-day windowing, cloud-migration Phase 1).
 
 `stop_events.service_date` / `runs.service_date` are STRING ("YYYY-MM-DD")
 columns, so the windowing DELETE is pure-ORM and runs on SQLite — these are

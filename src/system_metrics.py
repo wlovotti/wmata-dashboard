@@ -1,5 +1,5 @@
 """
-Per-date system-level metric computation (NOTES-48).
+Per-date system-level metric computation (cloud-migration Phase 1).
 
 Wraps the system-rollup helpers in `api/aggregations.py` to compute and
 persist the four headline metrics — OTP, service-delivered, EWT,

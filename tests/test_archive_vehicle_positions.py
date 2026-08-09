@@ -1,4 +1,4 @@
-"""Tests for pipelines.archive_vehicle_positions (tier-3 S3 archival, NOTES-48 §3.5).
+"""Tests for pipelines.archive_vehicle_positions (tier-3 S3 archival, cloud-migration retention plan §3.5).
 
 Three layers:
   * smoke — pure helpers (cutoff, parquet round-trip verify) and the S3

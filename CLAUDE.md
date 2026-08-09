@@ -4,7 +4,8 @@ WMATA bus/rail performance dashboard. FastAPI + Postgres backend, React/Vite
 frontend. The **data plane (collector + Postgres) runs on an AWS Lightsail VM**
 in production (cutover 2026-06-05); the API + frontend still run locally against
 it (via SSH tunnel — NOTES-50 deploys them). See `docs/DEPLOYMENT.md` for the
-cloud setup and `NOTES.md` for the active punch list.
+cloud setup and `NOTES.md` for the active punch list (an index — item
+bodies live in `notes/NOTES-N.md`).
 
 ## Load-bearing constraints
 

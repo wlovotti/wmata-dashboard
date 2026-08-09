@@ -737,7 +737,7 @@ class RouteServiceProfile(Base):
 class SystemMetricsDaily(Base):
     """
     Pre-computed daily system-wide rollup metrics for the home-page trend
-    strip (NOTES-36, materialized in NOTES-48).
+    strip (system trend rollup; see docs/DEPLOYMENT.md).
 
     One row per service_date holding the system-level OTP, service-delivered
     ratio, EWT, and bunching rate. Populated by

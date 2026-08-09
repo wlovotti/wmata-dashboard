@@ -1,5 +1,5 @@
 """
-Unit tests for the system_metrics_daily materialization path (NOTES-48).
+Unit tests for the system_metrics_daily materialization path (cloud-migration Phase 1).
 
 Covers:
   - `src/system_metrics.py:compute_system_metrics_for_date` returns the

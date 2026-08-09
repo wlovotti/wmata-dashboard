@@ -1899,7 +1899,7 @@ def get_route_trend_data(
 
 
 # ---------------------------------------------------------------------------
-# System trend (NOTES-36, materialized in NOTES-48): rollup across all
+# System trend (system trend rollup; see docs/DEPLOYMENT.md): rollup across all
 # routes for the home-page strip.
 #
 # The trend payload covers a 60-day span (current `days` + the immediately
@@ -2312,7 +2312,7 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
 
 
 def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> dict:
-    """System-level trend rollup for the home-page trend strip (NOTES-36).
+    """System-level trend rollup for the home-page trend strip (home-page system trend strip).
 
     Returns 30 days (or `days`) of system-level values for one of OTP /
     service-delivered / EWT / bunching, plus a single `prior_window_value`
