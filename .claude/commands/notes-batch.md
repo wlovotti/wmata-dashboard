@@ -56,7 +56,7 @@ Ask via `AskUserQuestion`:
 If the user selects more than 3, keep the top 3 by track priority
 then severity and name the deferred ones in the dispatch
 announcement. If the user named items at invocation
-(`/notes-batch 94 88`), that pre-satisfies this checkpoint: validate
+(`/notes-batch 12 34`), that pre-satisfies this checkpoint: validate
 each (unblocked? passes the scope gate?) and echo the resolved
 titles as a mistype guard before proceeding.
 
@@ -67,8 +67,11 @@ For each selected item, compute a **predicted touch-set**:
 1. `notes/NOTES-N.md` (its own body file);
 2. every file its cross-reference sweep would edit:
    `grep -rln 'NOTES-N' --include='*.md' --include='*.py'
-   --include='*.tsx' --include='*.ts' --include='*.jsx'`
-   (this portion is exact);
+   --include='*.tsx' --include='*.ts' --include='*.jsx'
+   | grep -v '^\./docs/superpowers/' | grep -v 'docs/POSTMORTEM_'`
+   — the fold sweep never edits `docs/superpowers/` or
+   `docs/POSTMORTEM_*.md` (frozen artifacts), so matches there are
+   excluded from the touch-set (this portion is exact);
 3. files named in the item body's work section, widened by
    convention: for each named file under `src/`, `api/`, or
    `pipelines/`, also include `tests/test_<name>.py`.
@@ -77,7 +80,7 @@ For each selected item, compute a **predicted touch-set**:
 different lines; Step 7's mergeability re-check handles that case.
 
 If two touch-sets intersect, drop the lower-priority item and name
-it in the announcement, e.g. "NOTES-88 dropped: overlaps NOTES-94 on
+it in the announcement, e.g. "NOTES-34 dropped: overlaps NOTES-12 on
 `src/wmata_collector.py` — run it serially after." This check is a
 **cost filter, not a correctness gate**: item bodies name the center
 of a change, not its blast radius, so misses are possible and
@@ -103,7 +106,11 @@ The prompt is the serial `/notes-cycle` Step-4 template with exactly
 three deltas:
 
 1. **Drop the ride-along paragraph** entirely (the clean tree is
-   guaranteed; there are no pre-existing uncommitted edits).
+   guaranteed; there are no pre-existing uncommitted edits). This
+   also drops the serial checklist's step-1 sentence "The
+   riding-along files (if any) will travel with the checkout — verify
+   with `git status` before proceeding" — it's obsolete under the
+   same no-ride-alongs guarantee.
 2. **Add a worktree note** after the item body: "You are working in
    an isolated git worktree. Branch creation, implementation,
    `git push`, and `gh pr create` all behave normally there."
@@ -112,12 +119,16 @@ three deltas:
    the NOTES.md index. Instead return it under NEW_NOTES as a
    proposal: title, severity/effort guess, and a two-sentence body
    sketch. Only the parent mints item numbers." (This is the
-   number-collision fix.)
+   number-collision fix.) This also redefines the serial return
+   contract's `NEW_NOTES` field: instead of "list of new NOTES-N
+   items added, or 'none'", it becomes "NEW_NOTES: proposals (title,
+   severity/effort guess, two-sentence body sketch), or 'none'".
 
-Everything else carries over verbatim: the TDD requirement for logic
-changes, the verify block matching CI, the fold-punch-list-edits
-step (each lane deletes its own item file and index line — disjoint
-by construction), the compact four-field return, and the
+Everything else carries over verbatim, with the NEW_NOTES return
+field redefined by delta 3: the TDD requirement for logic changes,
+the verify block matching CI, the fold-punch-list-edits step (each
+lane deletes its own item file and index line — disjoint by
+construction), the compact four-field return, and the
 `STATUS: needs_user` escape hatch.
 
 # Step 5 — Autonomous middle (pipeline, not barrier)
@@ -191,10 +202,18 @@ prompt. Skip this step entirely if no lane proposed anything.
 
 # Step 9 — Cleanup
 
-The `Agent` tool auto-removes unchanged worktrees. Prune the rest
-after their branches merge:
+The `Agent` tool auto-removes unchanged worktrees, but lanes that
+committed leave their worktree directories on disk — `git worktree
+prune` only drops admin records for already-*deleted* directories,
+so it can't clean those up by itself, and a subsequent
+`git branch -D` on a still-checked-out branch fails with "cannot
+delete branch ... used by worktree". List the worktrees first and
+explicitly remove each one whose branch has merged, THEN prune, then
+run the existing checkout/pull/fetch/branch-deletion tail:
 
 ```bash
+git worktree list
+git worktree remove <path>   # once per merged-branch lane worktree
 git worktree prune
 git checkout main
 git pull --ff-only
