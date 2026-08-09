@@ -25,9 +25,6 @@ identically per agency, shown side by side with honest comparability
 caveats. Audience for now: personal. Every open item below either
 serves this or is explicitly parked.
 
-<!-- TODO(user): wordsmith the north-star paragraph — it steers item
-     selection in /notes-cycle, so it should say what YOU mean. -->
-
 ## Comparison sprint (active — work top to bottom)
 
 - [NOTES-96](notes/NOTES-96.md) Replay archive support for multi-agency pipelines — sev medium / eff medium — unblocked
