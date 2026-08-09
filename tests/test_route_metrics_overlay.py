@@ -94,7 +94,7 @@ def test_upsert_route_metrics_forwards_tz_name_to_completeness_guard(db_session,
     equivalent test in tests/test_system_metrics.py). This test only pins
     down the guard's plumbing; the compute path's own EWT/bunching
     hour-of-day bucketing is exercised separately (see the agency-local
-    hour bucketing fix, PR #TODO).
+    hour bucketing fix, PR #190).
     """
     seen_tz_names = []
 

@@ -55,7 +55,7 @@ today's WMATA/Eastern behavior, including housekeeping, unchanged.
 
 The six per-date pipelines above bucket `ewt_seconds` and `bunching_rate`
 by the agency's own local hour-of-day (the agency-local hour bucketing
-fix, PR #TODO) — `otp_percentage` and `service_delivered_ratio` never
+fix, PR #190) — `otp_percentage` and `service_delivered_ratio` never
 needed this since they don't bucket by hour. `run_daily_batch.py --agency
 sfmta` now writes correct EWT/bunching numbers alongside OTP/service-
 delivered.

@@ -270,7 +270,7 @@ def test_upsert_system_metrics_forwards_tz_name_to_completeness_guard(
     completeness functions below); it doesn't assert on the metric
     computation's own EWT/bunching hour-of-day bucketing, which is
     exercised separately (see the agency-local hour bucketing fix,
-    PR #TODO).
+    PR #190).
     """
     seen_tz_names = []
 
