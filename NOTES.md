@@ -6,7 +6,12 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-08-08. Closed NOTES-97: `bin/pull-and-derive.sh` now
+Last edited 2026-08-08. Closed NOTES-98: added `bin/prune-vm-archive.sh`,
+a laptop-side verify-then-prune drain for the VM's raw JSONL archive —
+run manually after each `aws s3 sync` step (docs/DEPLOYMENT.md), it
+deletes VM-side files older than a safety window only after confirming
+a byte-size-matching S3 copy exists — see PR #183.
+Earlier same day: Closed NOTES-97: `bin/pull-and-derive.sh` now
 rsyncs `archive/sfmta_raw_snapshots/` alongside the WMATA archive dirs,
 and `s3://wmata-dashboard-backups/raw-jsonl-archive/sfmta/` was created
 and backfilled manually from the laptop the same day (IAM `PutObject`
@@ -299,11 +304,6 @@ the fixing PR, not a NOTES item.
   tier; laptop pulls from S3. Carries four deferred items as acceptance
   criteria (staleness alarm, cutover job inventory, downsize, retention
   chores replaced by upload). Needs its own spec/plan cycle.
-- **NOTES-98 VM JSONL archive has no automated drain.** The "14-day
-  buffer pruning" NOTES-95 references was never installed; the manual
-  laptop sync is the only thing that empties the archive, and it doesn't
-  delete. Root disk found at 87% on 2026-08-08 growing ~1.3 GB/day —
-  the July disk-fill failure mode on a timer.
 
 ### Independent of the redesign
 
@@ -1040,40 +1040,6 @@ Work:
    through to `_service_date_for_row`.
 2. Extract the stop_sequence dedup logic from `src/wmata_collector.py:_save_trip_updates`
    into a shared helper and call it in the replay path before upsert.
-
----
-
-## NOTES-98. VM JSONL archive has no automated drain
-
-**Severity: high (root disk at 87% on 2026-08-08, growing ~1.3 GB/day —
-the July disk-fill failure mode recurs on a timer without manual
-intervention).**
-**Effort: low (a prune-after-verified-sync step or documented cadence;
-the real fix is NOTES-95).**
-
-The "VM's 14-day JSONL buffer pruning" that NOTES-95 lists among the
-retention chores was never actually installed — a 2026-08-08 check found
-`archive/raw_snapshots/` holding contiguous files back to 2026-07-03
-(34 GB) plus 5.7 GB of SFMTA snapshots (that sync path has since been
-fixed — PR #182), totaling 40 GB of the
-58 GB root disk. The manual laptop-side sync is the only drain, and it
-copies without deleting. At ~1.3 GB/day combined growth (WMATA ~0.95 +
-SFMTA ~0.34), the disk fills in days-to-weeks whenever the sync lapses —
-it had lapsed for 3 weeks (since 7/18) when this was found.
-
-Work: after each verified sync (files present in S3 with matching
-sizes), delete VM-side JSONL older than a safety window (e.g. 7 days).
-Either document it as a step in the sync runbook or install the small
-timer NOTES-95 assumed existed. Interim remediation 2026-08-08: manual
-verify-then-delete of the already-synced 7/3–7/18 files. NOTES-95's
-hourly-upload design retires this item entirely.
-
-### Dependencies
-
-None to start — the SFMTA sync-path fix landed first, so both archive
-dirs (`raw_snapshots/` and `sfmta_raw_snapshots/`) now have an S3 copy
-and pruning can safely touch either. Superseded by NOTES-95 when it
-lands.
 
 ---
 

@@ -1,11 +1,13 @@
 ---
-description: Drive one full NOTES.md cycle — pick task, dispatch a subagent to implement+test+PR, watch CI, prompt for merge. Designed to run under `/loop /notes-cycle` for back-to-back cycles without parent-context rot.
+description: Use when closing a NOTES.md punch-list item as a PR — the user names a NOTES-N, asks to work the punch list, or runs back-to-back cycles under `/loop`.
 ---
 
 This command drives one iteration of the NOTES.md cycle: read NOTES.md →
-confirm next task → dispatch a subagent to implement → watch CI → prompt
-for merge → cleanup. Two human checkpoints (task confirmation, merge
-approval). Everything else autonomous.
+confirm next task → dispatch a subagent to implement → parent reviews
+the diff → watch CI → prompt for merge → cleanup. Task confirmation may
+be satisfied by the user naming the item at invocation (the parent
+echoes the resolved title before dispatch instead of asking); merge
+approval is never skippable. Everything else autonomous.
 
 The skill is composable: run it standalone for one cycle, or under
 `/loop /notes-cycle` for autonomous back-to-back cycles. Under `/loop`
@@ -79,6 +81,26 @@ Ask via `AskUserQuestion`:
 The user may pick the recommended, an alternate, or "Other" with a
 different NOTES-N. Capture the chosen NOTES-N for the rest of the cycle.
 
+If the user already named a specific NOTES-N when invoking the command
+(check ARGUMENTS), that satisfies this checkpoint — skip the question,
+but still echo a one-line confirmation of the resolved item before
+dispatching: "Closing NOTES-N: <item title> — scope: <small/mechanical
+or medium+/design-ambiguous>". This is a mistype guard, not a second
+question — proceed to the scope gate and Step 4 immediately after
+echoing it, without waiting for a reply.
+
+**Scope gate (applies to whichever item was chosen):** classify the
+item before dispatching.
+
+- **Small / mechanical** — the NOTES body reads as a spec (named files,
+  enumerated work items, no open design questions): proceed to Step 4.
+- **Medium+ / design-ambiguous** — new architecture, schema changes,
+  cross-cutting surfaces, or a NOTES body that says "needs its own
+  spec/plan cycle": do NOT dispatch. Tell the user this item outgrows
+  the cycle and route it through **superpowers:brainstorming** then
+  **superpowers:writing-plans** in the main thread instead. End the
+  cycle there.
+
 If `RIDE_ALONG_FILES` from Step 1 is non-empty, mention it in the
 question prose (not as a separate question), naming the exact files,
 e.g. *"Note: your uncommitted edits to `<paths>` will ride on this
@@ -129,6 +151,10 @@ Execute this checklist top-to-bottom. Do not deviate.
 
 2. IMPLEMENT. Follow the item's "Implementation" / "Remaining work"
    section. Keep scope tight; do NOT refactor adjacent code.
+   If the change adds or alters logic in src/, api/, or pipelines/:
+   REQUIRED SUB-SKILL: superpowers:test-driven-development — write the
+   failing test before the implementation. Doc, config, and shell
+   plumbing changes are exempt (verify those in step 4 instead).
 
 3. SIDE EFFECTS. If you discover a new issue worth tracking, APPEND
    a NOTES-<next-unused-N> entry to NOTES.md in this same session.
@@ -184,7 +210,27 @@ Do not guess.
 Capture the subagent's return value. If it returned `STATUS:
 needs_user`, route the question to the user via `AskUserQuestion` and
 re-dispatch with the answer. If it returned a PR number, continue to
-step 5.
+step 4.5.
+
+# Step 4.5 — Review the diff (parent does this directly)
+
+The subagent's work does not reach the merge prompt unreviewed. Before
+watching CI:
+
+1. `gh pr diff <PR_NUMBER>` — read every hunk.
+2. Check spec fidelity against the NOTES item text: exact paths and
+   values, conventions of the surrounding code preserved, no scope
+   creep, NOTES.md cross-reference rewrites kept their meaning.
+3. Verify no stale references survive:
+   `git grep -n 'NOTES-<N>' origin/<pr-branch>` (changelog-history
+   mentions in NOTES.md are fine).
+4. If the diff includes code (not just NOTES.md/doc folds):
+   REQUIRED SUB-SKILL: run the `code-review` skill against the PR.
+
+Findings: cosmetic → note them at the merge prompt; substantive → fix
+via a follow-up dispatch to the same branch (never silently merge over
+them); fundamental → STOP and surface to the user, same as a CI
+failure. On a clean review, continue to step 5.
 
 # Step 5 — Watch CI (parent does this directly)
 
@@ -267,11 +313,20 @@ session history but reduce context size.
 - **The parent thread stays slim.** Heavy file reads, edits, test
   output, and lint logs all live in the subagent and don't bloat the
   parent's context across `/loop` iterations.
-- **Two human checkpoints, always.** Task selection and merge approval
-  are non-skippable — wrong-task selection and unintended merges are
-  the highest-cost mistakes, so they're cheap to confirm.
+- **Task confirmation can be pre-satisfied; merge approval never is.**
+  A user-named NOTES-N at invocation satisfies task confirmation, but
+  the parent still echoes the resolved item title before dispatch as a
+  mistype guard. Merge approval has no such shortcut — it always waits
+  for an explicit answer, since an unintended merge is the highest-cost
+  mistake in the cycle.
 - **No auto-retry on CI failure.** A red CI is a signal to think, not
   to grind. The user decides whether to fix or abandon.
+- **No unreviewed merges.** The parent reads the full PR diff (step
+  4.5) — plus the `code-review` skill for code-bearing diffs — before
+  the merge prompt. Green CI alone does not qualify a PR for step 6.
+- **Right-size the process.** The scope gate (step 3) keeps big or
+  ambiguous items out of blind dispatch — those route to
+  superpowers:brainstorming / superpowers:writing-plans instead.
 - **No destructive recovery.** If the working tree has any dirty path
   outside the riding-along allowlist (`CLAUDE.md`, `NOTES.md`,
   `.claude/commands/*.md`), refuse to start. If a merge conflict appears, surface and stop. Never
