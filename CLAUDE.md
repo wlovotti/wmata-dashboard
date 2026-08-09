@@ -169,15 +169,10 @@ uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format gate (
   `cd frontend && npm run lint` before pushing.
 - Frontend unit tests run in CI: `cd frontend && npm test` (Vitest).
   Playwright visual regression is a blocking CI gate — baselines are
-  platform-specific (`*-chromium-linux.png` for CI, `*-chromium-darwin.png`
-  for local macOS). When you change a baselined page (Overview /
-  RouteList / RouteDetail-D72), regenerate BOTH sets or CI will fail on
-  stale Linux PNGs:
-  - macOS (local): `cd frontend && npx playwright test --update-snapshots`
-  - Linux (Docker): `cd frontend && docker run --rm -v "$(pwd):/work"
-    -v /work/node_modules -w /work mcr.microsoft.com/playwright:v1.60.0-noble
-    bash -c "npm ci --silent && npx playwright test --update-snapshots"`
-  See `frontend/README.md` for full details.
+  platform-specific, and changing a baselined page (Overview / RouteList /
+  RouteDetail-D72) requires regenerating BOTH the darwin and linux sets
+  or CI fails on stale Linux PNGs. Regen commands (macOS local + Linux
+  Docker) are in `frontend/README.md`.
 - **Schema/data migrations on the VM require a pre-migration ritual:**
   backup first, test on a restored prod-data copy, wrap in a transaction,
   and use `--dry-run` if available. See `docs/MIGRATIONS.md`.
