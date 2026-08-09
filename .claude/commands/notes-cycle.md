@@ -15,7 +15,9 @@ The skill is composable: run it standalone for one cycle, or under
 `/loop /notes-cycle` for autonomous back-to-back cycles. Under `/loop`
 the parent context grows by only the subagent's short summary per
 iteration — the heavy implementation transcript stays in the subagent
-and dies with it.
+and dies with it. When the index has 2-3 unblocked, small/mechanical
+items with disjoint footprints, `/notes-batch` runs them concurrently
+instead.
 
 # Step 1 — Pre-flight (parent does this directly)
 
