@@ -20,10 +20,27 @@ the spec §5 runbook.
 > `wmata-archive-positions.timer`. The raw JSONL archive on the VM is split
 > across `/home/wmata/wmata-dashboard/archive/raw_snapshots/` **and**
 > `/mnt/pgdata/archive-overflow/` (2026-07-17 disk-full remediation) —
-> rsync both. Interim freshness: run `bin/pull-and-derive.sh` on the laptop
-> (needs `bin/db-tunnel.sh` up). The stateless-collector rewrite (VM →
-> S3-only, no VM Postgres) is a separate follow-up plan. See
+> rsync both. The SFMTA sidecar (2026-07-22) writes its own raw JSONL to
+> `/home/wmata/wmata-dashboard/archive/sfmta_raw_snapshots/`, which is a
+> **single copy** on the VM until synced — `bin/pull-and-derive.sh` pulls
+> it into a separate local `archive/sfmta_raw_snapshots/` dir alongside
+> the WMATA rsync (fixed 2026-08-08, PR #182). Interim freshness: run
+> `bin/pull-and-derive.sh` on the laptop (needs `bin/db-tunnel.sh` up).
+> The stateless-collector rewrite (VM → S3-only, no VM Postgres) is a
+> separate follow-up plan. See
 > `docs/superpowers/specs/2026-07-14-laptop-recovery-design.md`.
+>
+> **Manual S3 sync (interim, until NOTES-95 lands):** the permanent raw
+> store is `s3://wmata-dashboard-backups/raw-jsonl-archive/`, with a
+> `sfmta/` prefix alongside the WMATA-feed objects (established
+> 2026-08-08; the IAM user's `PutObject` grant covers both prefixes —
+> the policy grants prefixes, not the bucket root). After
+> `bin/pull-and-derive.sh` pulls both archives laptop-side, sync each
+> local dir up separately, e.g.
+> `aws s3 sync archive/raw_snapshots/ s3://wmata-dashboard-backups/raw-jsonl-archive/` and
+> `aws s3 sync archive/sfmta_raw_snapshots/ s3://wmata-dashboard-backups/raw-jsonl-archive/sfmta/`,
+> then verify object counts/sizes before deleting the VM-side originals
+> (NOTES-98 — no automated drain yet).
 
 ---
 
