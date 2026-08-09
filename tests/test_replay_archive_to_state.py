@@ -545,6 +545,77 @@ def test_replay_raises_when_only_next_day_file_present(tmp_path, db_session):
 
 
 @pytest.mark.integration
+def test_replay_supplement_early_exit_survives_one_transient_past_target_poll(tmp_path, pg_session):
+    """A single transient past-target poll in the supplement file must not
+    end the scan and drop a later in-scope poll.
+
+    The supplement (UTC-next-day) file's early exit is a performance
+    optimization: rows are chronological within a file, so once we're
+    durably past target_date there's no need to keep decompressing. But
+    a GTFS-RT feed can have a flapping entity -- one poll with no
+    service-day-D trips (e.g. every currently-tracked trip happens to
+    have already rolled to the next service day) followed by a poll
+    that DOES still have a service-day-D trip (a legitimately
+    late-running one). Exiting on the first such poll would silently
+    drop that later, still-in-scope data. Requires 3 consecutive
+    past-target polls before exiting; one transient poll must not
+    trigger it.
+
+    ``trip_start_date`` is used to control each row's resolved
+    service_date directly (rather than relying on wall-clock inference)
+    so the test isolates the hysteresis behavior from timezone
+    arithmetic.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",  # primary date: must exist
+        [_row("2026-05-18 12:00:00", "T_FILLER_HYSTERESIS", 1, trip_start_date="20260517")],
+    )
+    _write_jsonl_zst(
+        archive_dir / "2026-05-19.0.jsonl.zst",  # UTC-next-day supplement
+        [
+            # Poll 1: transient -- every row here has already rolled to
+            # the next service day. Alone, this must not end the scan.
+            _row(
+                "2026-05-19 10:00:00",
+                "T_TRANSIENT",
+                1,
+                trip_start_date="20260519",
+            ),
+            # Poll 2 (later snapshot_ts, same file): a legitimately
+            # late-running service-day-D trip. Must still be replayed.
+            _row(
+                "2026-05-19 10:05:00",
+                "T_LATE_INSCOPE",
+                1,
+                trip_start_date="20260518",
+            ),
+        ],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(
+            TripUpdateState.trip_id.in_(["T_TRANSIENT", "T_LATE_INSCOPE"])
+        )
+    )
+    pg_session.commit()
+
+    count = replay_archive_for_date(
+        pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir
+    )
+    pg_session.commit()
+    assert count == 1  # only the in-scope row
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_LATE_INSCOPE").one()
+    assert state.service_date == date(2026, 5, 18)
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_TRANSIENT").one_or_none() is None
+
+
+@pytest.mark.integration
 def test_replay_default_agency_stays_eastern(tmp_path, pg_session):
     """Omitting ``--agency`` keeps today's WMATA/Eastern behavior (regression guard)."""
     from pipelines.replay_archive_to_state import replay_archive_for_date
@@ -728,3 +799,26 @@ def test_assert_west_of_utc_rejects_east_of_utc_zone():
 
     with pytest.raises(NotImplementedError, match="Asia/Tokyo"):
         _assert_west_of_utc("Asia/Tokyo")
+
+
+@pytest.mark.smoke
+def test_assert_west_of_utc_rejects_dst_boundary_zone():
+    """A zone that's UTC+0 in winter but UTC+1 in summer (British/EU
+    "Western European Time" zones) is east of UTC for ~7 months a year
+    and must be rejected -- exactly the boundary case a January-only
+    sample misses: at UTC+1, early-morning local rows land in the
+    UTC-PREVIOUS-day file, the direction replay_archive_for_date's D+1
+    glob doesn't check, so it would silently truncate.
+    """
+    from pipelines.replay_archive_to_state import _assert_west_of_utc
+
+    with pytest.raises(NotImplementedError, match="Europe/London"):
+        _assert_west_of_utc("Europe/London")
+
+
+@pytest.mark.smoke
+def test_assert_west_of_utc_accepts_year_round_utc_zone():
+    """Atlantic/Reykjavik stays UTC+0 year-round (no DST) -- must still pass."""
+    from pipelines.replay_archive_to_state import _assert_west_of_utc
+
+    _assert_west_of_utc("Atlantic/Reykjavik")

@@ -50,6 +50,12 @@ from src.wmata_collector import dedupe_trip_update_rows
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_AGENCY = "wmata"
 
+# Consecutive past-target-date polls required before _fold_archive_file's
+# early exit fires on the UTC-next-day supplement file. >1 guards against
+# a single flapping-entity poll masquerading as "we're done" -- see
+# _fold_archive_file's docstring.
+_SUPPLEMENT_EARLY_EXIT_STREAK = 3
+
 
 class NoArchiveFilesFoundError(RuntimeError):
     """Raised when the archive glob for a date matches zero files.
@@ -112,17 +118,27 @@ def _assert_west_of_utc(tz_name: str) -> None:
     a future eastern-hemisphere agency can't reach that silent-truncation
     failure mode.
 
-    A single fixed reference instant is enough: for any real-world named
-    zone, whether it's west or east of UTC does not flip with DST.
+    A single fixed reference instant is NOT enough: some zones (the
+    British/EU "Western European Time" family -- ``Europe/London``,
+    ``Europe/Dublin``, ``Europe/Lisbon``) sit at UTC+0 in winter but
+    UTC+1 for roughly seven months of summer DST, so a January-only
+    sample would wrongly accept them. Checking both a January and a
+    July instant catches that: an agency must be at or west of UTC
+    (offset <= 0) at BOTH, since ``Atlantic/Reykjavik``-style zones with
+    no DST at all stay at UTC+0 year-round and must still pass.
     """
-    offset = datetime(2026, 1, 15, tzinfo=ZoneInfo(tz_name)).utcoffset()
-    if offset is None or offset > timedelta(0):
+    offsets = [
+        datetime(2026, 1, 15, tzinfo=ZoneInfo(tz_name)).utcoffset(),
+        datetime(2026, 7, 15, tzinfo=ZoneInfo(tz_name)).utcoffset(),
+    ]
+    if any(offset is None or offset > timedelta(0) for offset in offsets):
         raise NotImplementedError(
-            f"Agency timezone {tz_name!r} is not west of UTC (offset "
-            f"{offset}). replay_archive_for_date's D+1-not-D-1 archive "
-            "glob assumption does not hold for east-of-UTC agencies -- "
-            "extend the glob to also check target_date - 1 day before "
-            "wiring up an agency in this timezone."
+            f"Agency timezone {tz_name!r} is not west of UTC year-round "
+            f"(January/July offsets: {offsets}). "
+            "replay_archive_for_date's D+1-not-D-1 archive glob "
+            "assumption does not hold for east-of-UTC (or DST-boundary) "
+            "agencies -- extend the glob to also check target_date - 1 "
+            "day before wiring up an agency in this timezone."
         )
 
 
@@ -185,13 +201,22 @@ def _fold_archive_file(
 
     ``early_exit``: when ``True`` (used only for the UTC-next-day
     supplement file — never the primary date's own files, which must
-    always be read in full), stops reading as soon as an entire poll's
-    rows have all resolved to a service_date later than ``target_date``
-    — see the early-exit comment at the ``replay_archive_for_date`` call
-    site for why that's safe. A poll that resolves to a *mix* of dates
-    (rare; only possible via differing ``trip_start_date`` values within
-    one poll) does not trigger the exit as long as at least one row is
-    still at or before ``target_date``.
+    always be read in full), stops reading once
+    ``_SUPPLEMENT_EARLY_EXIT_STREAK`` CONSECUTIVE polls have each
+    resolved entirely past ``target_date`` — see the early-exit comment
+    at the ``replay_archive_for_date`` call site for why that's safe.
+    Requiring a streak (not just one such poll) guards against a
+    flapping GTFS-RT entity producing one transient poll with no
+    service-day-``target_date`` trips (e.g. every currently-tracked trip
+    happens to have already rolled to the next service day for that one
+    poll) sandwiched between polls that still have one — exiting on the
+    single transient poll would silently drop the later, still-in-scope
+    poll. The streak counter resets to zero on any poll containing at
+    least one row whose service_date == ``target_date`` (unambiguous
+    proof we're still in scope); a poll with rows on neither side of
+    that boundary (empty after filtering, or a rare mix that's past
+    target_date but not resolved to it either) neither resets nor
+    advances the streak.
 
     Mutates ``folded`` in place (so multiple files, primary and
     supplement, accumulate into one shared fold) and returns the number
@@ -199,6 +224,7 @@ def _fold_archive_file(
     file alone.
     """
     total = 0
+    consecutive_past_target_polls = 0
     for _snapshot_key, poll_lines in itertools.groupby(
         _iter_jsonl_zst(path), key=lambda r: r.get("snapshot_ts")
     ):
@@ -212,8 +238,13 @@ def _fold_archive_file(
 
         deduped = dedupe_trip_update_rows(poll_rows, tz_name)
 
-        if early_exit and deduped and min(row["service_date"] for row in deduped) > target_date:
-            break
+        if early_exit and deduped:
+            if any(row["service_date"] == target_date for row in deduped):
+                consecutive_past_target_polls = 0
+            elif min(row["service_date"] for row in deduped) > target_date:
+                consecutive_past_target_polls += 1
+                if consecutive_past_target_polls >= _SUPPLEMENT_EARLY_EXIT_STREAK:
+                    break
 
         for row in deduped:
             service_date = row["service_date"]
