@@ -34,19 +34,20 @@ import json
 import os
 import sys
 from datetime import date as date_type
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import zstandard as zstd
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from src.agency_config import load_agency_config
+from src.agency_config import AgencyConfig, load_agency_config
 from src.database import get_session
 from src.upsert_helpers import upsert_trip_update_state
 from src.wmata_collector import dedupe_trip_update_rows
 
-DEFAULT_ARCHIVE_ROOT = Path("archive/raw_snapshots")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ARCHIVE_ROOT = REPO_ROOT / "archive" / "raw_snapshots"
 DEFAULT_AGENCY = "wmata"
 
 
@@ -62,6 +63,37 @@ class NoArchiveFilesFoundError(RuntimeError):
     derivation ran against empty state. Callers that genuinely expect
     an empty date must pass ``allow_empty=True`` explicitly.
     """
+
+
+class MissingAgencyDatabaseUrlError(RuntimeError):
+    """Raised when a non-WMATA agency's database env var isn't set.
+
+    ``get_session(db_url=None)`` silently falls back to ``DATABASE_URL``
+    (the WMATA default). Without this guard, running
+    ``--agency sfmta`` with ``SFMTA_DATABASE_URL`` unset would silently
+    replay SFMTA state into the WMATA production database instead of
+    failing — a correctness-critical footgun, not a convenience default.
+    WMATA itself is exempt: its configured env var IS ``DATABASE_URL``,
+    so an unset value there is the same, already-understood failure mode
+    ``get_session``/``get_engine`` have always had.
+    """
+
+
+def _resolve_agency_db_url(cfg: AgencyConfig) -> str | None:
+    """Return the DB URL env var value for ``cfg``, failing loudly if missing.
+
+    See ``MissingAgencyDatabaseUrlError`` for why this doesn't just let
+    ``get_session`` fall back to ``DATABASE_URL`` for non-WMATA agencies.
+    """
+    db_url = os.getenv(cfg.database_url_env)
+    if db_url is None and cfg.database_url_env != "DATABASE_URL":
+        raise MissingAgencyDatabaseUrlError(
+            f"{cfg.database_url_env} is not set. Replaying agency "
+            f"{cfg.name!r} would otherwise silently fall back to "
+            "DATABASE_URL (the WMATA default) and could write into the "
+            "wrong database."
+        )
+    return db_url
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -105,7 +137,7 @@ def _iter_jsonl_zst(path: Path):
 def replay_archive_for_date(
     db: Session,
     target_date: date_type,
-    archive_root: Path = DEFAULT_ARCHIVE_ROOT,
+    archive_root: Path | None = None,
     chunk_size: int = 5000,
     allow_empty: bool = False,
     agency: str = DEFAULT_AGENCY,
@@ -170,7 +202,12 @@ def replay_archive_for_date(
             responsible for committing or rolling back.
         target_date: The service date to replay (agency-local calendar
             day; see ``agency``).
-        archive_root: Directory holding the JSONL.zst files.
+        archive_root: Directory holding the JSONL.zst files. ``None``
+            (the default) resolves to ``REPO_ROOT / <agency's
+            collector.archive_dir>`` — e.g. ``archive/raw_snapshots`` for
+            wmata, ``archive/sfmta_raw_snapshots`` for sfmta — so the
+            right directory is picked even when ``agency`` isn't
+            ``"wmata"``.
         chunk_size: Folded rows per UPSERT statement.
         allow_empty: When ``True``, a zero-file glob match returns 0
             instead of raising — see ``NoArchiveFilesFoundError``
@@ -188,20 +225,38 @@ def replay_archive_for_date(
         NoArchiveFilesFoundError: if the glob matches zero files and
             ``allow_empty`` is ``False``.
     """
-    pattern_per_proc = f"{target_date.isoformat()}.*.jsonl.zst"
-    pattern_legacy = f"{target_date.isoformat()}.jsonl.zst"
-    paths = sorted(
-        set(archive_root.glob(pattern_per_proc)) | set(archive_root.glob(pattern_legacy))
-    )
+    cfg = load_agency_config(agency)
+    tz_name = cfg.timezone
+    if archive_root is None:
+        archive_root = REPO_ROOT / cfg.archive_dir
+
+    # JsonlArchiveWriter names files by the snapshot's UTC calendar date,
+    # never by the agency-local service date. Every agency here is west
+    # of UTC (behind it), so an agency-local service day D's snapshots
+    # fall on UTC date D or UTC date D+1 (late-evening/night local time
+    # rolls the UTC date forward) -- never D-1. Globbing only D silently
+    # dropped that D+1 tail (WMATA: everything after ~20:00 ET; SFMTA:
+    # ~17:00-24:00 PT) -- confirmed empirically as zero trip_update_state
+    # rows past UTC midnight on every recent day. The service_date filter
+    # below harmlessly discards any D+1-file rows that belong to D+1, not
+    # D, so over-globbing here is safe. NOTES-96 follow-up.
+    glob_dates = (target_date, target_date + timedelta(days=1))
+    paths: set[Path] = set()
+    for d in glob_dates:
+        paths |= set(archive_root.glob(f"{d.isoformat()}.*.jsonl.zst"))
+        paths |= set(archive_root.glob(f"{d.isoformat()}.jsonl.zst"))
+    paths = sorted(paths)
     if not paths:
         if allow_empty:
             print(
-                f"No archive files found for {target_date} under {archive_root} "
+                f"No archive files found for {target_date} (checked UTC dates "
+                f"{glob_dates[0]} and {glob_dates[1]}) under {archive_root} "
                 "(--allow-empty set, continuing)"
             )
             return 0
         raise NoArchiveFilesFoundError(
-            f"No archive files found for {target_date} under {archive_root}. "
+            f"No archive files found for {target_date} (checked UTC dates "
+            f"{glob_dates[0]} and {glob_dates[1]}) under {archive_root}. "
             "This usually means the JSONL archive hasn't been synced yet — "
             "check the source before assuming the date is genuinely empty. "
             "Pass --allow-empty to proceed anyway."
@@ -210,8 +265,6 @@ def replay_archive_for_date(
     print(f"Replaying {len(paths)} archive file(s) for {target_date}:")
     for p in paths:
         print(f"  - {p.name}")
-
-    tz_name = load_agency_config(agency).timezone
 
     total = 0
     # Fold state per (trip_id, stop_sequence); service_date is fixed to
@@ -300,9 +353,9 @@ def main() -> int:
         default=DEFAULT_AGENCY,
         help=(
             f"Agency name matching config/agencies/<agency>.yaml (default: "
-            f"{DEFAULT_AGENCY!r}). Selects the service-date timezone (NOTES-96) "
-            "and, unless --archive-root is given explicitly, the archive "
-            "directory and target database."
+            f"{DEFAULT_AGENCY!r}). Selects the service-date timezone and the "
+            "target database (unconditionally), and — unless --archive-root "
+            "is given explicitly — the default archive directory too."
         ),
     )
     parser.add_argument(
@@ -326,12 +379,15 @@ def main() -> int:
     args = parser.parse_args()
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     cfg = load_agency_config(args.agency)
-    archive_root = Path(args.archive_root) if args.archive_root else Path(cfg.archive_dir)
+    archive_root = Path(args.archive_root) if args.archive_root else None
 
-    # Route to the agency's own database (e.g. SFMTA_DATABASE_URL) rather
-    # than the DATABASE_URL default — replaying an SFMTA archive against
-    # the WMATA production database would silently corrupt it. NOTES-96.
-    db = get_session(db_url=os.getenv(cfg.database_url_env))
+    try:
+        db_url = _resolve_agency_db_url(cfg)
+    except MissingAgencyDatabaseUrlError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    db = get_session(db_url=db_url)
     try:
         replay_archive_for_date(
             db, target_date, archive_root, allow_empty=args.allow_empty, agency=args.agency

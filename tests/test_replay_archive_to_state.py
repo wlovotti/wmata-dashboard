@@ -376,13 +376,21 @@ def test_replay_uses_agency_timezone_for_service_date(tmp_path, pg_session):
     to the snapshot's local calendar day: 2026-05-19 Eastern (WMATA's
     default) but 2026-05-18 Pacific (SFMTA, ``config/agencies/sfmta.yaml``).
     ``agency="sfmta"`` must resolve the row against 2026-05-18. NOTES-96.
+
+    The archive file is named ``2026-05-19...`` (the row's UTC calendar
+    date) because ``JsonlArchiveWriter`` names files by UTC date, never by
+    the agency-local service date — see
+    ``test_replay_finds_late_evening_utc_next_day_file_sfmta`` for that
+    mechanism in isolation. This test only finds the file at all because
+    the replay tool globs both the target service date AND the following
+    UTC date.
     """
     from pipelines.replay_archive_to_state import replay_archive_for_date
 
     archive_dir = tmp_path / "sfmta_raw_snapshots"
     archive_dir.mkdir()
     _write_jsonl_zst(
-        archive_dir / "2026-05-18.0.jsonl.zst",
+        archive_dir / "2026-05-19.0.jsonl.zst",
         [_row("2026-05-19 05:30:00", "T_SFMTA_TZ", 1, trip_start_date=None)],
     )
 
@@ -402,6 +410,83 @@ def test_replay_uses_agency_timezone_for_service_date(tmp_path, pg_session):
     assert count == 1
 
     state = pg_session.query(TripUpdateState).filter_by(trip_id="T_SFMTA_TZ").one()
+    assert state.service_date == date(2026, 5, 18)
+
+
+@pytest.mark.integration
+def test_replay_finds_late_evening_utc_next_day_file_wmata(tmp_path, pg_session):
+    """WMATA's late-evening ET rows land in a UTC-next-day-named archive file.
+
+    2026-05-19 02:30 UTC is 2026-05-18 22:30 ET (EDT, UTC-4) -- still
+    service date 2026-05-18, but ``JsonlArchiveWriter`` names the file by
+    the snapshot's UTC date (2026-05-19). Replaying ``--date 2026-05-18``
+    globbed ONLY ``2026-05-18.*`` before this fix, so every WMATA service
+    day's tail (post ~20:00 ET) was silently unreachable -- confirmed on
+    the laptop DB (zero trip_update_state rows past UTC midnight on every
+    recent day). The glob must also check the following UTC date; the
+    existing service_date filter harmlessly discards any non-matching
+    rows that same file might also contain.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-19.0.jsonl.zst",  # UTC-next-day filename
+        [_row("2026-05-19 02:30:00", "T_LATE_ET", 1, trip_start_date=None)],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_LATE_ET")
+    )
+    pg_session.commit()
+
+    count = replay_archive_for_date(
+        pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir
+    )
+    pg_session.commit()
+    assert count == 1
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_LATE_ET").one()
+    assert state.service_date == date(2026, 5, 18)
+
+
+@pytest.mark.integration
+def test_replay_finds_late_evening_utc_next_day_file_sfmta(tmp_path, pg_session):
+    """SFMTA's late-afternoon/evening PT rows land in a UTC-next-day-named file.
+
+    2026-05-19 01:30 UTC is 2026-05-18 18:30 PT (PDT, UTC-7) -- still
+    service date 2026-05-18 Pacific, but the archive file is named by the
+    snapshot's UTC date (2026-05-19). Same mechanism as the WMATA case,
+    exercised on the wider Pacific offset (SFMTA loses ~17:00-24:00 PT
+    without this fix).
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "sfmta_raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-19.0.jsonl.zst",  # UTC-next-day filename
+        [_row("2026-05-19 01:30:00", "T_LATE_PT", 1, trip_start_date=None)],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_LATE_PT")
+    )
+    pg_session.commit()
+
+    count = replay_archive_for_date(
+        pg_session,
+        target_date=date(2026, 5, 18),
+        archive_root=archive_dir,
+        agency="sfmta",
+    )
+    pg_session.commit()
+    assert count == 1
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_LATE_PT").one()
     assert state.service_date == date(2026, 5, 18)
 
 
@@ -499,3 +584,50 @@ def test_replay_finds_legacy_single_daily_filename(tmp_path, pg_session):
     pg_session.commit()
 
     assert pg_session.query(TripUpdateState).filter_by(trip_id="T_LEGACY").one()
+
+
+@pytest.mark.smoke
+def test_resolve_agency_db_url_raises_when_agency_env_var_unset(monkeypatch):
+    """A non-WMATA agency with its DB env var unset must fail loudly, not
+    silently fall back to DATABASE_URL -- replaying an SFMTA archive into
+    the WMATA production database would be a silent-corruption footgun.
+    """
+    from pipelines.replay_archive_to_state import (
+        MissingAgencyDatabaseUrlError,
+        _resolve_agency_db_url,
+    )
+    from src.agency_config import load_agency_config
+
+    monkeypatch.delenv("SFMTA_DATABASE_URL", raising=False)
+    cfg = load_agency_config("sfmta")
+
+    with pytest.raises(MissingAgencyDatabaseUrlError, match="SFMTA_DATABASE_URL"):
+        _resolve_agency_db_url(cfg)
+
+
+@pytest.mark.smoke
+def test_resolve_agency_db_url_returns_value_when_set(monkeypatch):
+    """When the agency's env var IS set, its value is returned untouched."""
+    from pipelines.replay_archive_to_state import _resolve_agency_db_url
+    from src.agency_config import load_agency_config
+
+    monkeypatch.setenv("SFMTA_DATABASE_URL", "postgresql:///sfmta_test")
+    cfg = load_agency_config("sfmta")
+
+    assert _resolve_agency_db_url(cfg) == "postgresql:///sfmta_test"
+
+
+@pytest.mark.smoke
+def test_resolve_agency_db_url_wmata_unset_falls_back_silently(monkeypatch):
+    """WMATA's own env var IS DATABASE_URL, so an unset value is not a
+    misrouting risk -- it hits ``get_session``'s ordinary
+    DATABASE_URL-missing failure the same way it always has, not this
+    guard.
+    """
+    from pipelines.replay_archive_to_state import _resolve_agency_db_url
+    from src.agency_config import load_agency_config
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    cfg = load_agency_config("wmata")
+
+    assert _resolve_agency_db_url(cfg) is None

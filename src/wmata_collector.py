@@ -67,6 +67,19 @@ def dedupe_trip_update_rows(rows: list[dict], tz_name: str = "America/New_York")
     (``WMATADataCollector._save_trip_updates``) and the replay tool
     (``pipelines/replay_archive_to_state.py``, applied per archived poll)
     share one dedup implementation -- NOTES-96.
+
+    This only decides which row wins per key; it does not parse or
+    normalize field types beyond what the caller already passed in.
+    Every value (``snapshot_ts``, ``predicted_arrival_ts``, ...) in the
+    output is the winning input row's value, untouched. The live
+    collector passes real ``datetime`` objects for both fields
+    (``get_realtime_trip_updates`` already parsed them), so its output
+    is upsert-ready as-is. The replay path pre-parses only
+    ``snapshot_ts`` to a ``datetime`` before calling this helper (needed
+    for the service_date fallback) but leaves ``predicted_arrival_ts``
+    as the raw JSON-decoded string, parsing it itself (``_parse_dt``)
+    after this function returns. Don't assume the output is uniformly
+    upsert-ready without checking what the specific caller pre-parsed.
     """
     upsert_by_key: dict[tuple, dict] = {}
     for r in rows:
