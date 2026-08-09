@@ -36,6 +36,7 @@ import sys
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import zstandard as zstd
 from dotenv import load_dotenv
@@ -47,7 +48,6 @@ from src.upsert_helpers import upsert_trip_update_state
 from src.wmata_collector import dedupe_trip_update_rows
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_ARCHIVE_ROOT = REPO_ROOT / "archive" / "raw_snapshots"
 DEFAULT_AGENCY = "wmata"
 
 
@@ -86,7 +86,7 @@ def _resolve_agency_db_url(cfg: AgencyConfig) -> str | None:
     ``get_session`` fall back to ``DATABASE_URL`` for non-WMATA agencies.
     """
     db_url = os.getenv(cfg.database_url_env)
-    if db_url is None and cfg.database_url_env != "DATABASE_URL":
+    if not db_url and cfg.database_url_env != "DATABASE_URL":
         raise MissingAgencyDatabaseUrlError(
             f"{cfg.database_url_env} is not set. Replaying agency "
             f"{cfg.name!r} would otherwise silently fall back to "
@@ -94,6 +94,36 @@ def _resolve_agency_db_url(cfg: AgencyConfig) -> str | None:
             "wrong database."
         )
     return db_url
+
+
+def _assert_west_of_utc(tz_name: str) -> None:
+    """Raise if ``tz_name`` is not west of (or exactly at) UTC.
+
+    ``replay_archive_for_date`` globs the target service date's UTC-named
+    archive file AND the *following* UTC date's, never the *previous*
+    one -- correct only because every agency wired up so far
+    (``America/New_York``, ``America/Los_Angeles``) sits behind UTC, so
+    an agency-local service day's snapshots can only spill into the
+    following UTC calendar date, never the preceding one. An east-of-UTC
+    agency would invert that: its late-night local snapshots spill into
+    the *preceding* UTC date instead, and this glob would silently miss
+    them the same way the pre-fix D-only glob missed WMATA's evening
+    tail. Fail loudly here instead, at agency-config resolution time, so
+    a future eastern-hemisphere agency can't reach that silent-truncation
+    failure mode.
+
+    A single fixed reference instant is enough: for any real-world named
+    zone, whether it's west or east of UTC does not flip with DST.
+    """
+    offset = datetime(2026, 1, 15, tzinfo=ZoneInfo(tz_name)).utcoffset()
+    if offset is None or offset > timedelta(0):
+        raise NotImplementedError(
+            f"Agency timezone {tz_name!r} is not west of UTC (offset "
+            f"{offset}). replay_archive_for_date's D+1-not-D-1 archive "
+            "glob assumption does not hold for east-of-UTC agencies -- "
+            "extend the glob to also check target_date - 1 day before "
+            "wiring up an agency in this timezone."
+        )
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -132,6 +162,101 @@ def _iter_jsonl_zst(path: Path):
                         yield json.loads(line)
             if buf.strip():
                 yield json.loads(buf)
+
+
+def _fold_archive_file(
+    path: Path,
+    *,
+    tz_name: str,
+    target_date: date_type,
+    folded: dict[tuple[str, int], dict],
+    early_exit: bool,
+) -> int:
+    """Read one archive file's polls and fold matching rows into ``folded``.
+
+    Groups consecutive lines sharing one snapshot_ts (one archived poll
+    — the live archive writer appends a poll's rows contiguously, one
+    call per tick) and dedupes same-poll (trip_id, stop_sequence)
+    collisions before folding, exactly as
+    ``WMATADataCollector._save_trip_updates`` does for live polls —
+    NOTES-96. Parsing snapshot_ts to a datetime up front lets
+    ``dedupe_trip_update_rows``' service_date fallback (no
+    trip_start_date) work the same way it does for live rows.
+
+    ``early_exit``: when ``True`` (used only for the UTC-next-day
+    supplement file — never the primary date's own files, which must
+    always be read in full), stops reading as soon as an entire poll's
+    rows have all resolved to a service_date later than ``target_date``
+    — see the early-exit comment at the ``replay_archive_for_date`` call
+    site for why that's safe. A poll that resolves to a *mix* of dates
+    (rare; only possible via differing ``trip_start_date`` values within
+    one poll) does not trigger the exit as long as at least one row is
+    still at or before ``target_date``.
+
+    Mutates ``folded`` in place (so multiple files, primary and
+    supplement, accumulate into one shared fold) and returns the number
+    of rows counted (post same-poll dedup, pre-fold-collapse) from this
+    file alone.
+    """
+    total = 0
+    for _snapshot_key, poll_lines in itertools.groupby(
+        _iter_jsonl_zst(path), key=lambda r: r.get("snapshot_ts")
+    ):
+        poll_rows = []
+        for raw in poll_lines:
+            if raw.get("stop_sequence") is None:
+                continue
+            normalized = dict(raw)
+            normalized["snapshot_ts"] = _parse_dt(raw["snapshot_ts"])
+            poll_rows.append(normalized)
+
+        deduped = dedupe_trip_update_rows(poll_rows, tz_name)
+
+        if early_exit and deduped and min(row["service_date"] for row in deduped) > target_date:
+            break
+
+        for row in deduped:
+            service_date = row["service_date"]
+            if service_date != target_date:
+                continue
+
+            snapshot_ts = row["snapshot_ts"]
+            vehicle_id = row.get("vehicle_id")
+            predicted_arrival_ts = _parse_dt(row.get("predicted_arrival_ts"))
+            key = (row["trip_id"], row["stop_sequence"])
+            cur = folded.get(key)
+            if cur is None:
+                cur = {
+                    "trip_id": row["trip_id"],
+                    "stop_sequence": row["stop_sequence"],
+                    "service_date": target_date,
+                    "stop_id": row["stop_id"],
+                    "vehicle_id": vehicle_id,
+                    "snapshot_ts": snapshot_ts,
+                    "schedule_relationship": row.get("schedule_relationship"),
+                    "predicted_arrival_ts": None,
+                    "last_pred_snapshot_ts": None,
+                    "_vehicle_ts": snapshot_ts if vehicle_id is not None else None,
+                }
+                folded[key] = cur
+            else:
+                if snapshot_ts >= cur["snapshot_ts"]:
+                    cur["snapshot_ts"] = snapshot_ts
+                    cur["stop_id"] = row["stop_id"]
+                    cur["schedule_relationship"] = row.get("schedule_relationship")
+                if vehicle_id is not None and (
+                    cur["_vehicle_ts"] is None or snapshot_ts >= cur["_vehicle_ts"]
+                ):
+                    cur["vehicle_id"] = vehicle_id
+                    cur["_vehicle_ts"] = snapshot_ts
+            if predicted_arrival_ts is not None and (
+                cur["last_pred_snapshot_ts"] is None or snapshot_ts >= cur["last_pred_snapshot_ts"]
+            ):
+                cur["predicted_arrival_ts"] = predicted_arrival_ts
+                cur["last_pred_snapshot_ts"] = snapshot_ts
+            total += 1
+
+    return total
 
 
 def replay_archive_for_date(
@@ -227,113 +352,80 @@ def replay_archive_for_date(
     """
     cfg = load_agency_config(agency)
     tz_name = cfg.timezone
+    _assert_west_of_utc(tz_name)
     if archive_root is None:
         archive_root = REPO_ROOT / cfg.archive_dir
 
     # JsonlArchiveWriter names files by the snapshot's UTC calendar date,
     # never by the agency-local service date. Every agency here is west
-    # of UTC (behind it), so an agency-local service day D's snapshots
-    # fall on UTC date D or UTC date D+1 (late-evening/night local time
-    # rolls the UTC date forward) -- never D-1. Globbing only D silently
-    # dropped that D+1 tail (WMATA: everything after ~20:00 ET; SFMTA:
-    # ~17:00-24:00 PT) -- confirmed empirically as zero trip_update_state
-    # rows past UTC midnight on every recent day. The service_date filter
-    # below harmlessly discards any D+1-file rows that belong to D+1, not
-    # D, so over-globbing here is safe. NOTES-96 follow-up.
-    glob_dates = (target_date, target_date + timedelta(days=1))
-    paths: set[Path] = set()
-    for d in glob_dates:
-        paths |= set(archive_root.glob(f"{d.isoformat()}.*.jsonl.zst"))
-        paths |= set(archive_root.glob(f"{d.isoformat()}.jsonl.zst"))
-    paths = sorted(paths)
-    if not paths:
+    # of UTC (behind it, enforced by _assert_west_of_utc above), so an
+    # agency-local service day D's snapshots fall on UTC date D or UTC
+    # date D+1 (late-evening/night local time rolls the UTC date
+    # forward) -- never D-1. Globbing only D silently dropped that D+1
+    # tail (WMATA: everything after ~20:00 ET; SFMTA: ~17:00-24:00 PT)
+    # -- confirmed empirically as zero trip_update_state rows past UTC
+    # midnight on every recent day. NOTES-96 follow-up.
+    #
+    # The D+1 file is purely a content SUPPLEMENT, never a substitute
+    # for the primary (target) date's own file(s): the NOTES-93
+    # empty-archive guard exists because a genuinely-missing archive
+    # must fail loudly, not "succeed" on whatever unrelated sliver
+    # happens to land in a same-named neighboring file. A contiguous
+    # daily archive always has a D+1 file once D has ended, so checking
+    # the union for emptiness would make the guard nearly never fire.
+    next_date = target_date + timedelta(days=1)
+    primary_paths = set(archive_root.glob(f"{target_date.isoformat()}.*.jsonl.zst")) | set(
+        archive_root.glob(f"{target_date.isoformat()}.jsonl.zst")
+    )
+    supplement_paths = set(archive_root.glob(f"{next_date.isoformat()}.*.jsonl.zst")) | set(
+        archive_root.glob(f"{next_date.isoformat()}.jsonl.zst")
+    )
+    if not primary_paths:
         if allow_empty:
             print(
-                f"No archive files found for {target_date} (checked UTC dates "
-                f"{glob_dates[0]} and {glob_dates[1]}) under {archive_root} "
+                f"No archive files found for {target_date} under {archive_root} "
+                f"(also checked the UTC-next-day supplement, {next_date}) "
                 "(--allow-empty set, continuing)"
             )
             return 0
         raise NoArchiveFilesFoundError(
-            f"No archive files found for {target_date} (checked UTC dates "
-            f"{glob_dates[0]} and {glob_dates[1]}) under {archive_root}. "
+            f"No archive files found for {target_date} under {archive_root} "
+            f"(also checked the UTC-next-day supplement, {next_date}). "
             "This usually means the JSONL archive hasn't been synced yet — "
             "check the source before assuming the date is genuinely empty. "
             "Pass --allow-empty to proceed anyway."
         )
 
-    print(f"Replaying {len(paths)} archive file(s) for {target_date}:")
+    paths = sorted(primary_paths)
+    supplement_paths = sorted(supplement_paths)
+    print(f"Replaying {len(paths) + len(supplement_paths)} archive file(s) for {target_date}:")
     for p in paths:
         print(f"  - {p.name}")
+    for p in supplement_paths:
+        print(f"  - {p.name} (UTC-next-day supplement)")
 
-    total = 0
     # Fold state per (trip_id, stop_sequence); service_date is fixed to
-    # target_date by the filter below. "_vehicle_ts" / "_pred_ts" track
-    # which snapshot each conditional field last came from so ordering
-    # is by snapshot_ts, not file iteration order.
+    # target_date by the filter inside _fold_archive_file. "_vehicle_ts"
+    # / "_pred_ts" track which snapshot each conditional field last came
+    # from so ordering is by snapshot_ts, not file iteration order.
     folded: dict[tuple[str, int], dict] = {}
-
+    total = 0
     for p in paths:
-        # Group consecutive lines sharing one snapshot_ts (one archived
-        # poll — the live archive writer appends a poll's rows
-        # contiguously, one call per tick) and dedupe same-poll
-        # (trip_id, stop_sequence) collisions before folding, exactly as
-        # WMATADataCollector._save_trip_updates does for live polls —
-        # NOTES-96. Parsing snapshot_ts to a datetime up front lets
-        # dedupe_trip_update_rows' service_date fallback (no
-        # trip_start_date) work the same way it does for live rows.
-        for _snapshot_key, poll_lines in itertools.groupby(
-            _iter_jsonl_zst(p), key=lambda r: r.get("snapshot_ts")
-        ):
-            poll_rows = []
-            for raw in poll_lines:
-                if raw.get("stop_sequence") is None:
-                    continue
-                normalized = dict(raw)
-                normalized["snapshot_ts"] = _parse_dt(raw["snapshot_ts"])
-                poll_rows.append(normalized)
-
-            for deduped in dedupe_trip_update_rows(poll_rows, tz_name):
-                service_date = deduped["service_date"]
-                if service_date != target_date:
-                    continue
-
-                snapshot_ts = deduped["snapshot_ts"]
-                vehicle_id = deduped.get("vehicle_id")
-                predicted_arrival_ts = _parse_dt(deduped.get("predicted_arrival_ts"))
-                key = (deduped["trip_id"], deduped["stop_sequence"])
-                cur = folded.get(key)
-                if cur is None:
-                    cur = {
-                        "trip_id": deduped["trip_id"],
-                        "stop_sequence": deduped["stop_sequence"],
-                        "service_date": target_date,
-                        "stop_id": deduped["stop_id"],
-                        "vehicle_id": vehicle_id,
-                        "snapshot_ts": snapshot_ts,
-                        "schedule_relationship": deduped.get("schedule_relationship"),
-                        "predicted_arrival_ts": None,
-                        "last_pred_snapshot_ts": None,
-                        "_vehicle_ts": snapshot_ts if vehicle_id is not None else None,
-                    }
-                    folded[key] = cur
-                else:
-                    if snapshot_ts >= cur["snapshot_ts"]:
-                        cur["snapshot_ts"] = snapshot_ts
-                        cur["stop_id"] = deduped["stop_id"]
-                        cur["schedule_relationship"] = deduped.get("schedule_relationship")
-                    if vehicle_id is not None and (
-                        cur["_vehicle_ts"] is None or snapshot_ts >= cur["_vehicle_ts"]
-                    ):
-                        cur["vehicle_id"] = vehicle_id
-                        cur["_vehicle_ts"] = snapshot_ts
-                if predicted_arrival_ts is not None and (
-                    cur["last_pred_snapshot_ts"] is None
-                    or snapshot_ts >= cur["last_pred_snapshot_ts"]
-                ):
-                    cur["predicted_arrival_ts"] = predicted_arrival_ts
-                    cur["last_pred_snapshot_ts"] = snapshot_ts
-                total += 1
+        total += _fold_archive_file(
+            p, tz_name=tz_name, target_date=target_date, folded=folded, early_exit=False
+        )
+    for p in supplement_paths:
+        # Rows are chronological within a file (the collector writes
+        # each poll in real time), so once a whole poll's rows have all
+        # moved past target_date, every later poll in this same
+        # supplement file is guaranteed to have moved past it too --
+        # stop reading rather than decompressing the rest of a
+        # multi-hundred-MB file for rows that will only be filtered out.
+        # Only ever applied to the D+1 supplement, never the primary
+        # date's own file(s), which are always read in full.
+        total += _fold_archive_file(
+            p, tz_name=tz_name, target_date=target_date, folded=folded, early_exit=True
+        )
 
     rows_out = [{k: v for k, v in cur.items() if not k.startswith("_")} for cur in folded.values()]
     for i in range(0, len(rows_out), chunk_size):

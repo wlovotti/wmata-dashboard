@@ -377,18 +377,24 @@ def test_replay_uses_agency_timezone_for_service_date(tmp_path, pg_session):
     default) but 2026-05-18 Pacific (SFMTA, ``config/agencies/sfmta.yaml``).
     ``agency="sfmta"`` must resolve the row against 2026-05-18. NOTES-96.
 
-    The archive file is named ``2026-05-19...`` (the row's UTC calendar
-    date) because ``JsonlArchiveWriter`` names files by UTC date, never by
-    the agency-local service date — see
+    The row's archive file is named ``2026-05-19...`` (the row's UTC
+    calendar date) because ``JsonlArchiveWriter`` names files by UTC
+    date, never by the agency-local service date — see
     ``test_replay_finds_late_evening_utc_next_day_file_sfmta`` for that
-    mechanism in isolation. This test only finds the file at all because
-    the replay tool globs both the target service date AND the following
-    UTC date.
+    mechanism in isolation. A separate ``2026-05-18...`` (primary-date)
+    file is also present with an unrelated filler row: the primary
+    date's own file(s) must exist for the replay to proceed at all (see
+    ``test_replay_raises_when_only_next_day_file_present``) — the
+    UTC-next-day file is a content supplement, never a substitute.
     """
     from pipelines.replay_archive_to_state import replay_archive_for_date
 
     archive_dir = tmp_path / "sfmta_raw_snapshots"
     archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",  # primary date: must exist
+        [_row("2026-05-18 12:00:00", "T_FILLER_SFMTA_TZ", 1, trip_start_date="20260517")],
+    )
     _write_jsonl_zst(
         archive_dir / "2026-05-19.0.jsonl.zst",
         [_row("2026-05-19 05:30:00", "T_SFMTA_TZ", 1, trip_start_date=None)],
@@ -426,11 +432,20 @@ def test_replay_finds_late_evening_utc_next_day_file_wmata(tmp_path, pg_session)
     recent day). The glob must also check the following UTC date; the
     existing service_date filter harmlessly discards any non-matching
     rows that same file might also contain.
+
+    A primary-date (``2026-05-18...``) file is also present with an
+    unrelated filler row -- the UTC-next-day file supplements the
+    primary date's own file(s), it never substitutes for a missing one
+    (see ``test_replay_raises_when_only_next_day_file_present``).
     """
     from pipelines.replay_archive_to_state import replay_archive_for_date
 
     archive_dir = tmp_path / "raw_snapshots"
     archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",  # primary date: must exist
+        [_row("2026-05-18 12:00:00", "T_FILLER_LATE_ET", 1, trip_start_date="20260517")],
+    )
     _write_jsonl_zst(
         archive_dir / "2026-05-19.0.jsonl.zst",  # UTC-next-day filename
         [_row("2026-05-19 02:30:00", "T_LATE_ET", 1, trip_start_date=None)],
@@ -461,11 +476,19 @@ def test_replay_finds_late_evening_utc_next_day_file_sfmta(tmp_path, pg_session)
     snapshot's UTC date (2026-05-19). Same mechanism as the WMATA case,
     exercised on the wider Pacific offset (SFMTA loses ~17:00-24:00 PT
     without this fix).
+
+    A primary-date (``2026-05-18...``) file is also present with an
+    unrelated filler row -- see
+    ``test_replay_raises_when_only_next_day_file_present``.
     """
     from pipelines.replay_archive_to_state import replay_archive_for_date
 
     archive_dir = tmp_path / "sfmta_raw_snapshots"
     archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",  # primary date: must exist
+        [_row("2026-05-18 12:00:00", "T_FILLER_LATE_PT", 1, trip_start_date="20260517")],
+    )
     _write_jsonl_zst(
         archive_dir / "2026-05-19.0.jsonl.zst",  # UTC-next-day filename
         [_row("2026-05-19 01:30:00", "T_LATE_PT", 1, trip_start_date=None)],
@@ -488,6 +511,37 @@ def test_replay_finds_late_evening_utc_next_day_file_sfmta(tmp_path, pg_session)
 
     state = pg_session.query(TripUpdateState).filter_by(trip_id="T_LATE_PT").one()
     assert state.service_date == date(2026, 5, 18)
+
+
+@pytest.mark.smoke
+def test_replay_raises_when_only_next_day_file_present(tmp_path, db_session):
+    """The UTC-next-day file is a content supplement, never a substitute.
+
+    Regression guard for the NOTES-93 empty-archive guard: adding the
+    D+1 glob (so late-evening/night rows aren't silently dropped) must
+    NOT let a next-day-only archive satisfy the "did we find the
+    target date's data at all" check. Before this fix, a directory
+    holding only a ``2026-05-19...`` file would let
+    ``replay_archive_for_date(target_date=2026-05-18, ...)`` "succeed"
+    on whatever late-evening sliver happened to land in that file,
+    instead of raising -- exactly the silent-partial-success failure
+    mode NOTES-93 exists to prevent (a caller like
+    ``bin/pull-and-derive.sh`` would derive against that sliver while
+    looking clean). No DB write happens on this path (the guard fires
+    before any DB access), so the in-memory SQLite ``db_session``
+    fixture is enough.
+    """
+    from pipelines.replay_archive_to_state import NoArchiveFilesFoundError, replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-19.0.jsonl.zst",  # only the UTC-next-day file
+        [_row("2026-05-19 02:30:00", "T_ONLY_NEXT_DAY", 1, trip_start_date=None)],
+    )
+
+    with pytest.raises(NoArchiveFilesFoundError):
+        replay_archive_for_date(db_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
 
 
 @pytest.mark.integration
@@ -606,6 +660,28 @@ def test_resolve_agency_db_url_raises_when_agency_env_var_unset(monkeypatch):
 
 
 @pytest.mark.smoke
+def test_resolve_agency_db_url_raises_when_agency_env_var_empty_string(monkeypatch):
+    """An empty-string env var (``SFMTA_DATABASE_URL=``, e.g. from a
+    ``.env`` that ships the var with no value) must fail the same way an
+    unset one does -- ``get_engine("")`` treats falsy as absent and falls
+    back to ``DATABASE_URL``, the exact corruption path this guard
+    exists to close. Matches the ``if not value`` precedent at
+    ``scripts/sfmta_collector.py`` (``if not api_key``).
+    """
+    from pipelines.replay_archive_to_state import (
+        MissingAgencyDatabaseUrlError,
+        _resolve_agency_db_url,
+    )
+    from src.agency_config import load_agency_config
+
+    monkeypatch.setenv("SFMTA_DATABASE_URL", "")
+    cfg = load_agency_config("sfmta")
+
+    with pytest.raises(MissingAgencyDatabaseUrlError, match="SFMTA_DATABASE_URL"):
+        _resolve_agency_db_url(cfg)
+
+
+@pytest.mark.smoke
 def test_resolve_agency_db_url_returns_value_when_set(monkeypatch):
     """When the agency's env var IS set, its value is returned untouched."""
     from pipelines.replay_archive_to_state import _resolve_agency_db_url
@@ -631,3 +707,24 @@ def test_resolve_agency_db_url_wmata_unset_falls_back_silently(monkeypatch):
     cfg = load_agency_config("wmata")
 
     assert _resolve_agency_db_url(cfg) is None
+
+
+@pytest.mark.smoke
+def test_assert_west_of_utc_accepts_wmata_and_sfmta_zones():
+    """Both configured agencies' timezones are west of UTC -- no raise."""
+    from pipelines.replay_archive_to_state import _assert_west_of_utc
+
+    _assert_west_of_utc("America/New_York")
+    _assert_west_of_utc("America/Los_Angeles")
+
+
+@pytest.mark.smoke
+def test_assert_west_of_utc_rejects_east_of_utc_zone():
+    """An east-of-UTC agency breaks the D+1-not-D-1 glob assumption in
+    ``replay_archive_for_date`` -- must fail loudly, not silently
+    truncate that agency's replays the way west-of-UTC assumed.
+    """
+    from pipelines.replay_archive_to_state import _assert_west_of_utc
+
+    with pytest.raises(NotImplementedError, match="Asia/Tokyo"):
+        _assert_west_of_utc("Asia/Tokyo")
