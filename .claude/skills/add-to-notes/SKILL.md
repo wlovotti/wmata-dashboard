@@ -3,12 +3,14 @@ name: add-to-notes
 description: Add a newly identified improvement idea, feature, bug, refactor, or future-work item to this repo's NOTES.md punch list. Use whenever the user says "add to NOTES", "track this", "punch list", "let's not forget", "log this for later", or surfaces an idea mid-conversation that is worth not losing but is not being implemented right now. Also use proactively when, during a code review or investigation, you yourself identify something non-blocking that the user should know about later — propose adding it to NOTES.md rather than burying it in a comment that will scroll away.
 ---
 
-NOTES.md is the project's forward-looking punch list. New items are added
+The project's forward-looking punch list is an index (`NOTES.md`) plus
+one body file per open item (`notes/NOTES-N.md`). New items are added
 here so they survive context loss between sessions and PRs. The skill's
-job is to take a candidate idea, check it isn't already tracked, and append
-a well-formatted entry — leaving the working tree dirty so the edit rides
-on the next substantive PR (per the project's `update-notes-in-pr`
-workflow; standalone reconciliation PRs are churn).
+job is to take a candidate idea, check it isn't already tracked, and
+create a well-formatted item file + index line — leaving the working
+tree dirty so the edit rides on the next substantive PR (per the
+project's `update-notes-in-pr` workflow; standalone reconciliation PRs
+are churn).
 
 # Inputs
 
@@ -19,26 +21,26 @@ A short description of the idea, fix, or feature. May arrive as:
 
 # Steps
 
-## 1. Read NOTES.md and learn the current state
+## 1. Read the index and learn the current state
 
-Read `NOTES.md` end to end. Note:
-- The existing subsection structure under `## Active priorities` (e.g.
-  "Trend & comparison", "Diagnostic outputs", "Independent of the redesign",
-  "P5 — Cleanup") — the new item needs a home in one of these, or a new
-  subsection if no fit.
+Read `NOTES.md` (the index) end to end. Note:
+- The track headings (e.g. the active sprint, "Ops floor",
+  "Ops & reliability", "WMATA depth & UX", "Deferred / trigger-based") —
+  the new item needs a home under one of these, or a new track if no fit.
 - The highest currently-visible `NOTES-N`. Then verify against history:
   ```bash
-  git log --all -p -- NOTES.md | grep -oE "NOTES-[0-9]+" | sort -t- -k2 -n -u | tail -1
+  git log --all -p -- NOTES.md notes/ | grep -oE "NOTES-[0-9]+" | sort -t- -k2 -n -u | tail -1
   ```
   Numbers are stable forever (closed items are deleted but their numbers
   remain reserved). The new item takes **max(current, historical) + 1**.
-- The formatting conventions: severity line, paragraph(s) of explanation,
-  optional `### Dependencies`, `---` separator between entries.
+- The formatting conventions: open one or two existing `notes/*.md`
+  files as templates — `#` title, severity/effort lines, paragraph(s)
+  of explanation, optional `## Dependencies`.
 
 ## 2. Check for duplicates — semantic match, not keyword
 
-For each candidate idea, scan existing entries (both the bulleted summary
-lines under "Active priorities" and the detailed `## NOTES-N` sections).
+For each candidate idea, scan existing entries (the index lines in
+`NOTES.md`, plus `grep -ril <keywords> notes/` into the item bodies).
 A duplicate isn't just exact-string overlap — it's the same underlying
 work item phrased differently. Examples:
 
@@ -72,26 +74,26 @@ If genuinely unsure, pick the higher value and add a parenthetical
 ("Effort: medium (unknown — depends on whether X is already in place)").
 Overestimating is cheap; underestimating misleads future planning.
 
-## 4. Pick a subsection placement
+## 4. Pick a track placement
 
-Match the idea to an existing subsection under `## Active priorities`.
-Loose mapping:
+Match the idea to an existing track heading in the index. Loose
+mapping:
 
-- UI / IA / page-level work → existing "Information architecture & navigation"
-  or similar; create one if needed.
-- Pipeline / metric / data-correctness work → "Independent of the redesign"
-  is a safe default if no themed subsection fits.
-- Pure cleanup / dead-code / refactor → "P5 — Cleanup".
-- Infra / deployment / cloud → there's a cloud-migration thread
-  (NOTES-48/49/50) — slot related work nearby.
+- Directly advances the north star (see the index's North star
+  section) → the active sprint track, sequenced against its existing
+  items.
+- Ops / infra / reliability → "Ops & reliability" (or "Ops floor" only
+  if it prevents a known recurring failure — that bar is high).
+- UI / metrics depth on a single agency → "WMATA depth & UX".
+- Only matters under a future trigger (public deploy, scale) →
+  "Deferred / trigger-based".
 
-If no subsection is a clean fit:
-- **Single item with no home** — propose a new subsection to the user
-  before creating it. A new subsection just to hold one entry is
-  usually wrong; "Independent of the redesign" or "P5 — Cleanup" is
-  often a better fit.
+If no track is a clean fit:
+- **Single item with no home** — propose a new track to the user
+  before creating it. A new track just to hold one entry is usually
+  wrong.
 - **Batch of thematic items (3+) with no home** — go ahead and create
-  a clearly-named new subsection. Call it out explicitly in the
+  a clearly-named new track. Call it out explicitly in the
   return message so the user can rename or rehome it if they don't
   like the framing. Asking permission for every batch is friction
   the user has already opted out of by asking for the batch.
@@ -100,17 +102,15 @@ If no subsection is a clean fit:
 
 Two writes are needed:
 
-**(a)** A bullet under the chosen subsection in `## Active priorities`,
-one or two sentences max:
+**(a)** An index line under the chosen track in `NOTES.md`, matching
+the existing one-line format:
 ```markdown
-- **NOTES-N Short title.** One-sentence summary of the work and the
-  motivating gap.
+- [NOTES-N](notes/NOTES-N.md) Short title — sev low|medium|high / eff low|medium|high — unblocked|blocked by NOTES-M|short caveat
 ```
 
-**(b)** A detailed section, appended in NOTES-N order at the bottom of
-the file (before any trailing horizontal rules):
+**(b)** The body file `notes/NOTES-N.md`:
 ```markdown
-## NOTES-N. Short title
+# NOTES-N. Short title
 
 **Severity: low|medium|high** *(optional caveat)*.
 **Effort: low|medium|high** *(optional caveat)*.
@@ -120,11 +120,9 @@ Include enough specifics (file paths, table names, API surface, concrete
 acceptance criteria) that someone returning cold can scope it without
 re-deriving the context. If there are known unknowns, name them.
 
-### Dependencies
+## Dependencies
 
 (Optional — only if there are real blocking deps. Don't fabricate.)
-
----
 ```
 
 Match the prose style of existing entries: full sentences, concrete
@@ -132,27 +130,10 @@ references, no marketing voice. If the user described the idea in their
 own words, preserve their framing where possible — they know what they
 meant.
 
-## 6. Update the "Last edited" preamble
+## 6. No changelog
 
-The top of NOTES.md has a paragraph starting `Last edited YYYY-MM-DD.
-[Closed|Added|Updated] NOTES-N — …`. Update it to today's date (Eastern;
-see `src/timezones.py` if uncertain — usually just today's date is fine)
-and a summary of what was added.
-
-Length scales with batch size:
-- **One or two items** — 1-2 sentences. Lead with what changed; mention
-  concrete file paths / table names where relevant.
-- **Batch of 3+ items** — one short clause per item is fine. Name each
-  NOTES-N with a few words on what it is so the preamble continues to
-  read as a useful changelog. Group with `NOTES-N..M` shorthand if the
-  numbers are contiguous; spell out individually otherwise.
-- **Highlight surprises** — if any item has unusual severity, effort,
-  or dependency relative to the others in the batch, note it (e.g.,
-  "NOTES-66 medium severity after PR #115 near-miss").
-
-Use `Added NOTES-N — …` for fresh items. Preserve the existing pattern
-of mentioning concrete file paths / table names where relevant, so the
-preamble continues to read as a useful changelog.
+There is no "Last edited" preamble to update — git history is the
+record of when items were added and closed. Do not add one.
 
 ## 7. Return — do NOT commit
 
@@ -162,9 +143,9 @@ NOTES item" PRs are churn.
 
 Report to the user:
 - Which NOTES-N was assigned
-- Which subsection it landed in
+- Which track it landed in
 - Severity and effort
-- One line confirming the file is edited but unstaged
+- One line confirming the files are edited but unstaged
 
 If multiple items were added, list each.
 
@@ -194,16 +175,13 @@ the row when run twice for the same date, with no warning. should
 probably error or skip — add to NOTES."
 
 Skill execution:
-1. Read NOTES.md, find max NOTES-N = 62, confirm via git log.
-2. Scan for duplicates — search for "system_metrics_daily", "upsert",
-   "idempotency". None match. OK to add.
+1. Read the NOTES.md index, find max NOTES-N = 62, confirm via git log.
+2. Scan for duplicates — search the index and `grep -ril
+   'system_metrics_daily\|upsert' notes/`. None match. OK to add.
 3. Severity: low (no data loss, just confusing). Effort: low
    (one-file change in `pipelines/upsert_system_metrics_daily.py`).
-4. Subsection: "Independent of the redesign" (no themed bucket fits).
-5. Write bullet + detailed section as NOTES-63.
-6. Update preamble: `Last edited 2026-05-17. Added NOTES-63 —
-   upsert_system_metrics_daily silently overwrites on rerun; should
-   warn or no-op when row exists.`
-7. Return: "Added NOTES-63 (severity: low, effort: low) under
-   'Independent of the redesign'. NOTES.md is edited but unstaged —
-   it'll ride on your next substantive PR."
+4. Track: "Ops & reliability" (data-correctness, not sprint work).
+5. Write `notes/NOTES-63.md` + its index line.
+6. Return: "Added NOTES-63 (severity: low, effort: low) under
+   'Ops & reliability'. notes/NOTES-63.md + the index line are edited
+   but unstaged — they'll ride on your next substantive PR."

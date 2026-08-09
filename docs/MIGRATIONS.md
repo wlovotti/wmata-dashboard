@@ -35,9 +35,8 @@ pg_restore --list "$BACKUP_FILE" | tail -5   # prints the table-of-contents tail
 ```
 
 The backup is only useful if you have also tested restoring it at least once
-(see NOTES-48 remaining item 1 — S3 off-box backups). An untested backup is
-not a safety net. Until S3 transfer is wired in, keep the dump on the VM's
-block disk and note the path.
+(S3 off-box backups are live — see `docs/DEPLOYMENT.md` §5.2). An untested
+backup is not a safety net.
 
 ---
 

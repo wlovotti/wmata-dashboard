@@ -1,5 +1,5 @@
 """
-Create the `system_metrics_daily` table on an existing database (NOTES-48).
+Create the `system_metrics_daily` table on an existing database (cloud-migration Phase 1).
 
 Idempotent — `create(checkfirst=True)` only creates the table if it does not
 yet exist. Safe to re-run. Does not touch any other table.

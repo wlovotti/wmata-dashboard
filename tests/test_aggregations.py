@@ -547,7 +547,7 @@ class TestGetRouteTrendData:
 
 
 class TestGetSystemTrendData:
-    """Tests for get_system_trend_data — NOTES-36 home-page system trend strip."""
+    """Tests for get_system_trend_data — home-page system trend strip."""
 
     @staticmethod
     def _clear_cache():

@@ -1,4 +1,4 @@
-"""Dead-man's-switch ping for long-running daemons (NOTES-91).
+"""Dead-man's-switch ping for long-running daemons (collector dead-man ping, PR #173).
 
 The receiving service (healthchecks.io or similar) alerts when pings STOP
 arriving. The caller must therefore invoke :func:`ping_healthcheck` only

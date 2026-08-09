@@ -80,7 +80,7 @@ class WMATADataCollector:
         accumulate under the real archive on every test run.
 
         ``healthcheck_url``: dead-man endpoint pinged once per successful
-        trip-update tick; None disables (NOTES-91).
+        trip-update tick; None disables (collector dead-man ping, PR #173).
 
         ``tu_feed_url`` / ``vp_feed_url``: override the trip-updates /
         vehicle-positions GTFS-RT feed URLs. ``None`` (the default) keeps
@@ -727,7 +727,7 @@ class WMATADataCollector:
 
         # Dead-man ping: fires only when the tick's archive+upsert+heartbeat
         # all committed — a wedged collector goes silent and the alerting
-        # service pages on the missing ping (NOTES-91).
+        # service pages on the missing ping (collector dead-man ping, PR #173).
         ping_healthcheck(self._healthcheck_url)
 
         print(

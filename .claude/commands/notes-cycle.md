@@ -2,9 +2,11 @@
 description: Use when closing a NOTES.md punch-list item as a PR — the user names a NOTES-N, asks to work the punch list, or runs back-to-back cycles under `/loop`.
 ---
 
-This command drives one iteration of the NOTES.md cycle: read NOTES.md →
-confirm next task → dispatch a subagent to implement → parent reviews
-the diff → watch CI → prompt for merge → cleanup. Task confirmation may
+This command drives one iteration of the punch-list cycle: read the
+`NOTES.md` index (item bodies live in `notes/NOTES-N.md`) →
+confirm next task → dispatch a subagent to implement → dispatch the
+`pr-reviewer` agent to review the diff → watch CI → prompt for merge →
+cleanup. Task confirmation may
 be satisfied by the user naming the item at invocation (the parent
 echoes the resolved title before dispatch instead of asking); merge
 approval is never skippable. Everything else autonomous.
@@ -27,14 +29,17 @@ git pull --ff-only
 
 Pre-flight rule: the porcelain output may be empty, OR may contain
 **only** allowlisted paths — `CLAUDE.md` / `NOTES.md` at the repo
-root, or any file under `.claude/commands/`. Any other dirty path
+root, any file under `notes/`, or any file under `.claude/commands/`
+or `.claude/agents/`.
+Any other dirty path
 (including a staged file, a new untracked file, or a deletion) blocks
 the cycle. Capture the list of "riding-along" files for later steps —
 call this `RIDE_ALONG_FILES`.
 
 Concretely, if the porcelain output, after stripping the leading
 status bytes, contains any line outside the allowlist
-`{CLAUDE.md, NOTES.md, .claude/commands/*.md}`, **STOP**. Tell the user which path blocked it and let them resolve
+`{CLAUDE.md, NOTES.md, notes/*.md, .claude/commands/*.md, .claude/agents/*.md}`,
+**STOP**. Tell the user which path blocked it and let them resolve
 before re-running. Likewise STOP on a feature-branch checkout or a
 pull conflict. Do not auto-stash or auto-checkout — those are
 destructive shortcuts for problems we should investigate.
@@ -47,24 +52,28 @@ before any of that happens, in case they'd rather stash instead.
 
 # Step 2 — Read state (parent does this directly)
 
-Read `NOTES.md`. Identify each open item by its priority tier:
+Read `NOTES.md` (the index — cheap by design). Each open item is one
+line under a track heading, linking to its body in `notes/NOTES-N.md`.
+The index line carries severity/effort and a blocked-by note; open the
+item file only for the candidates you're actually considering.
 
-- **P4 — Surface to API + UI**
-- **P5 — Cleanup**
-- **Independent of the redesign**
+Track priority, top to bottom of the index: the **active sprint**
+track first, then the **ops floor**, then everything else. Parked
+tracks ("parked …" in the heading) are eligible only when the user
+names an item from them explicitly.
 
-For each item, note the severity tag and dependency line. An item is
-**unblocked** if its `### Dependencies` section says "Independent" or
-references only items already removed. An item is **blocked** if it
-depends on a still-open `NOTES-N`.
+An item is **unblocked** if its index line says so or its
+`## Dependencies` section references only closed items. An item is
+**blocked** if it depends on a still-open `NOTES-N`.
 
 # Step 3 — Propose & confirm next task (HUMAN CHECKPOINT #1)
 
 Pick a recommended next task. Selection rule of thumb:
 
 1. Prefer **unblocked** items
-2. Among unblocked, prefer **higher priority tier** (P4 > P5 > Independent)
-3. Among same tier, prefer **higher severity** (medium > low)
+2. Among unblocked, prefer **earlier track** (active sprint > ops
+   floor > everything else; parked tracks only on explicit user ask)
+3. Among same track, prefer **higher severity** (high > medium > low)
 4. Tiebreak on **smallest scope** (favor closing items quickly)
 
 Pick up to 2 alternates with different scope/risk profiles.
@@ -127,8 +136,9 @@ and `{{ride_along_files}}` — the last is either "none" or a
 comma-separated list of allowlisted paths from Step 1):
 
 ```
-Close NOTES-{{N}} from /Users/wlovotti/repos/wmata-dashboard/NOTES.md
-in one PR. Item section verbatim:
+Close NOTES-{{N}} in one PR. Its body lives in
+/Users/wlovotti/repos/wmata-dashboard/notes/NOTES-{{N}}.md; its index
+line is in NOTES.md at the repo root. Item body verbatim:
 
 {{section_summary}}
 
@@ -156,9 +166,11 @@ Execute this checklist top-to-bottom. Do not deviate.
    failing test before the implementation. Doc, config, and shell
    plumbing changes are exempt (verify those in step 4 instead).
 
-3. SIDE EFFECTS. If you discover a new issue worth tracking, APPEND
-   a NOTES-<next-unused-N> entry to NOTES.md in this same session.
-   Never open a second PR. Never renumber existing items.
+3. SIDE EFFECTS. If you discover a new issue worth tracking, create
+   `notes/NOTES-<next-unused-N>.md` and add its one-line entry to the
+   NOTES.md index in this same session (verify the next unused number
+   against git history per the index header, not just the visible
+   files). Never open a second PR. Never renumber existing items.
 
 4. VERIFY (run in order; fix and re-run until each is clean):
      uv run pytest -m smoke
@@ -170,21 +182,20 @@ Execute this checklist top-to-bottom. Do not deviate.
    If the change touches more than one small surface, also run the
    full suite: `uv run pytest`.
 
-5. FOLD NOTES.md EDITS onto this branch (no separate PR):
-   a. Delete the NOTES-{{N}} section wholesale (its header through
-      the next `---` separator).
-   b. Remove the NOTES-{{N}} bullet from "Active priorities". If its
-      priority subsection becomes empty, remove the subsection header.
-   c. Rewrite surviving cross-references to NOTES-{{N}} into a
-      descriptive PR-anchored phrase, e.g.
+5. FOLD PUNCH-LIST EDITS onto this branch (no separate PR):
+   a. Delete the item file: `git rm notes/NOTES-{{N}}.md`.
+   b. Remove the NOTES-{{N}} line from the NOTES.md index. If its
+      track section becomes empty, remove the section header.
+   c. Rewrite surviving cross-references to NOTES-{{N}} (in other
+      `notes/*.md` files, code comments, docs) into a descriptive
+      PR-anchored phrase, e.g.
         `the route_service_profile rollout (PR #M)`
       Use the in-flight PR number once known; otherwise leave a TODO
       and patch on PR open.
    d. Sweep the repo for stale references and rewrite them the same way:
         grep -rn 'NOTES-{{N}}' --include='*.md' --include='*.py' \
-          --include='*.tsx' --include='*.ts'
-   e. Update the "Last edited YYYY-MM-DD" line at the top of NOTES.md
-      to today's date.
+          --include='*.tsx' --include='*.ts' --include='*.jsx'
+   There is no changelog line to update — git history is the record.
 
 6. COMMIT. Format:
      <prefix>: <short summary> (NOTES-{{N}})
@@ -212,25 +223,31 @@ needs_user`, route the question to the user via `AskUserQuestion` and
 re-dispatch with the answer. If it returned a PR number, continue to
 step 4.5.
 
-# Step 4.5 — Review the diff (parent does this directly)
+# Step 4.5 — Review the diff (dispatch the `pr-reviewer` agent)
 
-The subagent's work does not reach the merge prompt unreviewed. Before
-watching CI:
+The subagent's work does not reach the merge prompt unreviewed — but
+the parent does not read the diff itself. Dispatch the checked-in
+`pr-reviewer` agent (`.claude/agents/pr-reviewer.md`, pinned to
+`model: opus` so the review does not burn parent-tier tokens):
 
-1. `gh pr diff <PR_NUMBER>` — read every hunk.
-2. Check spec fidelity against the NOTES item text: exact paths and
-   values, conventions of the surrounding code preserved, no scope
-   creep, NOTES.md cross-reference rewrites kept their meaning.
-3. Verify no stale references survive:
-   `git grep -n 'NOTES-<N>' origin/<pr-branch>` (changelog-history
-   mentions in NOTES.md are fine).
-4. If the diff includes code (not just NOTES.md/doc folds):
-   REQUIRED SUB-SKILL: run the `code-review` skill against the PR.
+- `subagent_type: "pr-reviewer"`
+- prompt containing: the PR number, the PR branch name, NOTES-{{N}},
+  and the NOTES item section text verbatim (the same
+  `{{section_summary}}` used in Step 4).
 
-Findings: cosmetic → note them at the merge prompt; substantive → fix
+The agent reads every hunk, checks spec fidelity, sweeps for stale
+NOTES-N references, runs the `code-review` skill on code-bearing
+diffs, and returns a `VERDICT` plus findings tagged
+cosmetic / substantive / fundamental.
+
+The parent adjudicates the returned findings (it does NOT re-read the
+diff): cosmetic → note them at the merge prompt; substantive → fix
 via a follow-up dispatch to the same branch (never silently merge over
 them); fundamental → STOP and surface to the user, same as a CI
-failure. On a clean review, continue to step 5.
+failure. On `VERDICT: clean`, continue to step 5. If a finding's
+severity tag seems miscalibrated or the verdict is ambiguous, the
+parent may spot-check the specific hunks in question — that is the
+exception, not the routine.
 
 # Step 5 — Watch CI (parent does this directly)
 
@@ -321,22 +338,33 @@ session history but reduce context size.
   mistake in the cycle.
 - **No auto-retry on CI failure.** A red CI is a signal to think, not
   to grind. The user decides whether to fix or abandon.
-- **No unreviewed merges.** The parent reads the full PR diff (step
-  4.5) — plus the `code-review` skill for code-bearing diffs — before
-  the merge prompt. Green CI alone does not qualify a PR for step 6.
+- **No unreviewed merges.** The dedicated `pr-reviewer` agent (Opus)
+  reads the full PR diff — plus the `code-review` skill for
+  code-bearing diffs — before the merge prompt, and the parent
+  adjudicates its structured findings (step 4.5). Green CI alone does
+  not qualify a PR for step 6.
 - **Right-size the process.** The scope gate (step 3) keeps big or
   ambiguous items out of blind dispatch — those route to
   superpowers:brainstorming / superpowers:writing-plans instead.
 - **No destructive recovery.** If the working tree has any dirty path
   outside the riding-along allowlist (`CLAUDE.md`, `NOTES.md`,
-  `.claude/commands/*.md`), refuse to start. If a merge conflict appears, surface and stop. Never
+  `notes/*.md`, `.claude/commands/*.md`, `.claude/agents/*.md`),
+  refuse to start. If a merge conflict appears, surface and stop. Never
   `git stash` / `git reset --hard` / `git checkout -f` as a shortcut.
-- **NOTES.md edits ride on the closing PR.** No standalone
+- **Punch-list edits ride on the closing PR.** No standalone
   reconciliation PRs. The subagent folds the edit in alongside the
   substantive change.
+- **Parallel cycles are allowed on disjoint items.** A closing PR
+  touches only `notes/NOTES-N.md` plus one index line, so two cycles
+  closing different items may run concurrently in separate git
+  worktrees. Before dispatching a second concurrent cycle, check that
+  neither item's cross-reference sweep will edit a file the other
+  cycle's PR touches (including each other's item files) — if they
+  overlap, serialize instead.
 - **Pre-existing allowlist-file drafts also ride on the next PR.**
   Uncommitted edits to allowlisted paths (`CLAUDE.md`, `NOTES.md`,
-  `.claude/commands/*.md`) at pre-flight are not a blocker — they
+  `notes/*.md`, `.claude/commands/*.md`, `.claude/agents/*.md`) at
+  pre-flight are not a blocker — they
   travel onto the feature branch via the `git checkout -b` and are
   committed by the subagent. Edits to any other path still block the
   cycle. Step 3 surfaces this to the user before dispatch so they can
