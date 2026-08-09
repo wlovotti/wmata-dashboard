@@ -15,14 +15,23 @@ The tool is cross-date safe: rows for service_dates other than the
 target are silently skipped, so backfilling 2026-05-18 cannot corrupt
 the 2026-05-19 rows the running collector is writing.
 
+Multi-agency (NOTES-96): pass ``--agency`` (matching a
+``config/agencies/<agency>.yaml``) to replay a non-WMATA archive with the
+correct service-date timezone, default archive directory, and target
+database. Omitting it keeps the WMATA/Eastern default.
+
 Usage:
     uv run python pipelines/replay_archive_to_state.py --date 2026-05-18
     uv run python pipelines/replay_archive_to_state.py --date 2026-05-18 \\
         --archive-root /path/to/archive/raw_snapshots
+    uv run python pipelines/replay_archive_to_state.py --date 2026-05-18 \\
+        --agency sfmta
 """
 
 import argparse
+import itertools
 import json
+import os
 import sys
 from datetime import date as date_type
 from datetime import datetime
@@ -32,11 +41,13 @@ import zstandard as zstd
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
+from src.agency_config import load_agency_config
 from src.database import get_session
 from src.upsert_helpers import upsert_trip_update_state
-from src.wmata_collector import _service_date_for_row
+from src.wmata_collector import dedupe_trip_update_rows
 
 DEFAULT_ARCHIVE_ROOT = Path("archive/raw_snapshots")
+DEFAULT_AGENCY = "wmata"
 
 
 class NoArchiveFilesFoundError(RuntimeError):
@@ -97,6 +108,7 @@ def replay_archive_for_date(
     archive_root: Path = DEFAULT_ARCHIVE_ROOT,
     chunk_size: int = 5000,
     allow_empty: bool = False,
+    agency: str = DEFAULT_AGENCY,
 ) -> int:
     """Replay all archive files for ``target_date`` into trip_update_state.
 
@@ -131,20 +143,46 @@ def replay_archive_for_date(
     silently skipped — defensive against midnight-crossing files that
     might contain a few rows belonging to the adjacent service-day.
 
+    **Agency-aware service date (NOTES-96):** ``agency`` selects the
+    IANA timezone (via ``config/agencies/<agency>.yaml``,
+    ``src.agency_config.load_agency_config``) used to infer
+    ``service_date`` when a row's ``trip_start_date`` is absent.
+    Defaults to ``"wmata"`` (Eastern), matching prior behavior. SFMTA
+    service dates run on Pacific time, so replaying an SFMTA archive
+    requires ``agency="sfmta"`` or rows near midnight UTC silently
+    resolve to the wrong calendar day.
+
+    **Same-poll dedup (NOTES-96):** before folding, rows sharing one
+    ``snapshot_ts`` (one archived poll — assumed contiguous within a
+    file, matching how the live archive writer appends them) run
+    through ``dedupe_trip_update_rows``, the same helper
+    ``WMATADataCollector._save_trip_updates`` uses. WMATA never repeats
+    a ``stop_sequence`` within one poll, but SFMTA/511.org does (~0.24%
+    of rows) — without this, two same-poll rows sharing
+    (trip_id, stop_sequence) could both survive into one folded output
+    row's inputs with an undefined tie-break; with it, the collision
+    resolves exactly as the live collector would (last row in feed
+    order wins outright, including a null field clobbering an earlier
+    non-null one).
+
     Args:
         db: Active SQLAlchemy session bound to PostgreSQL. Caller is
             responsible for committing or rolling back.
-        target_date: The service date to replay (Eastern calendar day).
+        target_date: The service date to replay (agency-local calendar
+            day; see ``agency``).
         archive_root: Directory holding the JSONL.zst files.
         chunk_size: Folded rows per UPSERT statement.
         allow_empty: When ``True``, a zero-file glob match returns 0
             instead of raising — see ``NoArchiveFilesFoundError``
             (NOTES-93).
+        agency: Name matching ``config/agencies/<agency>.yaml``, e.g.
+            ``"wmata"`` or ``"sfmta"``. Selects the service-date
+            timezone (NOTES-96). Defaults to ``"wmata"``.
 
     Returns:
-        The number of snapshot lines that matched ``target_date`` and
-        were folded (note: not the row-count in state — many snapshots
-        collapse to one state row by design).
+        The number of snapshot lines that matched ``target_date`` after
+        same-poll dedup and were folded (note: not the row-count in
+        state — many snapshots collapse to one state row by design).
 
     Raises:
         NoArchiveFilesFoundError: if the glob matches zero files and
@@ -173,6 +211,8 @@ def replay_archive_for_date(
     for p in paths:
         print(f"  - {p.name}")
 
+    tz_name = load_agency_config(agency).timezone
+
     total = 0
     # Fold state per (trip_id, stop_sequence); service_date is fixed to
     # target_date by the filter below. "_vehicle_ts" / "_pred_ts" track
@@ -181,53 +221,66 @@ def replay_archive_for_date(
     folded: dict[tuple[str, int], dict] = {}
 
     for p in paths:
-        for raw in _iter_jsonl_zst(p):
-            if raw.get("stop_sequence") is None:
-                continue
-            snapshot_ts = _parse_dt(raw["snapshot_ts"])
-            service_date = _service_date_for_row(
-                {
-                    "trip_start_date": raw.get("trip_start_date"),
-                    "snapshot_ts": snapshot_ts,
-                }
-            )
-            if service_date != target_date:
-                continue
+        # Group consecutive lines sharing one snapshot_ts (one archived
+        # poll — the live archive writer appends a poll's rows
+        # contiguously, one call per tick) and dedupe same-poll
+        # (trip_id, stop_sequence) collisions before folding, exactly as
+        # WMATADataCollector._save_trip_updates does for live polls —
+        # NOTES-96. Parsing snapshot_ts to a datetime up front lets
+        # dedupe_trip_update_rows' service_date fallback (no
+        # trip_start_date) work the same way it does for live rows.
+        for _snapshot_key, poll_lines in itertools.groupby(
+            _iter_jsonl_zst(p), key=lambda r: r.get("snapshot_ts")
+        ):
+            poll_rows = []
+            for raw in poll_lines:
+                if raw.get("stop_sequence") is None:
+                    continue
+                normalized = dict(raw)
+                normalized["snapshot_ts"] = _parse_dt(raw["snapshot_ts"])
+                poll_rows.append(normalized)
 
-            vehicle_id = raw.get("vehicle_id")
-            predicted_arrival_ts = _parse_dt(raw.get("predicted_arrival_ts"))
-            key = (raw["trip_id"], raw["stop_sequence"])
-            cur = folded.get(key)
-            if cur is None:
-                cur = {
-                    "trip_id": raw["trip_id"],
-                    "stop_sequence": raw["stop_sequence"],
-                    "service_date": target_date,
-                    "stop_id": raw["stop_id"],
-                    "vehicle_id": vehicle_id,
-                    "snapshot_ts": snapshot_ts,
-                    "schedule_relationship": raw.get("schedule_relationship"),
-                    "predicted_arrival_ts": None,
-                    "last_pred_snapshot_ts": None,
-                    "_vehicle_ts": snapshot_ts if vehicle_id is not None else None,
-                }
-                folded[key] = cur
-            else:
-                if snapshot_ts >= cur["snapshot_ts"]:
-                    cur["snapshot_ts"] = snapshot_ts
-                    cur["stop_id"] = raw["stop_id"]
-                    cur["schedule_relationship"] = raw.get("schedule_relationship")
-                if vehicle_id is not None and (
-                    cur["_vehicle_ts"] is None or snapshot_ts >= cur["_vehicle_ts"]
+            for deduped in dedupe_trip_update_rows(poll_rows, tz_name):
+                service_date = deduped["service_date"]
+                if service_date != target_date:
+                    continue
+
+                snapshot_ts = deduped["snapshot_ts"]
+                vehicle_id = deduped.get("vehicle_id")
+                predicted_arrival_ts = _parse_dt(deduped.get("predicted_arrival_ts"))
+                key = (deduped["trip_id"], deduped["stop_sequence"])
+                cur = folded.get(key)
+                if cur is None:
+                    cur = {
+                        "trip_id": deduped["trip_id"],
+                        "stop_sequence": deduped["stop_sequence"],
+                        "service_date": target_date,
+                        "stop_id": deduped["stop_id"],
+                        "vehicle_id": vehicle_id,
+                        "snapshot_ts": snapshot_ts,
+                        "schedule_relationship": deduped.get("schedule_relationship"),
+                        "predicted_arrival_ts": None,
+                        "last_pred_snapshot_ts": None,
+                        "_vehicle_ts": snapshot_ts if vehicle_id is not None else None,
+                    }
+                    folded[key] = cur
+                else:
+                    if snapshot_ts >= cur["snapshot_ts"]:
+                        cur["snapshot_ts"] = snapshot_ts
+                        cur["stop_id"] = deduped["stop_id"]
+                        cur["schedule_relationship"] = deduped.get("schedule_relationship")
+                    if vehicle_id is not None and (
+                        cur["_vehicle_ts"] is None or snapshot_ts >= cur["_vehicle_ts"]
+                    ):
+                        cur["vehicle_id"] = vehicle_id
+                        cur["_vehicle_ts"] = snapshot_ts
+                if predicted_arrival_ts is not None and (
+                    cur["last_pred_snapshot_ts"] is None
+                    or snapshot_ts >= cur["last_pred_snapshot_ts"]
                 ):
-                    cur["vehicle_id"] = vehicle_id
-                    cur["_vehicle_ts"] = snapshot_ts
-            if predicted_arrival_ts is not None and (
-                cur["last_pred_snapshot_ts"] is None or snapshot_ts >= cur["last_pred_snapshot_ts"]
-            ):
-                cur["predicted_arrival_ts"] = predicted_arrival_ts
-                cur["last_pred_snapshot_ts"] = snapshot_ts
-            total += 1
+                    cur["predicted_arrival_ts"] = predicted_arrival_ts
+                    cur["last_pred_snapshot_ts"] = snapshot_ts
+                total += 1
 
     rows_out = [{k: v for k, v in cur.items() if not k.startswith("_")} for cur in folded.values()]
     for i in range(0, len(rows_out), chunk_size):
@@ -243,9 +296,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", required=True, help="Service date (YYYY-MM-DD)")
     parser.add_argument(
+        "--agency",
+        default=DEFAULT_AGENCY,
+        help=(
+            f"Agency name matching config/agencies/<agency>.yaml (default: "
+            f"{DEFAULT_AGENCY!r}). Selects the service-date timezone (NOTES-96) "
+            "and, unless --archive-root is given explicitly, the archive "
+            "directory and target database."
+        ),
+    )
+    parser.add_argument(
         "--archive-root",
-        default=str(DEFAULT_ARCHIVE_ROOT),
-        help=f"Archive directory (default: {DEFAULT_ARCHIVE_ROOT})",
+        default=None,
+        help=(
+            "Archive directory (default: the agency config's "
+            "collector.archive_dir, e.g. archive/raw_snapshots for wmata or "
+            "archive/sfmta_raw_snapshots for sfmta)"
+        ),
     )
     parser.add_argument(
         "--allow-empty",
@@ -258,11 +325,17 @@ def main() -> int:
     )
     args = parser.parse_args()
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
-    archive_root = Path(args.archive_root)
+    cfg = load_agency_config(args.agency)
+    archive_root = Path(args.archive_root) if args.archive_root else Path(cfg.archive_dir)
 
-    db = get_session()
+    # Route to the agency's own database (e.g. SFMTA_DATABASE_URL) rather
+    # than the DATABASE_URL default — replaying an SFMTA archive against
+    # the WMATA production database would silently corrupt it. NOTES-96.
+    db = get_session(db_url=os.getenv(cfg.database_url_env))
     try:
-        replay_archive_for_date(db, target_date, archive_root, allow_empty=args.allow_empty)
+        replay_archive_for_date(
+            db, target_date, archive_root, allow_empty=args.allow_empty, agency=args.agency
+        )
         db.commit()
     except NoArchiveFilesFoundError as e:
         print(f"ERROR: {e}", file=sys.stderr)

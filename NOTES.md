@@ -27,8 +27,7 @@ serves this or is explicitly parked.
 
 ## Comparison sprint (active — work top to bottom)
 
-- [NOTES-96](notes/NOTES-96.md) Replay archive support for multi-agency pipelines — sev medium / eff medium — unblocked
-- [NOTES-100](notes/NOTES-100.md) SFMTA derivation end-to-end (Plan 2) — sev high / eff medium-high — blocked by NOTES-96
+- [NOTES-100](notes/NOTES-100.md) SFMTA derivation end-to-end (Plan 2) — sev high / eff medium-high — unblocked
 - [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — blocked by NOTES-100
 
 ## Ops floor (not frozen — prevents a known recurring failure)

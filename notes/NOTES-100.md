@@ -18,8 +18,9 @@ Work:
    and the per-route pipelines it orchestrates (default `wmata` so
    existing invocations are unchanged).
 2. Service-date and timezone correctness: SFMTA service days are
-   Pacific — builds on the NOTES-96 replay changes; audit any other
-   `eastern_*` call sites the SFMTA path would hit (`src/timezones.py`).
+   Pacific — builds on the replay-archive multi-agency support (PR #TODO);
+   audit any other `eastern_*` call sites the SFMTA path would hit
+   (`src/timezones.py`).
 3. SFMTA GTFS schedule load (versioned via `is_current`, same as WMATA)
    if not already present — the OTP/EWT/delivered metrics all join
    against the schedule.
@@ -35,5 +36,6 @@ convention as baseline regens).
 
 ## Dependencies
 
-NOTES-96 first (same file: `pipelines/replay_archive_to_state.py` —
-don't stack PRs). Blocks NOTES-99.
+Builds on the replay-archive multi-agency support (PR #TODO, same file:
+`pipelines/replay_archive_to_state.py` — don't stack PRs on top of it
+until it merges). Blocks NOTES-99.

@@ -369,6 +369,110 @@ def test_replay_allow_empty_returns_zero_without_raising(tmp_path, db_session):
 
 
 @pytest.mark.integration
+def test_replay_uses_agency_timezone_for_service_date(tmp_path, pg_session):
+    """``--agency`` threads the agency's IANA tz into service-date inference.
+
+    A 2026-05-19 05:30 UTC snapshot with no ``trip_start_date`` falls back
+    to the snapshot's local calendar day: 2026-05-19 Eastern (WMATA's
+    default) but 2026-05-18 Pacific (SFMTA, ``config/agencies/sfmta.yaml``).
+    ``agency="sfmta"`` must resolve the row against 2026-05-18. NOTES-96.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "sfmta_raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",
+        [_row("2026-05-19 05:30:00", "T_SFMTA_TZ", 1, trip_start_date=None)],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_SFMTA_TZ")
+    )
+    pg_session.commit()
+
+    count = replay_archive_for_date(
+        pg_session,
+        target_date=date(2026, 5, 18),
+        archive_root=archive_dir,
+        agency="sfmta",
+    )
+    pg_session.commit()
+    assert count == 1
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_SFMTA_TZ").one()
+    assert state.service_date == date(2026, 5, 18)
+
+
+@pytest.mark.integration
+def test_replay_default_agency_stays_eastern(tmp_path, pg_session):
+    """Omitting ``--agency`` keeps today's WMATA/Eastern behavior (regression guard)."""
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-19.0.jsonl.zst",
+        [_row("2026-05-19 05:30:00", "T_WMATA_TZ", 1, trip_start_date=None)],
+    )
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_WMATA_TZ")
+    )
+    pg_session.commit()
+
+    count = replay_archive_for_date(
+        pg_session, target_date=date(2026, 5, 19), archive_root=archive_dir
+    )
+    pg_session.commit()
+    assert count == 1
+
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_WMATA_TZ").one()
+    assert state.service_date == date(2026, 5, 19)
+
+
+@pytest.mark.integration
+def test_replay_dedupes_duplicate_stop_sequence_within_one_poll(tmp_path, pg_session):
+    """Two archive rows sharing (trip_id, stop_sequence) at one snapshot_ts must
+    not crash the fold/upsert, and must resolve via the same shared
+    ``dedupe_trip_update_rows`` semantics the live collector uses (last row
+    in feed order wins outright) -- not the fold's own per-field
+    non-null-preserving tie-break. Mirrors
+    ``test_save_trip_updates_dedupes_duplicate_key_within_one_poll`` in
+    tests/test_collector_dual_write.py. NOTES-96 (SFMTA/511.org repeats
+    stop_sequence within a trip in ~0.24% of rows).
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    row_a = _row("2026-05-18 22:00:00", "T_DUPSEQ", 44, "2026-05-18 22:05:00", vehicle_id="V_A")
+    row_b = _row("2026-05-18 22:00:00", "T_DUPSEQ", 44, "2026-05-18 22:06:00", vehicle_id=None)
+    row_b["stop_id"] = "S_SECOND"
+    _write_jsonl_zst(archive_dir / "2026-05-18.0.jsonl.zst", [row_a, row_b])
+
+    # Scoped reset (not whole-table): avoids deadlocking the live collector. Matches PR #144.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_DUPSEQ")
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(  # must not raise CardinalityViolation
+        pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir
+    )
+    pg_session.commit()
+
+    states = pg_session.query(TripUpdateState).filter_by(trip_id="T_DUPSEQ", stop_sequence=44).all()
+    assert len(states) == 1
+    # Same-poll collision: last row in feed order wins outright, including
+    # a null vehicle_id overwriting the earlier row's non-null value.
+    assert states[0].stop_id == "S_SECOND"
+    assert states[0].vehicle_id is None
+
+
+@pytest.mark.integration
 def test_replay_finds_legacy_single_daily_filename(tmp_path, pg_session):
     """Older archive files use ``YYYY-MM-DD.jsonl.zst`` (no pid suffix).
 

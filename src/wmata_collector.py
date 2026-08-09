@@ -44,6 +44,49 @@ def _service_date_for_row(row: dict, tz_name: str = "America/New_York"):
     return local_date_from_naive_utc(row["snapshot_ts"], tz_name)
 
 
+def dedupe_trip_update_rows(rows: list[dict], tz_name: str = "America/New_York") -> list[dict]:
+    """Dedupe raw trip-update rows onto ``trip_update_state``'s upsert conflict key.
+
+    The ON CONFLICT target is ``(trip_id, stop_sequence, service_date)``;
+    Postgres raises CardinalityViolation if that key repeats within one
+    INSERT statement's VALUES list. WMATA never repeats a stop_sequence
+    within one trip/poll, but SFMTA/511.org does (~0.24% of rows,
+    NOTES-96) -- observed as a single trip reporting one stop_sequence
+    twice for two different physical stops within one snapshot, likely
+    multiple vehicles on the same block/trip or a feed artifact.
+
+    Rows missing ``stop_sequence`` are dropped (can't be keyed into
+    ``trip_update_state``, whose PK includes it). On a same-key
+    collision, the LAST row in ``rows`` order wins outright (a full
+    overwrite, not a per-field non-null merge) -- an arbitrary but
+    deterministic tie-break. Every call site only ever passes rows that
+    share one snapshot_ts (one poll), so neither colliding row is more
+    "latest" than the other by timestamp.
+
+    Module-level (not a method) so both the live collector
+    (``WMATADataCollector._save_trip_updates``) and the replay tool
+    (``pipelines/replay_archive_to_state.py``, applied per archived poll)
+    share one dedup implementation -- NOTES-96.
+    """
+    upsert_by_key: dict[tuple, dict] = {}
+    for r in rows:
+        if r.get("stop_sequence") is None:
+            continue
+        service_date = _service_date_for_row(r, tz_name)
+        key = (r["trip_id"], r["stop_sequence"], service_date)
+        upsert_by_key[key] = {
+            "trip_id": r["trip_id"],
+            "stop_sequence": r["stop_sequence"],
+            "service_date": service_date,
+            "stop_id": r["stop_id"],
+            "vehicle_id": r.get("vehicle_id"),
+            "snapshot_ts": r["snapshot_ts"],
+            "predicted_arrival_ts": r.get("predicted_arrival_ts"),
+            "schedule_relationship": r.get("schedule_relationship"),
+        }
+    return list(upsert_by_key.values())
+
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -680,39 +723,14 @@ class WMATADataCollector:
             self._archive_writer.append(row, snapshot_ts=row["snapshot_ts"])
 
         # UPSERT into trip_update_state — rows missing stop_sequence can't be
-        # keyed in state (it's part of the PK), so we drop them from the payload.
-        # Archived rows are unaffected by this filter.
-        #
-        # Some agencies' feeds (observed on SFMTA/511.org, not WMATA) publish
-        # more than one stop_time_update at the same stop_sequence within a
-        # single trip/poll (e.g. a trip that revisits a stop_sequence value
-        # for two different physical stops). Postgres's ON CONFLICT DO UPDATE
-        # raises CardinalityViolation if the same conflict target
-        # (trip_id, stop_sequence, service_date) appears twice within one
-        # INSERT statement, so dedupe by that key here before handing rows
-        # to the upsert. Same-poll duplicate conflict keys (511/Muni repeats
-        # stop_sequence within a trip, ~0.24% of rows): keep the last row in
-        # feed order — an arbitrary tie-break within one snapshot, NOT the
-        # cross-poll "latest wins" semantics documented above (both
-        # colliding rows share one snapshot_ts, so neither is more "latest"
-        # than the other). Both raw rows remain in the archive regardless.
-        upsert_by_key: dict[tuple, dict] = {}
-        for r in rows:
-            if r.get("stop_sequence") is None:
-                continue
-            service_date = _service_date_for_row(r, self.service_date_tz)
-            key = (r["trip_id"], r["stop_sequence"], service_date)
-            upsert_by_key[key] = {
-                "trip_id": r["trip_id"],
-                "stop_sequence": r["stop_sequence"],
-                "service_date": service_date,
-                "stop_id": r["stop_id"],
-                "vehicle_id": r.get("vehicle_id"),
-                "snapshot_ts": r["snapshot_ts"],
-                "predicted_arrival_ts": r.get("predicted_arrival_ts"),
-                "schedule_relationship": r.get("schedule_relationship"),
-            }
-        upsert_payload = list(upsert_by_key.values())
+        # keyed in state (it's part of the PK), so dedupe_trip_update_rows
+        # drops them from the payload. Archived rows are unaffected by this
+        # filter (every raw row was already archived above). Same-poll
+        # duplicate conflict keys (SFMTA/511.org repeats stop_sequence
+        # within a trip, ~0.24% of rows) would otherwise raise
+        # CardinalityViolation — see dedupe_trip_update_rows for the
+        # tie-break. Both raw rows remain in the archive regardless.
+        upsert_payload = dedupe_trip_update_rows(rows, self.service_date_tz)
         if upsert_payload:
             upsert_trip_update_state(self.db, upsert_payload)
 
