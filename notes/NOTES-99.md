@@ -32,7 +32,7 @@ matched window, with the caveat footnotes rendered.
 
 ## Dependencies
 
-The SFMTA derivation rollout (PR #TBD) threaded `--agency` through the
+The SFMTA derivation rollout (PR #189) threaded `--agency` through the
 pipeline chain and fixed the schedule-anchor/service-date timezone bugs
 it would otherwise have hit; SFMTA metrics still need the backfill run
 (runbook in that PR's body) before rollup tables have real rows to
