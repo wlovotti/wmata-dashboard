@@ -10,7 +10,7 @@ Last edited 2026-08-09. Closed NOTES-93: `replay_archive_to_state.py`
 now raises `NoArchiveFilesFoundError` (CLI exit 1) when the archive
 glob matches zero files for `--date`, instead of silently returning 0;
 `--allow-empty` opts back into the old behavior for genuinely-empty
-dates — see PR #TODO.
+dates — see PR #184.
 Earlier same day: Closed NOTES-98: added `bin/prune-vm-archive.sh`,
 a laptop-side verify-then-prune drain for the VM's raw JSONL archive —
 run manually after each `aws s3 sync` step (docs/DEPLOYMENT.md), it

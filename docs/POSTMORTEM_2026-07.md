@@ -98,7 +98,7 @@ NOTES-89.
    yet" into a clean-looking success and slipped past the driver's
    failure guard (harmless that time — the derivation converged on
    re-run — but the whole June incident began with a silent no-op).
-   Fixed by the loud zero-file replay change (PR #TODO).
+   Fixed by the loud zero-file replay change (PR #184).
 
 ## What went well
 
@@ -172,7 +172,7 @@ runs locally.
 | 6 | The instance is undersized | Inverted by migration: downsize to the smallest tier once Postgres leaves the box | with rewrite |
 | 7 | Bind full natural keys in UPDATE/DELETE | Done (PR #172); grep for other 2-of-3-key writes | done / audit |
 | 8 | Perf-test recovery tools at production scale | Done for replay (PR #171); note in MIGRATIONS.md | done |
-| 9 | Zero-input runs must fail loudly | `replay_archive_to_state` exits 0 on zero matching files; make it an error (or `--allow-empty`) | **Done** PR #TODO |
+| 9 | Zero-input runs must fail loudly | `replay_archive_to_state` exits 0 on zero matching files; make it an error (or `--allow-empty`) | **Done** PR #184 |
 | 10 | Backfill must pin the schedule version end-to-end | Derive pipelines got `--gtfs-snapshot-id` in PR #170 but the rollup pipelines stayed `is_current`-only and June rollups were computed against the wrong schedule; closed by PR #176 + re-run | **Done** PR #176 |
 | 11 | Time-windowed jobs make review findings perishable | The "fold-in must precede the sweep" ordering constraint was real on 7/17 (lookback window reached exactly 6/12) and vacuous on 7/18 (window moved past it). Re-derive date-window safety arguments on the actual execution date | practice, not a ticket |
 
