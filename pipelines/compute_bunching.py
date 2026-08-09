@@ -6,10 +6,19 @@ Computes per-(route, service_date, time_period) bunching counts via
 per time_period. Idempotent: re-running the same (route, date) replaces
 the prior rows via the unique constraint.
 
+Multi-agency (NOTES-100): pass ``--agency`` (matching a
+``config/agencies/<agency>.yaml``) to compute against a non-WMATA
+database with the correct service-date timezone for the ``--date``-less
+default. Omitting it keeps the WMATA/Eastern default. Note:
+``--days`` without an explicit ``--date`` still resolves via
+``iter_recent_eastern_dates`` (Eastern-hardcoded) — always pass
+``--date`` explicitly for a non-WMATA backfill.
+
 Usage:
   uv run python pipelines/compute_bunching.py --route C51 --date 2026-05-03
   uv run python pipelines/compute_bunching.py --all-routes --date 2026-05-03
-  uv run python pipelines/compute_bunching.py --all-routes  # defaults to today (Eastern)
+  uv run python pipelines/compute_bunching.py --all-routes  # defaults to today (agency-local)
+  uv run python pipelines/compute_bunching.py --all-routes --date 2026-07-23 --agency sfmta
 """
 
 import argparse
@@ -20,13 +29,14 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
+from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.bunching import compute_bunching_for_route_date
 from src.database import get_session
 from src.date_ranges import iter_eastern_dates, iter_recent_eastern_dates
 from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, RouteHeadwayMetrics
-from src.timezones import eastern_today, utcnow_naive
+from src.timezones import local_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
 
@@ -148,6 +158,16 @@ def main():
             "for backfilling dates whose schedule has been superseded."
         ),
     )
+    parser.add_argument(
+        "--agency",
+        default="wmata",
+        help=(
+            "Agency name matching config/agencies/<agency>.yaml (default: "
+            "'wmata'). Selects the service-date timezone (for the "
+            "--date-less default only — see module docstring) and target "
+            "database — see pipelines/run_daily_batch.py."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.route and not args.all_routes:
@@ -160,6 +180,7 @@ def main():
         parser.error("--start-date and --end-date must be used together")
 
     load_dotenv()
+    cfg = load_agency_config(args.agency)
 
     if args.start_date and args.end_date:
         start = datetime.strptime(args.start_date, "%Y-%m-%d").date()
@@ -177,9 +198,9 @@ def main():
     elif args.date:
         service_dates = [datetime.strptime(args.date, "%Y-%m-%d").date()]
     else:
-        service_dates = [eastern_today()]
+        service_dates = [local_today(cfg.timezone)]
 
-    db = get_session()
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         if args.route:
             route_ids = [args.route]

@@ -14,17 +14,19 @@ from zoneinfo import ZoneInfo
 
 from src.models import StopTime
 
-EASTERN = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 
 
-def parse_gtfs_time_to_dt(time_str: str, anchor: date_type) -> datetime | None:
+def parse_gtfs_time_to_dt(
+    time_str: str, anchor: date_type, tz_name: str = "America/New_York"
+) -> datetime | None:
     """Parse a GTFS HH:MM:SS string into a naive UTC datetime anchored at the given service date.
 
     GTFS times can have HH ≥ 24 for trips that extend past midnight on the same
     service day; in that case the returned datetime is on the next calendar day.
-    The anchor is interpreted as the Eastern service date and converted to UTC.
-    Returns None on parse failure.
+    The anchor is interpreted as a local calendar date in ``tz_name``
+    (NOTES-100 multi-agency; default Eastern, matching every WMATA call
+    site) and converted to UTC. Returns None on parse failure.
     """
     try:
         hours, minutes, seconds = (int(x) for x in time_str.split(":"))
@@ -32,11 +34,11 @@ def parse_gtfs_time_to_dt(time_str: str, anchor: date_type) -> datetime | None:
         return None
 
     days_offset, hour_within_day = divmod(hours, 24)
-    eastern_midnight = datetime.combine(anchor, datetime.min.time())
-    naive_eastern = eastern_midnight + timedelta(
+    local_midnight = datetime.combine(anchor, datetime.min.time())
+    naive_local = local_midnight + timedelta(
         days=days_offset, hours=hour_within_day, minutes=minutes, seconds=seconds
     )
-    aware = naive_eastern.replace(tzinfo=EASTERN)
+    aware = naive_local.replace(tzinfo=ZoneInfo(tz_name))
     return aware.astimezone(UTC).replace(tzinfo=None)
 
 
@@ -98,6 +100,7 @@ def resolve_stop_time(
     candidates: list[dict],
     observed_ts: datetime,
     service_date: date_type,
+    tz_name: str = "America/New_York",
 ) -> dict | None:
     """Pick the closest-in-time stop_sequence candidate and resolve its scheduled times.
 
@@ -105,6 +108,9 @@ def resolve_stop_time(
     The temporal-proximity tie-break is defensive against GTFS loop routes. Returns
     a dict with `stop_sequence`, `scheduled_arrival_ts`, `scheduled_departure_ts`
     parsed against the given (per-position) service_date, or None if no candidates.
+
+    ``tz_name`` (NOTES-100 multi-agency; default Eastern) is forwarded to
+    ``parse_gtfs_time_to_dt`` — see its docstring.
     """
     if not candidates:
         return None
@@ -114,7 +120,7 @@ def resolve_stop_time(
             candidates,
             key=lambda c: abs(
                 (
-                    parse_gtfs_time_to_dt(c["arrival_time"], service_date) - observed_ts
+                    parse_gtfs_time_to_dt(c["arrival_time"], service_date, tz_name) - observed_ts
                 ).total_seconds()
                 if c["arrival_time"]
                 else float("inf")
@@ -123,12 +129,12 @@ def resolve_stop_time(
     return {
         "stop_sequence": chosen["stop_sequence"],
         "scheduled_arrival_ts": (
-            parse_gtfs_time_to_dt(chosen["arrival_time"], service_date)
+            parse_gtfs_time_to_dt(chosen["arrival_time"], service_date, tz_name)
             if chosen["arrival_time"]
             else None
         ),
         "scheduled_departure_ts": (
-            parse_gtfs_time_to_dt(chosen["departure_time"], service_date)
+            parse_gtfs_time_to_dt(chosen["departure_time"], service_date, tz_name)
             if chosen["departure_time"]
             else None
         ),

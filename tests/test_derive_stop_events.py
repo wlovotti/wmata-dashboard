@@ -173,3 +173,50 @@ def test_derive_with_gtfs_snapshot_id_uses_historical_schedule(pg_session):
     assert result["rows_written"] == 1
     event = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T_HIST")).scalar_one()
     assert event.observed_arrival_ts == datetime(2026, 6, 11, 14, 0, 0)
+
+
+@pytest.mark.integration
+def test_derive_tz_name_widens_window_for_late_pacific_positions(pg_session):
+    """NOTES-100: ``tz_name`` genuinely changes the position-window bounds,
+    not just cosmetically.
+
+    A position at 2026-07-04 05:00 UTC is inside the Pacific 48h window
+    for service_date=2026-07-02 (which runs 07-02 07:00 UTC .. 07-04
+    07:00 UTC, PDT = UTC-7) but past the end of the Eastern window for
+    the same service_date (07-02 04:00 UTC .. 07-04 04:00 UTC, EDT =
+    UTC-4) -- Pacific's window closes 3h later in UTC than Eastern's.
+    Without ``tz_name`` threaded through to the window helper, this
+    position would be silently dropped for an SFMTA-style Pacific route.
+    """
+    from pipelines.derive_stop_events import derive_proximity_stop_events
+
+    _seed_route_with_two_trips(pg_session)
+    late_pacific_ts = datetime(2026, 7, 4, 5, 0, 0)
+    pg_session.add(
+        VehiclePosition(
+            vehicle_id="V1",
+            trip_id="T_LATE",
+            route_id="R1",
+            trip_start_date="20260702",
+            latitude=STOP_LAT,
+            longitude=STOP_LON,
+            timestamp=late_pacific_ts,
+        )
+    )
+    pg_session.commit()
+
+    # Default (Eastern) window misses it.
+    result_eastern = derive_proximity_stop_events(
+        pg_session, route_id="R1", service_date=date(2026, 7, 2)
+    )
+    assert result_eastern["rows_written"] == 0
+
+    # Pacific window catches it.
+    result_pacific = derive_proximity_stop_events(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 7, 2),
+        tz_name="America/Los_Angeles",
+    )
+    pg_session.commit()
+    assert result_pacific["rows_written"] == 1

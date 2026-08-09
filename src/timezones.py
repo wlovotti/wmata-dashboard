@@ -112,6 +112,60 @@ def service_date_position_window_utc(service_date):
     return start, end
 
 
+def local_today(tz_name):
+    """Return the current date in an arbitrary IANA zone.
+
+    Timezone-generic sibling of ``eastern_today`` for multi-agency
+    pipeline CLI default-date resolution (NOTES-100): the agency-aware
+    per-date pipelines (``derive_stop_events*``, ``aggregate_runs``,
+    ``compute_bunching``, ``run_daily_batch``) use this with the
+    agency's configured timezone (``config/agencies/<agency>.yaml``)
+    instead of ``eastern_today()`` so an unset ``--date`` resolves to
+    the agency's own "today" rather than always Eastern. ``tz_name`` is
+    an IANA name like ``America/Los_Angeles``.
+    """
+    return datetime.now(ZoneInfo(tz_name)).date()
+
+
+def local_midnight_as_utc(date, tz_name):
+    """Convert local midnight on ``date`` in ``tz_name`` to naive UTC.
+
+    Timezone-generic sibling of ``eastern_midnight_as_utc`` (NOTES-100).
+    Equivalent to ``eastern_midnight_as_utc(date)`` when
+    ``tz_name == "America/New_York"``.
+    """
+    aware = datetime.combine(date, datetime.min.time(), tzinfo=ZoneInfo(tz_name))
+    return aware.astimezone(UTC).replace(tzinfo=None)
+
+
+def local_day_bounds_utc(date, tz_name):
+    """Return (start, end) naive-UTC datetimes spanning one local service day.
+
+    Timezone-generic sibling of ``eastern_day_bounds_utc`` (NOTES-100).
+    Same DST-transition caveat applies: end - start may be 23 or 25 hours
+    on a transition day in ``tz_name``.
+    """
+    start = local_midnight_as_utc(date, tz_name)
+    end = local_midnight_as_utc(date + timedelta(days=1), tz_name)
+    return start, end
+
+
+def local_service_date_position_window_utc(service_date, tz_name):
+    """Return (start, end) naive-UTC bounds for GTFS-RT positions on one service date.
+
+    Timezone-generic sibling of ``service_date_position_window_utc``
+    (NOTES-100) — same ~48h-window rationale, parameterized by IANA zone
+    name so non-Eastern agencies (e.g. SFMTA, Pacific) bound their
+    VehiclePosition/TripUpdateState scans against agency-local midnight
+    instead of silently reusing Eastern. Equivalent to
+    ``service_date_position_window_utc(service_date)`` when
+    ``tz_name == "America/New_York"``.
+    """
+    start = local_midnight_as_utc(service_date, tz_name)
+    end = local_midnight_as_utc(service_date + timedelta(days=2), tz_name)
+    return start, end
+
+
 def local_date_from_naive_utc(naive_utc_dt, tz_name):
     """Return the calendar date of a naive-UTC datetime in an arbitrary IANA zone.
 

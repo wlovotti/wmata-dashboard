@@ -32,5 +32,9 @@ matched window, with the caveat footnotes rendered.
 
 ## Dependencies
 
-NOTES-100 (SFMTA metrics must exist in the rollup tables first).
-Placement/polish coordinates with NOTES-84 later — do not block on it.
+The SFMTA derivation rollout (PR #TBD) threaded `--agency` through the
+pipeline chain and fixed the schedule-anchor/service-date timezone bugs
+it would otherwise have hit; SFMTA metrics still need the backfill run
+(runbook in that PR's body) before rollup tables have real rows to
+show. Placement/polish coordinates with NOTES-84 later — do not block
+on it.

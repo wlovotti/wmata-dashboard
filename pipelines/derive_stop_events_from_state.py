@@ -11,9 +11,15 @@ Service-date attribution: as before, vehicle_positions for the same
 trip_id on the target service_date is the authoritative anchor — trip
 updates themselves don't record trip_start_date.
 
+Multi-agency (NOTES-100): pass ``--agency`` (matching a
+``config/agencies/<agency>.yaml``) to derive against a non-WMATA
+database with the correct service-date timezone. Omitting it keeps the
+WMATA/Eastern default.
+
 Usage:
     uv run python pipelines/derive_stop_events_from_state.py --route C51 --date 2026-05-03
     uv run python pipelines/derive_stop_events_from_state.py --all-routes --date 2026-05-03
+    uv run python pipelines/derive_stop_events_from_state.py --all-routes --date 2026-07-23 --agency sfmta
 """
 
 import argparse
@@ -28,11 +34,12 @@ from sqlalchemy import tuple_, update
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import parse_gtfs_time_to_dt
+from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, StopEvent, StopTime, Trip, TripUpdateState, VehiclePosition
-from src.timezones import eastern_today, service_date_position_window_utc, utcnow_naive
+from src.timezones import local_service_date_position_window_utc, local_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
 # Chunk size for the per-state-row derived_at UPDATE. The UPDATE filters on
@@ -65,12 +72,18 @@ def derive_for_route_date(
     target_table_name: str = "stop_events",
     verbose: bool = False,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
 ) -> dict:
     """Materialize stop_events for one (route, service_date) from trip_update_state.
 
     ``target_table_name`` must be "stop_events" (the production table).
     The parameter is retained for call-site compatibility; passing any
     other value raises a ``ValueError``.
+
+    ``tz_name`` (NOTES-100 multi-agency; default Eastern) bounds the
+    vehicle_positions scan used for active-trip attribution by the
+    agency's own local midnight — see
+    ``local_service_date_position_window_utc``.
 
     Returns a counters dict.
     """
@@ -101,7 +114,7 @@ def derive_for_route_date(
     # load-bearing: trip_start_date has no index, so without them this is a
     # full-table seq scan per route (see derive_stop_events.py for the full
     # story — same fix, same ~48h window).
-    window_start, window_end = service_date_position_window_utc(service_date)
+    window_start, window_end = local_service_date_position_window_utc(service_date, tz_name)
     vp_trip_ids = {
         row[0]
         for row in db.query(VehiclePosition.trip_id)
@@ -166,12 +179,12 @@ def derive_for_route_date(
             continue  # ADDED trip or stale GTFS; skip.
 
         scheduled_arrival_ts = (
-            parse_gtfs_time_to_dt(sched["arrival_time"], service_date)
+            parse_gtfs_time_to_dt(sched["arrival_time"], service_date, tz_name)
             if sched["arrival_time"]
             else None
         )
         scheduled_departure_ts = (
-            parse_gtfs_time_to_dt(sched["departure_time"], service_date)
+            parse_gtfs_time_to_dt(sched["departure_time"], service_date, tz_name)
             if sched["departure_time"]
             else None
         )
@@ -329,6 +342,15 @@ def main() -> int:
             "since been superseded by a reload (see gtfs_snapshots table)."
         ),
     )
+    parser.add_argument(
+        "--agency",
+        default="wmata",
+        help=(
+            "Agency name matching config/agencies/<agency>.yaml (default: "
+            "'wmata'). Selects the service-date timezone and target "
+            "database — see pipelines/run_daily_batch.py."
+        ),
+    )
     args = parser.parse_args()
 
     if args.route and args.all_routes:
@@ -337,8 +359,11 @@ def main() -> int:
         parser.error("pass --route or --all-routes")
 
     load_dotenv()
-    service_date = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else eastern_today()
-    db = get_session()
+    cfg = load_agency_config(args.agency)
+    service_date = (
+        datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else local_today(cfg.timezone)
+    )
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         if args.route:
             route_ids = [args.route]
@@ -357,6 +382,7 @@ def main() -> int:
             verbose=True,
             target_table_name=args.target_table,
             gtfs_snapshot_id=args.gtfs_snapshot_id,
+            tz_name=cfg.timezone,
         )
         for r in results:
             print(r)

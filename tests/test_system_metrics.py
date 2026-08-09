@@ -255,3 +255,36 @@ def test_pipeline_upserts_system_metrics_row(db_session, sample_routes, monkeypa
     )
     assert len(rows) == 1  # still exactly one row
     assert 66.0 < rows[0].otp_percentage < 67.0
+
+
+@pytest.mark.smoke
+def test_upsert_system_metrics_forwards_tz_name_to_completeness_guard(
+    db_session, sample_routes, monkeypatch
+):
+    """NOTES-100: ``tz_name`` reaches the completeness guard, not just the
+    default parameter list -- a non-Eastern agency (e.g. sfmta,
+    America/Los_Angeles) must have its coverage window checked against
+    its own local day, not silently against Eastern.
+
+    Only the completeness *guard's window* is agency-aware here; the
+    metric computation itself (OTP/EWT/bunching hour-of-day bucketing)
+    is still Eastern-hardcoded (tracked separately, NOTES-103) — this
+    test only pins down the guard's plumbing.
+    """
+    seen_tz_names = []
+
+    def _fake_coverage_pct(db, service_date, tz_name="America/New_York"):
+        seen_tz_names.append(tz_name)
+        return 1.0
+
+    def _fake_is_complete(db, service_date, threshold=0.80, tz_name="America/New_York"):
+        seen_tz_names.append(tz_name)
+        return True
+
+    monkeypatch.setattr("src.data_completeness.coverage_pct_for_date", _fake_coverage_pct)
+    monkeypatch.setattr("src.data_completeness.is_date_sufficiently_complete", _fake_is_complete)
+
+    target_date = eastern_today() - timedelta(days=5)
+    upsert_system_metrics_for_date(db_session, target_date, tz_name="America/Los_Angeles")
+
+    assert seen_tz_names == ["America/Los_Angeles", "America/Los_Angeles"]

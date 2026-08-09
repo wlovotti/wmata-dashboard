@@ -141,6 +141,7 @@ def upsert_route_metrics_for_date(
     db: Session,
     service_date: date_type,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
 ) -> int | None:
     """Compute and upsert overlay rows for every route active on `service_date`.
 
@@ -157,14 +158,20 @@ def upsert_route_metrics_for_date(
     ``coverage_pct`` so the UI can render an explicit "partial day" badge
     rather than showing a silent gap in the trend strip. Complete days
     receive ``data_quality='complete'``.
+
+    ``tz_name`` (NOTES-100 multi-agency; default Eastern) only widens the
+    completeness guard's coverage window to the agency's own local day —
+    `compute_route_metrics_overlay_for_date` (OTP/EWT/bunching
+    hour-of-day bucketing) is still Eastern-hardcoded (tracked
+    separately, NOTES-103).
     """
     from src.data_completeness import (
         coverage_pct_for_date,
         is_date_sufficiently_complete,
     )
 
-    pct = coverage_pct_for_date(db, service_date)
-    is_complete = is_date_sufficiently_complete(db, service_date)
+    pct = coverage_pct_for_date(db, service_date, tz_name=tz_name)
+    is_complete = is_date_sufficiently_complete(db, service_date, tz_name=tz_name)
     data_quality = "complete" if is_complete else "partial"
 
     if not is_complete:

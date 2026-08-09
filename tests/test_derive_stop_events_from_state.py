@@ -329,3 +329,74 @@ def test_derive_sets_derived_at_on_state_rows(pg_session):
         )
     ).scalar_one()
     assert other_date_row.derived_at is None
+
+
+@pytest.mark.integration
+def test_derive_tz_name_widens_window_for_late_pacific_positions(pg_session):
+    """NOTES-100 sibling of the equivalent test in test_derive_stop_events.py.
+
+    Active-trip attribution here comes from a vehicle_positions scan
+    windowed the same way (see local_service_date_position_window_utc).
+    A position at 2026-07-04 05:00 UTC is inside the Pacific 48h window
+    for service_date=2026-07-02 but past the end of the Eastern window
+    for the same service_date -- without tz_name threaded through, the
+    trip is invisible ("no vehicle_positions for any current trip"), so
+    even a fully-populated trip_update_state row for it is silently
+    skipped.
+    """
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T1", route_id="R1", direction_id=0, is_current=True),
+            StopTime(
+                trip_id="T1",
+                stop_sequence=1,
+                stop_id="S1",
+                arrival_time="14:05:00",
+                departure_time="14:05:30",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T1",
+                route_id="R1",
+                trip_start_date="20260702",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 7, 4, 5, 0, 0),
+            ),
+            TripUpdateState(
+                trip_id="T1",
+                stop_sequence=1,
+                service_date=date(2026, 7, 2),
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 7, 2, 14, 6, 0),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 7, 2, 14, 6, 0),
+                last_predicted_arrival_ts=datetime(2026, 7, 2, 14, 6, 30),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    result_eastern = derive_for_route_date(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 7, 2),
+        target_table_name="stop_events",
+    )
+    assert (
+        result_eastern["note"] == "No vehicle_positions for any current trip on this service_date"
+    )
+
+    result_pacific = derive_for_route_date(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 7, 2),
+        target_table_name="stop_events",
+        tz_name="America/Los_Angeles",
+    )
+    pg_session.commit()
+    assert result_pacific["rows_written"] == 1

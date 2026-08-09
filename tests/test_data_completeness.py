@@ -113,3 +113,48 @@ def test_threshold_override(pg_session):
     _insert_heartbeat_minutes(pg_session, TEST_DATE, minute_count=720)  # 50%
     assert is_date_sufficiently_complete(pg_session, TEST_DATE, threshold=0.30) is True
     assert is_date_sufficiently_complete(pg_session, TEST_DATE, threshold=0.90) is False
+
+
+@pytest.mark.smoke
+def test_expected_minutes_honors_tz_name_on_dst_transition():
+    """NOTES-100: a non-Eastern tz_name changes which day is short/long.
+
+    2026-03-08 is Eastern's spring-forward day (23h, 1380 min) but an
+    ordinary 24h day everywhere that doesn't spring forward on that date
+    (e.g. Pacific also transitions the same US day in practice, so use a
+    fixed-offset zone with no DST to prove the parameter is actually
+    threaded through, not just defaulted).
+    """
+    assert expected_minutes_for_date(TEST_DATE, tz_name="America/New_York") == 1440
+    assert expected_minutes_for_date(TEST_DATE, tz_name="Pacific/Honolulu") == 1440
+    # Eastern's spring-forward day is short (23h); a no-DST zone's isn't.
+    dst_day = date(2026, 3, 8)
+    assert expected_minutes_for_date(dst_day, tz_name="America/New_York") == 1380
+    assert expected_minutes_for_date(dst_day, tz_name="Pacific/Honolulu") == 1440
+
+
+def test_coverage_pct_uses_tz_name_window_not_eastern(pg_session):
+    """A heartbeat placed one minute before the *next* Pacific midnight
+    (23:59 Pacific on TEST_DATE) falls inside the Pacific TEST_DATE window
+    but past the end of the Eastern TEST_DATE window (which closes at
+    05:00 UTC, 3 hours before Pacific midnight even starts) -- i.e.
+    tz_name genuinely changes which rows are counted, not just cosmetic
+    labeling.
+    """
+    from datetime import timedelta
+
+    from src.timezones import local_midnight_as_utc
+
+    late_pacific_ts = local_midnight_as_utc(
+        TEST_DATE + timedelta(days=1), "America/Los_Angeles"
+    ) - timedelta(minutes=1)
+    pg_session.execute(
+        text("INSERT INTO collector_heartbeats (ts, collector_name) VALUES (:ts, 'combined')"),
+        {"ts": late_pacific_ts},
+    )
+    pg_session.flush()
+
+    pacific_pct = coverage_pct_for_date(pg_session, TEST_DATE, tz_name="America/Los_Angeles")
+    eastern_pct = coverage_pct_for_date(pg_session, TEST_DATE, tz_name="America/New_York")
+    assert pacific_pct == pytest.approx(1 / 1440)
+    assert eastern_pct == 0.0

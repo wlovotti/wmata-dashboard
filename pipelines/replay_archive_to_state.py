@@ -31,7 +31,6 @@ Usage:
 import argparse
 import itertools
 import json
-import os
 import sys
 from datetime import date as date_type
 from datetime import datetime, timedelta
@@ -42,7 +41,8 @@ import zstandard as zstd
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from src.agency_config import AgencyConfig, load_agency_config
+from src.agency_config import MissingAgencyDatabaseUrlError, load_agency_config
+from src.agency_config import resolve_agency_db_url as _resolve_agency_db_url
 from src.database import get_session
 from src.upsert_helpers import upsert_trip_update_state
 from src.wmata_collector import dedupe_trip_update_rows
@@ -69,37 +69,6 @@ class NoArchiveFilesFoundError(RuntimeError):
     derivation ran against empty state. Callers that genuinely expect
     an empty date must pass ``allow_empty=True`` explicitly.
     """
-
-
-class MissingAgencyDatabaseUrlError(RuntimeError):
-    """Raised when a non-WMATA agency's database env var isn't set.
-
-    ``get_session(db_url=None)`` silently falls back to ``DATABASE_URL``
-    (the WMATA default). Without this guard, running
-    ``--agency sfmta`` with ``SFMTA_DATABASE_URL`` unset would silently
-    replay SFMTA state into the WMATA production database instead of
-    failing — a correctness-critical footgun, not a convenience default.
-    WMATA itself is exempt: its configured env var IS ``DATABASE_URL``,
-    so an unset value there is the same, already-understood failure mode
-    ``get_session``/``get_engine`` have always had.
-    """
-
-
-def _resolve_agency_db_url(cfg: AgencyConfig) -> str | None:
-    """Return the DB URL env var value for ``cfg``, failing loudly if missing.
-
-    See ``MissingAgencyDatabaseUrlError`` for why this doesn't just let
-    ``get_session`` fall back to ``DATABASE_URL`` for non-WMATA agencies.
-    """
-    db_url = os.getenv(cfg.database_url_env)
-    if not db_url and cfg.database_url_env != "DATABASE_URL":
-        raise MissingAgencyDatabaseUrlError(
-            f"{cfg.database_url_env} is not set. Replaying agency "
-            f"{cfg.name!r} would otherwise silently fall back to "
-            "DATABASE_URL (the WMATA default) and could write into the "
-            "wrong database."
-        )
-    return db_url
 
 
 def _assert_west_of_utc(tz_name: str) -> None:

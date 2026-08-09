@@ -227,6 +227,49 @@ def test_parse_gtfs_time_handles_post_midnight_hours():
 
 
 @pytest.mark.smoke
+def test_parse_gtfs_time_tz_name_anchors_to_agency_local_zone():
+    """NOTES-100: tz_name changes which UTC instant a GTFS clock time maps to.
+
+    scheduled_arrival_ts feeds directly into deviation_sec (OTP) and every
+    downstream metric -- an SFMTA (Pacific) stop_time anchored to Eastern
+    by mistake would be off by exactly the UTC-offset difference (3h in
+    summer), not a rounding error.
+    """
+    from datetime import date
+
+    from pipelines.stop_events_common import parse_gtfs_time_to_dt
+
+    eastern = parse_gtfs_time_to_dt("14:30:00", date(2026, 7, 3), tz_name="America/New_York")
+    pacific = parse_gtfs_time_to_dt("14:30:00", date(2026, 7, 3), tz_name="America/Los_Angeles")
+    assert eastern == datetime(2026, 7, 3, 18, 30, 0)
+    assert pacific == datetime(2026, 7, 3, 21, 30, 0)
+    assert (pacific - eastern).total_seconds() == 3 * 3600
+
+
+@pytest.mark.smoke
+def test_resolve_stop_time_threads_tz_name_into_scheduled_times():
+    """resolve_stop_time's scheduled_arrival_ts/scheduled_departure_ts must
+    honor tz_name too -- it's the function derive_stop_events.py actually
+    calls per matched position, not parse_gtfs_time_to_dt directly."""
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_stop_time
+
+    candidates = [{"stop_sequence": 1, "arrival_time": "14:30:00", "departure_time": "14:30:30"}]
+    observed_ts = datetime(2026, 7, 3, 21, 30, 0)  # matches the Pacific-anchored time
+
+    eastern_result = resolve_stop_time(
+        candidates, observed_ts, date(2026, 7, 3), tz_name="America/New_York"
+    )
+    pacific_result = resolve_stop_time(
+        candidates, observed_ts, date(2026, 7, 3), tz_name="America/Los_Angeles"
+    )
+
+    assert eastern_result["scheduled_arrival_ts"] == datetime(2026, 7, 3, 18, 30, 0)
+    assert pacific_result["scheduled_arrival_ts"] == datetime(2026, 7, 3, 21, 30, 0)
+
+
+@pytest.mark.smoke
 def test_parse_trip_start_date_round_trip():
     """trip_start_date YYYYMMDD parses to a date; bad inputs return None."""
     from datetime import date

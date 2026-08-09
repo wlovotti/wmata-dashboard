@@ -27,8 +27,8 @@ serves this or is explicitly parked.
 
 ## Comparison sprint (active — work top to bottom)
 
-- [NOTES-100](notes/NOTES-100.md) SFMTA derivation end-to-end (Plan 2) — sev high / eff medium-high — unblocked
-- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — blocked by NOTES-100
+- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (backfill + parity spot-validation user-run, see PR #TBD)
+- [NOTES-103](notes/NOTES-103.md) EWT/OTP/bunching hour-of-day bucketing hardcodes Eastern — sev medium / eff medium — unblocked; only matters for hour-of-day-based SFMTA numbers
 
 ## Ops floor (not frozen — prevents a known recurring failure)
 

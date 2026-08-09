@@ -11,6 +11,8 @@ api:
   trip_updates_url: https://api.wmata.com/gtfs/bus-gtfsrt-tripupdates.pb
   vehicle_positions_url: https://api.wmata.com/gtfs/bus-gtfsrt-vehiclepositions.pb
   extra_params: {}
+  static_gtfs_url: https://api.wmata.com/gtfs/bus-gtfs-static.zip
+  static_gtfs_params: {}
 collector:
   tick_sec: 30
   trip_updates_every_ticks: 1
