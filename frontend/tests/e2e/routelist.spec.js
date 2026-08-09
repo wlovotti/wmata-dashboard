@@ -43,7 +43,17 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({ json: fixture('targets.json') })
     }
     if (url.includes('/api/gtfs/freshness')) {
-      return route.fulfill({ json: { loaded_at: '2026-05-15T10:00:00', feed_version: '2026-05-15' } })
+      // feed_end_date is far in the future so `status` is always `ok` —
+      // the NOTES-90 expiry banner must never render in visual baselines.
+      return route.fulfill({
+        json: {
+          loaded_at: '2026-05-15T10:00:00',
+          feed_version: '2026-05-15',
+          feed_start_date: '20260101',
+          feed_end_date: '20991231',
+          status: 'ok',
+        },
+      })
     }
 
     await route.continue()

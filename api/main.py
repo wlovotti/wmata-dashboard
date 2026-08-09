@@ -8,7 +8,7 @@ Endpoints provide route-level OTP, headway, and speed data.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,7 +40,7 @@ from api.aggregations import (
 )
 from api.config import settings
 from src.database import get_session
-from src.models import Corridor, GTFSSnapshot, VehiclePosition
+from src.models import Corridor, FeedInfo, GTFSSnapshot, VehiclePosition
 from src.route_diagnostics import ALL_PERIODS as DIAGNOSTIC_PERIODS
 from src.time_periods import (
     ALL_DAY_TYPES,
@@ -172,22 +172,53 @@ async def health_check():
     return health_status
 
 
+def _feed_expiry_status(feed_end_date: str | None) -> str | None:
+    """Classify a GTFS `feed_end_date` (YYYYMMDD string) against Eastern today.
+
+    Returns `"expired"` when the date has already passed, `"expiring_soon"`
+    when it falls within the next 7 days inclusive (0-7 days out, so a feed
+    valid only through today is already flagged), `"ok"` when it's more than
+    7 days out, or `None` when there's no feed_end_date to classify (fresh
+    DB, no reload yet — distinct from "ok" so the UI doesn't imply health
+    it hasn't verified).
+
+    `feed_end_date` is zero-padded 8-char YYYYMMDD per the GTFS spec (unlike
+    the unpadded `arrival_time` gotcha), so a direct `strptime` is safe.
+    """
+    if not feed_end_date:
+        return None
+    end_date = datetime.strptime(feed_end_date, "%Y%m%d").date()
+    today = eastern_today()
+    if end_date < today:
+        return "expired"
+    if end_date <= today + timedelta(days=7):
+        return "expiring_soon"
+    return "ok"
+
+
 @app.get("/api/gtfs/freshness")
 async def get_gtfs_freshness():
     """
-    Return metadata for the most recent GTFS snapshot.
+    Return metadata for the most recent GTFS snapshot, plus a feed-expiry alarm.
 
     Thin observability endpoint so the dashboard can surface a "schedule
     current as of …" indicator and a stale schedule is visible instead of
-    silent. Returns the newest row from `gtfs_snapshots` (by `snapshot_date`,
-    falling back to `created_at` for tie-breaks). When the table is empty
-    (fresh DB, no reload yet) every field is null.
+    silent (NOTES-90). Returns the newest row from `gtfs_snapshots` (by
+    `snapshot_date`, falling back to `created_at` for tie-breaks) plus the
+    newest `feed_info` row for the `feed_end_date` / `feed_start_date`
+    expiry check — `feed_info` is truncated and reinserted on every GTFS
+    reload (`scripts/reload_gtfs_complete.py`), so there's normally exactly
+    one row, but we still order defensively. When either table is empty
+    (fresh DB, no reload yet) the corresponding fields are null.
 
     Returns:
-        Dict with `snapshot_date`, `created_at`, `feed_version`, and the
-        per-table counts at load time. Datetimes are ISO8601 strings (naive
-        UTC, matching storage convention); the frontend converts to Eastern
-        for display.
+        Dict with `snapshot_date`, `created_at`, `feed_version`, the
+        per-table counts at load time, `feed_start_date`, `feed_end_date`
+        (raw YYYYMMDD strings), and `status` — one of `expired` /
+        `expiring_soon` (within 7 days inclusive) / `ok`, or null when
+        `feed_end_date` is unavailable. Datetimes are ISO8601 strings
+        (naive UTC, matching storage convention); the frontend converts to
+        Eastern for display.
     """
     db = get_session()
     try:
@@ -196,23 +227,37 @@ async def get_gtfs_freshness():
             .order_by(GTFSSnapshot.snapshot_date.desc(), GTFSSnapshot.created_at.desc())
             .first()
         )
-        if snapshot is None:
-            return {
-                "snapshot_date": None,
-                "created_at": None,
-                "feed_version": None,
-                "routes_count": None,
-                "stops_count": None,
-                "trips_count": None,
-            }
-        return {
-            "snapshot_date": snapshot.snapshot_date.isoformat() if snapshot.snapshot_date else None,
-            "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
-            "feed_version": snapshot.feed_version,
-            "routes_count": snapshot.routes_count,
-            "stops_count": snapshot.stops_count,
-            "trips_count": snapshot.trips_count,
+        feed_info = (
+            db.query(FeedInfo).order_by(FeedInfo.created_at.desc(), FeedInfo.id.desc()).first()
+        )
+        feed_end_date = feed_info.feed_end_date if feed_info else None
+        feed_start_date = feed_info.feed_start_date if feed_info else None
+
+        result = {
+            "snapshot_date": None,
+            "created_at": None,
+            "feed_version": None,
+            "routes_count": None,
+            "stops_count": None,
+            "trips_count": None,
+            "feed_start_date": feed_start_date,
+            "feed_end_date": feed_end_date,
+            "status": _feed_expiry_status(feed_end_date),
         }
+        if snapshot is not None:
+            result.update(
+                {
+                    "snapshot_date": snapshot.snapshot_date.isoformat()
+                    if snapshot.snapshot_date
+                    else None,
+                    "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+                    "feed_version": snapshot.feed_version,
+                    "routes_count": snapshot.routes_count,
+                    "stops_count": snapshot.stops_count,
+                    "trips_count": snapshot.trips_count,
+                }
+            )
+        return result
     finally:
         db.close()
 

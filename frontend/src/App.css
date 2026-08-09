@@ -158,6 +158,28 @@ header h1 {
   color: #475569;
 }
 
+/* Feed-expiry alarm (NOTES-90). Sits in the app chrome between the header
+   actions row and the primary nav, so it's visible on every page — a stale
+   GTFS schedule (feed_end_date passed unnoticed) is now a visible signal
+   instead of something you only find by ssh-ing in. Only rendered when
+   status is expired/expiring_soon; ok/unknown statuses render nothing. */
+.gtfs-expiry-banner {
+  padding: 0.6rem 1.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.gtfs-expiry-banner-yellow {
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.gtfs-expiry-banner-red {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
 .see-all-link {
   color: #002F6C;
   font-weight: 600;

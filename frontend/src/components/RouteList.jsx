@@ -4,6 +4,7 @@ import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { computeSpectrumBar } from '../utils/spectrumBar'
 import { formatContribMetricValue } from '../utils/formatters'
 import { DeltaIndicator } from './RouteTrend'
+import useGtfsFreshness from '../hooks/useGtfsFreshness'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -11,7 +12,6 @@ import { DeltaIndicator } from './RouteTrend'
 // so the background fetch is cheap when warm.
 let _cachedRoutes = null
 let _cachedWindow = null
-let _cachedGtfsFreshness = null
 
 // Inline target subline for the scorecard table cells (NOTES-47).
 // `current` and `target` should already be in the same units the cell
@@ -183,7 +183,7 @@ function RouteList() {
   const [error, setError] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [sortConfig, setSortConfig] = useState({ key: 'route_name', direction: 'asc' })
-  const [gtfsFreshness, setGtfsFreshness] = useState(_cachedGtfsFreshness)
+  const gtfsFreshness = useGtfsFreshness()
   // Mode toggle: 'contributors' (NOTES-39, default after NOTES-51) vs
   // 'default' (full alphabetic scorecard table, now collapsed behind a
   // <details> disclosure). Clicking the "Default" toggle still flips the
@@ -226,24 +226,8 @@ function RouteList() {
       })
   }
 
-  // Pure observability — failures are silent; the footer just doesn't render.
-  const fetchGtfsFreshness = () => {
-    return fetch('/api/gtfs/freshness')
-      .then(res => (res.ok ? res.json() : null))
-      .then(data => {
-        if (data) {
-          setGtfsFreshness(data)
-          _cachedGtfsFreshness = data
-        }
-      })
-      .catch(() => {
-        // Swallow — this is informational; don't surface to the user.
-      })
-  }
-
   useEffect(() => {
     fetchRoutes().finally(() => setLoading(false))
-    fetchGtfsFreshness()
   }, [])
 
   // Fetch contributors only while the contributors mode is selected, and
