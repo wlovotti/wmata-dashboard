@@ -6,7 +6,15 @@ Item numbers (`NOTES-N`) are stable; new items take the next number.
 NOTES.md edits ride on substantive PRs; standalone reconciliation PRs
 are churn.
 
-Last edited 2026-07-18 (third edit). Added NOTES-95: the
+Last edited 2026-08-08. Added NOTES-97 — SFMTA raw snapshots
+(`archive/sfmta_raw_snapshots/`, writing since 7/22) have no sync path:
+`bin/pull-and-derive.sh` rsyncs only `raw_snapshots` and no S3 prefix
+exists, so the sidecar's output is single-copy on the VM root disk.
+Added NOTES-98 — the "14-day JSONL buffer pruning" NOTES-95 refers to
+was never installed; the manual laptop sync is the VM archive's only
+drain, and the root disk was found at 87% on 2026-08-08 (~5–6 days of
+runway) with 40 GB of unpruned archive.
+Earlier (2026-07-18, third edit). Added NOTES-95: the
 stateless-collector rewrite now has a tracking item — it was previously
 referenced only as a dangling "tracked there" pointer in NOTES-91 while
 four postmortem actions (staleness alarm, cutover job inventory,
@@ -286,6 +294,16 @@ the fixing PR, not a NOTES item.
   tier; laptop pulls from S3. Carries four deferred items as acceptance
   criteria (staleness alarm, cutover job inventory, downsize, retention
   chores replaced by upload). Needs its own spec/plan cycle.
+- **NOTES-97 SFMTA raw snapshots have no sync path.** The sidecar's
+  `archive/sfmta_raw_snapshots/` output is single-copy on the VM root
+  disk — `bin/pull-and-derive.sh` rsyncs only `raw_snapshots` and no S3
+  prefix exists. Disk-fill risk plus a Plan 2 prerequisite (replay needs
+  the files laptop-side).
+- **NOTES-98 VM JSONL archive has no automated drain.** The "14-day
+  buffer pruning" NOTES-95 references was never installed; the manual
+  laptop sync is the only thing that empties the archive, and it doesn't
+  delete. Root disk found at 87% on 2026-08-08 growing ~1.3 GB/day —
+  the July disk-fill failure mode on a timer.
 
 ### Independent of the redesign
 
@@ -1022,6 +1040,68 @@ Work:
    through to `_service_date_for_row`.
 2. Extract the stop_sequence dedup logic from `src/wmata_collector.py:_save_trip_updates`
    into a shared helper and call it in the replay path before upsert.
+
+---
+
+## NOTES-97. SFMTA raw snapshots have no sync path
+
+**Severity: medium (single-copy data on a filling disk; also blocks
+Plan 2 replay, which needs the files laptop-side).**
+**Effort: low (extend `bin/pull-and-derive.sh` + pick an S3 prefix).**
+
+Discovered 2026-08-08 during a VM health check. The SFMTA sidecar
+(deployed 2026-07-22, Plan 1 of the peer-comparison arc) writes zstd
+JSONL to `/home/wmata/wmata-dashboard/archive/sfmta_raw_snapshots/`
+(5.7 GB and growing ~0.34 GB/day as of 2026-08-08), but nothing moves
+those files anywhere: `bin/pull-and-derive.sh` hardcodes
+`REMOTE_ARCHIVE=.../archive/raw_snapshots` (WMATA only), and
+`s3://wmata-dashboard-backups/raw-jsonl-archive/` has no SFMTA prefix.
+Unlike the WMATA feed, the SFMTA raw files are the *only* copy — the
+sidecar's rows do land in VM Postgres, but the raw JSONL is the replay
+input NOTES-96 / Plan 2 depends on.
+
+Work: (1) rsync `sfmta_raw_snapshots/` in `pull-and-derive.sh` alongside
+the WMATA dir (a second rsync line; keep the dirs separate locally);
+(2) establish `raw-jsonl-archive/sfmta/` in S3 and include it in the
+manual sync; (3) confirm the IAM user's `PutObject` grant covers the new
+prefix (the policy grants prefixes, not the bucket root). Folds into
+NOTES-95's upload loop if the rewrite lands first.
+
+### Dependencies
+
+None to start. Related: NOTES-95 (subsumes this on landing), NOTES-96
+(consumes the files this item preserves).
+
+---
+
+## NOTES-98. VM JSONL archive has no automated drain
+
+**Severity: high (root disk at 87% on 2026-08-08, growing ~1.3 GB/day —
+the July disk-fill failure mode recurs on a timer without manual
+intervention).**
+**Effort: low (a prune-after-verified-sync step or documented cadence;
+the real fix is NOTES-95).**
+
+The "VM's 14-day JSONL buffer pruning" that NOTES-95 lists among the
+retention chores was never actually installed — a 2026-08-08 check found
+`archive/raw_snapshots/` holding contiguous files back to 2026-07-03
+(34 GB) plus 5.7 GB of SFMTA snapshots (NOTES-97), totaling 40 GB of the
+58 GB root disk. The manual laptop-side sync is the only drain, and it
+copies without deleting. At ~1.3 GB/day combined growth (WMATA ~0.95 +
+SFMTA ~0.34), the disk fills in days-to-weeks whenever the sync lapses —
+it had lapsed for 3 weeks (since 7/18) when this was found.
+
+Work: after each verified sync (files present in S3 with matching
+sizes), delete VM-side JSONL older than a safety window (e.g. 7 days).
+Either document it as a step in the sync runbook or install the small
+timer NOTES-95 assumed existed. Interim remediation 2026-08-08: manual
+verify-then-delete of the already-synced 7/3–7/18 files. NOTES-95's
+hourly-upload design retires this item entirely.
+
+### Dependencies
+
+NOTES-97 (SFMTA files must have a sync path before any prune can safely
+touch that dir). Superseded by NOTES-95 when it lands.
 
 ---
 
