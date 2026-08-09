@@ -19,10 +19,16 @@ only began populating `trip_start_date` on 2026-05-03; positions before that
 have it null and will not be picked up by this pipeline. That is an explicit
 forward-only design choice — historical backfill is not in scope.
 
+Multi-agency (NOTES-100): pass ``--agency`` (matching a
+``config/agencies/<agency>.yaml``) to derive against a non-WMATA
+database with the correct service-date timezone. Omitting it keeps the
+WMATA/Eastern default.
+
 Usage:
   uv run python pipelines/derive_stop_events.py --route C51 --date 2026-05-03
   uv run python pipelines/derive_stop_events.py --all-routes --date 2026-05-03
-  uv run python pipelines/derive_stop_events.py --all-routes  # defaults to today (Eastern)
+  uv run python pipelines/derive_stop_events.py --all-routes  # defaults to today (agency-local)
+  uv run python pipelines/derive_stop_events.py --all-routes --date 2026-07-23 --agency sfmta
 """
 
 import argparse
@@ -39,11 +45,12 @@ from pipelines.stop_events_common import (
     parse_trip_start_date,
     resolve_stop_time,
 )
+from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, Stop, StopEvent, StopTime, Trip, VehiclePosition
-from src.timezones import eastern_today, service_date_position_window_utc, utcnow_naive
+from src.timezones import local_service_date_position_window_utc, local_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
 PROXIMITY_THRESHOLD_M = 50.0
@@ -57,6 +64,7 @@ def derive_proximity_stop_events(
     proximity_m: float = PROXIMITY_THRESHOLD_M,
     verbose: bool = False,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
 ) -> dict:
     """Materialize stop_events for one (route_id, service_date) with source='proximity'.
 
@@ -65,6 +73,10 @@ def derive_proximity_stop_events(
     each to the nearest scheduled stop within `proximity_m`, keeps the FIRST
     detection per (trip_id, stop_sequence), and upserts a stop_event row per
     surviving observation. Returns counters describing the run.
+
+    ``tz_name`` (NOTES-100 multi-agency; default Eastern) bounds the
+    vehicle_positions scan window by the agency's own local midnight —
+    see ``local_service_date_position_window_utc``.
     """
     start_ts = time.time()
     trip_start_date_str = service_date.strftime("%Y%m%d")
@@ -80,7 +92,7 @@ def derive_proximity_stop_events(
     # (~35s/route on prod — the 2026-06/07 nightly-batch outage). Bounded,
     # the query uses idx_route_timestamp. The window is generous (~48h) so
     # past-midnight service is never dropped.
-    window_start, window_end = service_date_position_window_utc(service_date)
+    window_start, window_end = local_service_date_position_window_utc(service_date, tz_name)
     positions = (
         db.query(VehiclePosition)
         .filter(
@@ -199,7 +211,7 @@ def derive_proximity_stop_events(
         # trip_start_date drifts (e.g., legacy rows that lack the field fall
         # back to the requested service_date).
         position_service_date = parse_trip_start_date(pos.trip_start_date) or service_date
-        chosen = resolve_stop_time(candidates, pos.timestamp, position_service_date)
+        chosen = resolve_stop_time(candidates, pos.timestamp, position_service_date, tz_name)
         if chosen is None:
             continue
 
@@ -293,6 +305,7 @@ def derive_for_routes(
     service_date: date_type,
     proximity_m: float = PROXIMITY_THRESHOLD_M,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
 ) -> list[dict]:
     """Drive `derive_proximity_stop_events` over a list of routes, one date."""
     return run_route_date_grid(
@@ -303,6 +316,7 @@ def derive_for_routes(
         proximity_m=proximity_m,
         verbose=True,
         gtfs_snapshot_id=gtfs_snapshot_id,
+        tz_name=tz_name,
     )
 
 
@@ -337,6 +351,15 @@ def main():
             "since been superseded by a reload (see gtfs_snapshots table)."
         ),
     )
+    parser.add_argument(
+        "--agency",
+        default="wmata",
+        help=(
+            "Agency name matching config/agencies/<agency>.yaml (default: "
+            "'wmata'). Selects the service-date timezone and target "
+            "database — see pipelines/run_daily_batch.py."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.route and not args.all_routes:
@@ -345,12 +368,13 @@ def main():
         parser.error("--route and --all-routes are mutually exclusive")
 
     load_dotenv()
+    cfg = load_agency_config(args.agency)
     if args.date:
         service_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     else:
-        service_date = eastern_today()
+        service_date = local_today(cfg.timezone)
 
-    db = get_session()
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         if args.route:
             route_ids = [args.route]
@@ -369,6 +393,7 @@ def main():
             service_date,
             proximity_m=args.proximity_meters,
             gtfs_snapshot_id=args.gtfs_snapshot_id,
+            tz_name=cfg.timezone,
         )
 
         total_positions = sum(r["positions"] for r in results)

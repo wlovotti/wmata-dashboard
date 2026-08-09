@@ -34,34 +34,90 @@ written to or used for completeness accounting.
 """
 
 from datetime import date as date_type
+from math import lcm
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from src.timezones import eastern_day_bounds_utc
+from src.agency_config import AgencyConfig
+from src.timezones import local_day_bounds_utc
 
 MIN_COVERAGE_FOR_MATERIALIZATION = 0.80
 
 
-def expected_minutes_for_date(service_date: date_type) -> int:
-    """Return the number of clock-minutes in the Eastern service day.
+def agency_coverage_threshold(cfg: AgencyConfig) -> float:
+    """Return the completeness-guard threshold for one agency's polling cadence.
 
-    Normally 1,440 (24 h); on DST spring-forward days the Eastern day
+    ``MIN_COVERAGE_FOR_MATERIALIZATION`` (0.80) implicitly assumed a
+    collector that can reach ~100% minute-coverage under perfect
+    collection -- true for WMATA, where TripUpdates is polled every
+    tick (``trip_updates_every_ticks == 1``), so the collector writes a
+    heartbeat every tick and every clock-minute is coverable.
+
+    It is NOT true for an agency that polls both TripUpdates and
+    VehiclePositions less than once per tick (NOTES-100 follow-up):
+    the collector heartbeat fires only on ticks where it actually
+    polled something (see the collector's heartbeat-write call sites),
+    so the *theoretical maximum* achievable coverage is the fraction of
+    ticks, over one full LCM cycle of the two polling periods, on which
+    at least one feed is polled. For SFMTA
+    (``trip_updates_every_ticks=2``, ``vehicle_positions_every_ticks=3``)
+    that ceiling is 4/6 ≈ 66.7% -- meaning the flat 0.80 threshold can
+    NEVER be satisfied, even by a perfectly healthy SFMTA day with zero
+    collector downtime. Every SFMTA date would be permanently flagged
+    `data_quality='partial'`, which defeats the flag's purpose (it's
+    supposed to distinguish a real collector gap from a healthy day).
+
+    This function keeps the *same relative safety margin* the original
+    constant expressed (a plausible-dip-tolerant, healthy-day-permissive
+    80%) but scales it by the agency's own cadence ceiling instead of
+    assuming that ceiling is 100%.
+
+    Note: this is exact when ``tick_sec`` is a multiple of 60 (true for
+    both configured agencies today, 30s and 60s respectively) or when
+    every tick is active (the WMATA case) -- a sub-minute tick_sec with
+    a non-trivial cadence would need tick-to-minute deduplication logic
+    not implemented here, since no configured agency needs it yet.
+
+    Args:
+        cfg: The agency's ``AgencyConfig`` (uses ``tick_sec`` only for
+            documentation context; the ceiling itself depends on the
+            ``*_every_ticks`` ratio, not the absolute tick length).
+
+    Returns:
+        ``MIN_COVERAGE_FOR_MATERIALIZATION`` scaled by the agency's
+        cadence-derived coverage ceiling, in ``(0.0, MIN_COVERAGE_FOR_MATERIALIZATION]``.
+    """
+    tu, vp = cfg.trip_updates_every_ticks, cfg.vehicle_positions_every_ticks
+    cycle_ticks = lcm(tu, vp)
+    active_ticks = sum(1 for i in range(1, cycle_ticks + 1) if i % tu == 0 or i % vp == 0)
+    ceiling = active_ticks / cycle_ticks
+    return MIN_COVERAGE_FOR_MATERIALIZATION * ceiling
+
+
+def expected_minutes_for_date(service_date: date_type, tz_name: str = "America/New_York") -> int:
+    """Return the number of clock-minutes in the local service day.
+
+    Normally 1,440 (24 h); on DST spring-forward days the local day
     spans 23 h (1,380 min) and on fall-back days 25 h (1,500 min). Using
-    the actual Eastern-day duration as the denominator means the
+    the actual local-day duration as the denominator means the
     coverage threshold stays interpretable across DST transitions.
 
     Args:
-        service_date: Eastern operational date.
+        service_date: Operational date in ``tz_name``.
+        tz_name: IANA timezone name (NOTES-100 multi-agency; default
+            Eastern, matching every WMATA call site).
 
     Returns:
-        Total minutes between Eastern midnight and the next Eastern midnight.
+        Total minutes between local midnight and the next local midnight.
     """
-    start_utc, end_utc = eastern_day_bounds_utc(service_date)
+    start_utc, end_utc = local_day_bounds_utc(service_date, tz_name)
     return int((end_utc - start_utc).total_seconds() // 60)
 
 
-def _coverage_minutes(db: Session, service_date: date_type) -> int:
+def _coverage_minutes(
+    db: Session, service_date: date_type, tz_name: str = "America/New_York"
+) -> int:
     """Count distinct minute-buckets that have at least one ingest row.
 
     Unions ``collector_heartbeats.ts`` and ``vehicle_positions.timestamp``
@@ -73,13 +129,15 @@ def _coverage_minutes(db: Session, service_date: date_type) -> int:
 
     Args:
         db: SQLAlchemy session.
-        service_date: Eastern operational date to measure.
+        service_date: Operational date in ``tz_name`` to measure.
+        tz_name: IANA timezone name (NOTES-100 multi-agency; default
+            Eastern, matching every WMATA call site).
 
     Returns:
         Count of distinct UTC minute-buckets, in ``[0, expected_minutes]``,
-        within the Eastern-day window.
+        within the local-day window.
     """
-    start_utc, end_utc = eastern_day_bounds_utc(service_date)
+    start_utc, end_utc = local_day_bounds_utc(service_date, tz_name)
     dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
     if dialect == "sqlite":
         bucket_expr_hb = "strftime('%Y-%m-%d %H:%M:00', ts)"
@@ -107,7 +165,9 @@ def _coverage_minutes(db: Session, service_date: date_type) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-def coverage_pct_for_date(db: Session, service_date: date_type) -> float:
+def coverage_pct_for_date(
+    db: Session, service_date: date_type, tz_name: str = "America/New_York"
+) -> float:
     """Return the fraction of in-day minute-buckets with ingest coverage.
 
     A full healthy day scores ≥ 0.99 in observed history (the collector
@@ -117,21 +177,24 @@ def coverage_pct_for_date(db: Session, service_date: date_type) -> float:
 
     Args:
         db: SQLAlchemy session.
-        service_date: Eastern operational date to evaluate.
+        service_date: Operational date in ``tz_name`` to evaluate.
+        tz_name: IANA timezone name (NOTES-100 multi-agency; default
+            Eastern, matching every WMATA call site).
 
     Returns:
         Float in ``[0.0, 1.0]``.
     """
-    expected = expected_minutes_for_date(service_date)
+    expected = expected_minutes_for_date(service_date, tz_name)
     if expected <= 0:
         return 0.0
-    return _coverage_minutes(db, service_date) / expected
+    return _coverage_minutes(db, service_date, tz_name) / expected
 
 
 def is_date_sufficiently_complete(
     db: Session,
     service_date: date_type,
     threshold: float = MIN_COVERAGE_FOR_MATERIALIZATION,
+    tz_name: str = "America/New_York",
 ) -> bool:
     """Return True iff the date has enough coverage to materialize aggregates for.
 
@@ -143,10 +206,12 @@ def is_date_sufficiently_complete(
 
     Args:
         db: SQLAlchemy session.
-        service_date: Eastern operational date to check.
+        service_date: Operational date in ``tz_name`` to check.
         threshold: Minimum coverage fraction to count as "complete".
+        tz_name: IANA timezone name (NOTES-100 multi-agency; default
+            Eastern, matching every WMATA call site).
 
     Returns:
-        True when ``coverage_pct_for_date(db, service_date) >= threshold``.
+        True when ``coverage_pct_for_date(db, service_date, tz_name) >= threshold``.
     """
-    return coverage_pct_for_date(db, service_date) >= threshold
+    return coverage_pct_for_date(db, service_date, tz_name) >= threshold

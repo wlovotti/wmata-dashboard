@@ -227,6 +227,49 @@ def test_parse_gtfs_time_handles_post_midnight_hours():
 
 
 @pytest.mark.smoke
+def test_parse_gtfs_time_tz_name_anchors_to_agency_local_zone():
+    """NOTES-100: tz_name changes which UTC instant a GTFS clock time maps to.
+
+    scheduled_arrival_ts feeds directly into deviation_sec (OTP) and every
+    downstream metric -- an SFMTA (Pacific) stop_time anchored to Eastern
+    by mistake would be off by exactly the UTC-offset difference (3h in
+    summer), not a rounding error.
+    """
+    from datetime import date
+
+    from pipelines.stop_events_common import parse_gtfs_time_to_dt
+
+    eastern = parse_gtfs_time_to_dt("14:30:00", date(2026, 7, 3), tz_name="America/New_York")
+    pacific = parse_gtfs_time_to_dt("14:30:00", date(2026, 7, 3), tz_name="America/Los_Angeles")
+    assert eastern == datetime(2026, 7, 3, 18, 30, 0)
+    assert pacific == datetime(2026, 7, 3, 21, 30, 0)
+    assert (pacific - eastern).total_seconds() == 3 * 3600
+
+
+@pytest.mark.smoke
+def test_resolve_stop_time_threads_tz_name_into_scheduled_times():
+    """resolve_stop_time's scheduled_arrival_ts/scheduled_departure_ts must
+    honor tz_name too -- it's the function derive_stop_events.py actually
+    calls per matched position, not parse_gtfs_time_to_dt directly."""
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_stop_time
+
+    candidates = [{"stop_sequence": 1, "arrival_time": "14:30:00", "departure_time": "14:30:30"}]
+    observed_ts = datetime(2026, 7, 3, 21, 30, 0)  # matches the Pacific-anchored time
+
+    eastern_result = resolve_stop_time(
+        candidates, observed_ts, date(2026, 7, 3), tz_name="America/New_York"
+    )
+    pacific_result = resolve_stop_time(
+        candidates, observed_ts, date(2026, 7, 3), tz_name="America/Los_Angeles"
+    )
+
+    assert eastern_result["scheduled_arrival_ts"] == datetime(2026, 7, 3, 18, 30, 0)
+    assert pacific_result["scheduled_arrival_ts"] == datetime(2026, 7, 3, 21, 30, 0)
+
+
+@pytest.mark.smoke
 def test_parse_trip_start_date_round_trip():
     """trip_start_date YYYYMMDD parses to a date; bad inputs return None."""
     from datetime import date
@@ -1714,7 +1757,22 @@ def _minimal_gtfs_fixture() -> dict[str, list[dict]]:
                 "timepoint": "1",
             },
         ],
-        "shapes": [],
+        "shapes": [
+            {
+                "shape_id": "SHP1",
+                "shape_pt_lat": "38.9072",
+                "shape_pt_lon": "-77.0369",
+                "shape_pt_sequence": "1",
+                "shape_dist_traveled": "",
+            },
+            {
+                "shape_id": "SHP1",
+                "shape_pt_lat": "38.9100",
+                "shape_pt_lon": "-77.0400",
+                "shape_pt_sequence": "2",
+                "shape_dist_traveled": "500.0",
+            },
+        ],
         "calendar": [
             {
                 "service_id": "WK",
@@ -1784,6 +1842,80 @@ def test_apply_gtfs_to_db_succeeds_on_empty_db(db_session):
 
     agency = db_session.query(Agency).filter_by(agency_id="1").one()
     assert agency.agency_name == "WMATA"
+
+
+@pytest.mark.smoke
+def test_apply_gtfs_to_db_loads_shapes(db_session):
+    """shapes.txt rows are inserted, not silently dropped.
+
+    Regression test: `apply_gtfs_to_db` parsed `shapes.txt` into
+    `gtfs_data["shapes"]` but never inserted `Shape` rows -- only
+    `scripts/init_database.py`'s one-time seed did. A fresh database
+    that only ever goes through `reload_gtfs_complete.py` (e.g. the
+    SFMTA sidecar, which never runs `init_database.py`) would have a
+    permanently empty `shapes` table with no recovery path
+    (`init_database.py` refuses to run once a snapshot exists).
+    """
+    from scripts.reload_gtfs_complete import apply_gtfs_to_db
+    from src.models import Shape
+
+    db_session.execute(text("PRAGMA foreign_keys = ON"))
+    apply_gtfs_to_db(db_session, _minimal_gtfs_fixture())
+
+    shapes = (
+        db_session.query(Shape).filter_by(shape_id="SHP1").order_by(Shape.shape_pt_sequence).all()
+    )
+    assert len(shapes) == 2
+    assert shapes[0].shape_pt_sequence == 1
+    assert shapes[0].shape_pt_lat == pytest.approx(38.9072)
+    assert shapes[1].shape_dist_traveled == pytest.approx(500.0)
+
+
+@pytest.mark.smoke
+def test_apply_gtfs_to_db_refreshes_shapes_on_reload(db_session):
+    """Unversioned-table refresh (NOTES-100 follow-up): a second reload
+    with different shape data replaces the old rows, matching the
+    truncate-then-reinsert pattern `apply_gtfs_to_db` already uses for
+    `feed_info` / `timepoints` / `timepoint_times`."""
+    from scripts.reload_gtfs_complete import apply_gtfs_to_db
+    from src.models import Shape
+
+    db_session.execute(text("PRAGMA foreign_keys = ON"))
+    apply_gtfs_to_db(db_session, _minimal_gtfs_fixture())
+    db_session.flush()
+    assert db_session.query(Shape).count() == 2
+
+    fixture = _minimal_gtfs_fixture()
+    fixture["shapes"] = [
+        {
+            "shape_id": "SHP2",
+            "shape_pt_lat": "39.0",
+            "shape_pt_lon": "-77.1",
+            "shape_pt_sequence": "1",
+            "shape_dist_traveled": "",
+        }
+    ]
+    apply_gtfs_to_db(db_session, fixture)
+
+    remaining = db_session.query(Shape).all()
+    assert len(remaining) == 1
+    assert remaining[0].shape_id == "SHP2"
+
+
+@pytest.mark.smoke
+def test_apply_gtfs_to_db_missing_required_field_raises_clear_error(db_session):
+    """A GTFS export missing a whole required column (e.g. a single-agency
+    feed that omits `agency_id` entirely, which GTFS treats as
+    conditionally required) fails with a message naming the field and
+    row, not a bare `KeyError: 'agency_id'`."""
+    from scripts.reload_gtfs_complete import apply_gtfs_to_db
+
+    db_session.execute(text("PRAGMA foreign_keys = ON"))
+    fixture = _minimal_gtfs_fixture()
+    del fixture["agency"][0]["agency_id"]
+
+    with pytest.raises(RuntimeError, match="agency_id"):
+        apply_gtfs_to_db(db_session, fixture)
 
 
 @pytest.mark.smoke

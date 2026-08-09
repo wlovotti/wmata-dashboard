@@ -31,14 +31,42 @@ this wrapper is safe — the catch-up branch will replace any partial rows
 with a clean re-derivation.
 
 Logs land in `logs/daily_batch_<YYYY-MM-DD>.log` (Eastern date the batch
-ran on, not the service date). The `logs/` dir is gitignored (see
+ran on, not the service date) — or `logs/daily_batch_<agency>_<date>.log`
+for a non-default `--agency`, so a concurrent SFMTA run doesn't
+interleave with the WMATA log. The `logs/` dir is gitignored (see
 .gitignore line 41) and is the same convention the continuous collector
 uses.
+
+Multi-agency (NOTES-100): pass `--agency` (matching a
+`config/agencies/<agency>.yaml`) to run the per-date pipeline chain
+(derive_stop_events*, aggregate_runs, compute_bunching,
+upsert_system_metrics_daily, upsert_route_metrics_overlay) against a
+non-WMATA database with the correct service-date timezone. The
+non-date-scoped HOUSEKEEPING_PIPELINES below are skipped entirely for
+any agency other than the default: three of the four
+(refresh_route_diagnostic_profile, refresh_cross_route_segments,
+refresh_corridor_slip) are NOT agency-aware and always target
+`DATABASE_URL` (WMATA); the fourth, `cleanup_trip_update_state.py`, IS
+agency-aware but needs its own separate invocation/schedule per agency
+(`cleanup_trip_update_state.py --agency sfmta`) rather than running
+here, so `run_batch` skips the whole group rather than a non-WMATA run
+silently touching the WMATA database. Omitting `--agency` keeps
+today's WMATA/Eastern behavior, including housekeeping, unchanged.
+
+WARNING (NOTES-103): the six per-date pipelines above are correct for
+`otp_percentage` and `service_delivered_ratio` for any agency, but
+`ewt_seconds` and `bunching_rate` are hardcoded to Eastern hour-of-day
+bucketing internally and will be WRONG for a Pacific (or any non-Eastern)
+agency until NOTES-103 lands — see that item for the full analysis.
+`run_daily_batch.py --agency sfmta` runs today and writes rows, it just
+writes wrong EWT/bunching numbers alongside correct OTP/service-delivered
+ones.
 
 Usage:
   uv run python pipelines/run_daily_batch.py
   uv run python pipelines/run_daily_batch.py --lookback-days 14   # wider catch-up
   uv run python pipelines/run_daily_batch.py --dry-run            # print plan, don't execute
+  uv run python pipelines/run_daily_batch.py --agency sfmta       # SFMTA sidecar DB
 """
 
 import argparse
@@ -51,13 +79,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
 from src.date_ranges import iter_eastern_dates
 from src.models import Route, Run
-from src.timezones import eastern_today
+from src.timezones import eastern_today, local_today
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
+DEFAULT_AGENCY = "wmata"
 
 
 # Order matters. The first two are independent (both write stop_events from
@@ -161,22 +191,31 @@ HOUSEKEEPING_PIPELINES: list[dict] = [
 ]
 
 
-def determine_target_dates(lookback_days: int = 7) -> list[date_type]:
+def determine_target_dates(lookback_days: int = 7, agency: str = DEFAULT_AGENCY) -> list[date_type]:
     """Return the service dates this batch should process.
 
-    Always includes yesterday (Eastern). Additionally scans the prior
-    `lookback_days` service dates and includes any that have ZERO rows in
-    `runs` — those are catch-up targets where the scheduler missed a day.
+    Always includes yesterday (agency-local; Eastern for the default
+    `wmata` agency). Additionally scans the prior `lookback_days` service
+    dates and includes any that have ZERO rows in `runs` — those are
+    catch-up targets where the scheduler missed a day.
 
     Service dates are returned in ascending order (oldest first) so the
     catch-up pipelines see data in chronological order, matching how a
     human would re-run them.
+
+    Args:
+        lookback_days: How far back to scan for catch-up dates.
+        agency: Agency name matching `config/agencies/<agency>.yaml`
+            (NOTES-100 multi-agency; default `"wmata"`). Selects the
+            timezone used for "today"/"yesterday" and the database
+            queried for the catch-up scan.
     """
-    today = eastern_today()
+    cfg = load_agency_config(agency)
+    today = local_today(cfg.timezone)
     yesterday = today - timedelta(days=1)
 
     catch_up_window: list[date_type] = []
-    db = get_session()
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         # Scan from (today - lookback_days) up to (today - 2 == yesterday - 1).
         # Yesterday itself is always processed; skip it in the catch-up
@@ -195,12 +234,18 @@ def determine_target_dates(lookback_days: int = 7) -> list[date_type]:
     return targets
 
 
-def list_active_route_ids() -> list[str]:
+def list_active_route_ids(agency: str = DEFAULT_AGENCY) -> list[str]:
     """Return the route_ids of every current GTFS route, sorted.
 
     `is_current=True` is the project-wide GTFS versioning filter.
+
+    Args:
+        agency: Agency name matching `config/agencies/<agency>.yaml`
+            (NOTES-100 multi-agency; default `"wmata"`). Selects the
+            database queried.
     """
-    db = get_session()
+    cfg = load_agency_config(agency)
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         rows = db.query(Route.route_id).filter(Route.is_current).order_by(Route.route_id).all()
         return [r[0] for r in rows]
@@ -240,6 +285,7 @@ def run_pipeline(
     service_date: date_type,
     log_handle,
     extra_args: list[str] | None = None,
+    agency: str = DEFAULT_AGENCY,
 ) -> tuple[int, float]:
     """Run a single pipeline module via `python -m ...` for one service date.
 
@@ -250,6 +296,13 @@ def run_pipeline(
     ``extra_args`` is appended after ``--all-routes --date X`` for pipelines
     that need additional flags. None of the currently-configured pipelines
     use it; the hook remains for future per-pipeline overrides.
+
+    ``agency`` (NOTES-100 multi-agency) is always appended as
+    `--agency <agency>` — every per-date pipeline this wrapper drives
+    (derive_stop_events*, aggregate_runs, compute_bunching,
+    upsert_system_metrics_daily, upsert_route_metrics_overlay) accepts
+    it and defaults to `"wmata"` itself, so this is explicit rather than
+    a behavior change for the default case.
 
     Subprocess is the chosen integration mechanism: the four pipelines are
     already CLI scripts and the user's manual workflow is `uv run python
@@ -272,6 +325,7 @@ def run_pipeline(
     ]
     if extra_args:
         cmd.extend(extra_args)
+    cmd.extend(["--agency", agency])
     log_handle.write(f"\n$ {' '.join(cmd)}\n")
     log_handle.flush()
     start = time.time()
@@ -292,12 +346,25 @@ def run_batch(
     target_dates: list[date_type],
     log_handle,
     dry_run: bool = False,
+    agency: str = DEFAULT_AGENCY,
 ) -> int:
     """Drive all per-date pipelines across every (pipeline, target_date) cell.
 
     Returns the number of (pipeline, date) combinations that failed —
     callers turn a non-zero into a non-zero process exit so launchd can
     surface it.
+
+    ``agency`` (NOTES-100 multi-agency) is forwarded to every per-date
+    pipeline invocation as `--agency <agency>`. HOUSEKEEPING_PIPELINES
+    are skipped entirely for any non-default agency: they're global
+    (not per-route/per-date); three of the four aren't agency-aware and
+    always target `DATABASE_URL` (WMATA) — running them under `--agency
+    sfmta` would silently operate on the wrong database rather than the
+    SFMTA sidecar the caller intended. The fourth,
+    `cleanup_trip_update_state.py`, IS agency-aware but is deliberately
+    not invoked from this loop for a non-default agency either — see the
+    skip-message text this function emits for why. This isn't counted
+    as a failure.
     """
     failure_count = 0
     # results[date][pipeline_name] = exit_code, used for skipping downstream
@@ -327,7 +394,7 @@ def run_batch(
                 log_handle.write(
                     f"DRY-RUN would run {pipeline['module']} "
                     f"--all-routes --date {service_date.isoformat()}"
-                    f"{(' ' + extra_str) if extra_str else ''}\n"
+                    f"{(' ' + extra_str) if extra_str else ''} --agency {agency}\n"
                 )
                 results[service_date][pipeline["name"]] = 0
                 continue
@@ -337,6 +404,7 @@ def run_batch(
                 service_date,
                 log_handle,
                 extra_args=pipeline.get("extra_args"),
+                agency=agency,
             )
             results[service_date][pipeline["name"]] = rc
             if rc != 0:
@@ -356,6 +424,32 @@ def run_batch(
     # surfaces housekeeping outcomes through the same exit code so launchd
     # still notices, but a metrics-redesign pipeline failure is the priority
     # signal.
+    #
+    # NOTES-100: the WHOLE loop below is skipped for non-default agencies,
+    # not run with a substituted --agency. Three of the four housekeeping
+    # pipelines (refresh_route_diagnostic_profile,
+    # refresh_cross_route_segments, refresh_corridor_slip) aren't
+    # agency-aware and always target DATABASE_URL. The fourth,
+    # cleanup_trip_update_state.py, IS agency-aware (accepts --agency) --
+    # for the default agency it still runs below via
+    # run_housekeeping_pipeline (which passes no --agency flag, so it
+    # keeps defaulting to wmata, unchanged). For a non-default agency it's
+    # NOT invoked here at all: it needs its own schedule/invocation with
+    # `--agency <agency>` (never the default -- that would prune WMATA's
+    # table, not the agency's own) so that agency's trip_update_state
+    # table stays bounded.
+    if agency != DEFAULT_AGENCY:
+        log_handle.write(
+            f"\nSKIP housekeeping for agency={agency!r} — refresh_route_diagnostic_profile / "
+            "refresh_cross_route_segments / refresh_corridor_slip are not agency-aware yet "
+            f"(would target DATABASE_URL/{DEFAULT_AGENCY} regardless of --agency). "
+            "cleanup_trip_update_state.py IS agency-aware but is not invoked from here for a "
+            f"non-default agency -- run `cleanup_trip_update_state.py --agency {agency}` "
+            "on its own schedule to keep this agency's trip_update_state table bounded.\n"
+        )
+        log_handle.flush()
+        return failure_count
+
     for hk in HOUSEKEEPING_PIPELINES:
         log_handle.write(f"\n=== housekeeping: {hk['name']} ===\n")
         log_handle.flush()
@@ -396,20 +490,35 @@ def main() -> int:
         action="store_true",
         help="Print the plan without invoking subprocesses.",
     )
+    parser.add_argument(
+        "--agency",
+        default=DEFAULT_AGENCY,
+        help=(
+            f"Agency name matching config/agencies/<agency>.yaml (default: "
+            f"{DEFAULT_AGENCY!r}). Runs the per-date pipeline chain against "
+            "that agency's database and timezone; HOUSEKEEPING_PIPELINES are "
+            "skipped for any non-default agency — see module docstring."
+        ),
+    )
     args = parser.parse_args()
 
     load_dotenv()
     LOGS_DIR.mkdir(exist_ok=True)
+    # Log filename uses wall-clock Eastern regardless of --agency (it's when
+    # the operator ran the batch, not a service-date concept) but is
+    # agency-suffixed so a concurrent SFMTA run doesn't interleave with the
+    # WMATA log in the same file.
     today = eastern_today()
-    log_path = LOGS_DIR / f"daily_batch_{today.isoformat()}.log"
+    log_suffix = "" if args.agency == DEFAULT_AGENCY else f"_{args.agency}"
+    log_path = LOGS_DIR / f"daily_batch{log_suffix}_{today.isoformat()}.log"
 
-    target_dates = determine_target_dates(lookback_days=args.lookback_days)
-    route_ids = list_active_route_ids()
+    target_dates = determine_target_dates(lookback_days=args.lookback_days, agency=args.agency)
+    route_ids = list_active_route_ids(agency=args.agency)
 
     with log_path.open("a") as log_handle:
         log_handle.write(
             f"\n========== run_daily_batch start {today.isoformat()} "
-            f"({len(route_ids)} active routes) ==========\n"
+            f"agency={args.agency} ({len(route_ids)} active routes) ==========\n"
         )
         log_handle.write(f"target_dates: {[d.isoformat() for d in target_dates]}\n")
         if args.dry_run:
@@ -420,7 +529,9 @@ def main() -> int:
         print(f"run_daily_batch: log={log_path}")
         print(f"run_daily_batch: target_dates={[d.isoformat() for d in target_dates]}")
 
-        failure_count = run_batch(target_dates, log_handle, dry_run=args.dry_run)
+        failure_count = run_batch(
+            target_dates, log_handle, dry_run=args.dry_run, agency=args.agency
+        )
 
         log_handle.write(
             f"\n========== run_daily_batch done — "

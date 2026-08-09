@@ -651,6 +651,21 @@ sudo -u wmata sh -c 'cd /home/wmata/wmata-dashboard && uv sync --extra postgres'
 sudo systemctl restart wmata-collector
 ```
 
+**After any `.env` change (credentials especially): restart BOTH collector
+units** — `wmata-collector` AND `sfmta-collector`. They read the same
+`EnvironmentFile` at process start and cache it for the life of the process,
+so a unit that isn't restarted keeps the old values indefinitely. This bit
+for real on 2026-08-08: a DB password change restarted only
+`wmata-collector`, and the SFMTA sidecar spent ~27 h failing every upsert
+with `password authentication failed` while its feed fetches and JSONL
+archive kept running (no trip-update data lost — replayable from archive —
+but SFMTA vehicle positions for the gap were not archived and are gone).
+The dead-man ping (§11.4) is what surfaced it.
+
+```bash
+sudo systemctl restart wmata-collector sfmta-collector
+```
+
 **Manually trigger a job:**
 ```bash
 sudo systemctl start wmata-metrics.service       # nightly batch

@@ -22,10 +22,16 @@ filter at query time. See `Run` in `src/models.py` for the canonical filters.
 Idempotent: re-running the same (route, service_date) upserts via the
 `uq_runs_service_trip_source` constraint, replacing prior aggregations.
 
+Multi-agency (NOTES-100): pass ``--agency`` (matching a
+``config/agencies/<agency>.yaml``) to aggregate against a non-WMATA
+database with the correct service-date timezone. Omitting it keeps the
+WMATA/Eastern default.
+
 Usage:
   uv run python pipelines/aggregate_runs.py --route C51 --date 2026-05-03
   uv run python pipelines/aggregate_runs.py --all-routes --date 2026-05-03
-  uv run python pipelines/aggregate_runs.py --all-routes  # defaults to today (Eastern)
+  uv run python pipelines/aggregate_runs.py --all-routes  # defaults to today (agency-local)
+  uv run python pipelines/aggregate_runs.py --all-routes --date 2026-07-23 --agency sfmta
 """
 
 import argparse
@@ -39,11 +45,12 @@ from dotenv import load_dotenv
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
 from src.gtfs_versioning import gtfs_version_filter
 from src.models import Route, Run, StopEvent, StopTime
-from src.timezones import eastern_today, utcnow_naive
+from src.timezones import local_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
 
@@ -334,6 +341,15 @@ def main():
             "schedule has since been superseded by a reload."
         ),
     )
+    parser.add_argument(
+        "--agency",
+        default="wmata",
+        help=(
+            "Agency name matching config/agencies/<agency>.yaml (default: "
+            "'wmata'). Selects the service-date timezone and target "
+            "database — see pipelines/run_daily_batch.py."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.route and not args.all_routes:
@@ -342,12 +358,13 @@ def main():
         parser.error("--route and --all-routes are mutually exclusive")
 
     load_dotenv()
+    cfg = load_agency_config(args.agency)
     if args.date:
         service_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     else:
-        service_date = eastern_today()
+        service_date = local_today(cfg.timezone)
 
-    db = get_session()
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         if args.route:
             route_ids = [args.route]

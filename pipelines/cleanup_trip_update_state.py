@@ -9,10 +9,22 @@ The ``derived_at`` column is preserved as a per-row diagnostic ("did
 derivation run for this row?") but is no longer load-bearing for
 cleanup.
 
+Multi-agency (NOTES-100): pass ``--agency`` (matching a
+``config/agencies/<agency>.yaml``) to clean up a non-WMATA database
+with the correct retention-cutoff timezone. This is REQUIRED for a
+non-default agency, not optional housekeeping polish:
+``run_daily_batch.py`` skips this pipeline entirely for `--agency
+sfmta` (it isn't wired into the per-date orchestration), so it must be
+run separately with the matching `--agency` — running it bare
+(default `wmata`) would prune `DATABASE_URL` (the WMATA table), not
+the SFMTA one, leaving `sfmta_dashboard.trip_update_state` to grow
+unbounded.
+
 Usage:
     uv run python pipelines/cleanup_trip_update_state.py
     uv run python pipelines/cleanup_trip_update_state.py --retention-days 14
     uv run python pipelines/cleanup_trip_update_state.py --dry-run
+    uv run python pipelines/cleanup_trip_update_state.py --agency sfmta
 """
 
 import argparse
@@ -23,25 +35,31 @@ from dotenv import load_dotenv
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
+from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
 from src.models import TripUpdateState
-from src.timezones import eastern_today
+from src.timezones import local_today
 
 
-def run_cleanup(db: Session, retention_days: int = 7) -> dict[str, int]:
+def run_cleanup(
+    db: Session, retention_days: int = 7, tz_name: str = "America/New_York"
+) -> dict[str, int]:
     """Delete rows with ``service_date`` older than ``retention_days`` ago.
 
     Args:
         db: Active SQLAlchemy session. Caller is responsible for
             committing or rolling back after this returns.
-        retention_days: How many Eastern days of state to keep. Days are
+        retention_days: How many local days of state to keep. Days are
             counted from today (inclusive); the cutoff is
-            ``eastern_today() - retention_days``. Default 7.
+            ``local_today(tz_name) - retention_days``. Default 7.
+        tz_name: IANA timezone name (NOTES-100 multi-agency; default
+            Eastern, matching every WMATA call site) used to resolve
+            "today" for the cutoff.
 
     Returns:
         ``{"deleted": <row_count>}`` — the number of rows removed.
     """
-    cutoff = eastern_today() - timedelta(days=retention_days)
+    cutoff = local_today(tz_name) - timedelta(days=retention_days)
     stmt = delete(TripUpdateState).where(TripUpdateState.service_date < cutoff)
     result = db.execute(stmt)
     return {"deleted": result.rowcount or 0}
@@ -69,12 +87,23 @@ def main() -> int:
         action="store_true",
         help="Compute counts without deleting (rolls back).",
     )
+    parser.add_argument(
+        "--agency",
+        default="wmata",
+        help=(
+            "Agency name matching config/agencies/<agency>.yaml (default: "
+            "'wmata'). Selects the retention-cutoff timezone and the "
+            "target database. REQUIRED for a non-default agency -- see "
+            "module docstring."
+        ),
+    )
     args = parser.parse_args()
 
     load_dotenv()
-    db = get_session()
+    cfg = load_agency_config(args.agency)
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
-        counts = run_cleanup(db, retention_days=args.retention_days)
+        counts = run_cleanup(db, retention_days=args.retention_days, tz_name=cfg.timezone)
         if args.dry_run:
             db.rollback()
             print(f"DRY-RUN: would delete {counts}")

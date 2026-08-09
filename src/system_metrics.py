@@ -75,6 +75,8 @@ def upsert_system_metrics_for_date(
     db: Session,
     service_date: date_type,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
+    completeness_threshold: float | None = None,
 ) -> dict | None:
     """Compute and upsert one row of `system_metrics_daily` for `service_date`.
 
@@ -92,22 +94,45 @@ def upsert_system_metrics_for_date(
 
     Args:
         db: Database session.
-        service_date: Eastern service date to compute and store.
+        service_date: Service date (in ``tz_name``) to compute and store.
         gtfs_snapshot_id: Optional historical GTFS snapshot to pin the
             scheduled side to (backfill); see
             `compute_system_metrics_for_date`.
+        tz_name: IANA timezone name (NOTES-100 multi-agency; default
+            Eastern). Only widens the completeness guard's coverage
+            window to the agency's own local day —
+            `compute_system_metrics_for_date` (OTP/EWT/bunching
+            hour-of-day bucketing) is still Eastern-hardcoded
+            (tracked separately, NOTES-103).
+        completeness_threshold: Minimum coverage fraction to count as
+            "complete" (NOTES-100 multi-agency). ``None`` (the default)
+            uses ``src.data_completeness.MIN_COVERAGE_FOR_MATERIALIZATION``
+            — correct for WMATA, but a lower cadence-derived value is
+            required for any agency that doesn't poll every feed on
+            every collector tick (e.g. SFMTA) — see
+            ``src.data_completeness.agency_coverage_threshold``, which
+            callers should compute from the agency's ``AgencyConfig``
+            and pass here explicitly.
 
     Returns:
         The metrics dict written (includes ``data_quality`` and
         ``coverage_pct`` keys), or None if computation raised.
     """
     from src.data_completeness import (
+        MIN_COVERAGE_FOR_MATERIALIZATION,
         coverage_pct_for_date,
         is_date_sufficiently_complete,
     )
 
-    pct = coverage_pct_for_date(db, service_date)
-    is_complete = is_date_sufficiently_complete(db, service_date)
+    threshold = (
+        completeness_threshold
+        if completeness_threshold is not None
+        else MIN_COVERAGE_FOR_MATERIALIZATION
+    )
+    pct = coverage_pct_for_date(db, service_date, tz_name=tz_name)
+    is_complete = is_date_sufficiently_complete(
+        db, service_date, threshold=threshold, tz_name=tz_name
+    )
     data_quality = "complete" if is_complete else "partial"
 
     if not is_complete:

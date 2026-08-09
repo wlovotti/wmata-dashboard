@@ -13,6 +13,14 @@ api:
   vehicle_positions_url: https://api.511.org/transit/vehiclepositions
   extra_params:
     agency: SF
+  # 511.org's static-GTFS ("datafeeds") endpoint takes a DIFFERENT query
+  # param than the real-time feeds above -- operator_id, not agency (both
+  # confirmed live: both return "invalid API key" for a bad key rather
+  # than a 404/param error, i.e. the endpoint + param name are accepted).
+  # NOTES-100.
+  static_gtfs_url: https://api.511.org/transit/datafeeds
+  static_gtfs_params:
+    operator_id: SF
 collector:
   tick_sec: 60
   trip_updates_every_ticks: 2

@@ -7,6 +7,7 @@ names for secrets. The dataclass is the seed of the multi-agency engine
 code change that engine needs.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,8 @@ class AgencyConfig:
     trip_updates_url: str
     vehicle_positions_url: str
     extra_params: dict
+    static_gtfs_url: str
+    static_gtfs_params: dict
     tick_sec: int
     trip_updates_every_ticks: int
     vehicle_positions_every_ticks: int
@@ -62,6 +65,8 @@ def load_agency_config(name: str) -> AgencyConfig:
         trip_updates_url=raw["api"]["trip_updates_url"],
         vehicle_positions_url=raw["api"]["vehicle_positions_url"],
         extra_params=raw["api"].get("extra_params") or {},
+        static_gtfs_url=raw["api"]["static_gtfs_url"],
+        static_gtfs_params=raw["api"].get("static_gtfs_params") or {},
         tick_sec=raw["collector"]["tick_sec"],
         trip_updates_every_ticks=raw["collector"]["trip_updates_every_ticks"],
         vehicle_positions_every_ticks=raw["collector"]["vehicle_positions_every_ticks"],
@@ -71,6 +76,44 @@ def load_agency_config(name: str) -> AgencyConfig:
         database_url_env=raw["database"]["url_env"],
         healthcheck_url_env=raw["healthcheck"]["url_env"],
     )
+
+
+class MissingAgencyDatabaseUrlError(RuntimeError):
+    """Raised when a non-WMATA agency's database env var isn't set.
+
+    ``get_session(db_url=None)`` silently falls back to ``DATABASE_URL``
+    (the WMATA default). Without this guard, an agency-aware pipeline run
+    (replay, derivation, aggregation, GTFS reload, ...) with e.g.
+    ``--agency sfmta`` and ``SFMTA_DATABASE_URL`` unset would silently
+    write into the WMATA production database instead of failing — a
+    correctness-critical footgun, not a convenience default. WMATA itself
+    is exempt: its configured env var IS ``DATABASE_URL``, so an unset
+    value there is the same, already-understood failure mode
+    ``get_session``/``get_engine`` have always had.
+
+    Originally introduced (NOTES-96) as a private helper in
+    ``pipelines/replay_archive_to_state.py``; moved here (NOTES-100) once
+    a second pipeline needed the identical check — every agency-aware
+    entry point imports it from this one shared home instead of
+    redefining it per module.
+    """
+
+
+def resolve_agency_db_url(cfg: AgencyConfig) -> str | None:
+    """Return the DB URL env var value for ``cfg``, failing loudly if missing.
+
+    See ``MissingAgencyDatabaseUrlError`` for why this doesn't just let
+    ``get_session`` fall back to ``DATABASE_URL`` for non-WMATA agencies.
+    """
+    db_url = os.getenv(cfg.database_url_env)
+    if not db_url and cfg.database_url_env != "DATABASE_URL":
+        raise MissingAgencyDatabaseUrlError(
+            f"{cfg.database_url_env} is not set. Running agency "
+            f"{cfg.name!r} would otherwise silently fall back to "
+            "DATABASE_URL (the WMATA default) and could write into the "
+            "wrong database."
+        )
+    return db_url
 
 
 def request_kwargs(cfg: AgencyConfig, api_key: str) -> dict:

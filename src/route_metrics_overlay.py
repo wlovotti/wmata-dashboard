@@ -141,6 +141,8 @@ def upsert_route_metrics_for_date(
     db: Session,
     service_date: date_type,
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
+    completeness_threshold: float | None = None,
 ) -> int | None:
     """Compute and upsert overlay rows for every route active on `service_date`.
 
@@ -157,14 +159,34 @@ def upsert_route_metrics_for_date(
     ``coverage_pct`` so the UI can render an explicit "partial day" badge
     rather than showing a silent gap in the trend strip. Complete days
     receive ``data_quality='complete'``.
+
+    ``tz_name`` (NOTES-100 multi-agency; default Eastern) only widens the
+    completeness guard's coverage window to the agency's own local day —
+    `compute_route_metrics_overlay_for_date` (OTP/EWT/bunching
+    hour-of-day bucketing) is still Eastern-hardcoded (tracked
+    separately, NOTES-103).
+
+    ``completeness_threshold`` (NOTES-100 multi-agency): ``None`` (the
+    default) uses ``src.data_completeness.MIN_COVERAGE_FOR_MATERIALIZATION``
+    — correct for WMATA, but a lower cadence-derived value is required
+    for any agency that doesn't poll every feed on every collector tick
+    (e.g. SFMTA); see ``src.data_completeness.agency_coverage_threshold``.
     """
     from src.data_completeness import (
+        MIN_COVERAGE_FOR_MATERIALIZATION,
         coverage_pct_for_date,
         is_date_sufficiently_complete,
     )
 
-    pct = coverage_pct_for_date(db, service_date)
-    is_complete = is_date_sufficiently_complete(db, service_date)
+    threshold = (
+        completeness_threshold
+        if completeness_threshold is not None
+        else MIN_COVERAGE_FOR_MATERIALIZATION
+    )
+    pct = coverage_pct_for_date(db, service_date, tz_name=tz_name)
+    is_complete = is_date_sufficiently_complete(
+        db, service_date, threshold=threshold, tz_name=tz_name
+    )
     data_quality = "complete" if is_complete else "partial"
 
     if not is_complete:

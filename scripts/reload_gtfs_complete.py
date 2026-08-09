@@ -1,20 +1,36 @@
 """
 Complete GTFS Data Reload Script with Versioning
 
-Downloads the WMATA GTFS feed and applies it to the database in a single
-transaction: either the new snapshot fully replaces the current one, or
-nothing changes. Versioned tables (routes / stops / trips / stop_times /
-calendar / calendar_dates) get their current rows marked is_current=False
-and a fresh snapshot inserted; agencies are upserted by agency_id so the
-FK target stays stable for historical route rows; the remaining unversioned
-tables (feed_info / timepoints / timepoint_times / route_service_profile)
-are truncated and reinserted.
+Downloads an agency's static GTFS feed and applies it to the database in
+a single transaction: either the new snapshot fully replaces the current
+one, or nothing changes. Versioned tables (routes / stops / trips /
+stop_times / calendar / calendar_dates) get their current rows marked
+is_current=False and a fresh snapshot inserted; agencies are upserted by
+agency_id so the FK target stays stable for historical route rows; the
+remaining unversioned tables (feed_info / timepoints / timepoint_times /
+route_service_profile) are truncated and reinserted.
 
 The download step lives in `_download_and_parse_gtfs`; the DB-side logic
 lives in `apply_gtfs_to_db(db, gtfs_data)` so tests can exercise it
 without network or postgres-specific upserts.
+
+Multi-agency (NOTES-100): pass `--agency` (matching a
+`config/agencies/<agency>.yaml`) to load a non-WMATA agency's static
+GTFS into that agency's own database. The download URL, auth style
+(header vs query), and static-GTFS query params (e.g. SFMTA/511.org's
+`operator_id=SF` — a DIFFERENT param name than the real-time feeds'
+`agency=SF`, see config/agencies/sfmta.yaml) all come from the agency
+config. `timepoints.txt` / `timepoint_times.txt` are a WMATA-only
+GTFS-Plus extension; other agencies' zips simply won't have them, and
+that's tolerated (empty lists) rather than an error — every other GTFS
+file is still required.
+
+Usage:
+  uv run python scripts/reload_gtfs_complete.py
+  uv run python scripts/reload_gtfs_complete.py --agency sfmta
 """
 
+import argparse
 import csv
 import io
 import os
@@ -27,6 +43,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from pipelines.refresh_corridors import refresh_corridors
+from src.agency_config import AgencyConfig, load_agency_config, resolve_agency_db_url
 from src.database import get_session
 from src.models import (
     Agency,
@@ -48,7 +65,7 @@ from src.timezones import utcnow_naive
 
 load_dotenv()
 
-BASE_URL = "https://api.wmata.com/gtfs"
+DEFAULT_AGENCY = "wmata"
 
 # Files we read out of the GTFS zip. Order is informational; parse order
 # does not constrain DB write order.
@@ -66,6 +83,11 @@ GTFS_FILES = [
     "timepoint_times.txt",
 ]
 
+# GTFS-Plus extension files WMATA publishes that standard GTFS agencies
+# (e.g. SFMTA/511.org) simply don't have. Absence is expected, not an
+# error — every other file in GTFS_FILES is still required.
+OPTIONAL_GTFS_FILES = {"timepoints.txt", "timepoint_times.txt"}
+
 
 def parse_csv(zip_file: zipfile.ZipFile, filename: str) -> list[dict]:
     """Parse a CSV file out of the GTFS zip into a list of dicts."""
@@ -74,29 +96,65 @@ def parse_csv(zip_file: zipfile.ZipFile, filename: str) -> list[dict]:
     return list(reader)
 
 
-def _download_and_parse_gtfs() -> dict[str, list[dict]]:
-    """Download the WMATA GTFS zip and return a dict keyed by filename stem."""
-    api_key = os.getenv("WMATA_API_KEY")
-    if not api_key:
-        raise RuntimeError("WMATA_API_KEY not found in environment variables")
+def _require_field(row: dict, field: str, context: str) -> str:
+    """Fetch a required GTFS field, raising a clear error naming what's missing.
 
-    print("\nDownloading GTFS data...")
-    response = requests.get(
-        f"{BASE_URL}/bus-gtfs-static.zip",
-        headers={"api_key": api_key},
-        timeout=30,
-    )
+    A bare ``row[field]`` raises a raw, contextless ``KeyError: 'field'``
+    if an agency's GTFS export omits the whole column -- e.g. `agency_id`
+    in `agency.txt`, which GTFS treats as only *conditionally* required
+    (optional for a single-agency feed, which some non-WMATA exports are).
+    Wrapping the lookup turns that into an actionable error naming the
+    field and the row it came from, instead of a bare stack trace pointing
+    at a dict literal deep in `apply_gtfs_to_db`.
+    """
+    try:
+        return row[field]
+    except KeyError:
+        raise RuntimeError(
+            f"GTFS row missing required field {field!r} ({context}). "
+            f"Row keys present: {sorted(row.keys())}"
+        ) from None
+
+
+def _download_and_parse_gtfs(cfg: AgencyConfig) -> dict[str, list[dict]]:
+    """Download ``cfg``'s static GTFS zip and return a dict keyed by filename stem.
+
+    Auth style (header vs query) and the download URL/params come from
+    ``cfg`` (NOTES-100 multi-agency) — see the module docstring.
+    """
+    api_key = os.getenv(cfg.api_key_env)
+    if not api_key:
+        raise RuntimeError(f"{cfg.api_key_env} not found in environment variables")
+
+    print(f"\nDownloading {cfg.display_name} GTFS data...")
+    if cfg.auth_style == "header":
+        response = requests.get(
+            cfg.static_gtfs_url,
+            headers={"api_key": api_key},
+            timeout=30,
+        )
+    else:
+        response = requests.get(
+            cfg.static_gtfs_url,
+            params={"api_key": api_key, **cfg.static_gtfs_params},
+            timeout=30,
+        )
     response.raise_for_status()
     print("✓ Downloaded GTFS data")
 
     print("\nParsing GTFS files...")
     zip_file = zipfile.ZipFile(io.BytesIO(response.content))
+    zip_names = set(zip_file.namelist())
 
     gtfs_data: dict[str, list[dict]] = {}
     for filename in GTFS_FILES:
         print(f"  - {filename}...", end="")
         sys.stdout.flush()
         key = filename.replace(".txt", "")
+        if filename in OPTIONAL_GTFS_FILES and filename not in zip_names:
+            gtfs_data[key] = []
+            print(f" not present (optional GTFS-Plus extension for {cfg.name!r}) — 0 records")
+            continue
         gtfs_data[key] = parse_csv(zip_file, filename)
         print(f" {len(gtfs_data[key])} records")
 
@@ -151,9 +209,15 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
     # get refreshed.
     print("\n→ Upserting agencies...")
     for agency_data in gtfs_data["agency"]:
-        existing = db.query(Agency).filter_by(agency_id=agency_data["agency_id"]).one_or_none()
+        # agency_id is GTFS-"conditionally required" -- optional when
+        # agency.txt has exactly one row, required otherwise. A raw
+        # `agency_data["agency_id"]` KeyError with no context is a common
+        # single-agency-feed footgun; _require_field names the field.
+        agency_id = _require_field(agency_data, "agency_id", "agency.txt")
+        agency_name = _require_field(agency_data, "agency_name", "agency.txt")
+        existing = db.query(Agency).filter_by(agency_id=agency_id).one_or_none()
         if existing is not None:
-            existing.agency_name = agency_data["agency_name"]
+            existing.agency_name = agency_name
             existing.agency_url = agency_data.get("agency_url")
             existing.agency_timezone = agency_data.get("agency_timezone")
             existing.agency_lang = agency_data.get("agency_lang")
@@ -163,8 +227,8 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
         else:
             db.add(
                 Agency(
-                    agency_id=agency_data["agency_id"],
-                    agency_name=agency_data["agency_name"],
+                    agency_id=agency_id,
+                    agency_name=agency_name,
                     agency_url=agency_data.get("agency_url"),
                     agency_timezone=agency_data.get("agency_timezone"),
                     agency_lang=agency_data.get("agency_lang"),
@@ -203,14 +267,16 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
 
     print("→ Loading stops...")
     for stop_data in gtfs_data["stops"]:
+        stop_id = stop_data["stop_id"]
+        context = f"stops.txt, stop_id={stop_id!r}"
         db.add(
             Stop(
-                stop_id=stop_data["stop_id"],
+                stop_id=stop_id,
                 stop_code=stop_data.get("stop_code"),
-                stop_name=stop_data["stop_name"],
+                stop_name=_require_field(stop_data, "stop_name", context),
                 stop_desc=stop_data.get("stop_desc"),
-                stop_lat=float(stop_data["stop_lat"]),
-                stop_lon=float(stop_data["stop_lon"]),
+                stop_lat=float(_require_field(stop_data, "stop_lat", context)),
+                stop_lon=float(_require_field(stop_data, "stop_lon", context)),
                 zone_id=stop_data.get("zone_id"),
                 stop_url=stop_data.get("stop_url"),
                 snapshot_id=snapshot_id,
@@ -338,6 +404,39 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
         )
     print(f"  ✓ Loaded {len(gtfs_data['feed_info'])} feed_info records")
 
+    # `shapes` has no snapshot_id/is_current columns (unversioned, same as
+    # feed_info/timepoints) -- truncate-then-reinsert, NOT the
+    # `init_database.py` one-time "skip if any exist" seed behavior. Before
+    # this, a database that only ever went through `reload_gtfs_complete.py`
+    # (never `init_database.py`) had a permanently empty `shapes` table with
+    # no recovery path -- `init_database.py` refuses to run once a snapshot
+    # exists (NOTES-100 follow-up).
+    print("→ Loading shapes...")
+    db.execute(text("DELETE FROM shapes"))
+    batch = []
+    total_shapes = len(gtfs_data["shapes"])
+    for i, shape_data in enumerate(gtfs_data["shapes"]):
+        batch.append(
+            Shape(
+                shape_id=shape_data["shape_id"],
+                shape_pt_lat=float(shape_data["shape_pt_lat"]),
+                shape_pt_lon=float(shape_data["shape_pt_lon"]),
+                shape_pt_sequence=int(shape_data["shape_pt_sequence"]),
+                shape_dist_traveled=float(shape_data["shape_dist_traveled"])
+                if shape_data.get("shape_dist_traveled")
+                else None,
+            )
+        )
+        if len(batch) >= 10000:
+            db.bulk_save_objects(batch)
+            batch = []
+            percent = ((i + 1) / total_shapes) * 100
+            print(f"\r    Progress: {percent:.1f}% ({i + 1:,}/{total_shapes:,})", end="")
+            sys.stdout.flush()
+    if batch:
+        db.bulk_save_objects(batch)
+    print(f"\r  ✓ Loaded {total_shapes:,} shapes")
+
     print("→ Loading timepoints...")
     db.execute(text("DELETE FROM timepoint_times"))
     db.execute(text("DELETE FROM timepoints"))
@@ -410,15 +509,22 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
     return snapshot_id
 
 
-def reload_complete_gtfs():
-    """Download the WMATA GTFS feed and apply it in a single transaction."""
+def reload_complete_gtfs(agency: str = DEFAULT_AGENCY):
+    """Download an agency's GTFS feed and apply it in a single transaction.
+
+    Args:
+        agency: Agency name matching ``config/agencies/<agency>.yaml``
+            (NOTES-100 multi-agency; default ``"wmata"``). Selects the
+            download source and the target database.
+    """
+    cfg = load_agency_config(agency)
     print("=" * 70)
-    print("Complete GTFS Data Reload")
+    print(f"Complete GTFS Data Reload ({cfg.display_name})")
     print("=" * 70)
 
-    gtfs_data = _download_and_parse_gtfs()
+    gtfs_data = _download_and_parse_gtfs(cfg)
 
-    db = get_session()
+    db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         snapshot_id = apply_gtfs_to_db(db, gtfs_data)
         db.commit()
@@ -450,4 +556,11 @@ def reload_complete_gtfs():
 
 
 if __name__ == "__main__":
-    reload_complete_gtfs()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--agency",
+        default=DEFAULT_AGENCY,
+        help=(f"Agency name matching config/agencies/<agency>.yaml (default: {DEFAULT_AGENCY!r})."),
+    )
+    cli_args = parser.parse_args()
+    reload_complete_gtfs(agency=cli_args.agency)
