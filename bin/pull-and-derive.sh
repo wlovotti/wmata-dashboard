@@ -51,11 +51,24 @@ psql "$VM_DB_URL" -c "\copy (SELECT $VP_COLS FROM vehicle_positions WHERE id > $
 psql -d wmata_dashboard -Atc "SELECT setval('vehicle_positions_id_seq', (SELECT COALESCE(MAX(id),1) FROM vehicle_positions))" >/dev/null
 
 echo "== replay TU archive for the lookback window (idempotent) =="
+# No pre-guard: replay_archive_to_state.py itself fails loudly (exit 1) on a
+# zero-file glob match (NOTES-93) — a missing rsync must not look like a
+# clean skip. Collect any failed dates and refuse to derive if the list is
+# non-empty; deriving zero-run dates against unreplayed state is exactly the
+# incident NOTES-93 records, so derivation must never run past a replay
+# failure. --archive-root is passed explicitly so this honors the same
+# LOCAL_ARCHIVE override the rsync step above and the ls guard used to.
+failed=()
 for i in $(seq "$LOOKBACK_DAYS" -1 0); do
   d=$(date -v -"${i}"d +%F)   # macOS date; this script is laptop-only
-  ls "$LOCAL_ARCHIVE/$d".*.jsonl.zst >/dev/null 2>&1 || continue
-  PYTHONUNBUFFERED=1 uv run python pipelines/replay_archive_to_state.py --date "$d"
+  if ! PYTHONUNBUFFERED=1 uv run python pipelines/replay_archive_to_state.py --date "$d" --archive-root "$LOCAL_ARCHIVE"; then
+    failed+=("$d")
+  fi
 done
+if [ "${#failed[@]}" -gt 0 ]; then
+  echo "Replay failed for: ${failed[*]} — aborting before derive (NOTES-93)." >&2
+  exit 1
+fi
 
 echo "== derive (self-targets zero-run dates) =="
 PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --lookback-days "$LOOKBACK_DAYS"

@@ -39,6 +39,20 @@ from src.wmata_collector import _service_date_for_row
 DEFAULT_ARCHIVE_ROOT = Path("archive/raw_snapshots")
 
 
+class NoArchiveFilesFoundError(RuntimeError):
+    """Raised when the archive glob for a date matches zero files.
+
+    A replay with no input is almost always an operator error (the
+    JSONL archive hasn't been rsynced yet, a typo'd date, a wrong
+    ``--archive-root``) rather than an intentional no-op. NOTES-93:
+    this used to return 0 silently, which during the recovery driver's
+    fold-in phase turned "the archive isn't here yet" into a
+    clean-looking success — the failure guard never tripped, and
+    derivation ran against empty state. Callers that genuinely expect
+    an empty date must pass ``allow_empty=True`` explicitly.
+    """
+
+
 def _parse_dt(s: str | None) -> datetime | None:
     """Parse an archive datetime string ("2026-05-18 22:00:00") to a naive datetime.
 
@@ -82,6 +96,7 @@ def replay_archive_for_date(
     target_date: date_type,
     archive_root: Path = DEFAULT_ARCHIVE_ROOT,
     chunk_size: int = 5000,
+    allow_empty: bool = False,
 ) -> int:
     """Replay all archive files for ``target_date`` into trip_update_state.
 
@@ -122,11 +137,18 @@ def replay_archive_for_date(
         target_date: The service date to replay (Eastern calendar day).
         archive_root: Directory holding the JSONL.zst files.
         chunk_size: Folded rows per UPSERT statement.
+        allow_empty: When ``True``, a zero-file glob match returns 0
+            instead of raising — see ``NoArchiveFilesFoundError``
+            (NOTES-93).
 
     Returns:
         The number of snapshot lines that matched ``target_date`` and
         were folded (note: not the row-count in state — many snapshots
         collapse to one state row by design).
+
+    Raises:
+        NoArchiveFilesFoundError: if the glob matches zero files and
+            ``allow_empty`` is ``False``.
     """
     pattern_per_proc = f"{target_date.isoformat()}.*.jsonl.zst"
     pattern_legacy = f"{target_date.isoformat()}.jsonl.zst"
@@ -134,8 +156,18 @@ def replay_archive_for_date(
         set(archive_root.glob(pattern_per_proc)) | set(archive_root.glob(pattern_legacy))
     )
     if not paths:
-        print(f"No archive files found for {target_date} under {archive_root}")
-        return 0
+        if allow_empty:
+            print(
+                f"No archive files found for {target_date} under {archive_root} "
+                "(--allow-empty set, continuing)"
+            )
+            return 0
+        raise NoArchiveFilesFoundError(
+            f"No archive files found for {target_date} under {archive_root}. "
+            "This usually means the JSONL archive hasn't been synced yet — "
+            "check the source before assuming the date is genuinely empty. "
+            "Pass --allow-empty to proceed anyway."
+        )
 
     print(f"Replaying {len(paths)} archive file(s) for {target_date}:")
     for p in paths:
@@ -215,14 +247,26 @@ def main() -> int:
         default=str(DEFAULT_ARCHIVE_ROOT),
         help=f"Archive directory (default: {DEFAULT_ARCHIVE_ROOT})",
     )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help=(
+            "Exit 0 instead of erroring when the archive glob matches zero "
+            "files for --date. Off by default — see NoArchiveFilesFoundError "
+            "(NOTES-93)."
+        ),
+    )
     args = parser.parse_args()
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     archive_root = Path(args.archive_root)
 
     db = get_session()
     try:
-        replay_archive_for_date(db, target_date, archive_root)
+        replay_archive_for_date(db, target_date, archive_root, allow_empty=args.allow_empty)
         db.commit()
+    except NoArchiveFilesFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     finally:
         db.close()
     return 0
