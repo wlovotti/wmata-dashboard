@@ -61,6 +61,7 @@ designed UI. Resume after the comparison sprint ships.
 
 ## Deferred / trigger-based
 
+- [NOTES-101](notes/NOTES-101.md) Parallel notes-cycle driver (batch mode) — sev low / eff medium — after PR #186 merges
 - [NOTES-88](notes/NOTES-88.md) `/api/routes` N+1 latency cliff over the tunnel — sev medium / eff medium — blocks public deploy only
 - [NOTES-49](notes/NOTES-49.md) Cloud migration phase 2 — managed Postgres — trigger-based; partly mooted by NOTES-95
 - [NOTES-50](notes/NOTES-50.md) Cloud migration phase 3 — deploy API + frontend — trigger: audience beyond personal
