@@ -53,14 +53,12 @@ here, so `run_batch` skips the whole group rather than a non-WMATA run
 silently touching the WMATA database. Omitting `--agency` keeps
 today's WMATA/Eastern behavior, including housekeeping, unchanged.
 
-WARNING (NOTES-103): the six per-date pipelines above are correct for
-`otp_percentage` and `service_delivered_ratio` for any agency, but
-`ewt_seconds` and `bunching_rate` are hardcoded to Eastern hour-of-day
-bucketing internally and will be WRONG for a Pacific (or any non-Eastern)
-agency until NOTES-103 lands — see that item for the full analysis.
-`run_daily_batch.py --agency sfmta` runs today and writes rows, it just
-writes wrong EWT/bunching numbers alongside correct OTP/service-delivered
-ones.
+The six per-date pipelines above bucket `ewt_seconds` and `bunching_rate`
+by the agency's own local hour-of-day (the agency-local hour bucketing
+fix, PR #TODO) — `otp_percentage` and `service_delivered_ratio` never
+needed this since they don't bucket by hour. `run_daily_batch.py --agency
+sfmta` now writes correct EWT/bunching numbers alongside OTP/service-
+delivered.
 
 Usage:
   uv run python pipelines/run_daily_batch.py

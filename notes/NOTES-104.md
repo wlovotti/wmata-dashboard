@@ -1,10 +1,11 @@
 # NOTES-104. Replay-aware data-completeness signal
 
 **Severity: low-medium** *(no data-correctness bug — `otp_percentage`,
-`service_delivered_ratio`, and, once NOTES-103 lands, `ewt_seconds` /
-`bunching_rate` are all still numerically correct. The problem is that
-the `data_quality` badge is misleadingly conservative for an entire
-class of dates, which undermines trust in an otherwise-honest signal.)*
+`service_delivered_ratio`, `ewt_seconds`, and `bunching_rate` are all
+numerically correct (the last two as of the agency-local hour bucketing
+fix, PR #TODO). The problem is that the `data_quality` badge is
+misleadingly conservative for an entire class of dates, which
+undermines trust in an otherwise-honest signal.)*
 **Effort: medium** *(needs a second completeness code path keyed on
 how a date's data arrived — live collection vs. replay — plus deciding
 what "trip_update_state poll density" should mean quantitatively.)*

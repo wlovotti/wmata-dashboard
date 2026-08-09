@@ -91,10 +91,10 @@ def test_overlay_upsert_is_idempotent(db_session):
 @pytest.mark.smoke
 def test_upsert_route_metrics_forwards_tz_name_to_completeness_guard(db_session, monkeypatch):
     """NOTES-100: ``tz_name`` reaches the completeness guard (mirrors the
-    equivalent test in tests/test_system_metrics.py). Only the guard's
-    coverage window is agency-aware here — the compute path itself
-    (OTP/EWT/bunching hour-of-day bucketing) stays Eastern-hardcoded,
-    tracked separately as NOTES-103.
+    equivalent test in tests/test_system_metrics.py). This test only pins
+    down the guard's plumbing; the compute path's own EWT/bunching
+    hour-of-day bucketing is exercised separately (see the agency-local
+    hour bucketing fix, PR #TODO).
     """
     seen_tz_names = []
 

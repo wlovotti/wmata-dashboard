@@ -2029,6 +2029,7 @@ def _system_ewt_and_bunching_for_date(
     service_date: date_type,
     sched_by_day_type: dict[str, dict],
     gtfs_snapshot_id: int | None = None,
+    tz_name: str = "America/New_York",
 ) -> tuple[float | None, float | None]:
     """Pooled EWT and bunching across all routes for one service date.
 
@@ -2045,9 +2046,11 @@ def _system_ewt_and_bunching_for_date(
 
     `sched_by_day_type` is a memoized fetch of per-route schedule data per
     day_type so the schedule cost is amortized across many days in the
-    window. Returns `(ewt_seconds, bunching_rate)` — either may be `None`
-    when the underlying pool is empty or when the date has no observed
-    stop_events.
+    window. `tz_name` (NOTES-103 multi-agency) buckets the observed side by
+    the agency's own local hour so it agrees with the scheduled side's
+    (always agency-local, GTFS clock-time) hour key; defaults to Eastern.
+    Returns `(ewt_seconds, bunching_rate)` — either may be `None` when the
+    underlying pool is empty or when the date has no observed stop_events.
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
@@ -2095,7 +2098,9 @@ def _system_ewt_and_bunching_for_date(
         if prev_key_ewt == key and prev_ts_ewt is not None:
             delta = (ts - prev_ts_ewt).total_seconds()
             if delta > 0:
-                obs_ewt[(route_id, direction_id, stop_id, _eastern_hour(prev_ts_ewt))].append(delta)
+                obs_ewt[
+                    (route_id, direction_id, stop_id, _eastern_hour(prev_ts_ewt, tz_name))
+                ].append(delta)
         prev_key_ewt = key
         prev_ts_ewt = ts
         # Bunching pool: SCHEDULED only — keeps its own consecutive-arrival walk so
@@ -2104,9 +2109,9 @@ def _system_ewt_and_bunching_for_date(
             if prev_key_bun == key and prev_ts_bun is not None:
                 delta_b = (ts - prev_ts_bun).total_seconds()
                 if delta_b > 0:
-                    obs_bun[(route_id, direction_id, stop_id, _eastern_hour(prev_ts_bun))].append(
-                        delta_b
-                    )
+                    obs_bun[
+                        (route_id, direction_id, stop_id, _eastern_hour(prev_ts_bun, tz_name))
+                    ].append(delta_b)
             prev_key_bun = key
             prev_ts_bun = ts
 
