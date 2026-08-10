@@ -21,12 +21,13 @@ from src.ewt import (
     _eastern_hour,
     _is_cell_hour_frequent,
     _period_for_hour,
+    _scheduled_headways_by_cell_hour,
     compute_awt,
     compute_ewt_for_route_date,
     compute_ewt_for_routes,
     compute_ewt_headline_for_route,
 )
-from src.models import Calendar, Route, Stop, StopEvent, StopTime, Trip
+from src.models import Calendar, CalendarDate, Route, Stop, StopEvent, StopTime, Trip
 
 ROUTE = "TEST1"
 SERVICE_DATE = date(2026, 4, 14)  # Tuesday, EDT
@@ -482,6 +483,221 @@ class TestComputeEwtForRouteDate:
         assert am["frequent_cell_hours"] == 1
         assert am["n_scheduled_headways"] == 3
         assert am["swt_seconds"] == pytest.approx(300.0)
+
+
+def _seed_calendar_flag(
+    db_session,
+    service_id: str,
+    *,
+    monday: int = 0,
+    tuesday: int = 0,
+    wednesday: int = 0,
+    thursday: int = 0,
+    friday: int = 0,
+    saturday: int = 0,
+    sunday: int = 0,
+    start_date: str = "20260101",
+    end_date: str = "20261231",
+) -> None:
+    """Insert a `calendar` row with explicit per-weekday flags (default all 0).
+
+    Unlike the module-level `_seed_calendar` helper (which always seeds a
+    Mon-Fri weekday row), this lets a test model a `calendar` with NO
+    weekday coverage at all — the Muni/SFMTA shape NOTES-106 fixes.
+    """
+    db_session.add(
+        Calendar(
+            service_id=service_id,
+            monday=monday,
+            tuesday=tuesday,
+            wednesday=wednesday,
+            thursday=thursday,
+            friday=friday,
+            saturday=saturday,
+            sunday=sunday,
+            start_date=start_date,
+            end_date=end_date,
+            is_current=True,
+        )
+    )
+    db_session.commit()
+
+
+def _seed_calendar_date(db_session, service_id: str, date_str: str, exception_type: int) -> None:
+    """Insert a `calendar_dates` exception row (1=added, 2=removed)."""
+    db_session.add(
+        CalendarDate(
+            service_id=service_id,
+            date=date_str,
+            exception_type=exception_type,
+            is_current=True,
+        )
+    )
+    db_session.commit()
+
+
+def _seed_trip_with_service(
+    db_session, trip_id: str, route_id: str, service_id: str, direction_id: int = 0
+) -> None:
+    """Insert a current Trip row tied to an arbitrary `service_id` (unlike the
+    module-level `_seed_trip`, which always uses the global `SERVICE_ID`)."""
+    db_session.add(
+        Trip(
+            trip_id=trip_id,
+            route_id=route_id,
+            service_id=service_id,
+            direction_id=direction_id,
+            trip_headsign="Downtown",
+            is_current=True,
+        )
+    )
+    db_session.commit()
+
+
+class TestScheduledHeadwaysCalendarDatesResolution:
+    """NOTES-106: `_scheduled_headways_by_cell_hour` must honor `calendar_dates`
+    exceptions when `calendar` itself defines no day-of-week service for the
+    day_type — the Muni/SFMTA shape, where weekday service exists purely as
+    `calendar_dates` exception_type=1 (added) rows because `calendar` only
+    ever sets the Saturday/Sunday flags. Before the fix, the scheduled-side
+    query filtered `Calendar.tuesday == 1` directly and matched nothing on
+    such a feed, so every weekday EWT/bunching row came out NULL while
+    weekends (which DO have a `calendar` flag) computed fine.
+
+    Tests call the private `_scheduled_headways_by_cell_hour` directly —
+    same pattern the file already uses for `_day_type_for` / `_eastern_hour`
+    / `_is_cell_hour_frequent` — to isolate the calendar-resolution logic
+    from the AWT/SWT pooling machinery.
+    """
+
+    def test_weekday_only_via_calendar_dates_addition_is_resolved(self, db_session):
+        """Muni shape: `calendar` has ONLY a Saturday row (no weekday flags
+        anywhere), and the real weekday service exists purely as a
+        `calendar_dates` exception_type=1 addition on Tue/Wed dates. Before
+        the fix this returned an empty dict for day_type='weekday'."""
+        _seed_route(db_session)
+        _seed_calendar_flag(db_session, "SAT", saturday=1)
+        _seed_calendar_date(db_session, "WKADD", "20260414", exception_type=1)  # Tue
+        _seed_calendar_date(db_session, "WKADD", "20260415", exception_type=1)  # Wed
+        _seed_stop(db_session, "S1")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00"]):
+            trip_id = f"WT{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "WKADD")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "weekday")
+
+        assert sched, "weekday scheduled headways must not be empty on a calendar_dates-only feed"
+        assert sched[(0, "S1", 7)] == [600.0, 600.0]
+
+    def test_type2_removal_excludes_service_id_from_weekday_fallback_pool(self, db_session):
+        """A service_id added via `calendar_dates` type=1 but later fully
+        removed via type=2 (both on weekday-matching dates) must NOT
+        contribute to the fallback weekday pool, while a separately-added
+        service_id that was never removed still does."""
+        _seed_route(db_session)
+        # No base weekday calendar row at all (Muni shape).
+        _seed_calendar_date(db_session, "WKGONE", "20260414", exception_type=1)  # Tue: added
+        _seed_calendar_date(db_session, "WKGONE", "20260415", exception_type=2)  # Wed: removed
+        _seed_calendar_date(db_session, "WKKEPT", "20260416", exception_type=1)  # Thu: added
+        _seed_stop(db_session, "S1")
+        _seed_stop(db_session, "S2")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00"]):
+            trip_id = f"GONE{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "WKGONE")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+        for i, t in enumerate(["08:00:00", "08:15:00", "08:30:00"]):
+            trip_id = f"KEPT{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "WKKEPT")
+            _seed_stop_time(db_session, trip_id, "S2", t)
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "weekday")
+
+        assert (0, "S1", 7) not in sched, "net-removed service_id must not contribute headways"
+        assert sched[(0, "S2", 8)] == [900.0, 900.0]
+
+    def test_wmata_shaped_calendar_dates_present_but_base_nonempty_unaffected(self, db_session):
+        """WMATA regression: `calendar` already covers the weekday (as it
+        always has), and unrelated `calendar_dates` exceptions exist too —
+        the representative-weekday pool must come from `calendar` alone,
+        byte-for-byte identical to pre-NOTES-106 behavior. This guards the
+        "WMATA output unchanged" acceptance criterion: a stray calendar_dates
+        exception on some other service_id must not perturb the pooled
+        schedule used for the day_type-representative aggregate."""
+        _seed_route(db_session)
+        _seed_calendar(db_session)  # SERVICE_ID="WK", Mon-Fri flags — WMATA shape.
+        # Unrelated calendar_dates noise: an addition for a service NOT tied
+        # to any trip on this route, and a removal of the base service_id
+        # itself on one date (a single-day holiday swap — deliberately NOT
+        # subtracted at the representative-day level; see module docstring).
+        _seed_calendar_date(db_session, "HOLIDAY_ADD", "20260414", exception_type=1)
+        _seed_calendar_date(db_session, SERVICE_ID, "20260415", exception_type=2)
+        _seed_stop(db_session, "S1")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00"]):
+            trip_id = f"T{i + 1}"
+            _seed_trip(db_session, trip_id, ROUTE)
+            _seed_stop_time(db_session, trip_id, "S1", t)
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "weekday")
+
+        assert sched == {(0, "S1", 7): [600.0, 600.0]}
+
+    def test_weekend_base_calendar_unaffected_by_matching_calendar_dates_swap(self, db_session):
+        """The real SFMTA shape found in NOTES-106: a Saturday base service_id
+        is removed via calendar_dates type=2 AND a substitute service_id is
+        added via type=1 on that same Saturday date (a one-off holiday
+        schedule swap). Because the Saturday `calendar` flag already covers
+        the day_type, the representative pool must stay base-only — the
+        acceptance criterion is 'weekend values unchanged'."""
+        _seed_route(db_session)
+        _seed_calendar_flag(db_session, "SAT_BASE", saturday=1)
+        _seed_calendar_date(db_session, "SAT_BASE", "20260418", exception_type=2)  # Sat removed
+        _seed_calendar_date(db_session, "SAT_SWAP", "20260418", exception_type=1)  # Sat added
+        _seed_stop(db_session, "S1")
+        _seed_stop(db_session, "S2")
+        for i, t in enumerate(["09:00:00", "09:15:00", "09:30:00"]):
+            trip_id = f"BASE{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "SAT_BASE")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+        for i, t in enumerate(["10:00:00", "10:05:00"]):
+            trip_id = f"SWAP{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "SAT_SWAP")
+            _seed_stop_time(db_session, trip_id, "S2", t)
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "saturday")
+
+        assert sched == {(0, "S1", 9): [900.0, 900.0]}
+        assert (0, "S2", 10) not in sched
+
+    def test_end_to_end_ewt_weekday_non_null_on_calendar_dates_only_feed(self, db_session):
+        """Integration check through `compute_ewt_for_route_date`: the Muni
+        shape from `test_weekday_only_via_calendar_dates_addition_is_resolved`
+        must produce a non-None, non-degenerate weekday EWT row when there's
+        matching observed service, not just a non-empty scheduled pool."""
+        _seed_route(db_session)
+        _seed_calendar_flag(db_session, "SAT", saturday=1)
+        _seed_calendar_date(db_session, "WKADD", "20260414", exception_type=1)  # Tue
+        _seed_stop(db_session, "S1")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00", "07:30:00"]):
+            trip_id = f"WT{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "WKADD")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"WT{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 11, minute, 0),
+            )
+
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["frequent_cell_hours"] == 1
+        assert am["n_scheduled_headways"] == 3
+        assert am["swt_seconds"] == pytest.approx(300.0)
+        assert am["awt_seconds"] == pytest.approx(300.0)
+        assert am["ewt_seconds"] == pytest.approx(0.0)
 
 
 class TestCoverageRatio:

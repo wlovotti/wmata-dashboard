@@ -27,7 +27,9 @@ serves this or is explicitly parked.
 
 ## Comparison sprint (active — work top to bottom)
 
-- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (backfill + parity spot-validation user-run, see PR #189)
+- [NOTES-105](notes/NOTES-105.md) SFMTA owl routes: ~−24h deviation cluster poisons OTP — sev high / eff medium — unblocked; gates trustworthy SFMTA OTP
+- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (SFMTA backfill done 2026-08-09; SFMTA OTP blocked by NOTES-105, EWT/bunching re-derive pending PR #TBD)
+- [NOTES-107](notes/NOTES-107.md) `route_service_profile` weekday rows missing for SFMTA (same calendar_dates gap NOTES-106 fixed for EWT/bunching, different table) — sev medium / eff low — unblocked; not required for NOTES-99's headline KPIs
 
 ## Ops floor (not frozen — prevents a known recurring failure)
 
