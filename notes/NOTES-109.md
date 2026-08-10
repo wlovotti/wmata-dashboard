@@ -61,6 +61,16 @@ directly (no day_type/modal layer); the schedule cache is keyed by date;
 a WMATA before/after comparison is run and the output difference (Fridays,
 holidays) is reviewed and accepted as intentional before merge.
 
+One more reason full per-date resolution is the eventual right answer:
+SFMTA's modal margin is thin — `78968` wins weekday 3 Tuesdays to
+`82660`'s 2 out of the 7/23-8/28 window sampled at PR #191's merge time.
+One more week of feed (a single additional Tuesday landing in either
+era) flips the mode, so a historical SFMTA re-derive done today and the
+same re-derive done after the next GTFS reload are not guaranteed to
+agree — modal resolution is reload-order-sensitive in a way exact
+per-date resolution structurally isn't (each date always resolves the
+same way regardless of what the rest of the window looks like).
+
 ## Dependencies
 
 None (unblocked) — but not urgent. Modal resolution (PR #191) is a

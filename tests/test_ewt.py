@@ -712,6 +712,105 @@ class TestResolveServiceIdsForDayTypeModal:
         assert _resolve_service_ids_for_day_type(db_session, "weekday") == set()
 
 
+class TestResolveServiceIdsForDayTypeMemoization:
+    """`_resolve_service_ids_for_day_type` is called fresh per route from
+    `_scheduled_headways_by_cell_hour` (no upstream caching the way
+    `fetch_scheduled_cell_hours_for_routes`'s vectorized path has) — modal
+    resolution costs ~4 window queries + 3 per sampled representative
+    date, so unmemoized it multiplies into thousands of extra round-trips
+    across a route loop. These tests assert the module-level memo
+    (`_service_id_resolution_cache`) actually avoids re-running that work,
+    and that it doesn't cross-contaminate across snapshot_ids — mirroring
+    `_schedule_cache`'s exact `(day_type, resolved snapshot_id)` keying
+    and eviction semantics.
+    """
+
+    def test_second_call_for_same_day_type_and_snapshot_reuses_cached_result(
+        self, db_session, monkeypatch
+    ):
+        """The expensive per-date resolution (`scheduled_service_ids_for_date`)
+        must not run again on a cache hit — monkeypatched to count calls
+        rather than asserting on raw SQL statement counts, since the
+        cheap snapshot-id-resolution query legitimately still runs on
+        every call (mirrors `_schedule_cache`'s own behavior)."""
+        import src.ewt as ewt_module
+
+        _seed_calendar_flag(db_session, "WK", tuesday=1, start_date="20260301", end_date="20260401")
+        calls = {"n": 0}
+        original = ewt_module.scheduled_service_ids_for_date
+
+        def _counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(ewt_module, "scheduled_service_ids_for_date", _counting)
+
+        first = _resolve_service_ids_for_day_type(db_session, "weekday")
+        assert calls["n"] > 0, "the first call must actually do the per-date resolution work"
+
+        calls["n"] = 0
+        second = _resolve_service_ids_for_day_type(db_session, "weekday")
+
+        assert calls["n"] == 0, "a cache hit must not re-run per-date resolution"
+        assert second == first == {"WK"}
+
+    def test_different_snapshot_ids_do_not_cross_contaminate(self, db_session):
+        """Two explicit `gtfs_snapshot_id`s with different underlying
+        calendars must each resolve to their OWN service_id, never the
+        other's — including after the eviction that storing the second
+        snapshot's entry triggers for the first (mirrors `_schedule_cache`:
+        storing evicts every entry keyed to a different snapshot_id)."""
+        db_session.add(
+            Calendar(
+                service_id="S1",
+                monday=0,
+                tuesday=1,
+                wednesday=0,
+                thursday=0,
+                friday=0,
+                saturday=0,
+                sunday=0,
+                start_date="20260301",
+                end_date="20260401",
+                snapshot_id=1,
+                is_current=True,
+            )
+        )
+        db_session.add(
+            Calendar(
+                service_id="S2",
+                monday=0,
+                tuesday=1,
+                wednesday=0,
+                thursday=0,
+                friday=0,
+                saturday=0,
+                sunday=0,
+                start_date="20260301",
+                end_date="20260401",
+                snapshot_id=2,
+                is_current=True,
+            )
+        )
+        db_session.commit()
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=1) == {
+            "S1"
+        }
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=2) == {
+            "S2"
+        }
+        # Re-fetch both — snapshot 1's cache entry was evicted by storing
+        # snapshot 2's, forcing a recompute, but it must still resolve
+        # correctly (not silently return snapshot 2's cached value).
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=1) == {
+            "S1"
+        }
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=2) == {
+            "S2"
+        }
+
+
 class TestScheduledHeadwaysCalendarDatesResolution:
     """NOTES-106 (+ two review follow-ups): `_scheduled_headways_by_cell_hour`
     must honor `calendar_dates` when `calendar` itself defines no

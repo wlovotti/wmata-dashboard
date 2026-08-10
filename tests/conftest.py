@@ -437,3 +437,29 @@ def mock_env_vars(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
     # Mock API key to prevent accidental real API calls
     monkeypatch.setenv("WMATA_API_KEY", "test_api_key_do_not_use")
+
+
+@pytest.fixture(autouse=True)
+def _reset_ewt_schedule_caches():
+    """Reset `src/ewt.py`'s module-level schedule caches before every test.
+
+    `_schedule_cache` and `_service_id_resolution_cache` are keyed by
+    `(day_type, resolved snapshot_id)` and, by design, persist for the
+    process lifetime in production — correct there (a GTFS reload bumps
+    the snapshot_id, naturally invalidating stale entries). But every
+    SQLite test DB has no `gtfs_snapshots` rows, so an implicit
+    `gtfs_snapshot_id=None` always resolves to snapshot_id 0 — meaning
+    every test that doesn't pass an explicit snapshot shares the SAME
+    cache key. Without this reset, whichever test runs first "wins" and
+    every later test in the same pytest process silently reads its
+    stale, rolled-back-DB result instead of resolving fresh (NOTES-106
+    review round 3 caught this while adding memoization to
+    `_resolve_service_ids_for_day_type`).
+    """
+    import src.ewt as ewt_module
+
+    ewt_module._schedule_cache.clear()
+    ewt_module._service_id_resolution_cache.clear()
+    yield
+    ewt_module._schedule_cache.clear()
+    ewt_module._service_id_resolution_cache.clear()

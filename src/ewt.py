@@ -301,6 +301,29 @@ def _dates_matching_weekday(
     return out
 
 
+# Module-level memo for the per-day_type modal service_id resolution.
+# Keyed `(day_type, snapshot_id)` with the SAME resolve-then-evict
+# semantics `_schedule_cache` below uses (mirrored exactly, not
+# reinvented): `gtfs_snapshot_id=None` resolves to the concrete current
+# snapshot id via `MAX(GTFSSnapshot.snapshot_id)` BEFORE keying, so the
+# cache naturally invalidates the moment `reload_gtfs_complete.py` writes
+# a new `gtfs_snapshots` row — storing a fresh entry evicts every entry
+# keyed to a different snapshot_id. Explicit historical `gtfs_snapshot_id`
+# values (backfill) cache under their own id and never need invalidating.
+#
+# Needed because `_scheduled_headways_by_cell_hour` (the per-route path,
+# called once per route per pass — ~128 routes on WMATA) invokes
+# `_resolve_service_ids_for_day_type` fresh every time; unlike
+# `fetch_scheduled_cell_hours_for_routes`'s vectorized path, there's no
+# other caching upstream of it. Modal resolution costs ~4 window queries
+# + 3 queries per sampled representative-weekday date (~12/day_type on
+# WMATA's typical window) — unmemoized, that's ~40 queries × ~128 routes
+# ≈ 5,100 extra round-trips per day_type per pass, which multiplies badly
+# over the SSH tunnel (NOTES-88).
+_service_id_resolution_cache: dict[tuple[str, int], frozenset[str]] = {}
+_service_id_resolution_cache_lock = Lock()
+
+
 def _resolve_service_ids_for_day_type(
     db: Session, day_type: str, gtfs_snapshot_id: int | None = None
 ) -> set[str]:
@@ -320,34 +343,55 @@ def _resolve_service_ids_for_day_type(
     recent contributing date is later (a deterministic, data-driven
     tiebreak rather than an arbitrary one).
 
+    Memoized at module level by `(day_type, resolved snapshot_id)` — see
+    `_service_id_resolution_cache` above for the exact invalidation
+    semantics (mirrors `_schedule_cache`).
+
     Shared by `_scheduled_headways_by_cell_hour` and
     `fetch_scheduled_cell_hours_for_routes` so bunching (which imports both
     from this module) gets the fix for free rather than duplicating the
     query.
     """
+    if gtfs_snapshot_id is not None:
+        snapshot_id = gtfs_snapshot_id
+    else:
+        snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+    cache_key = (day_type, snapshot_id)
+    with _service_id_resolution_cache_lock:
+        cached = _service_id_resolution_cache.get(cache_key)
+    if cached is not None:
+        return set(cached)
+
     window = _feed_validity_window(db, gtfs_snapshot_id)
     if window is None:
-        return set()
-    start, end = window
-    weekday_index = _DAY_TYPE_WEEKDAY_INDEX[day_type]
-    candidate_dates = _dates_matching_weekday(start, end, weekday_index)
+        result: frozenset[str] = frozenset()
+    else:
+        start, end = window
+        weekday_index = _DAY_TYPE_WEEKDAY_INDEX[day_type]
+        candidate_dates = _dates_matching_weekday(start, end, weekday_index)
 
-    counts: dict[frozenset[str], int] = defaultdict(int)
-    most_recent: dict[frozenset[str], date_type] = {}
-    for d in candidate_dates:
-        ids = scheduled_service_ids_for_date(db, d, gtfs_snapshot_id)
-        if not ids:
-            continue
-        key = frozenset(ids)
-        counts[key] += 1
-        if key not in most_recent or d > most_recent[key]:
-            most_recent[key] = d
+        counts: dict[frozenset[str], int] = defaultdict(int)
+        most_recent: dict[frozenset[str], date_type] = {}
+        for d in candidate_dates:
+            ids = scheduled_service_ids_for_date(db, d, gtfs_snapshot_id)
+            if not ids:
+                continue
+            key = frozenset(ids)
+            counts[key] += 1
+            if key not in most_recent or d > most_recent[key]:
+                most_recent[key] = d
 
-    if not counts:
-        return set()
+        result = max(counts, key=lambda k: (counts[k], most_recent[k])) if counts else frozenset()
 
-    modal_key = max(counts, key=lambda k: (counts[k], most_recent[k]))
-    return set(modal_key)
+    with _service_id_resolution_cache_lock:
+        _service_id_resolution_cache[cache_key] = result
+        # Evict entries from older/other GTFS snapshots so the cache
+        # doesn't accumulate every historical version — same eviction
+        # rule `_schedule_cache` uses below.
+        for k in list(_service_id_resolution_cache.keys()):
+            if k[1] != snapshot_id:
+                del _service_id_resolution_cache[k]
+    return set(result)
 
 
 def _day_type_for(service_date: date_type) -> str:
