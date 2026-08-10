@@ -65,12 +65,15 @@ from datetime import date as date_type
 from sqlalchemy import case, distinct, func
 from sqlalchemy.orm import Session
 
+from src.gtfs_calendar import scheduled_service_ids_for_date
 from src.gtfs_versioning import gtfs_version_filter
-from src.models import Calendar, CalendarDate, Run, Trip
+from src.models import Run, Trip
 
-# Day-of-week column on `Calendar` for each Python weekday (Mon=0..Sun=6).
-# Used to filter "what's actually scheduled on THIS service_date." Distinct
-# from the representative-weekday convention in `src/ewt.py` and
+# NOTE: the calendar/calendar_dates resolution itself (day-of-week flag +
+# calendar_dates exceptions, filtered to THIS literal service_date) lives
+# in `src.gtfs_calendar.scheduled_service_ids_for_date` — shared with
+# `src/ewt.py` after a NOTES-106 review follow-up. Distinct from the
+# representative-weekday convention in `src/ewt.py` and
 # `src/service_profile.py`, which deliberately collapse all weekdays to a
 # Tuesday sample for cross-day aggregation. Service-delivered is a
 # per-date question — collapsing to Tuesday silently drops trips on dates
@@ -79,15 +82,6 @@ from src.models import Calendar, CalendarDate, Run, Trip
 # NOTES-51, where every Wed/Fri date returned `delivered_trips=0`
 # system-wide because the Tuesday filter excluded the Wed/Fri-only
 # service_ids that actually ran.
-_WEEKDAY_TO_CALENDAR_FIELD = (
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-    "saturday",
-    "sunday",
-)
 
 
 def _day_type_for(service_date: date_type) -> str:
@@ -131,53 +125,15 @@ def _scheduled_trip_ids_query(
     weekdays that explicitly drop weekday service (and add Sunday
     service via a Sunday service_id) compute against the real running
     schedule. Closes the holiday limitation noted in the module
-    docstring.
+    docstring. The resolution itself is
+    `src.gtfs_calendar.scheduled_service_ids_for_date` — see that
+    module's docstring for the shared-resolver rationale.
     """
-    service_date_str = service_date.strftime("%Y%m%d")
-    weekday_field = getattr(Calendar, _WEEKDAY_TO_CALENDAR_FIELD[service_date.weekday()])
-
-    # Service_ids active by base calendar (day-of-week + date window) MINUS
-    # explicit removals, UNION explicit additions for this date. This is
-    # the GTFS-spec rule for resolving `calendar` + `calendar_dates`.
-    base_service_ids = (
-        db.query(Calendar.service_id)
-        .filter(
-            gtfs_version_filter(Calendar, gtfs_snapshot_id),
-            weekday_field == 1,
-            Calendar.start_date <= service_date_str,
-            Calendar.end_date >= service_date_str,
-        )
-        .subquery()
-    )
-    removed_service_ids = (
-        db.query(CalendarDate.service_id)
-        .filter(
-            gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
-            CalendarDate.date == service_date_str,
-            CalendarDate.exception_type == 2,
-        )
-        .subquery()
-    )
-    added_service_ids = (
-        db.query(CalendarDate.service_id)
-        .filter(
-            gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
-            CalendarDate.date == service_date_str,
-            CalendarDate.exception_type == 1,
-        )
-        .subquery()
-    )
-
+    service_ids = scheduled_service_ids_for_date(db, service_date, gtfs_snapshot_id)
     return db.query(Trip.trip_id).filter(
         Trip.route_id == route_id,
         gtfs_version_filter(Trip, gtfs_snapshot_id),
-        (
-            (
-                Trip.service_id.in_(db.query(base_service_ids.c.service_id))
-                & ~Trip.service_id.in_(db.query(removed_service_ids.c.service_id))
-            )
-            | Trip.service_id.in_(db.query(added_service_ids.c.service_id))
-        ),
+        Trip.service_id.in_(service_ids),
     )
 
 
@@ -283,43 +239,7 @@ def compute_service_delivered_for_routes(
         # logic the per-route query uses, so the union is consistent — a route
         # whose only Friday-only service_id matches the date should appear
         # here, even though it'd be silently dropped by a Tuesday-rep filter.
-        gtfs_date_str = service_date.strftime("%Y%m%d")
-        weekday_field = getattr(Calendar, _WEEKDAY_TO_CALENDAR_FIELD[service_date.weekday()])
-        base_service_ids = {
-            sid
-            for (sid,) in db.query(Calendar.service_id)
-            .filter(
-                gtfs_version_filter(Calendar, gtfs_snapshot_id),
-                weekday_field == 1,
-                Calendar.start_date <= gtfs_date_str,
-                Calendar.end_date >= gtfs_date_str,
-            )
-            .distinct()
-            .all()
-        }
-        added_service_ids = {
-            sid
-            for (sid,) in db.query(CalendarDate.service_id)
-            .filter(
-                gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
-                CalendarDate.date == gtfs_date_str,
-                CalendarDate.exception_type == 1,
-            )
-            .distinct()
-            .all()
-        }
-        removed_service_ids = {
-            sid
-            for (sid,) in db.query(CalendarDate.service_id)
-            .filter(
-                gtfs_version_filter(CalendarDate, gtfs_snapshot_id),
-                CalendarDate.date == gtfs_date_str,
-                CalendarDate.exception_type == 2,
-            )
-            .distinct()
-            .all()
-        }
-        active_service_ids = (base_service_ids - removed_service_ids) | added_service_ids
+        active_service_ids = scheduled_service_ids_for_date(db, service_date, gtfs_snapshot_id)
 
         if active_service_ids:
             from_gtfs = {

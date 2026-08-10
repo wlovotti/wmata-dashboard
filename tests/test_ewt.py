@@ -17,16 +17,20 @@ import pytest
 
 from src.ewt import (
     EWT_TIME_PERIODS,
+    _dates_matching_weekday,
     _day_type_for,
     _eastern_hour,
+    _feed_validity_window,
     _is_cell_hour_frequent,
     _period_for_hour,
+    _resolve_service_ids_for_day_type,
+    _scheduled_headways_by_cell_hour,
     compute_awt,
     compute_ewt_for_route_date,
     compute_ewt_for_routes,
     compute_ewt_headline_for_route,
 )
-from src.models import Calendar, Route, Stop, StopEvent, StopTime, Trip
+from src.models import Calendar, CalendarDate, Route, Stop, StopEvent, StopTime, Trip
 
 ROUTE = "TEST1"
 SERVICE_DATE = date(2026, 4, 14)  # Tuesday, EDT
@@ -482,6 +486,500 @@ class TestComputeEwtForRouteDate:
         assert am["frequent_cell_hours"] == 1
         assert am["n_scheduled_headways"] == 3
         assert am["swt_seconds"] == pytest.approx(300.0)
+
+
+def _seed_calendar_flag(
+    db_session,
+    service_id: str,
+    *,
+    monday: int = 0,
+    tuesday: int = 0,
+    wednesday: int = 0,
+    thursday: int = 0,
+    friday: int = 0,
+    saturday: int = 0,
+    sunday: int = 0,
+    start_date: str = "20260101",
+    end_date: str = "20261231",
+) -> None:
+    """Insert a `calendar` row with explicit per-weekday flags (default all 0).
+
+    Unlike the module-level `_seed_calendar` helper (which always seeds a
+    Mon-Fri weekday row), this lets a test model a `calendar` with NO
+    weekday coverage at all — the Muni/SFMTA shape NOTES-106 fixes.
+    """
+    db_session.add(
+        Calendar(
+            service_id=service_id,
+            monday=monday,
+            tuesday=tuesday,
+            wednesday=wednesday,
+            thursday=thursday,
+            friday=friday,
+            saturday=saturday,
+            sunday=sunday,
+            start_date=start_date,
+            end_date=end_date,
+            is_current=True,
+        )
+    )
+    db_session.commit()
+
+
+def _seed_calendar_date(db_session, service_id: str, date_str: str, exception_type: int) -> None:
+    """Insert a `calendar_dates` exception row (1=added, 2=removed)."""
+    db_session.add(
+        CalendarDate(
+            service_id=service_id,
+            date=date_str,
+            exception_type=exception_type,
+            is_current=True,
+        )
+    )
+    db_session.commit()
+
+
+def _seed_trip_with_service(
+    db_session, trip_id: str, route_id: str, service_id: str, direction_id: int = 0
+) -> None:
+    """Insert a current Trip row tied to an arbitrary `service_id` (unlike the
+    module-level `_seed_trip`, which always uses the global `SERVICE_ID`)."""
+    db_session.add(
+        Trip(
+            trip_id=trip_id,
+            route_id=route_id,
+            service_id=service_id,
+            direction_id=direction_id,
+            trip_headsign="Downtown",
+            is_current=True,
+        )
+    )
+    db_session.commit()
+
+
+class TestFeedValidityWindow:
+    """Direct tests of `_feed_validity_window` — the union of `calendar`
+    start/end ranges and `calendar_dates` dates that bounds which dates
+    modal resolution samples."""
+
+    def test_union_of_calendar_and_calendar_dates_ranges(self, db_session):
+        _seed_calendar_flag(db_session, "WK", tuesday=1, start_date="20260301", end_date="20260601")
+        _seed_calendar_date(
+            db_session, "EXTRA", "20260901", exception_type=1
+        )  # later than end_date
+        assert _feed_validity_window(db_session) == (date(2026, 3, 1), date(2026, 9, 1))
+
+    def test_calendar_dates_only_feed(self, db_session):
+        """No `calendar` rows at all — window comes entirely from
+        `calendar_dates` (the Muni/SFMTA shape)."""
+        _seed_calendar_date(db_session, "A", "20260723", exception_type=1)
+        _seed_calendar_date(db_session, "B", "20260828", exception_type=1)
+        assert _feed_validity_window(db_session) == (date(2026, 7, 23), date(2026, 8, 28))
+
+    def test_returns_none_when_no_data(self, db_session):
+        assert _feed_validity_window(db_session) is None
+
+    def test_malformed_calendar_end_date_is_skipped(self, db_session):
+        """A malformed `calendar.end_date` must not raise — the window
+        falls back to whatever other evidence (here, `calendar_dates`) is
+        parseable, per the finding-C hardening (`_try_parse_yyyymmdd`)."""
+        _seed_calendar_flag(
+            db_session, "WK", tuesday=1, start_date="20260301", end_date="not-a-date"
+        )
+        _seed_calendar_date(db_session, "WK", "20260414", exception_type=1)
+        # start_date parses fine; end_date doesn't, so the max comes from
+        # calendar_dates instead of raising.
+        assert _feed_validity_window(db_session) == (date(2026, 3, 1), date(2026, 4, 14))
+
+
+class TestDatesMatchingWeekday:
+    """Direct tests of `_dates_matching_weekday`."""
+
+    def test_enumerates_every_matching_weekday_in_range(self, db_session):
+        # 2026-03-31, 04-07, 04-14 are consecutive Tuesdays (weekday index 1).
+        assert _dates_matching_weekday(date(2026, 3, 28), date(2026, 4, 16), 1) == [
+            date(2026, 3, 31),
+            date(2026, 4, 7),
+            date(2026, 4, 14),
+        ]
+
+    def test_empty_when_start_after_end(self):
+        assert _dates_matching_weekday(date(2026, 4, 14), date(2026, 4, 1), 1) == []
+
+    def test_single_day_range_matching(self):
+        assert _dates_matching_weekday(date(2026, 4, 14), date(2026, 4, 14), 1) == [
+            date(2026, 4, 14)
+        ]
+
+    def test_single_day_range_not_matching(self):
+        assert _dates_matching_weekday(date(2026, 4, 14), date(2026, 4, 14), 5) == []
+
+
+class TestResolveServiceIdsForDayTypeModal:
+    """Direct tests of `_resolve_service_ids_for_day_type`'s modal-resolution
+    core, isolated from the `_scheduled_headways_by_cell_hour` wiring.
+    Reference weekdays (all Tuesdays, 7 days apart, so no independent
+    verification needed beyond the first): 2026-03-31, 04-07, 04-14, 04-21,
+    04-28, 05-05.
+    """
+
+    def test_single_sample_wins_trivially(self, db_session):
+        _seed_calendar_date(db_session, "WKADD", "20260414", exception_type=1)
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"WKADD"}
+
+    def test_majority_wins_over_terminal_edge_exceptions(self, db_session):
+        """The exact shape of the real WMATA bug: a base service_id covers
+        most Tuesdays in the window, but the LAST few Tuesdays each carry
+        their own distinct type=1/type=2 substitution pair (a
+        schedule-transition artifact stacked at the feed's terminal edge).
+        No single substitute earns more than one vote, so the base
+        service_id's 4-vote majority wins cleanly over 1-vote-each
+        substitutes."""
+        _seed_calendar_flag(
+            db_session, "MTWT_SID", tuesday=1, start_date="20260325", end_date="20260510"
+        )
+        # Tuesdays in [2026-03-25, 2026-05-10]: 3/31, 4/7, 4/14, 4/21, 4/28, 5/5 (6 total).
+        # Terminal two (4/28, 5/5) each get a one-off substitution.
+        _seed_calendar_date(db_session, "MTWT_SID", "20260428", exception_type=2)
+        _seed_calendar_date(db_session, "SUB1", "20260428", exception_type=1)
+        _seed_calendar_date(db_session, "MTWT_SID", "20260505", exception_type=2)
+        _seed_calendar_date(db_session, "SUB2", "20260505", exception_type=1)
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"MTWT_SID"}
+
+    def test_exception_on_the_most_recent_date_does_not_win(self, db_session):
+        """Minimal case of the same bug: ONLY the most recent sampled date
+        carries an exception — proving modal resolution doesn't special-case
+        "most recent" the way the rejected anchor design did."""
+        _seed_calendar_flag(
+            db_session, "BASE", tuesday=1, start_date="20260325", end_date="20260428"
+        )
+        # Tuesdays: 3/31, 4/7, 4/14, 4/21, 4/28 (5 total) — only the last one substituted.
+        _seed_calendar_date(db_session, "BASE", "20260428", exception_type=2)
+        _seed_calendar_date(db_session, "SUB", "20260428", exception_type=1)
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"BASE"}
+
+    def test_majority_schedule_revision_era_wins_over_more_recent_minority_era(self, db_session):
+        """The real SFMTA shape: two calendar_dates-only weekday service_ids
+        on non-overlapping date ranges (no `calendar` row at all). Era A
+        covers 3 Tuesdays, era B (the more recent revision) covers only 2.
+        Modal resolution picks era A — the MAJORITY era, not the most
+        recent one. This is intended: era A is what the schedule looked
+        like on most of the sampled weekdays."""
+        _seed_calendar_date(db_session, "ERA_A", "20260331", exception_type=1)
+        _seed_calendar_date(db_session, "ERA_A", "20260407", exception_type=1)
+        _seed_calendar_date(db_session, "ERA_A", "20260414", exception_type=1)
+        _seed_calendar_date(db_session, "ERA_B", "20260421", exception_type=1)
+        _seed_calendar_date(db_session, "ERA_B", "20260428", exception_type=1)
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"ERA_A"}
+
+    def test_tiebreak_prefers_set_with_more_recent_contributing_date(self, db_session):
+        """Two eras tied 2-2 on vote count — the tiebreak picks the era
+        whose most recent contributing date is later."""
+        _seed_calendar_date(db_session, "ERA_A", "20260331", exception_type=1)
+        _seed_calendar_date(db_session, "ERA_A", "20260407", exception_type=1)
+        _seed_calendar_date(db_session, "ERA_B", "20260414", exception_type=1)
+        _seed_calendar_date(db_session, "ERA_B", "20260421", exception_type=1)
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"ERA_B"}
+
+    def test_empty_sampled_dates_are_skipped_not_counted_as_modal(self, db_session):
+        """A Tuesday that resolves to nothing (e.g. a removal with no
+        replacement — a genuine one-off outage) must not out-vote a real,
+        non-empty majority just by being another sampled date."""
+        _seed_calendar_flag(
+            db_session, "BASE", tuesday=1, start_date="20260325", end_date="20260421"
+        )
+        # Tuesdays: 3/31, 4/7, 4/14, 4/21 (4 total) — one pure removal, no substitute added.
+        _seed_calendar_date(db_session, "BASE", "20260421", exception_type=2)
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"BASE"}
+
+    def test_all_empty_stays_empty(self, db_session):
+        _seed_calendar_flag(
+            db_session, "BASE", tuesday=1, start_date="20260325", end_date="20260414"
+        )
+        # Every Tuesday in range (3/31, 4/7, 4/14) is removed with no replacement.
+        _seed_calendar_date(db_session, "BASE", "20260331", exception_type=2)
+        _seed_calendar_date(db_session, "BASE", "20260407", exception_type=2)
+        _seed_calendar_date(db_session, "BASE", "20260414", exception_type=2)
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == set()
+
+    def test_returns_empty_when_no_calendar_data_at_all(self, db_session):
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == set()
+
+
+class TestResolveServiceIdsForDayTypeMemoization:
+    """`_resolve_service_ids_for_day_type` is called fresh per route from
+    `_scheduled_headways_by_cell_hour` (no upstream caching the way
+    `fetch_scheduled_cell_hours_for_routes`'s vectorized path has) — modal
+    resolution costs ~4 window queries + 3 per sampled representative
+    date, so unmemoized it multiplies into thousands of extra round-trips
+    across a route loop. These tests assert the module-level memo
+    (`_service_id_resolution_cache`) actually avoids re-running that work,
+    and that it doesn't cross-contaminate across snapshot_ids — mirroring
+    `_schedule_cache`'s exact `(day_type, resolved snapshot_id)` keying
+    and eviction semantics.
+    """
+
+    def test_second_call_for_same_day_type_and_snapshot_reuses_cached_result(
+        self, db_session, monkeypatch
+    ):
+        """The expensive per-date resolution (`scheduled_service_ids_for_date`)
+        must not run again on a cache hit — monkeypatched to count calls
+        rather than asserting on raw SQL statement counts, since the
+        cheap snapshot-id-resolution query legitimately still runs on
+        every call (mirrors `_schedule_cache`'s own behavior)."""
+        import src.ewt as ewt_module
+
+        _seed_calendar_flag(db_session, "WK", tuesday=1, start_date="20260301", end_date="20260401")
+        calls = {"n": 0}
+        original = ewt_module.scheduled_service_ids_for_date
+
+        def _counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(ewt_module, "scheduled_service_ids_for_date", _counting)
+
+        first = _resolve_service_ids_for_day_type(db_session, "weekday")
+        assert calls["n"] > 0, "the first call must actually do the per-date resolution work"
+
+        calls["n"] = 0
+        second = _resolve_service_ids_for_day_type(db_session, "weekday")
+
+        assert calls["n"] == 0, "a cache hit must not re-run per-date resolution"
+        assert second == first == {"WK"}
+
+    def test_different_snapshot_ids_do_not_cross_contaminate(self, db_session):
+        """Two explicit `gtfs_snapshot_id`s with different underlying
+        calendars must each resolve to their OWN service_id, never the
+        other's — including after the eviction that storing the second
+        snapshot's entry triggers for the first (mirrors `_schedule_cache`:
+        storing evicts every entry keyed to a different snapshot_id)."""
+        db_session.add(
+            Calendar(
+                service_id="S1",
+                monday=0,
+                tuesday=1,
+                wednesday=0,
+                thursday=0,
+                friday=0,
+                saturday=0,
+                sunday=0,
+                start_date="20260301",
+                end_date="20260401",
+                snapshot_id=1,
+                is_current=True,
+            )
+        )
+        db_session.add(
+            Calendar(
+                service_id="S2",
+                monday=0,
+                tuesday=1,
+                wednesday=0,
+                thursday=0,
+                friday=0,
+                saturday=0,
+                sunday=0,
+                start_date="20260301",
+                end_date="20260401",
+                snapshot_id=2,
+                is_current=True,
+            )
+        )
+        db_session.commit()
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=1) == {
+            "S1"
+        }
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=2) == {
+            "S2"
+        }
+        # Re-fetch both — snapshot 1's cache entry was evicted by storing
+        # snapshot 2's, forcing a recompute, but it must still resolve
+        # correctly (not silently return snapshot 2's cached value).
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=1) == {
+            "S1"
+        }
+        assert _resolve_service_ids_for_day_type(db_session, "weekday", gtfs_snapshot_id=2) == {
+            "S2"
+        }
+
+
+class TestScheduledHeadwaysCalendarDatesResolution:
+    """NOTES-106 (+ two review follow-ups): `_scheduled_headways_by_cell_hour`
+    must honor `calendar_dates` when `calendar` itself defines no
+    day-of-week service for the day_type — the Muni/SFMTA shape, where
+    weekday service exists purely as `calendar_dates` exception_type=1
+    (added) rows. The resolver samples every representative-weekday date
+    in the feed's validity window and takes the MODAL (most common)
+    resolved service_id set (`_resolve_service_ids_for_day_type`, tested
+    directly above) — these tests check that resolver is wired correctly
+    into the scheduled-headway pool end-to-end, not the modal arithmetic
+    itself.
+
+    Tests call the private `_scheduled_headways_by_cell_hour` directly —
+    same pattern the file already uses for `_day_type_for` / `_eastern_hour`
+    / `_is_cell_hour_frequent` — to isolate the calendar-resolution logic
+    from the AWT/SWT pooling machinery.
+    """
+
+    def test_weekday_only_via_calendar_dates_addition_is_resolved(self, db_session):
+        """Muni shape: `calendar` has ONLY a Saturday row (no weekday flags
+        anywhere), and the real weekday service exists purely as a single
+        `calendar_dates` exception_type=1 addition. Before the original
+        NOTES-106 fix this returned an empty dict for day_type='weekday'."""
+        _seed_route(db_session)
+        _seed_calendar_flag(db_session, "SAT", saturday=1)
+        _seed_calendar_date(db_session, "WKADD", "20260414", exception_type=1)  # Tue
+        _seed_stop(db_session, "S1")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00"]):
+            trip_id = f"WT{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "WKADD")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "weekday")
+
+        assert sched, "weekday scheduled headways must not be empty on a calendar_dates-only feed"
+        assert sched[(0, "S1", 7)] == [600.0, 600.0]
+
+    def test_wmata_shaped_terminal_exceptions_do_not_override_the_majority_schedule(
+        self, db_session
+    ):
+        """Real-shape regression (re-review finding A.1): split calendar
+        rows (a Mon-Thu service_id with `tuesday=1`, plus a separate
+        Friday-only service_id with `tuesday=0` — WMATA's actual split,
+        see NOTES-51) PLUS type=1/type=2 exception pairs stacked on the
+        terminal Tuesdays of the window. The resolved schedule must still
+        match the Mon-Thu service_id's trips — not an exception
+        substitute — because it's the majority across the sampled window."""
+        _seed_route(db_session)
+        _seed_calendar_flag(
+            db_session,
+            "MTWT_SID",
+            monday=1,
+            tuesday=1,
+            wednesday=1,
+            thursday=1,
+            start_date="20260325",
+            end_date="20260510",
+        )
+        _seed_calendar_flag(
+            db_session, "FRI_SID", friday=1, start_date="20260325", end_date="20260510"
+        )
+        # Terminal-edge exception pairs on the last two Tuesdays (4/28, 5/5).
+        _seed_calendar_date(db_session, "MTWT_SID", "20260428", exception_type=2)
+        _seed_calendar_date(db_session, "SUB1", "20260428", exception_type=1)
+        _seed_calendar_date(db_session, "MTWT_SID", "20260505", exception_type=2)
+        _seed_calendar_date(db_session, "SUB2", "20260505", exception_type=1)
+        _seed_stop(db_session, "S1")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00"]):
+            trip_id = f"T{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "MTWT_SID")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+        # A substitute trip that must NOT show up in the resolved schedule.
+        _seed_trip_with_service(db_session, "SUBTRIP", ROUTE, "SUB1")
+        _seed_stop_time(db_session, "SUBTRIP", "S1", "23:00:00")
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "weekday")
+
+        assert sched == {(0, "S1", 7): [600.0, 600.0]}
+
+    def test_disjoint_schedule_revision_eras_resolve_to_the_majority_era_not_an_interleave(
+        self, db_session
+    ):
+        """The real SFMTA shape (service_id `78968` covers 7/23-8/14 —
+        3 Tuesdays in a small window — `82660` takes over 8/17-8/28 — 2
+        Tuesdays): two calendar_dates-only weekday service_ids with
+        DIFFERENT arrival times, added on non-overlapping dates. The
+        resolved pool must match exactly the MAJORITY era's timetable —
+        not a blended interleave of both (the bug the original,
+        since-rejected feed-wide-pooling fallback had)."""
+        _seed_route(db_session)
+        for d in ("20260331", "20260407", "20260414"):  # ERA_A: 3 Tuesdays (majority)
+            _seed_calendar_date(db_session, "ERA_A", d, exception_type=1)
+        for d in ("20260421", "20260428"):  # ERA_B: 2 Tuesdays (minority, more recent)
+            _seed_calendar_date(db_session, "ERA_B", d, exception_type=1)
+        _seed_stop(db_session, "S1")
+        # ERA_A: 10-minute headway (600s) — the majority, expected winner.
+        for i, t in enumerate(["07:00:00", "07:10:00"]):
+            trip_id = f"A{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "ERA_A")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+        # ERA_B: 20-minute headway (1200s) — would pollute the pool if blended in.
+        for i, t in enumerate(["07:00:00", "07:20:00"]):
+            trip_id = f"B{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "ERA_B")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "weekday")
+
+        assert sched == {(0, "S1", 7): [600.0]}, "must resolve to ERA_A only, not a blend"
+
+    def test_weekend_base_calendar_unaffected_by_a_single_one_off_swap(self, db_session):
+        """The real SFMTA shape found in NOTES-106: a Saturday base
+        service_id is removed via calendar_dates type=2 AND a substitute
+        service_id is added via type=1 on exactly ONE Saturday out of
+        several in the window (a one-off holiday schedule swap). The base
+        service_id's majority vote must win — the acceptance criterion is
+        'weekend values unchanged'."""
+        _seed_route(db_session)
+        _seed_calendar_flag(
+            db_session, "SAT_BASE", saturday=1, start_date="20260404", end_date="20260425"
+        )
+        # Saturdays in range: 4/4, 4/11, 4/18, 4/25 (4 total) — only 4/18 swapped.
+        _seed_calendar_date(db_session, "SAT_BASE", "20260418", exception_type=2)
+        _seed_calendar_date(db_session, "SAT_SWAP", "20260418", exception_type=1)
+        _seed_stop(db_session, "S1")
+        _seed_stop(db_session, "S2")
+        for i, t in enumerate(["09:00:00", "09:15:00", "09:30:00"]):
+            trip_id = f"BASE{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "SAT_BASE")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+        for i, t in enumerate(["10:00:00", "10:05:00"]):
+            trip_id = f"SWAP{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "SAT_SWAP")
+            _seed_stop_time(db_session, trip_id, "S2", t)
+
+        sched = _scheduled_headways_by_cell_hour(db_session, ROUTE, "saturday")
+
+        assert sched == {(0, "S1", 9): [900.0, 900.0]}
+        assert (0, "S2", 10) not in sched
+
+    def test_end_to_end_ewt_weekday_non_null_on_calendar_dates_only_feed(self, db_session):
+        """Integration check through `compute_ewt_for_route_date`: the Muni
+        shape from `test_weekday_only_via_calendar_dates_addition_is_resolved`
+        must produce a non-None, non-degenerate weekday EWT row when there's
+        matching observed service, not just a non-empty scheduled pool."""
+        _seed_route(db_session)
+        _seed_calendar_flag(db_session, "SAT", saturday=1)
+        _seed_calendar_date(db_session, "WKADD", "20260414", exception_type=1)  # Tue
+        _seed_stop(db_session, "S1")
+        for i, t in enumerate(["07:00:00", "07:10:00", "07:20:00", "07:30:00"]):
+            trip_id = f"WT{i + 1}"
+            _seed_trip_with_service(db_session, trip_id, ROUTE, "WKADD")
+            _seed_stop_time(db_session, trip_id, "S1", t)
+        for i, minute in enumerate([0, 10, 20, 30]):
+            _seed_stop_event(
+                db_session,
+                trip_id=f"WT{i + 1}",
+                route_id=ROUTE,
+                stop_id="S1",
+                observed_arrival_ts=datetime(2026, 4, 14, 11, minute, 0),
+            )
+
+        rows = compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        am = next(r for r in rows if r["time_period"] == "AM Peak (6-9)")
+        assert am["frequent_cell_hours"] == 1
+        assert am["n_scheduled_headways"] == 3
+        assert am["swt_seconds"] == pytest.approx(300.0)
+        assert am["awt_seconds"] == pytest.approx(300.0)
+        assert am["ewt_seconds"] == pytest.approx(0.0)
 
 
 class TestCoverageRatio:

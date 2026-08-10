@@ -51,12 +51,12 @@ Observed vs scheduled sources
     naturally widen the observed gap and bunched arrivals naturally narrow
     it — both feed into AWT correctly.
 
-  - Scheduled: `stop_times` joined to `trips` and `calendar`, filtered by the
-    representative weekday for `service_date`'s day_type (Tue → weekday, Sat
-    → saturday, Sun → sunday — same convention as `service_profile.py`).
-    GTFS `arrival_time` is parsed to seconds before sorting (string MIN/MAX
-    is broken on WMATA's unpadded single-digit hours, e.g. `"10:00:07" <
-    "9:58:27"` lexicographically).
+  - Scheduled: `stop_times` joined to `trips`, filtered to the service_ids
+    modally resolved for `service_date`'s day_type (weekday/saturday/
+    sunday — see "Calendar resolution and calendar_dates" below for
+    exactly how that set is computed). GTFS `arrival_time` is parsed to
+    seconds before sorting (string MIN/MAX is broken on WMATA's unpadded
+    single-digit hours, e.g. `"10:00:07" < "9:58:27"` lexicographically).
 
 Aggregation to time_period
 --------------------------
@@ -67,20 +67,80 @@ with more arrivals contribute more headways. Per-cell AWTs are never
 averaged together — averaging AWTs is wrong; only the pooled formula gives
 the correct rider-weighted aggregate.
 
+Calendar resolution and calendar_dates (NOTES-106)
+----------------------------------------------------
+The scheduled side pools GTFS `stop_times` for a **representative**
+service_id set per day_type, not the literal `service_date` passed in.
+This is deliberate: it lets one schedule fetch serve every observed date
+of the same day_type instead of re-querying per date (see
+`fetch_scheduled_cell_hours_for_routes`'s module-level cache).
+
+The representative set is resolved by MODAL RESOLUTION
+(`_resolve_service_ids_for_day_type`): sample every date in the feed's
+validity window whose weekday matches the day_type's single representative
+weekday (Tuesday for `weekday`, Saturday for `saturday`, Sunday for
+`sunday` — the same `DAY_TYPE_REPRESENTATIVE_FIELD` convention
+`service_profile.py` uses; WMATA's weekday service can split across
+Mon/Tue/Thu vs a separate Wed-only or Fri-only service_id — see the
+NOTES-51 note in `service_delivered.py` — so sampling every Mon-Fri date
+would mix distinct services; Tuesday-only sampling stays consistent with
+what "the weekday schedule" already means everywhere else in this
+codebase), resolve EACH sampled date independently via the exact GTFS-spec
+per-date rule `service_delivered.py` uses —
+`src.gtfs_calendar.scheduled_service_ids_for_date` — and take the MOST
+COMMON (modal) resolved service_id set across all samples. Ties break by
+preferring the set whose most recent contributing date is later.
+
+This is the second replacement for this fix (both caught in review before
+merge — see git history on this file/PR for the earlier attempts):
+  1. The original version unioned every `calendar_dates` type=1 addition
+     matching the day_type's weekday **across the whole feed** and
+     subtracted every matching type=2 removal, also feed-wide. Bug: a
+     single `exception_type=2` row anywhere in the feed evicted a
+     service_id from the ENTIRE pool (self-reverting on the very next
+     holiday), and an agency whose `calendar_dates`-only day_type spans
+     more than one schedule-revision era (SFMTA: service_id `78968`
+     covers 7/23-8/14, `82660` covers 8/17-8/28) got both eras blended
+     into one schedule.
+  2. The second version picked ONE deterministic date — the most recent
+     matching-weekday date the snapshot had ANY evidence for — and
+     resolved only that date. Bug, found on real `wmata_dashboard` data:
+     anchoring on the feed's most recent date targets the terminal edge
+     of the schedule, which is exactly where agencies stack
+     schedule-transition `calendar_dates` exceptions (WMATA's feed has a
+     type=1/type=2 substitution pair on nearly every one of its last ~20
+     dates). The anchor would land on an exception-substitute service_id
+     instead of the stable base service — silently changing WMATA's
+     output, which the "WMATA output unchanged" acceptance criterion was
+     specifically meant to catch, and did (663 frequent-cell-hour flips
+     on the weekday pool alone).
+Modal resolution avoids both: no single exception (feed-wide OR
+terminal-edge) can dominate a multi-week sample unless it's actually the
+majority pattern, and each sampled date is resolved independently so
+eras/exceptions never blend.
+
 Known limitations (deferred)
 ----------------------------
   - `schedule_relationship='ADDED'` trips (real-time-only additions) aren't
     in the scheduled denominator since they aren't in GTFS. Rare, accepted.
-  - Holiday awareness (calendar_dates) is not consulted — same caveat as
-    `service_delivered.py`. A federal-holiday weekday running Sunday service
-    will use the weekday schedule as the SWT comparison.
+  - Modal resolution answers "what does this day_type's schedule look like
+    MOST of the time" — a genuinely majority schedule-revision era (e.g.
+    SFMTA's `78968` era, which covers more of the sampled window than
+    `82660`) wins even when a later era is more "current." NOTES-109
+    tracks a full per-date resolution (each `service_date` computes its
+    own exact pool via `scheduled_service_ids_for_date` directly, no
+    day_type sampling at all) as the eventual replacement for this
+    representative-pooling approach entirely; deferred because it needs a
+    cache keyed by date instead of day_type and a fresh WMATA
+    re-validation (Fridays/holidays would get genuinely different
+    schedules than today, which is a deliberate output change, not a bug).
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date as date_type
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from zoneinfo import ZoneInfo
 
@@ -88,8 +148,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.frequent_routes import DEFAULT_GATE_SEC, get_cell_hour_gate_sec
+from src.gtfs_calendar import scheduled_service_ids_for_date
 from src.gtfs_versioning import gtfs_version_filter
-from src.models import Calendar, GTFSSnapshot, StopEvent, StopTime, Trip
+from src.models import Calendar, CalendarDate, GTFSSnapshot, StopEvent, StopTime, Trip
 from src.time_periods import is_hour_in_period
 
 UTC = ZoneInfo("UTC")
@@ -123,6 +184,214 @@ DAY_TYPE_REPRESENTATIVE_FIELD = {
 }
 
 CellHour = tuple[int, str, int]  # (direction_id, stop_id, hour)
+
+# Calendar column name -> Python `date.weekday()` index (Mon=0..Sun=6).
+_CALENDAR_FIELD_TO_WEEKDAY_INDEX = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+
+# The single representative weekday (as a `date.weekday()` index) sampled
+# for each day_type, derived from `DAY_TYPE_REPRESENTATIVE_FIELD` above so
+# there's one source of truth for the convention. Deliberately ONE weekday
+# per day_type, not "any Mon-Fri" — WMATA splits weekday service across
+# multiple service_ids (Mon/Tue/Thu vs a separate Wed-only or Fri-only
+# service_id; see the NOTES-51 note in `service_delivered.py`), so
+# sampling every weekday date would mix distinct services into the same
+# modal vote.
+_DAY_TYPE_WEEKDAY_INDEX: dict[str, int] = {
+    day_type: _CALENDAR_FIELD_TO_WEEKDAY_INDEX[field_name]
+    for day_type, field_name in DAY_TYPE_REPRESENTATIVE_FIELD.items()
+}
+
+
+def _try_parse_yyyymmdd(value: str | None, *, context: str) -> date_type | None:
+    """Parse a 'YYYYMMDD' string; return `None` (and print a warning) on
+    `None` input or a malformed string, instead of raising — one bad date
+    column from a feed shouldn't take down EWT/bunching resolution for the
+    whole agency.
+    """
+    if value is None:
+        return None
+    try:
+        return datetime.strptime(value, "%Y%m%d").date()
+    except ValueError:
+        print(f"[ewt] skipping malformed date value={value!r} ({context})")
+        return None
+
+
+def _feed_validity_window(
+    db: Session, gtfs_snapshot_id: int | None = None
+) -> tuple[date_type, date_type] | None:
+    """Return `(earliest, latest)` date the snapshot has ANY `calendar` or
+    `calendar_dates` evidence for — the union of every `calendar` row's
+    `[start_date, end_date]` range and every `calendar_dates.date`.
+    `None` when the snapshot has no calendar data at all.
+
+    GTFS date strings are fixed-width 'YYYYMMDD' (unlike GTFS time
+    strings, which are NOT zero-padded — see `_parse_gtfs_time_to_seconds`)
+    so SQL `MIN`/`MAX` on the raw string columns is safe and avoids
+    pulling every row into Python just to find the extremes.
+    """
+    cal_start = (
+        db.query(func.min(Calendar.start_date))
+        .filter(gtfs_version_filter(Calendar, gtfs_snapshot_id))
+        .scalar()
+    )
+    cal_end = (
+        db.query(func.max(Calendar.end_date))
+        .filter(gtfs_version_filter(Calendar, gtfs_snapshot_id))
+        .scalar()
+    )
+    cd_min = (
+        db.query(func.min(CalendarDate.date))
+        .filter(gtfs_version_filter(CalendarDate, gtfs_snapshot_id))
+        .scalar()
+    )
+    cd_max = (
+        db.query(func.max(CalendarDate.date))
+        .filter(gtfs_version_filter(CalendarDate, gtfs_snapshot_id))
+        .scalar()
+    )
+
+    starts = [
+        d
+        for d in (
+            _try_parse_yyyymmdd(cal_start, context="calendar.start_date"),
+            _try_parse_yyyymmdd(cd_min, context="calendar_dates.date"),
+        )
+        if d is not None
+    ]
+    ends = [
+        d
+        for d in (
+            _try_parse_yyyymmdd(cal_end, context="calendar.end_date"),
+            _try_parse_yyyymmdd(cd_max, context="calendar_dates.date"),
+        )
+        if d is not None
+    ]
+    if not starts or not ends:
+        return None
+    start, end = min(starts), max(ends)
+    if start > end:
+        return None
+    return start, end
+
+
+def _dates_matching_weekday(
+    start: date_type, end: date_type, weekday_index: int
+) -> list[date_type]:
+    """Every date in `[start, end]` (inclusive) whose `date.weekday()`
+    equals `weekday_index` — i.e. every Tuesday (or Saturday, or Sunday) in
+    the range, in ascending order.
+    """
+    if start > end:
+        return []
+    offset = (weekday_index - start.weekday()) % 7
+    d = start + timedelta(days=offset)
+    out: list[date_type] = []
+    while d <= end:
+        out.append(d)
+        d += timedelta(days=7)
+    return out
+
+
+# Module-level memo for the per-day_type modal service_id resolution.
+# Keyed `(day_type, snapshot_id)` with the SAME resolve-then-evict
+# semantics `_schedule_cache` below uses (mirrored exactly, not
+# reinvented): `gtfs_snapshot_id=None` resolves to the concrete current
+# snapshot id via `MAX(GTFSSnapshot.snapshot_id)` BEFORE keying, so the
+# cache naturally invalidates the moment `reload_gtfs_complete.py` writes
+# a new `gtfs_snapshots` row — storing a fresh entry evicts every entry
+# keyed to a different snapshot_id. Explicit historical `gtfs_snapshot_id`
+# values (backfill) cache under their own id and never need invalidating.
+#
+# Needed because `_scheduled_headways_by_cell_hour` (the per-route path,
+# called once per route per pass — ~128 routes on WMATA) invokes
+# `_resolve_service_ids_for_day_type` fresh every time; unlike
+# `fetch_scheduled_cell_hours_for_routes`'s vectorized path, there's no
+# other caching upstream of it. Modal resolution costs ~4 window queries
+# + 3 queries per sampled representative-weekday date (~12/day_type on
+# WMATA's typical window) — unmemoized, that's ~40 queries × ~128 routes
+# ≈ 5,100 extra round-trips per day_type per pass, which multiplies badly
+# over the SSH tunnel (NOTES-88).
+_service_id_resolution_cache: dict[tuple[str, int], frozenset[str]] = {}
+_service_id_resolution_cache_lock = Lock()
+
+
+def _resolve_service_ids_for_day_type(
+    db: Session, day_type: str, gtfs_snapshot_id: int | None = None
+) -> set[str]:
+    """Resolve `day_type`'s representative service_id set by MODAL
+    RESOLUTION (NOTES-106, second review follow-up — see the module
+    docstring's "Calendar resolution and calendar_dates" section for the
+    full rationale and the two rejected earlier designs).
+
+    Samples every date in the feed's validity window (`_feed_validity_window`)
+    whose weekday matches `day_type`'s single representative weekday
+    (`_DAY_TYPE_WEEKDAY_INDEX`), resolves EACH sampled date independently
+    via the exact GTFS-spec per-date rule `service_delivered.py` uses —
+    `src.gtfs_calendar.scheduled_service_ids_for_date` — and returns the
+    MOST COMMON (modal) resolved set. Dates that resolve to an empty set
+    are skipped when computing the mode; if every sampled date is empty,
+    the result stays empty. Ties break by preferring the set whose most
+    recent contributing date is later (a deterministic, data-driven
+    tiebreak rather than an arbitrary one).
+
+    Memoized at module level by `(day_type, resolved snapshot_id)` — see
+    `_service_id_resolution_cache` above for the exact invalidation
+    semantics (mirrors `_schedule_cache`).
+
+    Shared by `_scheduled_headways_by_cell_hour` and
+    `fetch_scheduled_cell_hours_for_routes` so bunching (which imports both
+    from this module) gets the fix for free rather than duplicating the
+    query.
+    """
+    if gtfs_snapshot_id is not None:
+        snapshot_id = gtfs_snapshot_id
+    else:
+        snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+    cache_key = (day_type, snapshot_id)
+    with _service_id_resolution_cache_lock:
+        cached = _service_id_resolution_cache.get(cache_key)
+    if cached is not None:
+        return set(cached)
+
+    window = _feed_validity_window(db, gtfs_snapshot_id)
+    if window is None:
+        result: frozenset[str] = frozenset()
+    else:
+        start, end = window
+        weekday_index = _DAY_TYPE_WEEKDAY_INDEX[day_type]
+        candidate_dates = _dates_matching_weekday(start, end, weekday_index)
+
+        counts: dict[frozenset[str], int] = defaultdict(int)
+        most_recent: dict[frozenset[str], date_type] = {}
+        for d in candidate_dates:
+            ids = scheduled_service_ids_for_date(db, d, gtfs_snapshot_id)
+            if not ids:
+                continue
+            key = frozenset(ids)
+            counts[key] += 1
+            if key not in most_recent or d > most_recent[key]:
+                most_recent[key] = d
+
+        result = max(counts, key=lambda k: (counts[k], most_recent[k])) if counts else frozenset()
+
+    with _service_id_resolution_cache_lock:
+        _service_id_resolution_cache[cache_key] = result
+        # Evict entries from older/other GTFS snapshots so the cache
+        # doesn't accumulate every historical version — same eviction
+        # rule `_schedule_cache` uses below.
+        for k in list(_service_id_resolution_cache.keys()):
+            if k[1] != snapshot_id:
+                del _service_id_resolution_cache[k]
+    return set(result)
 
 
 def _day_type_for(service_date: date_type) -> str:
@@ -260,19 +529,26 @@ def _scheduled_headways_by_cell_hour(
     earlier arrival — same convention `route_service_profile` uses, so the
     frequent threshold has the same units. Hours ≥ 24 in GTFS service-day-
     extending times wrap correctly.
+
+    The representative-day service_id set is resolved via
+    `_resolve_service_ids_for_day_type` (NOTES-106): modal resolution over
+    every matching-weekday date in the feed's validity window, each
+    resolved independently via the same per-date GTFS rule
+    `service_delivered.py` uses. Handles a Muni/SFMTA-shaped feed (no
+    weekday `calendar` rows at all — weekday service exists purely as
+    `calendar_dates` additions) the same as a WMATA-shaped one.
     """
-    field_name = DAY_TYPE_REPRESENTATIVE_FIELD[day_type]
-    field = getattr(Calendar, field_name)
+    service_ids = _resolve_service_ids_for_day_type(db, day_type)
+    if not service_ids:
+        return {}
     rows = (
         db.query(Trip.direction_id, StopTime.stop_id, StopTime.arrival_time)
         .join(StopTime, StopTime.trip_id == Trip.trip_id)
-        .join(Calendar, Calendar.service_id == Trip.service_id)
         .filter(
             Trip.route_id == route_id,
             Trip.is_current,
             StopTime.is_current,
-            Calendar.is_current,
-            field == 1,
+            Trip.service_id.in_(service_ids),
         )
         .all()
     )
@@ -550,8 +826,11 @@ def fetch_scheduled_cell_hours_for_routes(
 ) -> dict[str, dict[CellHour, list[float]]]:
     """Vectorized scheduled-headway-per-(direction, stop, hour) for every route.
 
-    Single SQL pass joining `trips`, `stop_times`, and `calendar` for the
-    representative weekday of `day_type`. Returns
+    Resolves the representative-day service_id set once (see
+    `_resolve_service_ids_for_day_type`), then a single SQL pass joins
+    `trips` and `stop_times` filtered to that service_id set — no `calendar`
+    join here; the calendar/calendar_dates resolution happens entirely
+    inside the resolver. Returns
     `{route_id: {(direction_id, stop_id, hour): [scheduled_headway_sec, ...]}}`
     — each list is consecutive scheduled headways within that cell, bucketed
     by the earlier arrival's hour-of-day.
@@ -566,6 +845,11 @@ def fetch_scheduled_cell_hours_for_routes(
     (backfill); the default reads the live `is_current` snapshot. Explicit
     snapshots cache under their own id — historical snapshot rows never
     change, so those entries never need invalidating.
+
+    The representative-day service_id set is resolved via
+    `_resolve_service_ids_for_day_type` (NOTES-106) — same shared resolver
+    `_scheduled_headways_by_cell_hour` uses, so this vectorized path and the
+    per-route path never disagree on which schedule "the weekday" means.
     """
     if route_ids is None:
         if gtfs_snapshot_id is not None:
@@ -578,35 +862,33 @@ def fetch_scheduled_cell_hours_for_routes(
         if cached is not None:
             return cached
 
-    field_name = DAY_TYPE_REPRESENTATIVE_FIELD[day_type]
-    field = getattr(Calendar, field_name)
-
-    sched_q = (
-        db.query(
-            Trip.route_id,
-            Trip.direction_id,
-            StopTime.stop_id,
-            StopTime.arrival_time,
-        )
-        .join(StopTime, StopTime.trip_id == Trip.trip_id)
-        .join(Calendar, Calendar.service_id == Trip.service_id)
-        .filter(
-            gtfs_version_filter(Trip, gtfs_snapshot_id),
-            gtfs_version_filter(StopTime, gtfs_snapshot_id),
-            gtfs_version_filter(Calendar, gtfs_snapshot_id),
-            field == 1,
-        )
-    )
-    if route_ids is not None:
-        sched_q = sched_q.filter(Trip.route_id.in_(route_ids))
+    service_ids = _resolve_service_ids_for_day_type(db, day_type, gtfs_snapshot_id)
 
     sched_by_route_cell: dict[tuple[str, int, str], list[int]] = defaultdict(list)
-    for route_id, direction_id, stop_id, arrival_time in sched_q.all():
-        if arrival_time is None:
-            continue
-        sched_by_route_cell[(route_id, direction_id, stop_id)].append(
-            _parse_gtfs_time_to_seconds(arrival_time)
+    if service_ids:
+        sched_q = (
+            db.query(
+                Trip.route_id,
+                Trip.direction_id,
+                StopTime.stop_id,
+                StopTime.arrival_time,
+            )
+            .join(StopTime, StopTime.trip_id == Trip.trip_id)
+            .filter(
+                gtfs_version_filter(Trip, gtfs_snapshot_id),
+                gtfs_version_filter(StopTime, gtfs_snapshot_id),
+                Trip.service_id.in_(service_ids),
+            )
         )
+        if route_ids is not None:
+            sched_q = sched_q.filter(Trip.route_id.in_(route_ids))
+
+        for route_id, direction_id, stop_id, arrival_time in sched_q.all():
+            if arrival_time is None:
+                continue
+            sched_by_route_cell[(route_id, direction_id, stop_id)].append(
+                _parse_gtfs_time_to_seconds(arrival_time)
+            )
 
     sched_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
         lambda: defaultdict(list)
@@ -639,10 +921,11 @@ def compute_ewt_headline_for_routes(
 ) -> dict[str, dict]:
     """Vectorized headline EWT for all routes — two SQL passes, no per-route loop.
 
-    Pulls all scheduled stop_times (joined to trips and calendar for the
-    representative weekday) and all observed `stop_events` on the date in one
-    query each, then groups by (route, direction, stop) in Python and
-    aggregates per route.
+    Pulls all scheduled stop_times (joined to trips, filtered to the
+    day_type's modally-resolved service_id set — see
+    `_resolve_service_ids_for_day_type`) and all observed `stop_events` on
+    the date in one query each, then groups by (route, direction, stop) in
+    Python and aggregates per route.
 
     Pass `sched_by_route_cell_hour` to skip the scheduled fetch — used by the
     scorecard path to share scheduled data with bunching.
