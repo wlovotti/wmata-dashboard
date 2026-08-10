@@ -43,7 +43,7 @@ serves this or is explicitly parked.
 - [NOTES-82](notes/NOTES-82.md) Redundant vehicle_positions indexes — sev low / eff low — unblocked
 - [NOTES-102](notes/NOTES-102.md) Backfill June recovery-window trip_update truncation — sev low / eff low — unblocked; needs S3 pull for 6/14–16 + snapshot-12 GTFS pin
 - [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189), NOTES-99 should annotate
-- [NOTES-108](notes/NOTES-108.md) `src/ewt.py` schedule cache keyed without agency identity — cross-agency collision risk — sev medium / eff low — unblocked
+- [NOTES-108](notes/NOTES-108.md) `src/ewt.py` module-level schedule caches (both of them) keyed without agency identity — cross-agency collision risk — sev medium / eff low — unblocked
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
 
 ## WMATA depth & UX (parked during the sprint)
