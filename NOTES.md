@@ -27,8 +27,7 @@ serves this or is explicitly parked.
 
 ## Comparison sprint (active — work top to bottom)
 
-- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (SFMTA backfill done 2026-08-09; owl-route deviation anchor fixed in PR #192, service_date residual: NOTES-110; SFMTA re-derive + EWT/bunching re-derive pending PR #191)
-- [NOTES-110](notes/NOTES-110.md) SFMTA owl-route stop_events.service_date still misattributed after PR #192's deviation-anchor fix — sev medium / eff low-medium — unblocked; gates day_type-correct SFMTA metrics
+- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (SFMTA backfill done 2026-08-09; owl-route deviation anchor fixed in PR #192, service_date residual fixed in PR #TODO; SFMTA re-derive + EWT/bunching re-derive pending PR #191)
 - [NOTES-107](notes/NOTES-107.md) `route_service_profile` weekday rows missing for SFMTA (same calendar_dates gap NOTES-106 fixed for EWT/bunching, different table) — sev medium / eff low — unblocked; not required for NOTES-99's headline KPIs
 
 ## Ops floor (not frozen — prevents a known recurring failure)

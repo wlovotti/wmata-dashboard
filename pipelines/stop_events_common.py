@@ -102,9 +102,9 @@ def resolve_scheduled_instants(
     observed_ts: datetime,
     service_date: date_type,
     tz_name: str = "America/New_York",
-) -> tuple[datetime | None, datetime | None]:
-    """Resolve (scheduled_arrival_ts, scheduled_departure_ts), correcting for
-    a possible one-day service-date misattribution (NOTES-105).
+) -> tuple[datetime | None, datetime | None, date_type]:
+    """Resolve (scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date),
+    correcting for a possible one-day service-date misattribution (NOTES-105).
 
     GTFS-RT `trip_start_date` (or, for the trip_update source, its
     snapshot_ts-calendar-day fallback in
@@ -140,10 +140,19 @@ def resolve_scheduled_instants(
     clusters top out around 80 minutes, nowhere near half a day), so the
     same-day anchor always wins there — verified by regression test.
 
-    Returns ``(None, None)`` if both inputs are ``None``.
+    ``resolved_service_date`` is whichever anchor (``service_date`` or the
+    day before it) produced the returned instants — the anchor day the
+    resolver determined is the trip's true GTFS service day. Callers that
+    persist a per-row ``service_date`` (NOTES-110) must use this instead of
+    the raw ``service_date`` argument, since the latter is exactly the
+    misattributed value this function exists to correct for.
+
+    Returns ``(None, None, service_date)`` if both inputs are ``None``
+    (nothing to anchor against, so the given ``service_date`` is kept
+    as-is).
     """
     if arrival_time is None and departure_time is None:
-        return None, None
+        return None, None, service_date
 
     # Prefer arrival_time to pick the anchor day (it's what deviation_sec
     # is computed from), but fall back to departure_time when arrival_time
@@ -167,6 +176,7 @@ def resolve_scheduled_instants(
     return (
         parse_gtfs_time_to_dt(arrival_time, best_anchor, tz_name) if arrival_time else None,
         parse_gtfs_time_to_dt(departure_time, best_anchor, tz_name) if departure_time else None,
+        best_anchor,
     )
 
 
@@ -181,7 +191,10 @@ def resolve_stop_time(
     For the WMATA case there is always exactly one candidate per (trip_id, stop_id).
     The temporal-proximity tie-break is defensive against GTFS loop routes. Returns
     a dict with `stop_sequence`, `scheduled_arrival_ts`, `scheduled_departure_ts`
-    parsed against the given (per-position) service_date, or None if no candidates.
+    parsed against the given (per-position) service_date, plus
+    `resolved_service_date` (NOTES-110 — the anchor day that actually
+    produced those instants; see ``resolve_scheduled_instants``), or None if
+    no candidates.
 
     ``tz_name`` (NOTES-100 multi-agency; default Eastern) is forwarded to
     ``parse_gtfs_time_to_dt`` — see its docstring.
@@ -207,11 +220,14 @@ def resolve_stop_time(
     if len(candidates) > 1:
         chosen = min(candidates, key=_min_delta)
 
-    scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
-        chosen["arrival_time"], chosen["departure_time"], observed_ts, service_date, tz_name
+    scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            chosen["arrival_time"], chosen["departure_time"], observed_ts, service_date, tz_name
+        )
     )
     return {
         "stop_sequence": chosen["stop_sequence"],
         "scheduled_arrival_ts": scheduled_arrival_ts,
         "scheduled_departure_ts": scheduled_departure_ts,
+        "resolved_service_date": resolved_service_date,
     }

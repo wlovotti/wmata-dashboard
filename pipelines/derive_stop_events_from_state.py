@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from sqlalchemy import tuple_, update
 from sqlalchemy.orm import Session
 
-from pipelines.stop_events_common import parse_gtfs_time_to_dt, resolve_scheduled_instants
+from pipelines.stop_events_common import resolve_scheduled_instants
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
@@ -197,26 +197,34 @@ def derive_for_route_date(
             # src.wmata_collector._service_date_for_row the same way
             # vehicle_positions.trip_start_date is, and inherits the same
             # owl-route misattribution on SFMTA.
-            scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
-                sched["arrival_time"],
-                sched["departure_time"],
-                observed_arrival_ts,
-                service_date,
-                tz_name,
+            scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+                resolve_scheduled_instants(
+                    sched["arrival_time"],
+                    sched["departure_time"],
+                    observed_arrival_ts,
+                    service_date,
+                    tz_name,
+                )
             )
         else:
-            # SKIPPED rows have no observation to disambiguate against;
-            # fall back to the plain service_date anchor (deviation_sec
-            # stays None for these regardless).
-            scheduled_arrival_ts = (
-                parse_gtfs_time_to_dt(sched["arrival_time"], service_date, tz_name)
-                if sched["arrival_time"]
-                else None
-            )
-            scheduled_departure_ts = (
-                parse_gtfs_time_to_dt(sched["departure_time"], service_date, tz_name)
-                if sched["departure_time"]
-                else None
+            # SKIPPED rows have no arrival prediction to disambiguate
+            # against, but final_snapshot_ts -- the last snapshot that
+            # observed the (trip, stop) before it dropped out of the feed,
+            # always populated on TripUpdateState -- is a serviceable
+            # proxy observation (NOTES-110 "related latent gap"). Reusing
+            # the same resolver keeps the SKIPPED branch's service_date
+            # attribution consistent with the SCHEDULED branch instead of
+            # always trusting the raw, possibly-misattributed service_date
+            # anchor. deviation_sec still comes out None for these rows
+            # regardless (observed_arrival_ts stays None below).
+            scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+                resolve_scheduled_instants(
+                    sched["arrival_time"],
+                    sched["departure_time"],
+                    state.final_snapshot_ts,
+                    service_date,
+                    tz_name,
+                )
             )
 
         deviation_sec = None
@@ -225,7 +233,11 @@ def derive_for_route_date(
 
         rows.append(
             {
-                "service_date": service_date_str,
+                # NOTES-110: persist the anchor day the resolver actually
+                # picked (possibly service_date - 1 for SFMTA owl routes),
+                # not the raw outer-loop service_date -- the latter is
+                # exactly the misattributed value the resolver corrects for.
+                "service_date": resolved_service_date.isoformat(),
                 "trip_id": state.trip_id,
                 "route_id": route_id,
                 "direction_id": trip_direction[state.trip_id],

@@ -224,6 +224,13 @@ def derive_proximity_stop_events(
                 "stop_sequence": chosen["stop_sequence"],
                 "scheduled_arrival_ts": chosen["scheduled_arrival_ts"],
                 "scheduled_departure_ts": chosen["scheduled_departure_ts"],
+                # NOTES-110: the anchor day resolve_stop_time actually
+                # resolved (possibly service_date - 1 for SFMTA owl
+                # routes), not the raw per-position service_date passed
+                # in — persisted below as the row's service_date so
+                # day_type/calendar_dates queries land on the trip's true
+                # GTFS service day.
+                "resolved_service_date": chosen["resolved_service_date"],
                 "observed_arrival_ts": pos.timestamp,
                 "vehicle_id": pos.vehicle_id,
                 "match_distance_m": min_distance,
@@ -231,6 +238,8 @@ def derive_proximity_stop_events(
 
     rows = []
     derived_at = utcnow_naive()
+    # Batch identity for the summary/log dict below — distinct from each
+    # row's own (possibly NOTES-110-corrected) service_date.
     service_date_str = service_date.isoformat()
     for entry in earliest.values():
         deviation_sec = None
@@ -240,7 +249,7 @@ def derive_proximity_stop_events(
             )
         rows.append(
             {
-                "service_date": service_date_str,
+                "service_date": entry["resolved_service_date"].isoformat(),
                 "trip_id": entry["trip_id"],
                 "route_id": route_id,
                 "direction_id": trip_direction[entry["trip_id"]],

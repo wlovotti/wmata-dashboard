@@ -309,6 +309,11 @@ def test_resolve_stop_time_corrects_owl_route_service_date_off_by_one():
     deviation_sec = (observed_ts - result["scheduled_arrival_ts"]).total_seconds()
     assert abs(deviation_sec) < 300
 
+    # NOTES-110: the corrected anchor day must be surfaced too, so callers
+    # can persist stop_events.service_date at the trip's true service day
+    # instead of the misattributed date they were called with.
+    assert result["resolved_service_date"] == date(2026, 7, 22)
+
 
 @pytest.mark.smoke
 def test_resolve_stop_time_owl_correction_is_noop_without_24h_schedule():
@@ -325,6 +330,9 @@ def test_resolve_stop_time_owl_correction_is_noop_without_24h_schedule():
     result = resolve_stop_time(candidates, observed_ts, date(2026, 5, 17), tz_name="UTC")
 
     assert result["scheduled_arrival_ts"] == datetime(2026, 5, 17, 14, 5, 0)
+    # NOTES-110: no anchor shift here, so the resolved service_date must
+    # stay the plain, unshifted date -- not always the day before.
+    assert result["resolved_service_date"] == date(2026, 5, 17)
 
 
 @pytest.mark.smoke
@@ -369,12 +377,17 @@ def test_resolve_scheduled_instants_falls_back_to_departure_time_for_anchor():
     misattributed_service_date = date(2026, 7, 23)
     observed_ts = datetime(2026, 7, 23, 7, 7, 22)
 
-    scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
-        None, "31:09:40", observed_ts, misattributed_service_date, tz_name="UTC"
+    scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            None, "31:09:40", observed_ts, misattributed_service_date, tz_name="UTC"
+        )
     )
 
     assert scheduled_arrival_ts is None
     assert scheduled_departure_ts == datetime(2026, 7, 23, 7, 9, 40)
+    # NOTES-110: the departure-anchored resolution still surfaces the
+    # corrected (day-before) service date.
+    assert resolved_service_date == date(2026, 7, 22)
 
 
 @pytest.mark.smoke
