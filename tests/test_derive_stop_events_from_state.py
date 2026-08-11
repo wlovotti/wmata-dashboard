@@ -332,6 +332,73 @@ def test_derive_sets_derived_at_on_state_rows(pg_session):
 
 
 @pytest.mark.integration
+def test_derive_corrects_owl_route_service_date_off_by_one(pg_session):
+    """NOTES-105: a trip_update_state row bucketed under a misattributed
+    service_date (one day later than the trip's true GTFS service day —
+    the same defect confirmed for vehicle_positions.trip_start_date on
+    SFMTA's 24h owl routes) must not produce a ~24h deviation.
+
+    trip_update_state.service_date comes from
+    src.wmata_collector._service_date_for_row, which shares the
+    trip_start_date-or-snapshot_ts-calendar-day logic that misattributes
+    owl trips. Here the state row's service_date (2026-07-23) is the
+    misattributed date; the schedule's arrival_time (">=24:00", i.e. after
+    the true service day's midnight) combined with the real prediction
+    2026-07-23 07:07:22 must resolve to a normal few-minute deviation, not
+    ~24h.
+    """
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T_OWL", route_id="R14", direction_id=0, is_current=True),
+            StopTime(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                stop_id="S1",
+                arrival_time="31:09:40",  # 07:09:40 the day after the true service date
+                departure_time="31:09:40",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_OWL",
+                route_id="R14",
+                trip_start_date="20260723",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+            TripUpdateState(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                service_date=date(2026, 7, 23),  # misattributed +1 day
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 7, 23, 7, 7, 22),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 7, 23, 7, 7, 22),
+                last_predicted_arrival_ts=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    derive_for_route_date(
+        pg_session,
+        route_id="R14",
+        service_date=date(2026, 7, 23),
+        target_table_name="stop_events",
+        tz_name="UTC",
+    )
+    pg_session.commit()
+
+    event = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T_OWL")).scalar_one()
+    assert event.scheduled_arrival_ts == datetime(2026, 7, 23, 7, 9, 40)
+    assert abs(event.deviation_sec) < 300
+
+
+@pytest.mark.integration
 def test_derive_tz_name_widens_window_for_late_pacific_positions(pg_session):
     """NOTES-100 sibling of the equivalent test in test_derive_stop_events.py.
 
