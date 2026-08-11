@@ -155,6 +155,17 @@ if unrelated).
 
 Execute this checklist top-to-bottom. Do not deviate.
 
+TURN INVARIANT: never end your turn while any background task or
+monitor of yours is still pending — a subagent that ends its turn is
+stopped, and nothing auto-resumes it, so a "wait for the notification"
+plan just orphans the work until the parent notices and nudges. Either
+run commands in the foreground, or background them and keep doing
+checklist work in the same turn (e.g. run the full pytest suite in the
+background while folding the punch-list edits in step 5), collecting
+every result before you finish. Practical default: foreground anything
+expected to finish within ~5 minutes; background only commands that
+would outlive the 600 s foreground cap.
+
 1. BRANCH. From `main`:
      git checkout -b <prefix>/notes-{{N}}-<short-slug>
    `<prefix>` ∈ {feature, fix, docs, refactor} per the item's nature.
@@ -250,6 +261,11 @@ failure. On `VERDICT: clean`, continue to step 5. If a finding's
 severity tag seems miscalibrated or the verdict is ambiguous, the
 parent may spot-check the specific hunks in question — that is the
 exception, not the routine.
+
+Any follow-up fix dispatch must restate the Step 4 TURN INVARIANT
+verbatim in its prompt (never end a turn with pending background work;
+foreground anything under ~5 minutes) — ad-hoc fix prompts are where
+the stall-and-orphan failure mode has actually bitten.
 
 # Step 5 — Watch CI (parent does this directly)
 

@@ -69,3 +69,16 @@ To close:
 Scope note: this affects any FUTURE agency onboarded primarily via
 archive replay too, not just SFMTA — worth keeping generic rather than
 SFMTA-specific when implemented.
+
+**Addendum (2026-08-11, NOTES-105/110 repave verification):** the gap
+is wider than the empty-numerator replay case. The repave re-derived
+7/22–8/8 with **full `vehicle_positions` present** (wholesale-pulled
+from the VM), and every date still stamped `partial` at coverage
+0.28–0.33 — exactly the ceiling VP-at-180s can reach when it is the
+*only* numerator signal, because `collector_heartbeats` are written by
+the live collector on the VM and never reach the laptop DB. So on the
+laptop (the system of record), no SFMTA date can clear the threshold
+even with perfect collection: the cadence-aware threshold from
+NOTES-100 evidently sits above the ~33% VP-only ceiling. Closing this
+item should therefore handle three numerator regimes, not two: live
+(heartbeats+VP), replayed (neither), and rsync'd-to-laptop (VP only).

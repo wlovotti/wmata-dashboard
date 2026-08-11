@@ -27,8 +27,7 @@ serves this or is explicitly parked.
 
 ## Comparison sprint (active — work top to bottom)
 
-- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (SFMTA backfill done 2026-08-09; owl-route deviation anchor fixed in PR #192, service_date residual fixed in PR #193; SFMTA re-derive + EWT/bunching re-derive pending PR #191)
-- [NOTES-107](notes/NOTES-107.md) `route_service_profile` weekday rows missing for SFMTA (same calendar_dates gap NOTES-106 fixed for EWT/bunching, different table) — sev medium / eff low — unblocked; not required for NOTES-99's headline KPIs
+- [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (SFMTA backfill done 2026-08-09; owl fixes PR #192/#193; full poisoned-window re-derive done 2026-08-11 — OTP/EWT now clean for 7/22–8/7)
 
 ## Ops floor (not frozen — prevents a known recurring failure)
 
@@ -41,9 +40,11 @@ serves this or is explicitly parked.
 - [NOTES-81](notes/NOTES-81.md) Phantom vehicle-reported timestamps — sev low / eff low — fold guard into NOTES-95 if it starts first
 - [NOTES-82](notes/NOTES-82.md) Redundant vehicle_positions indexes — sev low / eff low — unblocked
 - [NOTES-102](notes/NOTES-102.md) Backfill June recovery-window trip_update truncation — sev low / eff low — unblocked; needs S3 pull for 6/14–16 + snapshot-12 GTFS pin
-- [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189), NOTES-99 should annotate
+- [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189), NOTES-99 should annotate; 2026-08-11 addendum: laptop VP-only numerator caps ~33%, so ALL laptop SFMTA dates flag partial
 - [NOTES-108](notes/NOTES-108.md) `src/ewt.py` module-level schedule caches (both of them) keyed without agency identity — cross-agency collision risk — sev medium / eff low — unblocked
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
+- [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
+- [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — blocked on next archive rsync
 
 ## WMATA depth & UX (parked during the sprint)
 
