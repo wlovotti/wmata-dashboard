@@ -42,6 +42,7 @@ from sqlalchemy import delete, tuple_
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import (
+    _iter_chunks,
     build_stop_time_index,
     parse_trip_start_date,
     resolve_stop_time,
@@ -56,6 +57,12 @@ from src.upsert_helpers import upsert_rows
 
 PROXIMITY_THRESHOLD_M = 50.0
 EARTH_RADIUS_M = 6_371_000
+
+# PR #193 review round 2 (finding 3): chunk size for the stale-row DELETE's
+# tuple_(trip_id, stop_sequence).in_(<pairs>) filter -- see
+# `pipelines.stop_events_common._TUPLE_IN_CHUNK_SIZE` for the full sizing
+# rationale (Postgres max_stack_depth on large tuple-IN lists).
+_DELETE_CHUNK_SIZE = 1000
 
 
 def derive_proximity_stop_events(
@@ -252,7 +259,7 @@ def derive_proximity_stop_events(
     # Batch identity for the summary/log dict below — distinct from each
     # row's own (possibly NOTES-110-corrected) service_date.
     service_date_str = service_date.isoformat()
-    # NOTES-111: (trip_id, stop_sequence) pairs whose resolved anchor day
+    # PR #193 review: (trip_id, stop_sequence) pairs whose resolved anchor day
     # differs from the outer-loop service_date -- the misattributed row a
     # prior derivation run (or the pre-NOTES-110 code) may have written
     # under service_date still exists and must be superseded, since
@@ -291,18 +298,21 @@ def derive_proximity_stop_events(
     service_dates_written: list[str] = []
     if rows:
         if stale_keys:
-            # NOTES-111: delete the superseded (service_date, trip_id,
-            # stop_sequence, source) rows before the upsert below, in the
-            # same transaction (upsert_rows commits both). Scoped to
-            # exactly the identities being rewritten this run — never a
-            # broad date-range delete.
-            db.execute(
-                delete(StopEvent).where(
-                    StopEvent.service_date == service_date_str,
-                    StopEvent.source == "proximity",
-                    tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(stale_keys),
+            # PR #193 review: delete the superseded
+            # (service_date, trip_id, stop_sequence, source) rows before the
+            # upsert below, in the same transaction (upsert_rows commits
+            # both). Scoped to exactly the identities being rewritten this
+            # run — never a broad date-range delete. Chunked at
+            # _DELETE_CHUNK_SIZE (finding 3): an unchunked tuple-IN list
+            # blows Postgres's max_stack_depth on large routes.
+            for chunk in _iter_chunks(stale_keys, _DELETE_CHUNK_SIZE):
+                db.execute(
+                    delete(StopEvent).where(
+                        StopEvent.service_date == service_date_str,
+                        StopEvent.source == "proximity",
+                        tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(chunk),
+                    )
                 )
-            )
 
         # Postgres upsert keyed on the stop_events natural key.
         upsert_rows(
@@ -325,7 +335,7 @@ def derive_proximity_stop_events(
             ],
         )
         rows_written = len(rows)
-        # NOTES-111: distinct service_date values actually written, cheap
+        # PR #193 review: distinct service_date values actually written, cheap
         # to compute since `rows` already holds every row's resolved
         # service_date. run_daily_batch aggregates the union of these
         # across all target dates, not just the requested service_date.
@@ -456,7 +466,7 @@ def main():
         )
         print(f"Elapsed: {total_elapsed:.1f}s")
 
-        # NOTES-111: report every distinct service_date actually written
+        # PR #193 review: report every distinct service_date actually written
         # (may include service_date - 1 via the resolver's owl-route
         # anchor correction) so run_daily_batch's subprocess wrapper can
         # aggregate day-shifted rows instead of orphaning them in an

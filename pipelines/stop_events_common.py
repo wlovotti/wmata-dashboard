@@ -8,6 +8,7 @@ This module owns those primitives so the two pipelines can't drift apart.
 """
 
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,6 +16,37 @@ from zoneinfo import ZoneInfo
 from src.models import StopTime
 
 UTC = ZoneInfo("UTC")
+
+# PR #193 review round 2 (finding 1): the ``proxy_guard=True`` distance cap
+# in `resolve_scheduled_instants` -- see that function's docstring for the
+# full sizing rationale (production SFMTA genuine-shift distribution: median
+# 149s, p99 2,844s, max 7,131s; 3h gives ~1.5x headroom over the p99/max).
+_PROXY_GUARD_MAX_DISTANCE_SEC = 10_800
+
+# Chunk size for tuple_(...).in_(<pairs>) queries (DELETEs/UPDATEs keyed on
+# (trip_id, stop_sequence) pairs) in both derive_stop_events*.py pipelines.
+# Postgres parses a tuple-IN filter as a deeply nested row-constructor OR
+# expression; at tens of thousands of pairs the parser exhausts
+# max_stack_depth (default 2MB) and the query fails with
+# "StatementTooComplex: stack depth limit exceeded" (reviewer-measured
+# failure at 20k pairs; worst real key set observed in production is 2,353).
+# 1000 pairs per query stays comfortably under that limit on
+# production-shaped batches.
+_TUPLE_IN_CHUNK_SIZE = 1000
+
+
+def _iter_chunks[T](items: Iterable[T], size: int) -> Iterator[list[T]]:
+    """Yield successive lists of length ``size`` from ``items`` (last may be short)."""
+    if size <= 0:
+        raise ValueError(f"chunk size must be positive, got {size}")
+    chunk: list[T] = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def parse_gtfs_time_to_dt(
@@ -148,26 +180,41 @@ def resolve_scheduled_instants(
     the raw ``service_date`` argument, since the latter is exactly the
     misattributed value this function exists to correct for.
 
-    ``proxy_guard`` (NOTES-111): set ``True`` when ``observed_ts`` is a
-    wall-clock *proxy* rather than a genuine arrival observation — e.g. the
-    SKIPPED-fallback branch's ``final_snapshot_ts`` (the last poll that saw
-    a (trip, stop) before it dropped out of the feed). The "never >12h
-    early" invariant above was verified only for real observations; a trip
-    that goes dark early (vehicle offline, early cancellation, collector
-    gap) can leave a proxy timestamp far from the true scheduled time for
-    reasons that have nothing to do with an owl-route misattribution, on
-    any agency including WMATA. With ``proxy_guard=True`` the day-before
-    anchor is accepted only when it is *both* strictly closer to
-    ``observed_ts`` *and* the same-day anchor would place the scheduled
-    instant more than 12h after the proxy — the same ``x > 43200``
-    direction the invariant above derives, checked explicitly rather than
-    left as an emergent property of the generic argmin search, so the
-    SKIPPED path's safety doesn't silently drift if the generic search
-    changes shape later (extra candidate anchors, a different tie-break)
-    for the SCHEDULED branch's needs. When the guard doesn't clear, the
-    plain same-day anchor is kept — matching pre-NOTES-110 SKIPPED-branch
-    behavior exactly. Verified: 0 of 91,822 production WMATA SKIPPED rows
-    trip this guard (max observed same-day lag ≈3.6h vs the 12h threshold).
+    ``proxy_guard`` (PR #193 review): set ``True`` when ``observed_ts`` is
+    a wall-clock *proxy* rather than a genuine arrival observation — e.g.
+    the SKIPPED-fallback branch's
+    ``final_snapshot_ts`` (the last poll that saw a (trip, stop) before it
+    dropped out of the feed). The "never >12h early" invariant above was
+    verified only for real observations; a trip that goes dark early
+    (vehicle offline, early cancellation, collector gap) can leave a proxy
+    timestamp far from the true scheduled time for reasons that have
+    nothing to do with an owl-route misattribution, on any agency
+    including WMATA.
+
+    The guard was originally the same ``prior_day_delta < same_day_delta
+    AND same_day_lag > 43_200`` direction check the unguarded argmin
+    already implies — a code-review pass (PR #193 review round 2, finding
+    1) found the two clauses are mathematically equivalent by the
+    ``|x − 86400| < |x| ⟺ x > 43200`` identity the module docstring
+    itself derives, so the "guard" never actually rejected anything a
+    plain closest-anchor search wouldn't already have picked. Repro: a
+    23:00:00 schedule with service_date D and a same-day proxy at 08:00
+    has same_day_lag = 54,000s (> 43,200, "clears" the old guard) even
+    though the day-before anchor is 32,400s (9h) from the proxy — an
+    ordinary early dropout, not an owl-route misattribution — and the old
+    guard wrongly shifted the anchor a day.
+
+    The guard is now a plain distance cap: the day-before anchor is
+    accepted only when its scheduled instant lands within 3 hours
+    (10,800s absolute difference) of the proxy observation; otherwise the
+    plain same-day anchor is kept, matching pre-NOTES-110 SKIPPED-branch
+    behavior exactly. 3h is sized from production data: across the
+    289,962 SFMTA rows that genuinely shift, the winning day-before anchor
+    lands median 149s, p99 2,844s, max 7,131s (~2.0h) from the
+    observation — a 3h cap accepts all genuine corrections with ~1.5x
+    headroom while rejecting gaps of several hours or more (like the 9h
+    repro above) that are far more likely to be an unrelated early
+    dropout than a genuine day-before correction.
 
     Returns ``(None, None, service_date)`` if both inputs are ``None``
     (nothing to anchor against, so the given ``service_date`` is kept
@@ -202,18 +249,7 @@ def resolve_scheduled_instants(
         )
 
         if proxy_guard:
-            same_day_lag = (
-                (same_day_parsed - observed_ts).total_seconds()
-                if same_day_parsed is not None
-                else None
-            )
-            if (
-                same_day_delta is not None
-                and prior_day_delta is not None
-                and prior_day_delta < same_day_delta
-                and same_day_lag is not None
-                and same_day_lag > 43_200
-            ):
+            if prior_day_delta is not None and prior_day_delta <= _PROXY_GUARD_MAX_DISTANCE_SEC:
                 best_anchor = prior_day_anchor
             else:
                 best_anchor = same_day_anchor

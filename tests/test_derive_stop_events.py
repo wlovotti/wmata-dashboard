@@ -173,7 +173,7 @@ def test_derive_corrects_owl_route_service_date_off_by_one(pg_session):
 
 @pytest.mark.integration
 def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
-    """NOTES-111: a stop_events row previously written under the
+    """PR #193 review: a stop_events row previously written under the
     misattributed service_date (pre-NOTES-110 code, or a prior run before
     this fix) must be deleted when re-deriving lands the corrected row on
     the adjacent date -- otherwise both copies survive (service_date is
@@ -211,7 +211,7 @@ def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
                 timestamp=datetime(2026, 7, 23, 7, 7, 22),
             ),
             # Simulates a stop_event a prior derivation run (pre-NOTES-110,
-            # or NOTES-110 without the NOTES-111 dedup) wrote under the
+            # or a subsequent PR #193 review round without the dedup fix) wrote under the
             # misattributed date.
             StopEvent(
                 service_date="2026-07-23",

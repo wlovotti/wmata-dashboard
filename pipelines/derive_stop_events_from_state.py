@@ -25,7 +25,6 @@ Usage:
 import argparse
 import sys
 import time
-from collections.abc import Iterable, Iterator
 from datetime import date as date_type
 from datetime import datetime
 
@@ -33,7 +32,7 @@ from dotenv import load_dotenv
 from sqlalchemy import delete, tuple_, update
 from sqlalchemy.orm import Session
 
-from pipelines.stop_events_common import resolve_scheduled_instants
+from pipelines.stop_events_common import _iter_chunks, resolve_scheduled_instants
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
@@ -42,27 +41,14 @@ from src.models import Route, StopEvent, StopTime, Trip, TripUpdateState, Vehicl
 from src.timezones import local_service_date_position_window_utc, local_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
-# Chunk size for the per-state-row derived_at UPDATE. The UPDATE filters on
-# ``tuple_(trip_id, stop_sequence).in_(<list>)``, which Postgres parses as a
-# deeply nested row-constructor OR expression. At ~thousands of pairs the
-# parser exhausts ``max_stack_depth`` (default 2MB) and the query fails with
-# ``StatementTooComplex: stack depth limit exceeded``. 1000 pairs per UPDATE
-# stays comfortably under that limit on production-shaped batches.
+# Chunk size for tuple_(trip_id, stop_sequence).in_(<pairs>) queries in this
+# file (the stale-row DELETE below and the per-state-row derived_at UPDATE
+# further down) -- see `pipelines.stop_events_common._TUPLE_IN_CHUNK_SIZE`
+# for the full sizing rationale (Postgres max_stack_depth on large tuple-IN
+# lists). Kept as a same-named local alias (rather than importing the
+# shared constant directly) so this module's own chunking call sites read
+# self-descriptively.
 _STATE_UPDATE_CHUNK_SIZE = 1000
-
-
-def _iter_chunks[T](items: Iterable[T], size: int) -> Iterator[list[T]]:
-    """Yield successive lists of length ``size`` from ``items`` (last may be short)."""
-    if size <= 0:
-        raise ValueError(f"chunk size must be positive, got {size}")
-    chunk: list[T] = []
-    for item in items:
-        chunk.append(item)
-        if len(chunk) >= size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
 
 
 def derive_for_route_date(
@@ -179,7 +165,7 @@ def derive_for_route_date(
     skipped_count = 0
     no_prediction_count = 0
     derived_keys: list[tuple[str, int]] = []
-    # NOTES-111: (trip_id, stop_sequence) pairs whose resolved anchor day
+    # PR #193 review: (trip_id, stop_sequence) pairs whose resolved anchor day
     # differs from the outer-loop service_date -- the misattributed row a
     # prior derivation run (or the pre-NOTES-110 code) may have written
     # under service_date still exists and must be superseded, since
@@ -234,7 +220,7 @@ def derive_for_route_date(
             # anchor. deviation_sec still comes out None for these rows
             # regardless (observed_arrival_ts stays None below).
             #
-            # proxy_guard=True (NOTES-111): final_snapshot_ts is a
+            # proxy_guard=True (PR #193 review): final_snapshot_ts is a
             # wall-clock proxy, not a genuine arrival observation -- a trip
             # that drops out of the feed early (vehicle offline, early
             # cancellation, collector gap) can leave it far from the true
@@ -293,18 +279,22 @@ def derive_for_route_date(
         constraint_name = "uq_stop_events_run_stop_source"
 
         if stale_keys:
-            # NOTES-111: delete the superseded (service_date, trip_id,
-            # stop_sequence, source) rows before the upsert below, in the
-            # same transaction (upsert_rows commits both). Scoped to
-            # exactly the identities being rewritten this run — never a
-            # broad date-range delete.
-            db.execute(
-                delete(StopEvent).where(
-                    StopEvent.service_date == service_date_str,
-                    StopEvent.source == "trip_update",
-                    tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(stale_keys),
+            # PR #193 review: delete the superseded
+            # (service_date, trip_id, stop_sequence, source) rows before the
+            # upsert below, in the same transaction (upsert_rows commits
+            # both). Scoped to exactly the identities being rewritten this
+            # run — never a broad date-range delete. Chunked at
+            # _STATE_UPDATE_CHUNK_SIZE (finding 3) for the same reason the
+            # derived_at UPDATE below is: an unchunked tuple-IN list blows
+            # Postgres's max_stack_depth on large routes.
+            for chunk in _iter_chunks(stale_keys, _STATE_UPDATE_CHUNK_SIZE):
+                db.execute(
+                    delete(StopEvent).where(
+                        StopEvent.service_date == service_date_str,
+                        StopEvent.source == "trip_update",
+                        tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(chunk),
+                    )
                 )
-            )
 
         upsert_rows(
             db,
@@ -376,7 +366,7 @@ def derive_for_route_date(
         "skipped_emitted": skipped_count,
         "dropped_no_prediction": no_prediction_count,
         "rows_written": rows_written,
-        # NOTES-111: distinct service_date values actually written to
+        # PR #193 review: distinct service_date values actually written to
         # stop_events this call, cheap to compute since `rows` already
         # holds every row's resolved service_date. Almost always just
         # [service_date_str], but the resolver's owl-route anchor
@@ -472,7 +462,7 @@ def main() -> int:
         for r in results:
             print(r)
 
-        # NOTES-111: report every distinct service_date actually written
+        # PR #193 review: report every distinct service_date actually written
         # (may include service_date - 1 via the resolver's owl-route
         # anchor correction) so run_daily_batch's subprocess wrapper can
         # aggregate day-shifted rows instead of orphaning them in an

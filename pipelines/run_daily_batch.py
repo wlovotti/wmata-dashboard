@@ -89,11 +89,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
 DEFAULT_AGENCY = "wmata"
 
-# NOTES-111: the derive_stop_events* pipelines print this marker (see their
-# main()s) reporting every distinct service_date they actually wrote —
+# PR #193 review: the derive_stop_events* pipelines print this marker (see
+# their main()s) reporting every distinct service_date they actually wrote —
 # usually just the requested date, but the resolver's owl-route anchor
 # correction (NOTES-110) can additionally write service_date - 1. Matched
-# against combined subprocess stdout/stderr.
+# against the log file slice this run's subprocess appended (see
+# `run_pipeline`).
 _SERVICE_DATES_WRITTEN_RE = re.compile(r"^SERVICE_DATES_WRITTEN:(\S*)$", re.MULTILINE)
 
 
@@ -323,8 +324,8 @@ def run_pipeline(
 
     Uses `--all-routes` (the wrapper's design contract is "cover everything")
     and `--date YYYY-MM-DD`. Pipeline stdout/stderr is appended to
-    `log_handle`; the return code, elapsed wall time, and (NOTES-111) the
-    set of service_dates the pipeline reported writing (parsed from its
+    `log_handle`; the return code, elapsed wall time, and (PR #193 review)
+    the set of service_dates the pipeline reported writing (parsed from its
     SERVICE_DATES_WRITTEN marker — empty for pipelines that don't print
     one) are returned.
 
@@ -350,12 +351,17 @@ def run_pipeline(
     Python. Re-resolving via `uv` per subprocess would also fail under launchd,
     which strips PATH down to a minimal set that doesn't include Homebrew.
 
-    Output capture: stdout/stderr are captured (not streamed directly to
-    `log_handle`) so the SERVICE_DATES_WRITTEN marker can be parsed, then
-    written to `log_handle` in one shot once the subprocess exits — a
-    small loss of real-time tailing versus the previous direct redirect,
-    traded for keeping `subprocess.run` as the single call this function
-    makes (existing tests monkeypatch `subprocess.run` directly).
+    Output streaming (PR #193 review round 2, finding 2): stdout/stderr are
+    redirected straight to `log_handle` (same real-time-tailing pattern as
+    `run_housekeeping_pipeline`), not captured via `subprocess.PIPE` — a
+    prior revision buffered the whole subprocess's output and wrote it only
+    after exit, which meant a hung derive emitted nothing at all to the log
+    while it hung. Per-route progress lines streaming live is exactly what
+    diagnosed the 2026-06/07 nightly-batch slow-seq-scan outage referenced
+    below. The SERVICE_DATES_WRITTEN marker is recovered by re-reading the
+    slice of the log file this call appended (from the byte offset recorded
+    just before the subprocess starts, to EOF) once the subprocess exits,
+    rather than from captured stdout.
     """
     cmd = [
         sys.executable,
@@ -370,21 +376,22 @@ def run_pipeline(
     cmd.extend(["--agency", agency])
     log_handle.write(f"\n$ {' '.join(cmd)}\n")
     log_handle.flush()
+    log_path = Path(log_handle.name)
+    marker_start_pos = log_path.stat().st_size
     start = time.time()
     proc = subprocess.run(
         cmd,
         cwd=str(REPO_ROOT),
-        stdout=subprocess.PIPE,
+        stdout=log_handle,
         stderr=subprocess.STDOUT,
-        text=True,
         check=False,
     )
     elapsed = time.time() - start
-    output = getattr(proc, "stdout", None) or ""
-    if output:
-        log_handle.write(output)
     log_handle.write(f"[exit {proc.returncode}, {elapsed:.1f}s]\n")
     log_handle.flush()
+    with log_path.open("r") as f:
+        f.seek(marker_start_pos)
+        output = f.read()
     return proc.returncode, elapsed, _parse_service_dates_written(output)
 
 
@@ -412,7 +419,7 @@ def run_batch(
     skip-message text this function emits for why. This isn't counted
     as a failure.
 
-    NOTES-111: derive and aggregate are run in two separate phases rather
+    PR #193 review: derive and aggregate are run in two separate phases rather
     than interleaved per date. Phase 1 runs both derive_stop_events*
     pipelines across every target date, collecting the union of
     `target_dates` and any adjacent service_date the resolver's

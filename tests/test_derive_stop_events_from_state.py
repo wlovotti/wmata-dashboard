@@ -510,7 +510,7 @@ def test_derive_skipped_branch_corrects_service_date_via_final_snapshot_ts(pg_se
 
 @pytest.mark.integration
 def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
-    """NOTES-111: a stop_events row previously written under the
+    """PR #193 review: a stop_events row previously written under the
     misattributed service_date (pre-NOTES-110 code, or a prior run before
     this fix) must be deleted when re-deriving lands the corrected row on
     the adjacent date -- otherwise both copies survive (service_date is
@@ -552,7 +552,7 @@ def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
                 last_predicted_arrival_ts=datetime(2026, 7, 23, 7, 7, 22),
             ),
             # Simulates a stop_event a prior derivation run (pre-NOTES-110,
-            # or NOTES-110 without the NOTES-111 dedup) wrote under the
+            # or a subsequent PR #193 review round without the dedup fix) wrote under the
             # misattributed date -- same (trip_id, stop_sequence, source)
             # identity the corrected row will resolve to, but the wrong
             # service_date.
@@ -603,7 +603,7 @@ def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
 
 @pytest.mark.integration
 def test_derive_is_idempotent_across_reruns(pg_session):
-    """NOTES-111 companion: re-deriving the SAME service_date twice (the
+    """PR #193 review (companion to the above): re-deriving the SAME service_date twice (the
     normal bin/pull-and-derive.sh re-derive pattern) must not leave a
     duplicate pair across adjacent dates for an owl-route row."""
     from pipelines.derive_stop_events_from_state import derive_for_route_date
@@ -670,7 +670,7 @@ def test_derive_is_idempotent_across_reruns(pg_session):
 
 @pytest.mark.integration
 def test_derive_skipped_branch_proxy_guard_keeps_plain_anchor_for_moderate_gap(pg_session):
-    """NOTES-111: a SKIPPED row whose final_snapshot_ts is merely several
+    """PR #193 review: a SKIPPED row whose final_snapshot_ts is merely several
     hours from its (ordinary, non-owl) scheduled arrival -- e.g. the
     vehicle went quiet earlier in its run -- must keep the plain
     service_date anchor, not shift to service_date - 1. The resolver's

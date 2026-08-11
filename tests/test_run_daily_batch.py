@@ -203,10 +203,12 @@ def test_run_batch_skips_housekeeping_for_non_default_agency(tmp_path, monkeypat
 
 
 def test_run_batch_aggregates_day_shifted_dates_from_derive_output(tmp_path, monkeypatch):
-    """NOTES-111: when a derive pipeline reports (via its
-    SERVICE_DATES_WRITTEN stdout marker) that it filed a row under an
-    adjacent service_date -- the resolver's owl-route anchor correction,
-    NOTES-110 -- that adjacent date must be aggregated too.
+    """PR #193 review: when a derive pipeline
+    reports (via its SERVICE_DATES_WRITTEN marker, now recovered by
+    re-reading the log file rather than captured stdout -- finding 2)
+    that it filed a row under an adjacent service_date -- the resolver's
+    owl-route anchor correction, NOTES-110 -- that adjacent date must be
+    aggregated too.
 
     Without this, a day-shifted stop_events row lands in a service_date
     that determine_target_dates never revisits (it only re-checks a date
@@ -219,17 +221,20 @@ def test_run_batch_aggregates_day_shifted_dates_from_derive_output(tmp_path, mon
     captured_cmds = []
 
     class _FakeCompletedProcess:
-        def __init__(self, returncode=0, stdout=""):
+        def __init__(self, returncode=0):
             self.returncode = returncode
-            self.stdout = stdout
 
     def _fake_subprocess_run(cmd, **kwargs):
         captured_cmds.append(cmd)
         module = cmd[2]  # cmd = [sys.executable, "-m", module, ...]
         if module == "pipelines.derive_stop_events_from_state":
             # Reports a day-shifted write onto 2026-07-22, one day before
-            # the requested 2026-07-23.
-            return _FakeCompletedProcess(stdout="SERVICE_DATES_WRITTEN:2026-07-22,2026-07-23\n")
+            # the requested 2026-07-23. run_pipeline now streams stdout
+            # straight to the log file (kwargs["stdout"]) and recovers the
+            # marker by re-reading it, so the fake writes there directly
+            # instead of returning a captured `.stdout` string.
+            kwargs["stdout"].write("SERVICE_DATES_WRITTEN:2026-07-22,2026-07-23\n")
+            kwargs["stdout"].flush()
         return _FakeCompletedProcess()
 
     import pipelines.run_daily_batch as run_daily_batch_module

@@ -391,12 +391,53 @@ def test_resolve_scheduled_instants_falls_back_to_departure_time_for_anchor():
 
 
 @pytest.mark.smoke
+def test_resolve_scheduled_instants_proxy_guard_rejects_far_9h_gap():
+    """PR #193 review round 2, finding 1: the pre-cap guard
+    (`prior_day_delta < same_day_delta AND same_day_lag > 43_200`) is
+    mathematically identical to the unguarded argmin -- both clauses
+    reduce to the same `x > 43200` direction the module docstring
+    derives, so the guard never actually blocked anything. Repro: a
+    23:00:00 schedule with service_date 2026-05-18 and a same-day proxy
+    observation at 08:00 (an ordinary early feed dropout, not an owl-route
+    misattribution) has the day-before anchor numerically closer (32,400s
+    vs 54,000s) AND same_day_lag (54,000s) clears the old 12h bar -- so
+    the old guard wrongly shifted the anchor a day. The distance-cap
+    guard must instead reject the day-before anchor here (it lands 9h /
+    32,400s from the proxy, past the 3h / 10,800s cap) and keep the plain
+    same-day anchor.
+    """
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_scheduled_instants
+
+    service_date = date(2026, 5, 18)
+    arrival_time = "23:00:00"
+    proxy_ts = datetime(2026, 5, 18, 8, 0, 0)  # same-day proxy, 15h before schedule
+
+    scheduled_arrival_ts, _scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            arrival_time,
+            None,
+            proxy_ts,
+            service_date,
+            tz_name="UTC",
+            proxy_guard=True,
+        )
+    )
+
+    assert scheduled_arrival_ts == datetime(2026, 5, 18, 23, 0, 0)
+    assert resolved_service_date == date(2026, 5, 18)
+
+
+@pytest.mark.smoke
 def test_resolve_scheduled_instants_proxy_guard_allows_strong_owl_evidence():
-    """NOTES-111: proxy_guard=True must still accept the day-before anchor
-    when the same-day anchor would land >12h after the proxy observation
-    -- the strong-evidence case (same production owl-route shape as
-    test_resolve_stop_time_corrects_owl_route_service_date_off_by_one).
-    The guard exists to BLOCK weak evidence, not real corrections."""
+    """PR #193 review: proxy_guard=True must still
+    accept the day-before anchor when it lands close (within the 3h /
+    10,800s cap) to the proxy observation -- the strong-evidence case
+    (same production owl-route shape as
+    test_resolve_stop_time_corrects_owl_route_service_date_off_by_one;
+    the winning anchor here lands 138s from the proxy). The guard exists
+    to BLOCK weak evidence, not real corrections."""
     from datetime import date, datetime
 
     from pipelines.stop_events_common import resolve_scheduled_instants
@@ -421,14 +462,13 @@ def test_resolve_scheduled_instants_proxy_guard_allows_strong_owl_evidence():
 
 @pytest.mark.smoke
 def test_resolve_scheduled_instants_proxy_guard_keeps_plain_anchor_for_moderate_gap():
-    """NOTES-111: a proxy observation (final_snapshot_ts) that's merely
-    several hours from the scheduled arrival -- e.g. a vehicle that went
-    quiet earlier in its run, nothing to do with an owl-route
-    misattribution -- must NOT shift service_date. Real arrival
-    observations are documented to never land >12h before their own
-    schedule; a wall-clock proxy has no such guarantee, so the guard only
-    trusts a same-day gap that clears the same 12h bar the invariant
-    itself uses.
+    """PR #193 review: a proxy observation
+    (final_snapshot_ts) that's merely several hours from the scheduled
+    arrival -- e.g. a vehicle that went quiet earlier in its run, nothing
+    to do with an owl-route misattribution -- must NOT shift
+    service_date. The day-before anchor here (2026-05-16 14:05:00) lands
+    well outside the 3h / 10,800s distance cap from the proxy, so it's
+    rejected and the plain same-day anchor is kept.
     """
     from datetime import date, datetime
 
@@ -454,11 +494,10 @@ def test_resolve_scheduled_instants_proxy_guard_keeps_plain_anchor_for_moderate_
 
 
 @pytest.mark.smoke
-def test_resolve_scheduled_instants_proxy_guard_boundary_at_12h():
-    """NOTES-111: pins the guard's exact threshold -- a same-day lag just
-    over 12h (43,260s) clears the guard, just under (43,140s) does not.
-    Both cases have the day-before anchor numerically closer (by
-    construction); the guard's job is to require the >12h direction too.
+def test_resolve_scheduled_instants_proxy_guard_boundary_at_3h():
+    """PR #193 review: pins the distance-cap's
+    exact threshold -- a day-before anchor landing exactly 3h (10,800s)
+    from the proxy observation clears the cap, 1s further does not.
     """
     from datetime import date, datetime
 
@@ -466,28 +505,29 @@ def test_resolve_scheduled_instants_proxy_guard_boundary_at_12h():
 
     arrival_time = "00:05:00"
     service_date = date(2026, 5, 18)
+    # Day-before anchor is 2026-05-17 00:05:00.
 
-    # 12h01m before the same-day anchor (2026-05-18 00:05:00) -- clears.
+    # Proxy exactly 3h00m00s after the day-before anchor -- clears (<=10,800s).
+    just_within = resolve_scheduled_instants(
+        arrival_time,
+        None,
+        datetime(2026, 5, 17, 3, 5, 0),
+        service_date,
+        tz_name="UTC",
+        proxy_guard=True,
+    )
+    assert just_within[2] == date(2026, 5, 17)
+
+    # Proxy 3h00m01s after the day-before anchor -- does not clear.
     just_over = resolve_scheduled_instants(
         arrival_time,
         None,
-        datetime(2026, 5, 17, 12, 4, 0),
+        datetime(2026, 5, 17, 3, 5, 1),
         service_date,
         tz_name="UTC",
         proxy_guard=True,
     )
-    assert just_over[2] == date(2026, 5, 17)
-
-    # 11h59m before the same-day anchor -- does not clear.
-    just_under = resolve_scheduled_instants(
-        arrival_time,
-        None,
-        datetime(2026, 5, 17, 12, 6, 0),
-        service_date,
-        tz_name="UTC",
-        proxy_guard=True,
-    )
-    assert just_under[2] == date(2026, 5, 18)
+    assert just_over[2] == date(2026, 5, 18)
 
 
 @pytest.mark.smoke
