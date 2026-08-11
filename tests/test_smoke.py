@@ -287,11 +287,16 @@ def test_resolve_stop_time_corrects_owl_route_service_date_off_by_one():
 
     from pipelines.stop_events_common import resolve_stop_time
 
-    # Mirrors the real production row: trip 12097226_M11, stop_sequence 2,
-    # arrival_time "31:09:40" (07:09:40 the day after its true service
-    # date). The pipeline was invoked with service_date=2026-07-23 (the
-    # misattributed +1 day), but the vehicle was actually observed at
-    # 2026-07-23 07:07:22 -- 2m18s before the correctly-anchored schedule.
+    # Based on the real production row: trip 12097226_M11, stop_sequence 2,
+    # GTFS static arrival_time "24:09:40" Pacific (00:09:40 the day after
+    # its true service date). This test uses tz_name="UTC" and the
+    # UTC-equivalent time string "31:09:40" instead (24:09:40 Pacific is
+    # UTC+7h in summer DST = 31:09:40 UTC) purely to avoid DST arithmetic
+    # in the test -- the two are the same instant, and the anchor-selection
+    # logic under test doesn't care which tz_name is used. The pipeline was
+    # invoked with service_date=2026-07-23 (the misattributed +1 day), but
+    # the vehicle was actually observed at 2026-07-23 07:07:22 -- 2m18s
+    # before the correctly-anchored schedule.
     candidates = [{"stop_sequence": 2, "arrival_time": "31:09:40", "departure_time": "31:09:40"}]
     misattributed_service_date = date(2026, 7, 23)
     observed_ts = datetime(2026, 7, 23, 7, 7, 22)
@@ -320,6 +325,56 @@ def test_resolve_stop_time_owl_correction_is_noop_without_24h_schedule():
     result = resolve_stop_time(candidates, observed_ts, date(2026, 5, 17), tz_name="UTC")
 
     assert result["scheduled_arrival_ts"] == datetime(2026, 5, 17, 14, 5, 0)
+
+
+@pytest.mark.smoke
+def test_resolve_stop_time_owl_correction_noop_on_wmata_post_midnight_schedule():
+    """The previous no-op test uses a midday time that can never reach the
+    day-before anchor's decision boundary at all -- it doesn't actually
+    exercise the guard. WMATA's GTFS does have plenty of stop_times with
+    hour >= 24 (~229,760 rows; late-evening trips ending after midnight),
+    so the real invariant that keeps WMATA safe isn't "no >=24:00 times"
+    but "no observation lands >12h before its own same-day-anchored
+    schedule" (see resolve_scheduled_instants' docstring for the exact
+    |x - 86400| < |x| boundary). This pins that in CI with a genuine
+    midnight-crossing WMATA-shaped case instead of relying only on the
+    manual A12 checksum comparison from the PR.
+    """
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_stop_time
+
+    # 25:30:00 Eastern = 2026-05-18 01:30 EDT = 2026-05-18 05:30 UTC.
+    candidates = [{"stop_sequence": 1, "arrival_time": "25:30:00", "departure_time": "25:30:00"}]
+    observed_ts = datetime(2026, 5, 18, 5, 31, 0)  # 60s late, ordinary WMATA case
+
+    result = resolve_stop_time(candidates, observed_ts, date(2026, 5, 17))
+
+    assert result["scheduled_arrival_ts"] == datetime(2026, 5, 18, 5, 30, 0)
+
+
+@pytest.mark.smoke
+def test_resolve_scheduled_instants_falls_back_to_departure_time_for_anchor():
+    """NOTES-105 follow-up: when arrival_time is absent, the anchor search
+    must fall back to departure_time instead of silently keeping
+    `service_date` -- otherwise a departure-only stop_time on an owl trip
+    keeps the misattributed anchor and ends up ~24h off, the exact failure
+    mode this module exists to fix."""
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_scheduled_instants
+
+    # Same owl-route shape as the arrival_time tests above, but with
+    # arrival_time missing (e.g. a timepoint-only departure record).
+    misattributed_service_date = date(2026, 7, 23)
+    observed_ts = datetime(2026, 7, 23, 7, 7, 22)
+
+    scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
+        None, "31:09:40", observed_ts, misattributed_service_date, tz_name="UTC"
+    )
+
+    assert scheduled_arrival_ts is None
+    assert scheduled_departure_ts == datetime(2026, 7, 23, 7, 9, 40)
 
 
 @pytest.mark.smoke

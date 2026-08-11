@@ -346,6 +346,11 @@ def test_derive_corrects_owl_route_service_date_off_by_one(pg_session):
     the true service day's midnight) combined with the real prediction
     2026-07-23 07:07:22 must resolve to a normal few-minute deviation, not
     ~24h.
+
+    Based on the real production row (trip 12097226_M11, stop_sequence 2),
+    whose GTFS static arrival_time is "24:09:40" Pacific -- this test uses
+    tz_name="UTC" and the UTC-equivalent "31:09:40" instead purely to avoid
+    DST arithmetic; the two are the same instant.
     """
     from pipelines.derive_stop_events_from_state import derive_for_route_date
 
@@ -356,7 +361,7 @@ def test_derive_corrects_owl_route_service_date_off_by_one(pg_session):
                 trip_id="T_OWL",
                 stop_sequence=2,
                 stop_id="S1",
-                arrival_time="31:09:40",  # 07:09:40 the day after the true service date
+                arrival_time="31:09:40",  # UTC-equivalent of 24:09:40 Pacific
                 departure_time="31:09:40",
                 is_current=True,
             ),

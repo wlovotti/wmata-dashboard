@@ -125,21 +125,38 @@ def resolve_scheduled_instants(
     candidate causes, some upstream of derivation — see NOTES-105), this
     recovers at resolution time: try anchoring the GTFS time string at both
     `service_date` and the day before, and keep whichever produces a
-    scheduled arrival closest to `observed_ts`. For a schedule that never
-    uses times >= 24:00 (WMATA), the day-before anchor is always ~24h
-    further from any real observation, so it never wins — this is a no-op
-    there, verified by regression test.
+    scheduled instant closest to `observed_ts`. The true invariant this
+    relies on has nothing to do with midnight-crossing per se: letting `x`
+    be the (same-day-anchored scheduled instant) minus `observed_ts` in
+    seconds, the day-before anchor (which shifts the parsed instant back
+    exactly 86,400s) wins the abs-delta comparison iff `|x − 86400| < |x|`,
+    i.e. iff `x > 43200` — the same-day scheduled instant lands more than
+    12h *after* the observation (equivalently: the observation is more
+    than 12h *earlier* than the same-day parse). WMATA's GTFS does have
+    plenty of stop_times with hour >= 24 (~229,760 rows), so
+    midnight-crossing alone is not the guard; what actually keeps this a
+    no-op for WMATA in practice is that a real WMATA observation is never
+    >12h earlier than its own scheduled time (WMATA's early-arrival
+    clusters top out around 80 minutes, nowhere near half a day), so the
+    same-day anchor always wins there — verified by regression test.
 
     Returns ``(None, None)`` if both inputs are ``None``.
     """
     if arrival_time is None and departure_time is None:
         return None, None
 
+    # Prefer arrival_time to pick the anchor day (it's what deviation_sec
+    # is computed from), but fall back to departure_time when arrival_time
+    # is absent — otherwise a departure-only stop_time on an owl trip would
+    # silently keep the misattributed `service_date` anchor and end up ~24h
+    # off exactly like the case this function exists to fix.
+    anchor_source = arrival_time if arrival_time is not None else departure_time
+
     best_anchor = service_date
-    if arrival_time is not None:
+    if anchor_source is not None:
         best_delta = None
         for anchor in (service_date, service_date - timedelta(days=1)):
-            parsed = parse_gtfs_time_to_dt(arrival_time, anchor, tz_name)
+            parsed = parse_gtfs_time_to_dt(anchor_source, anchor, tz_name)
             if parsed is None:
                 continue
             delta = abs((parsed - observed_ts).total_seconds())
