@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from sqlalchemy import tuple_, update
 from sqlalchemy.orm import Session
 
-from pipelines.stop_events_common import parse_gtfs_time_to_dt
+from pipelines.stop_events_common import parse_gtfs_time_to_dt, resolve_scheduled_instants
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
@@ -178,17 +178,6 @@ def derive_for_route_date(
         if sched is None:
             continue  # ADDED trip or stale GTFS; skip.
 
-        scheduled_arrival_ts = (
-            parse_gtfs_time_to_dt(sched["arrival_time"], service_date, tz_name)
-            if sched["arrival_time"]
-            else None
-        )
-        scheduled_departure_ts = (
-            parse_gtfs_time_to_dt(sched["departure_time"], service_date, tz_name)
-            if sched["departure_time"]
-            else None
-        )
-
         is_skipped = state.final_schedule_relationship == "SKIPPED"
         if is_skipped:
             schedule_relationship = "SKIPPED"
@@ -200,6 +189,35 @@ def derive_for_route_date(
                 no_prediction_count += 1
                 continue
             schedule_relationship = "SCHEDULED"
+
+        if observed_arrival_ts is not None:
+            # Anchor against whichever of service_date / service_date-1
+            # lands the scheduled arrival closest to the observation
+            # (NOTES-105) -- trip_update_state.service_date is computed by
+            # src.wmata_collector._service_date_for_row the same way
+            # vehicle_positions.trip_start_date is, and inherits the same
+            # owl-route misattribution on SFMTA.
+            scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
+                sched["arrival_time"],
+                sched["departure_time"],
+                observed_arrival_ts,
+                service_date,
+                tz_name,
+            )
+        else:
+            # SKIPPED rows have no observation to disambiguate against;
+            # fall back to the plain service_date anchor (deviation_sec
+            # stays None for these regardless).
+            scheduled_arrival_ts = (
+                parse_gtfs_time_to_dt(sched["arrival_time"], service_date, tz_name)
+                if sched["arrival_time"]
+                else None
+            )
+            scheduled_departure_ts = (
+                parse_gtfs_time_to_dt(sched["departure_time"], service_date, tz_name)
+                if sched["departure_time"]
+                else None
+            )
 
         deviation_sec = None
         if observed_arrival_ts is not None and scheduled_arrival_ts is not None:

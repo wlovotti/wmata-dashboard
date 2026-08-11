@@ -96,6 +96,80 @@ def build_stop_time_seq_index(
     }
 
 
+def resolve_scheduled_instants(
+    arrival_time: str | None,
+    departure_time: str | None,
+    observed_ts: datetime,
+    service_date: date_type,
+    tz_name: str = "America/New_York",
+) -> tuple[datetime | None, datetime | None]:
+    """Resolve (scheduled_arrival_ts, scheduled_departure_ts), correcting for
+    a possible one-day service-date misattribution (NOTES-105).
+
+    GTFS-RT `trip_start_date` (or, for the trip_update source, its
+    snapshot_ts-calendar-day fallback in
+    ``src.wmata_collector._service_date_for_row``) can report the calendar
+    day an update was *observed* rather than the GTFS service day the
+    trip's schedule is anchored to. WMATA never exercises this at scale
+    (service ends ~03:00), but SFMTA's 24-hour owl routes (14, 22, 24, 38,
+    44, 48 confirmed; likely 5, 90, 91) schedule straight through midnight
+    using GTFS times >= 24:00, and their RT feed's start_date flips to the
+    next calendar day mid-trip once a poll lands after local midnight —
+    even though the static schedule still anchors those >=24:00 times to
+    the *previous* service day. Parsing against the misattributed date
+    lands the scheduled instant almost exactly 24h away from the real
+    observation (confirmed on route 14, 2026-07-23: a clean cluster at
+    -89,077 to -80,032 sec).
+
+    Rather than trying to fix the misattribution at its source (multiple
+    candidate causes, some upstream of derivation — see NOTES-105), this
+    recovers at resolution time: try anchoring the GTFS time string at both
+    `service_date` and the day before, and keep whichever produces a
+    scheduled instant closest to `observed_ts`. The true invariant this
+    relies on has nothing to do with midnight-crossing per se: letting `x`
+    be the (same-day-anchored scheduled instant) minus `observed_ts` in
+    seconds, the day-before anchor (which shifts the parsed instant back
+    exactly 86,400s) wins the abs-delta comparison iff `|x − 86400| < |x|`,
+    i.e. iff `x > 43200` — the same-day scheduled instant lands more than
+    12h *after* the observation (equivalently: the observation is more
+    than 12h *earlier* than the same-day parse). WMATA's GTFS does have
+    plenty of stop_times with hour >= 24 (~229,760 rows), so
+    midnight-crossing alone is not the guard; what actually keeps this a
+    no-op for WMATA in practice is that a real WMATA observation is never
+    >12h earlier than its own scheduled time (WMATA's early-arrival
+    clusters top out around 80 minutes, nowhere near half a day), so the
+    same-day anchor always wins there — verified by regression test.
+
+    Returns ``(None, None)`` if both inputs are ``None``.
+    """
+    if arrival_time is None and departure_time is None:
+        return None, None
+
+    # Prefer arrival_time to pick the anchor day (it's what deviation_sec
+    # is computed from), but fall back to departure_time when arrival_time
+    # is absent — otherwise a departure-only stop_time on an owl trip would
+    # silently keep the misattributed `service_date` anchor and end up ~24h
+    # off exactly like the case this function exists to fix.
+    anchor_source = arrival_time if arrival_time is not None else departure_time
+
+    best_anchor = service_date
+    if anchor_source is not None:
+        best_delta = None
+        for anchor in (service_date, service_date - timedelta(days=1)):
+            parsed = parse_gtfs_time_to_dt(anchor_source, anchor, tz_name)
+            if parsed is None:
+                continue
+            delta = abs((parsed - observed_ts).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_anchor = anchor
+
+    return (
+        parse_gtfs_time_to_dt(arrival_time, best_anchor, tz_name) if arrival_time else None,
+        parse_gtfs_time_to_dt(departure_time, best_anchor, tz_name) if departure_time else None,
+    )
+
+
 def resolve_stop_time(
     candidates: list[dict],
     observed_ts: datetime,
@@ -111,31 +185,33 @@ def resolve_stop_time(
 
     ``tz_name`` (NOTES-100 multi-agency; default Eastern) is forwarded to
     ``parse_gtfs_time_to_dt`` — see its docstring.
+
+    Both the stop_sequence tie-break and the final scheduled-time parse
+    consider `service_date` and the day before it (NOTES-105) — see
+    ``resolve_scheduled_instants``.
     """
     if not candidates:
         return None
+
+    def _min_delta(c: dict) -> float:
+        if not c["arrival_time"]:
+            return float("inf")
+        deltas = []
+        for anchor in (service_date, service_date - timedelta(days=1)):
+            parsed = parse_gtfs_time_to_dt(c["arrival_time"], anchor, tz_name)
+            if parsed is not None:
+                deltas.append(abs((parsed - observed_ts).total_seconds()))
+        return min(deltas) if deltas else float("inf")
+
     chosen = candidates[0]
     if len(candidates) > 1:
-        chosen = min(
-            candidates,
-            key=lambda c: abs(
-                (
-                    parse_gtfs_time_to_dt(c["arrival_time"], service_date, tz_name) - observed_ts
-                ).total_seconds()
-                if c["arrival_time"]
-                else float("inf")
-            ),
-        )
+        chosen = min(candidates, key=_min_delta)
+
+    scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
+        chosen["arrival_time"], chosen["departure_time"], observed_ts, service_date, tz_name
+    )
     return {
         "stop_sequence": chosen["stop_sequence"],
-        "scheduled_arrival_ts": (
-            parse_gtfs_time_to_dt(chosen["arrival_time"], service_date, tz_name)
-            if chosen["arrival_time"]
-            else None
-        ),
-        "scheduled_departure_ts": (
-            parse_gtfs_time_to_dt(chosen["departure_time"], service_date, tz_name)
-            if chosen["departure_time"]
-            else None
-        ),
+        "scheduled_arrival_ts": scheduled_arrival_ts,
+        "scheduled_departure_ts": scheduled_departure_ts,
     }

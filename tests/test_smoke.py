@@ -270,6 +270,114 @@ def test_resolve_stop_time_threads_tz_name_into_scheduled_times():
 
 
 @pytest.mark.smoke
+def test_resolve_stop_time_corrects_owl_route_service_date_off_by_one():
+    """NOTES-105: SFMTA's GTFS-RT trip_start_date for 24h owl routes (14, 22,
+    24, 38, 44, ...) reports the calendar day an update was observed rather
+    than the GTFS service day its >=24:00 schedule times are anchored to --
+    confirmed on route 14, 2026-07-23, where derive_proximity_stop_events
+    was called with service_date one day later than the trip's true
+    service day, producing scheduled_arrival_ts exactly ~24h after the
+    observation for every post-midnight stop.
+
+    resolve_stop_time must recover by also trying the day before the given
+    service_date and keeping whichever anchor lands closest to observed_ts,
+    rather than trusting the (possibly misattributed) service_date alone.
+    """
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_stop_time
+
+    # Based on the real production row: trip 12097226_M11, stop_sequence 2,
+    # GTFS static arrival_time "24:09:40" Pacific (00:09:40 the day after
+    # its true service date). This test uses tz_name="UTC" and the
+    # UTC-equivalent time string "31:09:40" instead (24:09:40 Pacific is
+    # UTC+7h in summer DST = 31:09:40 UTC) purely to avoid DST arithmetic
+    # in the test -- the two are the same instant, and the anchor-selection
+    # logic under test doesn't care which tz_name is used. The pipeline was
+    # invoked with service_date=2026-07-23 (the misattributed +1 day), but
+    # the vehicle was actually observed at 2026-07-23 07:07:22 -- 2m18s
+    # before the correctly-anchored schedule.
+    candidates = [{"stop_sequence": 2, "arrival_time": "31:09:40", "departure_time": "31:09:40"}]
+    misattributed_service_date = date(2026, 7, 23)
+    observed_ts = datetime(2026, 7, 23, 7, 7, 22)
+
+    result = resolve_stop_time(candidates, observed_ts, misattributed_service_date, tz_name="UTC")
+
+    # Anchoring one day earlier (the trip's true service date) recovers a
+    # normal few-minute deviation instead of ~24h.
+    assert result["scheduled_arrival_ts"] == datetime(2026, 7, 23, 7, 9, 40)
+    deviation_sec = (observed_ts - result["scheduled_arrival_ts"]).total_seconds()
+    assert abs(deviation_sec) < 300
+
+
+@pytest.mark.smoke
+def test_resolve_stop_time_owl_correction_is_noop_without_24h_schedule():
+    """WMATA has no 24h routes, so the day-before anchor tried for
+    NOTES-105 must never win when the schedule time never crosses
+    midnight -- otherwise ordinary WMATA deviations would regress."""
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_stop_time
+
+    candidates = [{"stop_sequence": 1, "arrival_time": "14:05:00", "departure_time": "14:05:30"}]
+    observed_ts = datetime(2026, 5, 17, 14, 6, 30)  # 90s late, ordinary WMATA case
+
+    result = resolve_stop_time(candidates, observed_ts, date(2026, 5, 17), tz_name="UTC")
+
+    assert result["scheduled_arrival_ts"] == datetime(2026, 5, 17, 14, 5, 0)
+
+
+@pytest.mark.smoke
+def test_resolve_stop_time_owl_correction_noop_on_wmata_post_midnight_schedule():
+    """The previous no-op test uses a midday time that can never reach the
+    day-before anchor's decision boundary at all -- it doesn't actually
+    exercise the guard. WMATA's GTFS does have plenty of stop_times with
+    hour >= 24 (~229,760 rows; late-evening trips ending after midnight),
+    so the real invariant that keeps WMATA safe isn't "no >=24:00 times"
+    but "no observation lands >12h before its own same-day-anchored
+    schedule" (see resolve_scheduled_instants' docstring for the exact
+    |x - 86400| < |x| boundary). This pins that in CI with a genuine
+    midnight-crossing WMATA-shaped case instead of relying only on the
+    manual A12 checksum comparison from the PR.
+    """
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_stop_time
+
+    # 25:30:00 Eastern = 2026-05-18 01:30 EDT = 2026-05-18 05:30 UTC.
+    candidates = [{"stop_sequence": 1, "arrival_time": "25:30:00", "departure_time": "25:30:00"}]
+    observed_ts = datetime(2026, 5, 18, 5, 31, 0)  # 60s late, ordinary WMATA case
+
+    result = resolve_stop_time(candidates, observed_ts, date(2026, 5, 17))
+
+    assert result["scheduled_arrival_ts"] == datetime(2026, 5, 18, 5, 30, 0)
+
+
+@pytest.mark.smoke
+def test_resolve_scheduled_instants_falls_back_to_departure_time_for_anchor():
+    """NOTES-105 follow-up: when arrival_time is absent, the anchor search
+    must fall back to departure_time instead of silently keeping
+    `service_date` -- otherwise a departure-only stop_time on an owl trip
+    keeps the misattributed anchor and ends up ~24h off, the exact failure
+    mode this module exists to fix."""
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_scheduled_instants
+
+    # Same owl-route shape as the arrival_time tests above, but with
+    # arrival_time missing (e.g. a timepoint-only departure record).
+    misattributed_service_date = date(2026, 7, 23)
+    observed_ts = datetime(2026, 7, 23, 7, 7, 22)
+
+    scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
+        None, "31:09:40", observed_ts, misattributed_service_date, tz_name="UTC"
+    )
+
+    assert scheduled_arrival_ts is None
+    assert scheduled_departure_ts == datetime(2026, 7, 23, 7, 9, 40)
+
+
+@pytest.mark.smoke
 def test_parse_trip_start_date_round_trip():
     """trip_start_date YYYYMMDD parses to a date; bad inputs return None."""
     from datetime import date
