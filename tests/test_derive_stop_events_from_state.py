@@ -401,6 +401,340 @@ def test_derive_corrects_owl_route_service_date_off_by_one(pg_session):
     event = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T_OWL")).scalar_one()
     assert event.scheduled_arrival_ts == datetime(2026, 7, 23, 7, 9, 40)
     assert abs(event.deviation_sec) < 300
+    # NOTES-110: the corrected anchor day must be persisted as
+    # stop_events.service_date, not the misattributed date the
+    # pipeline was invoked with -- otherwise day_type-filtered
+    # queries and calendar_dates joins pick the wrong day.
+    assert event.service_date == "2026-07-22"
+
+
+@pytest.mark.integration
+def test_derive_does_not_shift_service_date_for_ordinary_trips(pg_session):
+    """NOTES-110 companion: a normal, non-owl trip_update_state row (no
+    anchor shift needed) must keep stop_events.service_date equal to the
+    outer-loop service_date argument -- the correction only applies when
+    the resolver actually picks the day-before anchor."""
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    _seed_minimal_route(pg_session)
+    pred = datetime(2026, 5, 17, 14, 6, 30)  # 90s late vs 14:05 schedule
+    pg_session.add(
+        TripUpdateState(
+            trip_id="T1",
+            stop_sequence=1,
+            service_date=date(2026, 5, 17),
+            stop_id="S1",
+            vehicle_id="V1",
+            final_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
+            final_schedule_relationship="SCHEDULED",
+            last_pred_snapshot_ts=datetime(2026, 5, 17, 14, 6, 0),
+            last_predicted_arrival_ts=pred,
+        )
+    )
+    pg_session.commit()
+
+    derive_for_route_date(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 5, 17),
+        target_table_name="stop_events",
+    )
+    pg_session.commit()
+
+    event = pg_session.execute(select(StopEvent).where(StopEvent.trip_id == "T1")).scalar_one()
+    assert event.service_date == "2026-05-17"
+
+
+@pytest.mark.integration
+def test_derive_skipped_branch_corrects_service_date_via_final_snapshot_ts(pg_session):
+    """NOTES-110 latent-gap fix: a SKIPPED row has no arrival prediction to
+    disambiguate the anchor against, but final_snapshot_ts (always
+    populated) is a serviceable proxy observation. A SKIPPED owl-route row
+    filed under the misattributed service_date must still resolve to the
+    corrected (day-before) service_date, the same way SCHEDULED rows do.
+    """
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T_OWL_SKIP", route_id="R14", direction_id=0, is_current=True),
+            StopTime(
+                trip_id="T_OWL_SKIP",
+                stop_sequence=2,
+                stop_id="S1",
+                arrival_time="31:09:40",  # UTC-equivalent of 24:09:40 Pacific
+                departure_time="31:09:40",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_OWL_SKIP",
+                route_id="R14",
+                trip_start_date="20260723",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+            TripUpdateState(
+                trip_id="T_OWL_SKIP",
+                stop_sequence=2,
+                service_date=date(2026, 7, 23),  # misattributed +1 day
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 7, 23, 7, 7, 22),
+                final_schedule_relationship="SKIPPED",
+                last_pred_snapshot_ts=None,
+                last_predicted_arrival_ts=None,
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    derive_for_route_date(
+        pg_session,
+        route_id="R14",
+        service_date=date(2026, 7, 23),
+        target_table_name="stop_events",
+        tz_name="UTC",
+    )
+    pg_session.commit()
+
+    event = pg_session.execute(
+        select(StopEvent).where(StopEvent.trip_id == "T_OWL_SKIP")
+    ).scalar_one()
+    assert event.schedule_relationship == "SKIPPED"
+    assert event.observed_arrival_ts is None
+    assert event.scheduled_arrival_ts == datetime(2026, 7, 23, 7, 9, 40)
+    assert event.service_date == "2026-07-22"
+
+
+@pytest.mark.integration
+def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
+    """PR #193 review: a stop_events row previously written under the
+    misattributed service_date (pre-NOTES-110 code, or a prior run before
+    this fix) must be deleted when re-deriving lands the corrected row on
+    the adjacent date -- otherwise both copies survive (service_date is
+    part of uq_stop_events_run_stop_source, so the corrected row is a
+    distinct upsert target, not a conflict against the stale one) and the
+    same real-world event double-counts across two service dates.
+    """
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T_OWL", route_id="R14", direction_id=0, is_current=True),
+            StopTime(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                stop_id="S1",
+                arrival_time="31:09:40",  # UTC-equivalent of 24:09:40 Pacific
+                departure_time="31:09:40",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_OWL",
+                route_id="R14",
+                trip_start_date="20260723",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+            TripUpdateState(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                service_date=date(2026, 7, 23),  # misattributed +1 day
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 7, 23, 7, 7, 22),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 7, 23, 7, 7, 22),
+                last_predicted_arrival_ts=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+            # Simulates a stop_event a prior derivation run (pre-NOTES-110,
+            # or a subsequent PR #193 review round without the dedup fix) wrote under the
+            # misattributed date -- same (trip_id, stop_sequence, source)
+            # identity the corrected row will resolve to, but the wrong
+            # service_date.
+            StopEvent(
+                service_date="2026-07-23",
+                trip_id="T_OWL",
+                route_id="R14",
+                direction_id=0,
+                vehicle_id="V1",
+                stop_id="S1",
+                stop_sequence=2,
+                scheduled_arrival_ts=datetime(2026, 7, 24, 7, 9, 40),
+                scheduled_departure_ts=datetime(2026, 7, 24, 7, 9, 40),
+                observed_arrival_ts=datetime(2026, 7, 23, 7, 7, 22),
+                deviation_sec=-86538,
+                source="trip_update",
+                schedule_relationship="SCHEDULED",
+                derived_at=datetime(2026, 7, 23, 8, 0, 0),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    derive_for_route_date(
+        pg_session,
+        route_id="R14",
+        service_date=date(2026, 7, 23),
+        target_table_name="stop_events",
+        tz_name="UTC",
+    )
+    pg_session.commit()
+
+    events = (
+        pg_session.execute(
+            select(StopEvent).where(
+                StopEvent.trip_id == "T_OWL",
+                StopEvent.stop_sequence == 2,
+                StopEvent.source == "trip_update",
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].service_date == "2026-07-22"
+    assert abs(events[0].deviation_sec) < 300
+
+
+@pytest.mark.integration
+def test_derive_is_idempotent_across_reruns(pg_session):
+    """PR #193 review (companion to the above): re-deriving the SAME service_date twice (the
+    normal bin/pull-and-derive.sh re-derive pattern) must not leave a
+    duplicate pair across adjacent dates for an owl-route row."""
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T_OWL", route_id="R14", direction_id=0, is_current=True),
+            StopTime(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                stop_id="S1",
+                arrival_time="31:09:40",
+                departure_time="31:09:40",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_OWL",
+                route_id="R14",
+                trip_start_date="20260723",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+            TripUpdateState(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                service_date=date(2026, 7, 23),
+                stop_id="S1",
+                vehicle_id="V1",
+                final_snapshot_ts=datetime(2026, 7, 23, 7, 7, 22),
+                final_schedule_relationship="SCHEDULED",
+                last_pred_snapshot_ts=datetime(2026, 7, 23, 7, 7, 22),
+                last_predicted_arrival_ts=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    for _ in range(2):
+        derive_for_route_date(
+            pg_session,
+            route_id="R14",
+            service_date=date(2026, 7, 23),
+            target_table_name="stop_events",
+            tz_name="UTC",
+        )
+        pg_session.commit()
+
+    events = (
+        pg_session.execute(
+            select(StopEvent).where(
+                StopEvent.trip_id == "T_OWL",
+                StopEvent.stop_sequence == 2,
+                StopEvent.source == "trip_update",
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].service_date == "2026-07-22"
+
+
+@pytest.mark.integration
+def test_derive_skipped_branch_proxy_guard_keeps_plain_anchor_for_moderate_gap(pg_session):
+    """PR #193 review: a SKIPPED row whose final_snapshot_ts is merely several
+    hours from its (ordinary, non-owl) scheduled arrival -- e.g. the
+    vehicle went quiet earlier in its run -- must keep the plain
+    service_date anchor, not shift to service_date - 1. The resolver's
+    "never >12h early" invariant was verified only for genuine arrival
+    observations; final_snapshot_ts is a wall-clock proxy that could
+    plausibly be far from schedule for reasons unrelated to an owl-route
+    misattribution, so only a same-day gap that clears the 12h bar is
+    trusted as evidence of a real anchor correction.
+    """
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T_GAP_SKIP", route_id="R1", direction_id=0, is_current=True),
+            StopTime(
+                trip_id="T_GAP_SKIP",
+                stop_sequence=1,
+                stop_id="S1",
+                arrival_time="14:05:00",
+                departure_time="14:05:30",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_GAP_SKIP",
+                route_id="R1",
+                trip_start_date="20260517",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 5, 17, 8, 0, 0),
+            ),
+            TripUpdateState(
+                trip_id="T_GAP_SKIP",
+                stop_sequence=1,
+                service_date=date(2026, 5, 17),
+                stop_id="S1",
+                vehicle_id="V1",
+                # Went dark ~6h before its own scheduled arrival -- an
+                # unremarkable early feed dropout, not an owl-route
+                # misattribution.
+                final_snapshot_ts=datetime(2026, 5, 17, 8, 0, 0),
+                final_schedule_relationship="SKIPPED",
+                last_pred_snapshot_ts=None,
+                last_predicted_arrival_ts=None,
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    derive_for_route_date(
+        pg_session,
+        route_id="R1",
+        service_date=date(2026, 5, 17),
+        target_table_name="stop_events",
+        tz_name="UTC",
+    )
+    pg_session.commit()
+
+    event = pg_session.execute(
+        select(StopEvent).where(StopEvent.trip_id == "T_GAP_SKIP")
+    ).scalar_one()
+    assert event.schedule_relationship == "SKIPPED"
+    assert event.scheduled_arrival_ts == datetime(2026, 5, 17, 14, 5, 0)
+    assert event.service_date == "2026-05-17"
 
 
 @pytest.mark.integration

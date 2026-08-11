@@ -8,6 +8,7 @@ This module owns those primitives so the two pipelines can't drift apart.
 """
 
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,6 +16,37 @@ from zoneinfo import ZoneInfo
 from src.models import StopTime
 
 UTC = ZoneInfo("UTC")
+
+# PR #193 review round 2 (finding 1): the ``proxy_guard=True`` distance cap
+# in `resolve_scheduled_instants` -- see that function's docstring for the
+# full sizing rationale (production SFMTA genuine-shift distribution: median
+# 149s, p99 2,844s, max 7,131s; 3h gives ~1.5x headroom over the p99/max).
+_PROXY_GUARD_MAX_DISTANCE_SEC = 10_800
+
+# Chunk size for tuple_(...).in_(<pairs>) queries (DELETEs/UPDATEs keyed on
+# (trip_id, stop_sequence) pairs) in both derive_stop_events*.py pipelines.
+# Postgres parses a tuple-IN filter as a deeply nested row-constructor OR
+# expression; at tens of thousands of pairs the parser exhausts
+# max_stack_depth (default 2MB) and the query fails with
+# "StatementTooComplex: stack depth limit exceeded" (reviewer-measured
+# failure at 20k pairs; worst real key set observed in production is 2,353).
+# 1000 pairs per query stays comfortably under that limit on
+# production-shaped batches.
+_TUPLE_IN_CHUNK_SIZE = 1000
+
+
+def _iter_chunks[T](items: Iterable[T], size: int) -> Iterator[list[T]]:
+    """Yield successive lists of length ``size`` from ``items`` (last may be short)."""
+    if size <= 0:
+        raise ValueError(f"chunk size must be positive, got {size}")
+    chunk: list[T] = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def parse_gtfs_time_to_dt(
@@ -102,9 +134,10 @@ def resolve_scheduled_instants(
     observed_ts: datetime,
     service_date: date_type,
     tz_name: str = "America/New_York",
-) -> tuple[datetime | None, datetime | None]:
-    """Resolve (scheduled_arrival_ts, scheduled_departure_ts), correcting for
-    a possible one-day service-date misattribution (NOTES-105).
+    proxy_guard: bool = False,
+) -> tuple[datetime | None, datetime | None, date_type]:
+    """Resolve (scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date),
+    correcting for a possible one-day service-date misattribution (NOTES-105).
 
     GTFS-RT `trip_start_date` (or, for the trip_update source, its
     snapshot_ts-calendar-day fallback in
@@ -140,10 +173,55 @@ def resolve_scheduled_instants(
     clusters top out around 80 minutes, nowhere near half a day), so the
     same-day anchor always wins there — verified by regression test.
 
-    Returns ``(None, None)`` if both inputs are ``None``.
+    ``resolved_service_date`` is whichever anchor (``service_date`` or the
+    day before it) produced the returned instants — the anchor day the
+    resolver determined is the trip's true GTFS service day. Callers that
+    persist a per-row ``service_date`` (NOTES-110) must use this instead of
+    the raw ``service_date`` argument, since the latter is exactly the
+    misattributed value this function exists to correct for.
+
+    ``proxy_guard`` (PR #193 review): set ``True`` when ``observed_ts`` is
+    a wall-clock *proxy* rather than a genuine arrival observation — e.g.
+    the SKIPPED-fallback branch's
+    ``final_snapshot_ts`` (the last poll that saw a (trip, stop) before it
+    dropped out of the feed). The "never >12h early" invariant above was
+    verified only for real observations; a trip that goes dark early
+    (vehicle offline, early cancellation, collector gap) can leave a proxy
+    timestamp far from the true scheduled time for reasons that have
+    nothing to do with an owl-route misattribution, on any agency
+    including WMATA.
+
+    The guard was originally the same ``prior_day_delta < same_day_delta
+    AND same_day_lag > 43_200`` direction check the unguarded argmin
+    already implies — a code-review pass (PR #193 review round 2, finding
+    1) found the two clauses are mathematically equivalent by the
+    ``|x − 86400| < |x| ⟺ x > 43200`` identity the module docstring
+    itself derives, so the "guard" never actually rejected anything a
+    plain closest-anchor search wouldn't already have picked. Repro: a
+    23:00:00 schedule with service_date D and a same-day proxy at 08:00
+    has same_day_lag = 54,000s (> 43,200, "clears" the old guard) even
+    though the day-before anchor is 32,400s (9h) from the proxy — an
+    ordinary early dropout, not an owl-route misattribution — and the old
+    guard wrongly shifted the anchor a day.
+
+    The guard is now a plain distance cap: the day-before anchor is
+    accepted only when its scheduled instant lands within 3 hours
+    (10,800s absolute difference) of the proxy observation; otherwise the
+    plain same-day anchor is kept, matching pre-NOTES-110 SKIPPED-branch
+    behavior exactly. 3h is sized from production data: across the
+    289,962 SFMTA rows that genuinely shift, the winning day-before anchor
+    lands median 149s, p99 2,844s, max 7,131s (~2.0h) from the
+    observation — a 3h cap accepts all genuine corrections with ~1.5x
+    headroom while rejecting gaps of several hours or more (like the 9h
+    repro above) that are far more likely to be an unrelated early
+    dropout than a genuine day-before correction.
+
+    Returns ``(None, None, service_date)`` if both inputs are ``None``
+    (nothing to anchor against, so the given ``service_date`` is kept
+    as-is).
     """
     if arrival_time is None and departure_time is None:
-        return None, None
+        return None, None, service_date
 
     # Prefer arrival_time to pick the anchor day (it's what deviation_sec
     # is computed from), but fall back to departure_time when arrival_time
@@ -152,21 +230,45 @@ def resolve_scheduled_instants(
     # off exactly like the case this function exists to fix.
     anchor_source = arrival_time if arrival_time is not None else departure_time
 
-    best_anchor = service_date
+    same_day_anchor = service_date
+    prior_day_anchor = service_date - timedelta(days=1)
+    best_anchor = same_day_anchor
+
     if anchor_source is not None:
-        best_delta = None
-        for anchor in (service_date, service_date - timedelta(days=1)):
-            parsed = parse_gtfs_time_to_dt(anchor_source, anchor, tz_name)
-            if parsed is None:
-                continue
-            delta = abs((parsed - observed_ts).total_seconds())
-            if best_delta is None or delta < best_delta:
-                best_delta = delta
-                best_anchor = anchor
+        same_day_parsed = parse_gtfs_time_to_dt(anchor_source, same_day_anchor, tz_name)
+        prior_day_parsed = parse_gtfs_time_to_dt(anchor_source, prior_day_anchor, tz_name)
+        same_day_delta = (
+            abs((same_day_parsed - observed_ts).total_seconds())
+            if same_day_parsed is not None
+            else None
+        )
+        prior_day_delta = (
+            abs((prior_day_parsed - observed_ts).total_seconds())
+            if prior_day_parsed is not None
+            else None
+        )
+
+        if proxy_guard:
+            if prior_day_delta is not None and prior_day_delta <= _PROXY_GUARD_MAX_DISTANCE_SEC:
+                best_anchor = prior_day_anchor
+            else:
+                best_anchor = same_day_anchor
+        else:
+            best_delta = None
+            for anchor, delta in (
+                (same_day_anchor, same_day_delta),
+                (prior_day_anchor, prior_day_delta),
+            ):
+                if delta is None:
+                    continue
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best_anchor = anchor
 
     return (
         parse_gtfs_time_to_dt(arrival_time, best_anchor, tz_name) if arrival_time else None,
         parse_gtfs_time_to_dt(departure_time, best_anchor, tz_name) if departure_time else None,
+        best_anchor,
     )
 
 
@@ -181,7 +283,10 @@ def resolve_stop_time(
     For the WMATA case there is always exactly one candidate per (trip_id, stop_id).
     The temporal-proximity tie-break is defensive against GTFS loop routes. Returns
     a dict with `stop_sequence`, `scheduled_arrival_ts`, `scheduled_departure_ts`
-    parsed against the given (per-position) service_date, or None if no candidates.
+    parsed against the given (per-position) service_date, plus
+    `resolved_service_date` (NOTES-110 — the anchor day that actually
+    produced those instants; see ``resolve_scheduled_instants``), or None if
+    no candidates.
 
     ``tz_name`` (NOTES-100 multi-agency; default Eastern) is forwarded to
     ``parse_gtfs_time_to_dt`` — see its docstring.
@@ -207,11 +312,14 @@ def resolve_stop_time(
     if len(candidates) > 1:
         chosen = min(candidates, key=_min_delta)
 
-    scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
-        chosen["arrival_time"], chosen["departure_time"], observed_ts, service_date, tz_name
+    scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            chosen["arrival_time"], chosen["departure_time"], observed_ts, service_date, tz_name
+        )
     )
     return {
         "stop_sequence": chosen["stop_sequence"],
         "scheduled_arrival_ts": scheduled_arrival_ts,
         "scheduled_departure_ts": scheduled_departure_ts,
+        "resolved_service_date": resolved_service_date,
     }

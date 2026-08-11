@@ -25,15 +25,14 @@ Usage:
 import argparse
 import sys
 import time
-from collections.abc import Iterable, Iterator
 from datetime import date as date_type
 from datetime import datetime
 
 from dotenv import load_dotenv
-from sqlalchemy import tuple_, update
+from sqlalchemy import delete, tuple_, update
 from sqlalchemy.orm import Session
 
-from pipelines.stop_events_common import parse_gtfs_time_to_dt, resolve_scheduled_instants
+from pipelines.stop_events_common import _iter_chunks, resolve_scheduled_instants
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
@@ -42,27 +41,14 @@ from src.models import Route, StopEvent, StopTime, Trip, TripUpdateState, Vehicl
 from src.timezones import local_service_date_position_window_utc, local_today, utcnow_naive
 from src.upsert_helpers import upsert_rows
 
-# Chunk size for the per-state-row derived_at UPDATE. The UPDATE filters on
-# ``tuple_(trip_id, stop_sequence).in_(<list>)``, which Postgres parses as a
-# deeply nested row-constructor OR expression. At ~thousands of pairs the
-# parser exhausts ``max_stack_depth`` (default 2MB) and the query fails with
-# ``StatementTooComplex: stack depth limit exceeded``. 1000 pairs per UPDATE
-# stays comfortably under that limit on production-shaped batches.
+# Chunk size for tuple_(trip_id, stop_sequence).in_(<pairs>) queries in this
+# file (the stale-row DELETE below and the per-state-row derived_at UPDATE
+# further down) -- see `pipelines.stop_events_common._TUPLE_IN_CHUNK_SIZE`
+# for the full sizing rationale (Postgres max_stack_depth on large tuple-IN
+# lists). Kept as a same-named local alias (rather than importing the
+# shared constant directly) so this module's own chunking call sites read
+# self-descriptively.
 _STATE_UPDATE_CHUNK_SIZE = 1000
-
-
-def _iter_chunks[T](items: Iterable[T], size: int) -> Iterator[list[T]]:
-    """Yield successive lists of length ``size`` from ``items`` (last may be short)."""
-    if size <= 0:
-        raise ValueError(f"chunk size must be positive, got {size}")
-    chunk: list[T] = []
-    for item in items:
-        chunk.append(item)
-        if len(chunk) >= size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
 
 
 def derive_for_route_date(
@@ -75,6 +61,15 @@ def derive_for_route_date(
     tz_name: str = "America/New_York",
 ) -> dict:
     """Materialize stop_events for one (route, service_date) from trip_update_state.
+
+    Rows are usually filed under ``service_date``, but NOTES-110's resolver
+    anchor correction can file a row under ``service_date - 1`` instead
+    (owl-route schedules whose GTFS-RT-reported service date is one day
+    later than the trip's true GTFS service day) — see
+    ``resolve_scheduled_instants``. Callers that need every row this call
+    wrote, not just the ones under ``service_date``, should use the
+    returned ``service_dates_written`` list rather than assuming the
+    output lands entirely under the requested date.
 
     ``target_table_name`` must be "stop_events" (the production table).
     The parameter is retained for call-site compatibility; passing any
@@ -170,6 +165,13 @@ def derive_for_route_date(
     skipped_count = 0
     no_prediction_count = 0
     derived_keys: list[tuple[str, int]] = []
+    # PR #193 review: (trip_id, stop_sequence) pairs whose resolved anchor day
+    # differs from the outer-loop service_date -- the misattributed row a
+    # prior derivation run (or the pre-NOTES-110 code) may have written
+    # under service_date still exists and must be superseded, since
+    # service_date is part of uq_stop_events_run_stop_source and a plain
+    # upsert can't reach a row keyed on a different service_date.
+    stale_keys: list[tuple[str, int]] = []
 
     target_model = StopEvent
 
@@ -197,35 +199,63 @@ def derive_for_route_date(
             # src.wmata_collector._service_date_for_row the same way
             # vehicle_positions.trip_start_date is, and inherits the same
             # owl-route misattribution on SFMTA.
-            scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
-                sched["arrival_time"],
-                sched["departure_time"],
-                observed_arrival_ts,
-                service_date,
-                tz_name,
+            scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+                resolve_scheduled_instants(
+                    sched["arrival_time"],
+                    sched["departure_time"],
+                    observed_arrival_ts,
+                    service_date,
+                    tz_name,
+                )
             )
         else:
-            # SKIPPED rows have no observation to disambiguate against;
-            # fall back to the plain service_date anchor (deviation_sec
-            # stays None for these regardless).
-            scheduled_arrival_ts = (
-                parse_gtfs_time_to_dt(sched["arrival_time"], service_date, tz_name)
-                if sched["arrival_time"]
-                else None
-            )
-            scheduled_departure_ts = (
-                parse_gtfs_time_to_dt(sched["departure_time"], service_date, tz_name)
-                if sched["departure_time"]
-                else None
+            # SKIPPED rows have no arrival prediction to disambiguate
+            # against, but final_snapshot_ts -- the last snapshot that
+            # observed the (trip, stop) before it dropped out of the feed,
+            # always populated on TripUpdateState -- is a serviceable
+            # proxy observation (NOTES-110 "related latent gap"). Reusing
+            # the same resolver keeps the SKIPPED branch's service_date
+            # attribution consistent with the SCHEDULED branch instead of
+            # always trusting the raw, possibly-misattributed service_date
+            # anchor. deviation_sec still comes out None for these rows
+            # regardless (observed_arrival_ts stays None below).
+            #
+            # proxy_guard=True (PR #193 review): final_snapshot_ts is a
+            # wall-clock proxy, not a genuine arrival observation -- a trip
+            # that drops out of the feed early (vehicle offline, early
+            # cancellation, collector gap) can leave it far from the true
+            # scheduled time for reasons unrelated to an owl-route
+            # misattribution, on any agency including WMATA. The guard
+            # only accepts the day-before anchor when the same-day anchor
+            # would land the scheduled instant >12h after the proxy (see
+            # resolve_scheduled_instants' proxy_guard docstring) --
+            # otherwise it keeps the plain service_date anchor exactly
+            # like the pre-NOTES-110 code did.
+            scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+                resolve_scheduled_instants(
+                    sched["arrival_time"],
+                    sched["departure_time"],
+                    state.final_snapshot_ts,
+                    service_date,
+                    tz_name,
+                    proxy_guard=True,
+                )
             )
 
         deviation_sec = None
         if observed_arrival_ts is not None and scheduled_arrival_ts is not None:
             deviation_sec = int((observed_arrival_ts - scheduled_arrival_ts).total_seconds())
 
+        if resolved_service_date != service_date:
+            stale_keys.append((state.trip_id, state.stop_sequence))
+
         rows.append(
             {
-                "service_date": service_date_str,
+                # NOTES-110: persist the anchor day the resolver actually
+                # picked (possibly service_date - 1 for SFMTA owl routes),
+                # not the raw outer-loop service_date -- the latter is
+                # exactly the misattributed value the resolver corrects for.
+                "service_date": resolved_service_date.isoformat(),
                 "trip_id": state.trip_id,
                 "route_id": route_id,
                 "direction_id": trip_direction[state.trip_id],
@@ -247,6 +277,25 @@ def derive_for_route_date(
     rows_written = 0
     if rows:
         constraint_name = "uq_stop_events_run_stop_source"
+
+        if stale_keys:
+            # PR #193 review: delete the superseded
+            # (service_date, trip_id, stop_sequence, source) rows before the
+            # upsert below, in the same transaction (upsert_rows commits
+            # both). Scoped to exactly the identities being rewritten this
+            # run — never a broad date-range delete. Chunked at
+            # _STATE_UPDATE_CHUNK_SIZE (finding 3) for the same reason the
+            # derived_at UPDATE below is: an unchunked tuple-IN list blows
+            # Postgres's max_stack_depth on large routes.
+            for chunk in _iter_chunks(stale_keys, _STATE_UPDATE_CHUNK_SIZE):
+                db.execute(
+                    delete(StopEvent).where(
+                        StopEvent.service_date == service_date_str,
+                        StopEvent.source == "trip_update",
+                        tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(chunk),
+                    )
+                )
+
         upsert_rows(
             db,
             target_model,
@@ -317,6 +366,14 @@ def derive_for_route_date(
         "skipped_emitted": skipped_count,
         "dropped_no_prediction": no_prediction_count,
         "rows_written": rows_written,
+        # PR #193 review: distinct service_date values actually written to
+        # stop_events this call, cheap to compute since `rows` already
+        # holds every row's resolved service_date. Almost always just
+        # [service_date_str], but the resolver's owl-route anchor
+        # correction (NOTES-110) can additionally write service_date - 1
+        # -- callers (run_daily_batch) must aggregate that date too, not
+        # just the one this pipeline was invoked for.
+        "service_dates_written": sorted({r["service_date"] for r in rows}),
         "elapsed_sec": round(time.time() - start_ts, 2),
     }
 
@@ -404,6 +461,16 @@ def main() -> int:
         )
         for r in results:
             print(r)
+
+        # PR #193 review: report every distinct service_date actually written
+        # (may include service_date - 1 via the resolver's owl-route
+        # anchor correction) so run_daily_batch's subprocess wrapper can
+        # aggregate day-shifted rows instead of orphaning them in an
+        # already-aggregated date.
+        all_written = set()
+        for r in results:
+            all_written.update(r.get("service_dates_written", []))
+        print(f"SERVICE_DATES_WRITTEN:{','.join(sorted(all_written))}")
     finally:
         db.close()
     return 0

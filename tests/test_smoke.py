@@ -309,6 +309,11 @@ def test_resolve_stop_time_corrects_owl_route_service_date_off_by_one():
     deviation_sec = (observed_ts - result["scheduled_arrival_ts"]).total_seconds()
     assert abs(deviation_sec) < 300
 
+    # NOTES-110: the corrected anchor day must be surfaced too, so callers
+    # can persist stop_events.service_date at the trip's true service day
+    # instead of the misattributed date they were called with.
+    assert result["resolved_service_date"] == date(2026, 7, 22)
+
 
 @pytest.mark.smoke
 def test_resolve_stop_time_owl_correction_is_noop_without_24h_schedule():
@@ -325,6 +330,9 @@ def test_resolve_stop_time_owl_correction_is_noop_without_24h_schedule():
     result = resolve_stop_time(candidates, observed_ts, date(2026, 5, 17), tz_name="UTC")
 
     assert result["scheduled_arrival_ts"] == datetime(2026, 5, 17, 14, 5, 0)
+    # NOTES-110: no anchor shift here, so the resolved service_date must
+    # stay the plain, unshifted date -- not always the day before.
+    assert result["resolved_service_date"] == date(2026, 5, 17)
 
 
 @pytest.mark.smoke
@@ -369,12 +377,157 @@ def test_resolve_scheduled_instants_falls_back_to_departure_time_for_anchor():
     misattributed_service_date = date(2026, 7, 23)
     observed_ts = datetime(2026, 7, 23, 7, 7, 22)
 
-    scheduled_arrival_ts, scheduled_departure_ts = resolve_scheduled_instants(
-        None, "31:09:40", observed_ts, misattributed_service_date, tz_name="UTC"
+    scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            None, "31:09:40", observed_ts, misattributed_service_date, tz_name="UTC"
+        )
     )
 
     assert scheduled_arrival_ts is None
     assert scheduled_departure_ts == datetime(2026, 7, 23, 7, 9, 40)
+    # NOTES-110: the departure-anchored resolution still surfaces the
+    # corrected (day-before) service date.
+    assert resolved_service_date == date(2026, 7, 22)
+
+
+@pytest.mark.smoke
+def test_resolve_scheduled_instants_proxy_guard_rejects_far_9h_gap():
+    """PR #193 review round 2, finding 1: the pre-cap guard
+    (`prior_day_delta < same_day_delta AND same_day_lag > 43_200`) is
+    mathematically identical to the unguarded argmin -- both clauses
+    reduce to the same `x > 43200` direction the module docstring
+    derives, so the guard never actually blocked anything. Repro: a
+    23:00:00 schedule with service_date 2026-05-18 and a same-day proxy
+    observation at 08:00 (an ordinary early feed dropout, not an owl-route
+    misattribution) has the day-before anchor numerically closer (32,400s
+    vs 54,000s) AND same_day_lag (54,000s) clears the old 12h bar -- so
+    the old guard wrongly shifted the anchor a day. The distance-cap
+    guard must instead reject the day-before anchor here (it lands 9h /
+    32,400s from the proxy, past the 3h / 10,800s cap) and keep the plain
+    same-day anchor.
+    """
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_scheduled_instants
+
+    service_date = date(2026, 5, 18)
+    arrival_time = "23:00:00"
+    proxy_ts = datetime(2026, 5, 18, 8, 0, 0)  # same-day proxy, 15h before schedule
+
+    scheduled_arrival_ts, _scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            arrival_time,
+            None,
+            proxy_ts,
+            service_date,
+            tz_name="UTC",
+            proxy_guard=True,
+        )
+    )
+
+    assert scheduled_arrival_ts == datetime(2026, 5, 18, 23, 0, 0)
+    assert resolved_service_date == date(2026, 5, 18)
+
+
+@pytest.mark.smoke
+def test_resolve_scheduled_instants_proxy_guard_allows_strong_owl_evidence():
+    """PR #193 review: proxy_guard=True must still
+    accept the day-before anchor when it lands close (within the 3h /
+    10,800s cap) to the proxy observation -- the strong-evidence case
+    (same production owl-route shape as
+    test_resolve_stop_time_corrects_owl_route_service_date_off_by_one;
+    the winning anchor here lands 138s from the proxy). The guard exists
+    to BLOCK weak evidence, not real corrections."""
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_scheduled_instants
+
+    misattributed_service_date = date(2026, 7, 23)
+    proxy_ts = datetime(2026, 7, 23, 7, 7, 22)  # final_snapshot_ts stand-in
+
+    scheduled_arrival_ts, _scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            "31:09:40",
+            "31:09:40",
+            proxy_ts,
+            misattributed_service_date,
+            tz_name="UTC",
+            proxy_guard=True,
+        )
+    )
+
+    assert scheduled_arrival_ts == datetime(2026, 7, 23, 7, 9, 40)
+    assert resolved_service_date == date(2026, 7, 22)
+
+
+@pytest.mark.smoke
+def test_resolve_scheduled_instants_proxy_guard_keeps_plain_anchor_for_moderate_gap():
+    """PR #193 review: a proxy observation
+    (final_snapshot_ts) that's merely several hours from the scheduled
+    arrival -- e.g. a vehicle that went quiet earlier in its run, nothing
+    to do with an owl-route misattribution -- must NOT shift
+    service_date. The day-before anchor here (2026-05-16 14:05:00) lands
+    well outside the 3h / 10,800s distance cap from the proxy, so it's
+    rejected and the plain same-day anchor is kept.
+    """
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_scheduled_instants
+
+    service_date = date(2026, 5, 17)
+    arrival_time = "14:05:00"
+    proxy_ts = datetime(2026, 5, 17, 8, 0, 0)  # 6h05m before schedule, same day
+
+    scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date = (
+        resolve_scheduled_instants(
+            arrival_time,
+            arrival_time,
+            proxy_ts,
+            service_date,
+            tz_name="UTC",
+            proxy_guard=True,
+        )
+    )
+
+    assert scheduled_arrival_ts == datetime(2026, 5, 17, 14, 5, 0)
+    assert resolved_service_date == date(2026, 5, 17)
+
+
+@pytest.mark.smoke
+def test_resolve_scheduled_instants_proxy_guard_boundary_at_3h():
+    """PR #193 review: pins the distance-cap's
+    exact threshold -- a day-before anchor landing exactly 3h (10,800s)
+    from the proxy observation clears the cap, 1s further does not.
+    """
+    from datetime import date, datetime
+
+    from pipelines.stop_events_common import resolve_scheduled_instants
+
+    arrival_time = "00:05:00"
+    service_date = date(2026, 5, 18)
+    # Day-before anchor is 2026-05-17 00:05:00.
+
+    # Proxy exactly 3h00m00s after the day-before anchor -- clears (<=10,800s).
+    just_within = resolve_scheduled_instants(
+        arrival_time,
+        None,
+        datetime(2026, 5, 17, 3, 5, 0),
+        service_date,
+        tz_name="UTC",
+        proxy_guard=True,
+    )
+    assert just_within[2] == date(2026, 5, 17)
+
+    # Proxy 3h00m01s after the day-before anchor -- does not clear.
+    just_over = resolve_scheduled_instants(
+        arrival_time,
+        None,
+        datetime(2026, 5, 17, 3, 5, 1),
+        service_date,
+        tz_name="UTC",
+        proxy_guard=True,
+    )
+    assert just_over[2] == date(2026, 5, 18)
 
 
 @pytest.mark.smoke

@@ -38,9 +38,11 @@ from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
+from sqlalchemy import delete, tuple_
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import (
+    _iter_chunks,
     build_stop_time_index,
     parse_trip_start_date,
     resolve_stop_time,
@@ -55,6 +57,12 @@ from src.upsert_helpers import upsert_rows
 
 PROXIMITY_THRESHOLD_M = 50.0
 EARTH_RADIUS_M = 6_371_000
+
+# PR #193 review round 2 (finding 3): chunk size for the stale-row DELETE's
+# tuple_(trip_id, stop_sequence).in_(<pairs>) filter -- see
+# `pipelines.stop_events_common._TUPLE_IN_CHUNK_SIZE` for the full sizing
+# rationale (Postgres max_stack_depth on large tuple-IN lists).
+_DELETE_CHUNK_SIZE = 1000
 
 
 def derive_proximity_stop_events(
@@ -73,6 +81,16 @@ def derive_proximity_stop_events(
     each to the nearest scheduled stop within `proximity_m`, keeps the FIRST
     detection per (trip_id, stop_sequence), and upserts a stop_event row per
     surviving observation. Returns counters describing the run.
+
+    Rows are usually filed under ``service_date``, but NOTES-110's resolver
+    anchor correction can file a row under ``service_date - 1`` instead
+    (owl-route schedules whose GTFS-RT-reported service date is one day
+    later than the trip's true GTFS service day) — see
+    ``resolve_stop_time`` / ``resolve_scheduled_instants``. Callers that
+    need every row this call wrote, not just the ones under
+    ``service_date``, should use the returned ``service_dates_written``
+    list rather than assuming the output lands entirely under the
+    requested date.
 
     ``tz_name`` (NOTES-100 multi-agency; default Eastern) bounds the
     vehicle_positions scan window by the agency's own local midnight —
@@ -224,6 +242,13 @@ def derive_proximity_stop_events(
                 "stop_sequence": chosen["stop_sequence"],
                 "scheduled_arrival_ts": chosen["scheduled_arrival_ts"],
                 "scheduled_departure_ts": chosen["scheduled_departure_ts"],
+                # NOTES-110: the anchor day resolve_stop_time actually
+                # resolved (possibly service_date - 1 for SFMTA owl
+                # routes), not the raw per-position service_date passed
+                # in — persisted below as the row's service_date so
+                # day_type/calendar_dates queries land on the trip's true
+                # GTFS service day.
+                "resolved_service_date": chosen["resolved_service_date"],
                 "observed_arrival_ts": pos.timestamp,
                 "vehicle_id": pos.vehicle_id,
                 "match_distance_m": min_distance,
@@ -231,16 +256,27 @@ def derive_proximity_stop_events(
 
     rows = []
     derived_at = utcnow_naive()
+    # Batch identity for the summary/log dict below — distinct from each
+    # row's own (possibly NOTES-110-corrected) service_date.
     service_date_str = service_date.isoformat()
+    # PR #193 review: (trip_id, stop_sequence) pairs whose resolved anchor day
+    # differs from the outer-loop service_date -- the misattributed row a
+    # prior derivation run (or the pre-NOTES-110 code) may have written
+    # under service_date still exists and must be superseded, since
+    # service_date is part of uq_stop_events_run_stop_source and a plain
+    # upsert can't reach a row keyed on a different service_date.
+    stale_keys: list[tuple[str, int]] = []
     for entry in earliest.values():
         deviation_sec = None
         if entry["scheduled_arrival_ts"] is not None:
             deviation_sec = int(
                 (entry["observed_arrival_ts"] - entry["scheduled_arrival_ts"]).total_seconds()
             )
+        if entry["resolved_service_date"] != service_date:
+            stale_keys.append((entry["trip_id"], entry["stop_sequence"]))
         rows.append(
             {
-                "service_date": service_date_str,
+                "service_date": entry["resolved_service_date"].isoformat(),
                 "trip_id": entry["trip_id"],
                 "route_id": route_id,
                 "direction_id": trip_direction[entry["trip_id"]],
@@ -259,7 +295,25 @@ def derive_proximity_stop_events(
         )
 
     rows_written = 0
+    service_dates_written: list[str] = []
     if rows:
+        if stale_keys:
+            # PR #193 review: delete the superseded
+            # (service_date, trip_id, stop_sequence, source) rows before the
+            # upsert below, in the same transaction (upsert_rows commits
+            # both). Scoped to exactly the identities being rewritten this
+            # run — never a broad date-range delete. Chunked at
+            # _DELETE_CHUNK_SIZE (finding 3): an unchunked tuple-IN list
+            # blows Postgres's max_stack_depth on large routes.
+            for chunk in _iter_chunks(stale_keys, _DELETE_CHUNK_SIZE):
+                db.execute(
+                    delete(StopEvent).where(
+                        StopEvent.service_date == service_date_str,
+                        StopEvent.source == "proximity",
+                        tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(chunk),
+                    )
+                )
+
         # Postgres upsert keyed on the stop_events natural key.
         upsert_rows(
             db,
@@ -281,6 +335,11 @@ def derive_proximity_stop_events(
             ],
         )
         rows_written = len(rows)
+        # PR #193 review: distinct service_date values actually written, cheap
+        # to compute since `rows` already holds every row's resolved
+        # service_date. run_daily_batch aggregates the union of these
+        # across all target dates, not just the requested service_date.
+        service_dates_written = sorted({r["service_date"] for r in rows})
 
     result = {
         "route_id": route_id,
@@ -288,6 +347,7 @@ def derive_proximity_stop_events(
         "positions": len(positions),
         "matched_to_stop": matched_to_stop,
         "rows_written": rows_written,
+        "service_dates_written": service_dates_written,
         "elapsed_sec": round(time.time() - start_ts, 2),
     }
     if verbose:
@@ -405,6 +465,16 @@ def main():
             f"Total: {total_positions} positions → {total_matched} matched → {total_written} stop_events"
         )
         print(f"Elapsed: {total_elapsed:.1f}s")
+
+        # PR #193 review: report every distinct service_date actually written
+        # (may include service_date - 1 via the resolver's owl-route
+        # anchor correction) so run_daily_batch's subprocess wrapper can
+        # aggregate day-shifted rows instead of orphaning them in an
+        # already-aggregated date.
+        all_written = set()
+        for r in results:
+            all_written.update(r.get("service_dates_written", []))
+        print(f"SERVICE_DATES_WRITTEN:{','.join(sorted(all_written))}")
     finally:
         db.close()
 
