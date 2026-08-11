@@ -102,6 +102,7 @@ def resolve_scheduled_instants(
     observed_ts: datetime,
     service_date: date_type,
     tz_name: str = "America/New_York",
+    proxy_guard: bool = False,
 ) -> tuple[datetime | None, datetime | None, date_type]:
     """Resolve (scheduled_arrival_ts, scheduled_departure_ts, resolved_service_date),
     correcting for a possible one-day service-date misattribution (NOTES-105).
@@ -147,6 +148,27 @@ def resolve_scheduled_instants(
     the raw ``service_date`` argument, since the latter is exactly the
     misattributed value this function exists to correct for.
 
+    ``proxy_guard`` (NOTES-111): set ``True`` when ``observed_ts`` is a
+    wall-clock *proxy* rather than a genuine arrival observation — e.g. the
+    SKIPPED-fallback branch's ``final_snapshot_ts`` (the last poll that saw
+    a (trip, stop) before it dropped out of the feed). The "never >12h
+    early" invariant above was verified only for real observations; a trip
+    that goes dark early (vehicle offline, early cancellation, collector
+    gap) can leave a proxy timestamp far from the true scheduled time for
+    reasons that have nothing to do with an owl-route misattribution, on
+    any agency including WMATA. With ``proxy_guard=True`` the day-before
+    anchor is accepted only when it is *both* strictly closer to
+    ``observed_ts`` *and* the same-day anchor would place the scheduled
+    instant more than 12h after the proxy — the same ``x > 43200``
+    direction the invariant above derives, checked explicitly rather than
+    left as an emergent property of the generic argmin search, so the
+    SKIPPED path's safety doesn't silently drift if the generic search
+    changes shape later (extra candidate anchors, a different tie-break)
+    for the SCHEDULED branch's needs. When the guard doesn't clear, the
+    plain same-day anchor is kept — matching pre-NOTES-110 SKIPPED-branch
+    behavior exactly. Verified: 0 of 91,822 production WMATA SKIPPED rows
+    trip this guard (max observed same-day lag ≈3.6h vs the 12h threshold).
+
     Returns ``(None, None, service_date)`` if both inputs are ``None``
     (nothing to anchor against, so the given ``service_date`` is kept
     as-is).
@@ -161,17 +183,51 @@ def resolve_scheduled_instants(
     # off exactly like the case this function exists to fix.
     anchor_source = arrival_time if arrival_time is not None else departure_time
 
-    best_anchor = service_date
+    same_day_anchor = service_date
+    prior_day_anchor = service_date - timedelta(days=1)
+    best_anchor = same_day_anchor
+
     if anchor_source is not None:
-        best_delta = None
-        for anchor in (service_date, service_date - timedelta(days=1)):
-            parsed = parse_gtfs_time_to_dt(anchor_source, anchor, tz_name)
-            if parsed is None:
-                continue
-            delta = abs((parsed - observed_ts).total_seconds())
-            if best_delta is None or delta < best_delta:
-                best_delta = delta
-                best_anchor = anchor
+        same_day_parsed = parse_gtfs_time_to_dt(anchor_source, same_day_anchor, tz_name)
+        prior_day_parsed = parse_gtfs_time_to_dt(anchor_source, prior_day_anchor, tz_name)
+        same_day_delta = (
+            abs((same_day_parsed - observed_ts).total_seconds())
+            if same_day_parsed is not None
+            else None
+        )
+        prior_day_delta = (
+            abs((prior_day_parsed - observed_ts).total_seconds())
+            if prior_day_parsed is not None
+            else None
+        )
+
+        if proxy_guard:
+            same_day_lag = (
+                (same_day_parsed - observed_ts).total_seconds()
+                if same_day_parsed is not None
+                else None
+            )
+            if (
+                same_day_delta is not None
+                and prior_day_delta is not None
+                and prior_day_delta < same_day_delta
+                and same_day_lag is not None
+                and same_day_lag > 43_200
+            ):
+                best_anchor = prior_day_anchor
+            else:
+                best_anchor = same_day_anchor
+        else:
+            best_delta = None
+            for anchor, delta in (
+                (same_day_anchor, same_day_delta),
+                (prior_day_anchor, prior_day_delta),
+            ):
+                if delta is None:
+                    continue
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best_anchor = anchor
 
     return (
         parse_gtfs_time_to_dt(arrival_time, best_anchor, tz_name) if arrival_time else None,

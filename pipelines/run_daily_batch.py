@@ -68,9 +68,11 @@ Usage:
 """
 
 import argparse
+import re
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from datetime import date as date_type
 from datetime import timedelta
 from pathlib import Path
@@ -86,6 +88,38 @@ from src.timezones import eastern_today, local_today
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
 DEFAULT_AGENCY = "wmata"
+
+# NOTES-111: the derive_stop_events* pipelines print this marker (see their
+# main()s) reporting every distinct service_date they actually wrote —
+# usually just the requested date, but the resolver's owl-route anchor
+# correction (NOTES-110) can additionally write service_date - 1. Matched
+# against combined subprocess stdout/stderr.
+_SERVICE_DATES_WRITTEN_RE = re.compile(r"^SERVICE_DATES_WRITTEN:(\S*)$", re.MULTILINE)
+
+
+def _parse_service_dates_written(output: str) -> set[date_type]:
+    """Parse a derive pipeline's "SERVICE_DATES_WRITTEN: ..." marker line.
+
+    Returns the set of service dates the subprocess reported writing
+    stop_events rows under. Only the derive_stop_events* pipelines print
+    this marker; other pipelines' output has no match and this returns an
+    empty set. Malformed tokens (should never happen — the marker is
+    machine-generated) are skipped rather than raising, since a parse
+    hiccup here shouldn't take down the whole batch.
+    """
+    match = _SERVICE_DATES_WRITTEN_RE.search(output or "")
+    if not match or not match.group(1):
+        return set()
+    dates: set[date_type] = set()
+    for token in match.group(1).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            dates.add(date_type.fromisoformat(token))
+        except ValueError:
+            continue
+    return dates
 
 
 # Order matters. The first two are independent (both write stop_events from
@@ -284,12 +318,15 @@ def run_pipeline(
     log_handle,
     extra_args: list[str] | None = None,
     agency: str = DEFAULT_AGENCY,
-) -> tuple[int, float]:
+) -> tuple[int, float, set[date_type]]:
     """Run a single pipeline module via `python -m ...` for one service date.
 
     Uses `--all-routes` (the wrapper's design contract is "cover everything")
     and `--date YYYY-MM-DD`. Pipeline stdout/stderr is appended to
-    `log_handle`; the return code and elapsed wall time are returned.
+    `log_handle`; the return code, elapsed wall time, and (NOTES-111) the
+    set of service_dates the pipeline reported writing (parsed from its
+    SERVICE_DATES_WRITTEN marker — empty for pipelines that don't print
+    one) are returned.
 
     ``extra_args`` is appended after ``--all-routes --date X`` for pipelines
     that need additional flags. None of the currently-configured pipelines
@@ -312,6 +349,13 @@ def run_pipeline(
     has already activated the venv — `sys.executable` points at the venv's
     Python. Re-resolving via `uv` per subprocess would also fail under launchd,
     which strips PATH down to a minimal set that doesn't include Homebrew.
+
+    Output capture: stdout/stderr are captured (not streamed directly to
+    `log_handle`) so the SERVICE_DATES_WRITTEN marker can be parsed, then
+    written to `log_handle` in one shot once the subprocess exits — a
+    small loss of real-time tailing versus the previous direct redirect,
+    traded for keeping `subprocess.run` as the single call this function
+    makes (existing tests monkeypatch `subprocess.run` directly).
     """
     cmd = [
         sys.executable,
@@ -330,14 +374,18 @@ def run_pipeline(
     proc = subprocess.run(
         cmd,
         cwd=str(REPO_ROOT),
-        stdout=log_handle,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        text=True,
         check=False,
     )
     elapsed = time.time() - start
+    output = getattr(proc, "stdout", None) or ""
+    if output:
+        log_handle.write(output)
     log_handle.write(f"[exit {proc.returncode}, {elapsed:.1f}s]\n")
     log_handle.flush()
-    return proc.returncode, elapsed
+    return proc.returncode, elapsed, _parse_service_dates_written(output)
 
 
 def run_batch(
@@ -363,16 +411,76 @@ def run_batch(
     not invoked from this loop for a non-default agency either — see the
     skip-message text this function emits for why. This isn't counted
     as a failure.
+
+    NOTES-111: derive and aggregate are run in two separate phases rather
+    than interleaved per date. Phase 1 runs both derive_stop_events*
+    pipelines across every target date, collecting the union of
+    `target_dates` and any adjacent service_date the resolver's
+    owl-route anchor correction (NOTES-110) wrote rows under (via each
+    subprocess's SERVICE_DATES_WRITTEN marker — see `run_pipeline`).
+    Phase 2 runs aggregate_runs/compute_bunching/the rollups across that
+    full union, in ascending date order. Without this split, a date-N
+    derive that corrects a row onto date N-1 would run after N-1's own
+    aggregation already completed (target_dates are processed oldest
+    first) and the row would never be aggregated.
     """
     failure_count = 0
     # results[date][pipeline_name] = exit_code, used for skipping downstream
-    # pipelines whose hard dependency just failed.
-    results: dict[date_type, dict[str, int]] = {d: {} for d in target_dates}
+    # pipelines whose hard dependency just failed. defaultdict so a date
+    # that only appears via a day-shifted write (not in target_dates) gets
+    # an empty dict on first access — dep-check below then treats it as
+    # "no failure recorded" (matching the pre-existing default-0 semantics)
+    # rather than raising KeyError.
+    results: dict[date_type, dict[str, int]] = defaultdict(dict)
 
+    derive_pipelines = [p for p in PIPELINES if p["depends_on"] is None]
+    downstream_pipelines = [p for p in PIPELINES if p["depends_on"] is not None]
+
+    # Phase 1: derive_stop_events* for every target date, collecting the
+    # full set of service dates (target dates plus any day-shifted dates)
+    # before any aggregation runs.
+    all_service_dates: set[date_type] = set(target_dates)
     for service_date in target_dates:
-        log_handle.write(f"\n=== service_date={service_date.isoformat()} ===\n")
+        log_handle.write(f"\n=== derive: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
-        for pipeline in PIPELINES:
+        for pipeline in derive_pipelines:
+            if dry_run:
+                extra_args = pipeline.get("extra_args", []) or []
+                extra_str = " ".join(extra_args)
+                log_handle.write(
+                    f"DRY-RUN would run {pipeline['module']} "
+                    f"--all-routes --date {service_date.isoformat()}"
+                    f"{(' ' + extra_str) if extra_str else ''} --agency {agency}\n"
+                )
+                results[service_date][pipeline["name"]] = 0
+                continue
+
+            rc, elapsed, extra_dates = run_pipeline(
+                pipeline["module"],
+                service_date,
+                log_handle,
+                extra_args=pipeline.get("extra_args"),
+                agency=agency,
+            )
+            results[service_date][pipeline["name"]] = rc
+            all_service_dates.update(extra_dates)
+            if rc != 0:
+                failure_count += 1
+                log_handle.write(
+                    f"FAIL {pipeline['name']} for {service_date.isoformat()}: "
+                    f"exit {rc} after {elapsed:.1f}s\n"
+                )
+            else:
+                log_handle.write(
+                    f"OK   {pipeline['name']} for {service_date.isoformat()}: {elapsed:.1f}s\n"
+                )
+            log_handle.flush()
+
+    # Phase 2: aggregate_runs + downstream across the full union, ascending.
+    for service_date in sorted(all_service_dates):
+        log_handle.write(f"\n=== aggregate: service_date={service_date.isoformat()} ===\n")
+        log_handle.flush()
+        for pipeline in downstream_pipelines:
             dep = pipeline["depends_on"]
             if dep is not None and results[service_date].get(dep, 0) != 0:
                 msg = (
@@ -397,7 +505,7 @@ def run_batch(
                 results[service_date][pipeline["name"]] = 0
                 continue
 
-            rc, elapsed = run_pipeline(
+            rc, elapsed, _extra_dates = run_pipeline(
                 pipeline["module"],
                 service_date,
                 log_handle,

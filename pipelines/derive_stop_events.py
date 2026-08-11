@@ -38,6 +38,7 @@ from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
+from sqlalchemy import delete, tuple_
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import (
@@ -73,6 +74,16 @@ def derive_proximity_stop_events(
     each to the nearest scheduled stop within `proximity_m`, keeps the FIRST
     detection per (trip_id, stop_sequence), and upserts a stop_event row per
     surviving observation. Returns counters describing the run.
+
+    Rows are usually filed under ``service_date``, but NOTES-110's resolver
+    anchor correction can file a row under ``service_date - 1`` instead
+    (owl-route schedules whose GTFS-RT-reported service date is one day
+    later than the trip's true GTFS service day) — see
+    ``resolve_stop_time`` / ``resolve_scheduled_instants``. Callers that
+    need every row this call wrote, not just the ones under
+    ``service_date``, should use the returned ``service_dates_written``
+    list rather than assuming the output lands entirely under the
+    requested date.
 
     ``tz_name`` (NOTES-100 multi-agency; default Eastern) bounds the
     vehicle_positions scan window by the agency's own local midnight —
@@ -241,12 +252,21 @@ def derive_proximity_stop_events(
     # Batch identity for the summary/log dict below — distinct from each
     # row's own (possibly NOTES-110-corrected) service_date.
     service_date_str = service_date.isoformat()
+    # NOTES-111: (trip_id, stop_sequence) pairs whose resolved anchor day
+    # differs from the outer-loop service_date -- the misattributed row a
+    # prior derivation run (or the pre-NOTES-110 code) may have written
+    # under service_date still exists and must be superseded, since
+    # service_date is part of uq_stop_events_run_stop_source and a plain
+    # upsert can't reach a row keyed on a different service_date.
+    stale_keys: list[tuple[str, int]] = []
     for entry in earliest.values():
         deviation_sec = None
         if entry["scheduled_arrival_ts"] is not None:
             deviation_sec = int(
                 (entry["observed_arrival_ts"] - entry["scheduled_arrival_ts"]).total_seconds()
             )
+        if entry["resolved_service_date"] != service_date:
+            stale_keys.append((entry["trip_id"], entry["stop_sequence"]))
         rows.append(
             {
                 "service_date": entry["resolved_service_date"].isoformat(),
@@ -268,7 +288,22 @@ def derive_proximity_stop_events(
         )
 
     rows_written = 0
+    service_dates_written: list[str] = []
     if rows:
+        if stale_keys:
+            # NOTES-111: delete the superseded (service_date, trip_id,
+            # stop_sequence, source) rows before the upsert below, in the
+            # same transaction (upsert_rows commits both). Scoped to
+            # exactly the identities being rewritten this run — never a
+            # broad date-range delete.
+            db.execute(
+                delete(StopEvent).where(
+                    StopEvent.service_date == service_date_str,
+                    StopEvent.source == "proximity",
+                    tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(stale_keys),
+                )
+            )
+
         # Postgres upsert keyed on the stop_events natural key.
         upsert_rows(
             db,
@@ -290,6 +325,11 @@ def derive_proximity_stop_events(
             ],
         )
         rows_written = len(rows)
+        # NOTES-111: distinct service_date values actually written, cheap
+        # to compute since `rows` already holds every row's resolved
+        # service_date. run_daily_batch aggregates the union of these
+        # across all target dates, not just the requested service_date.
+        service_dates_written = sorted({r["service_date"] for r in rows})
 
     result = {
         "route_id": route_id,
@@ -297,6 +337,7 @@ def derive_proximity_stop_events(
         "positions": len(positions),
         "matched_to_stop": matched_to_stop,
         "rows_written": rows_written,
+        "service_dates_written": service_dates_written,
         "elapsed_sec": round(time.time() - start_ts, 2),
     }
     if verbose:
@@ -414,6 +455,16 @@ def main():
             f"Total: {total_positions} positions → {total_matched} matched → {total_written} stop_events"
         )
         print(f"Elapsed: {total_elapsed:.1f}s")
+
+        # NOTES-111: report every distinct service_date actually written
+        # (may include service_date - 1 via the resolver's owl-route
+        # anchor correction) so run_daily_batch's subprocess wrapper can
+        # aggregate day-shifted rows instead of orphaning them in an
+        # already-aggregated date.
+        all_written = set()
+        for r in results:
+            all_written.update(r.get("service_dates_written", []))
+        print(f"SERVICE_DATES_WRITTEN:{','.join(sorted(all_written))}")
     finally:
         db.close()
 
