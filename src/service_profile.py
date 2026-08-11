@@ -8,13 +8,22 @@ EWT for frequent routes — see `src/ewt.py`).
 Day-type representative-day strategy
 ------------------------------------
 GTFS lets a service_id apply on any subset of weekdays via its calendar.txt
-day-of-week flags (plus calendar_dates exceptions, which we don't consult
-here). WMATA in particular splits weekday service across multiple
-service_ids — Mon/Tue/Thu (service_id 12), Wed (13), Fri (9) — each with
-slightly different trip counts. There is no single "weekday" service.
+day-of-week flags, or purely via calendar_dates exceptions (the Muni/SFMTA
+shape — no calendar.txt weekday coverage at all). WMATA in particular
+splits weekday service across multiple service_ids — Mon/Tue/Thu
+(service_id 12), Wed (13), Fri (9) — each with slightly different trip
+counts. There is no single "weekday" service.
 
-We pick a representative day-of-week per day_type and aggregate every
-service_id whose calendar.txt flag covers that day:
+We pick a representative day-of-week per day_type and resolve the
+service_id set that actually runs on that day type via
+`src.ewt._resolve_service_ids_for_day_type` — the same MODAL RESOLUTION
+NOTES-106 introduced for EWT/bunching's scheduled-headway pool (samples
+every date in the feed's validity window matching the representative
+weekday, resolves each independently via calendar + calendar_dates, and
+takes the most common result). See that function's docstring for the
+full rationale; this module was NOTES-107, a second call site for the
+same bug (`route_service_profile` silently had zero weekday rows for any
+agency whose weekday service is calendar_dates-only, e.g. SFMTA):
 - weekday  → Tuesday  (covers WMATA's dominant Mon-Tue-Thu pattern)
 - saturday → Saturday
 - sunday   → Sunday
@@ -51,14 +60,8 @@ from collections.abc import Iterable
 
 from sqlalchemy.orm import Session
 
-from src.models import Calendar, Route, RouteServiceProfile, StopTime, Trip
-
-# Day-of-week column on `Calendar` chosen to represent each day_type bucket.
-DAY_TYPE_REPRESENTATIVE_FIELD = {
-    "weekday": "tuesday",
-    "saturday": "saturday",
-    "sunday": "sunday",
-}
+from src.ewt import _resolve_service_ids_for_day_type
+from src.models import Route, RouteServiceProfile, StopTime, Trip
 
 FREQUENT_HEADWAY_MIN = 15.0
 
@@ -145,14 +148,6 @@ def _parse_gtfs_time_to_seconds(t: str) -> int:
     return h * 3600 + m * 60 + s
 
 
-def _service_ids_for_day_type(db: Session, day_type: str) -> list[str]:
-    """Return current service_ids whose calendar.txt flag covers the day_type's representative day."""
-    field_name = DAY_TYPE_REPRESENTATIVE_FIELD[day_type]
-    field = getattr(Calendar, field_name)
-    rows = db.query(Calendar.service_id).filter(Calendar.is_current, field == 1).all()
-    return [sid for (sid,) in rows]
-
-
 def _trunk_stop_arrivals(db: Session, service_ids: Iterable[str]) -> dict[str, list[str]]:
     """
     For every route active in `service_ids`, pick the most-served stop that
@@ -211,10 +206,15 @@ def compute_route_service_profile(db: Session) -> list[dict]:
     Returns a list of dicts with keys: route_id, day_type, hour,
     scheduled_trips, mean_headway_min (None if scheduled_trips < 2),
     is_frequent.
+
+    The per-day_type service_id set is resolved via
+    `src.ewt._resolve_service_ids_for_day_type` (NOTES-107) so calendar_dates-
+    only weekday service (SFMTA) isn't silently dropped — see the module
+    docstring's "Day-type representative-day strategy" section.
     """
     results: list[dict] = []
     for day_type in ("weekday", "saturday", "sunday"):
-        service_ids = _service_ids_for_day_type(db, day_type)
+        service_ids = _resolve_service_ids_for_day_type(db, day_type)
         if not service_ids:
             continue
 
