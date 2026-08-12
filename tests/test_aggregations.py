@@ -10,7 +10,7 @@ Tests the business logic in api/aggregations.py including:
 Run with: pytest tests/test_aggregations.py
 """
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -457,6 +457,330 @@ class TestGetRouteDetailMetrics:
         result = get_route_detail_metrics(db_session, "TEST1", days=14)
 
         assert result["time_period_days"] == 14
+
+
+class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
+    """NOTES-117: route-detail live KPIs anchor on the route's own latest
+    service_date, not the system-wide max across all routes.
+
+    Reproduces the A90-on-a-Saturday bug: a weekday-only route's page
+    rendered N/A across every header KPI whenever the system-wide latest
+    derived day (`MAX(service_date)` over ALL routes) fell on a day the
+    route itself has no stop_events for. `_latest_service_date_for_route`
+    and `_resolve_route_anchor_date` are the route-scoped resolution;
+    `_latest_service_date_with_stop_events` keeps its system-wide meaning
+    for callers that intentionally want it (the scorecard window end).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_live_metrics_cache(self):
+        """Process-global cache isolation.
+
+        Several tests below poke `_live_metrics_cache` directly with
+        hard-coded date keys to simulate warm/cold states; without this,
+        a leftover entry from one test could leak into another test's
+        cache lookup and make results depend on run order.
+        """
+        from api.aggregations import _live_metrics_cache
+
+        _live_metrics_cache.clear()
+        yield
+        _live_metrics_cache.clear()
+
+    def _seed_stop_event(self, db_session, route_id, service_date_str, hour=14):
+        """One proximity stop_event for `route_id` on `service_date_str`.
+
+        `deviation_sec=0` gives a deterministic 100%-on-time OTP block so
+        tests can assert non-null live KPIs without a full GTFS fixture
+        (service-delivered's ratio needs GTFS trips/calendar, out of scope
+        here — the OTP block alone is enough to prove the anchor flips
+        from null to real values). `hour` is naive UTC (matches storage
+        convention — see CLAUDE.md); period-key bucketing converts to
+        Eastern, currently UTC-4 (EDT), before comparing. Defaults to an
+        off-peak-either-way 14:00 UTC (10am EDT); pass e.g. `hour=12`
+        (8am EDT) to land inside `period=am_peak`.
+        """
+        from datetime import datetime as _dt
+
+        from src.models import StopEvent
+
+        d = date.fromisoformat(service_date_str)
+        db_session.add(
+            StopEvent(
+                service_date=service_date_str,
+                trip_id=f"TRIP_{route_id}_{service_date_str}_{hour}",
+                route_id=route_id,
+                direction_id=0,
+                stop_id=f"STOP_ANCHOR_{route_id}",
+                stop_sequence=1,
+                observed_arrival_ts=_dt.combine(d, _dt.min.time()).replace(hour=hour),
+                deviation_sec=0,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+        db_session.commit()
+
+    def _seed_gtfs_scheduled(self, db_session, route_id, service_date_str, trip_count=1):
+        """One Calendar service + `trip_count` Trip rows making `route_id`
+        GTFS-scheduled on the literal weekday of `service_date_str`.
+
+        Sets only the `Calendar` day-of-week flag matching `date.weekday()`
+        for `service_date_str` — matches exactly what `route_scheduled_on_date`
+        / `scheduled_service_ids_for_date` resolve, so this seeds "scheduled
+        on this exact date," not just "scheduled on this day of week in
+        general" (a distinction that matters if a test ever crosses a
+        `calendar_dates` exception boundary, though none here do).
+        """
+        from src.models import Calendar, Trip
+
+        d = date.fromisoformat(service_date_str)
+        weekday_fields = (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+        flags = dict.fromkeys(weekday_fields, 0)
+        flags[weekday_fields[d.weekday()]] = 1
+        service_id = f"SVC_SCHED_{route_id}_{service_date_str}"
+        db_session.add(
+            Calendar(
+                service_id=service_id,
+                start_date="20260101",
+                end_date="20271231",
+                is_current=True,
+                **flags,
+            )
+        )
+        for i in range(trip_count):
+            db_session.add(
+                Trip(
+                    trip_id=f"TRIP_SCHED_{route_id}_{service_date_str}_{i}",
+                    route_id=route_id,
+                    service_id=service_id,
+                    direction_id=i % 2,
+                    is_current=True,
+                )
+            )
+        db_session.commit()
+
+    def test_latest_service_date_for_route_is_route_scoped(self, db_session, sample_routes):
+        """The route-scoped helper ignores other routes' later dates."""
+        from api.aggregations import _latest_service_date_for_route
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")  # Friday
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")  # Saturday
+
+        assert _latest_service_date_for_route(db_session, "TEST1") == date(2026, 8, 7)
+        assert _latest_service_date_for_route(db_session, "TEST2") == date(2026, 8, 8)
+        assert _latest_service_date_for_route(db_session, "NONEXISTENT") is None
+
+    def test_live_metrics_anchor_on_route_own_latest_date_when_system_wide_differs(
+        self, db_session, sample_routes
+    ):
+        """A weekday-only route's latest events are earlier than the
+        system-wide max (another route ran later) — the live-metrics
+        anchor must follow the route's own latest date, and report it."""
+        from api.aggregations import get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")  # weekday-only route
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")  # system-wide max
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 7)
+        assert metrics is not None
+        assert metrics["otp_split"]["all_timepoints"]["on_time_pct"] == 100.0
+
+    def test_live_metrics_anchor_matches_system_wide_when_route_has_data_there(
+        self, db_session, sample_routes
+    ):
+        """No regression for the common case: a route WITH events on the
+        system-wide max date still anchors there."""
+        from api.aggregations import get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+        self._seed_stop_event(db_session, "TEST1", "2026-08-08")  # TEST1 also ran the 8th
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 8)
+        assert metrics is not None
+
+    def test_live_metrics_anchor_survives_warm_cross_route_cache_miss(
+        self, db_session, sample_routes
+    ):
+        """Reproduces the exact bug mechanism: the cross-route
+        `_live_metrics_cache` is warm for the system-wide date (e.g. from a
+        prior /api/routes scorecard call) but has no entry for this route
+        because the route legitimately has no data that day. The
+        route-detail call must fall back to the route's own latest date
+        instead of treating "missing from a warm cache" as "no data"."""
+        import time
+
+        from api.aggregations import _live_metrics_cache, get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+
+        # Simulate a warm scorecard cache for the system-wide date that
+        # only has an entry for TEST2 — TEST1 has none, same as production
+        # when the cross-route pass finds nothing for it. (`_live_metrics_cache`
+        # starts empty and is cleared again after the test by the autouse
+        # `_clear_live_metrics_cache` fixture.)
+        _live_metrics_cache["2026-08-08"] = (
+            time.monotonic(),
+            {"TEST2": {"service_delivered": {"ratio": 1.0}}},
+        )
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 7)
+        assert metrics is not None
+
+    def test_live_metrics_anchor_uses_route_scoped_anchor_regardless_of_period_key(
+        self, db_session, sample_routes
+    ):
+        """Finding 1 (pr-reviewer, PR #199): the route-scoped anchor must
+        apply for every `period_key`, not just `period_key=all`.
+
+        Before the fix, passing any period filter (e.g. `?period=am_peak`)
+        alongside the default `day_type=all` fell straight into the
+        filtered branch, which called
+        `_latest_service_date_for_day_type(db, "all")` — the system-wide
+        max — bypassing the NOTES-117 route-scoped fallback entirely. A90
+        would populate at "Time: All" and revert to N/A the moment a rider
+        picked "AM Peak."
+        """
+        from api.aggregations import get_live_metrics_for_route_today
+
+        # TEST1 (weekday-only route): AM-peak observation on Friday.
+        # hour=12 UTC → 8am Eastern (EDT), inside the am_peak (6-10) window.
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07", hour=12)
+        # TEST2 pushes the system-wide max to Saturday.
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+
+        metrics, anchor_date = get_live_metrics_for_route_today(
+            db_session, "TEST1", period_key="am_peak"
+        )
+
+        assert anchor_date == date(2026, 8, 7)
+        assert metrics is not None
+        assert metrics["otp_split"]["all_timepoints"]["on_time_pct"] == 100.0
+
+    def test_live_metrics_anchor_falls_back_when_route_not_scheduled_on_system_date(
+        self, db_session, sample_routes
+    ):
+        """Contrast case for finding 2(b): TEST1 is explicitly NOT
+        GTFS-scheduled on the system-wide max date (its calendar only
+        covers Friday) — falls back to its own latest date. Same outcome
+        as the "no GTFS at all" tests above, but with an explicit calendar
+        proving the "not scheduled" branch is what's firing, not just an
+        absence of any schedule data."""
+        from api.aggregations import get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")  # Friday
+        self._seed_gtfs_scheduled(db_session, "TEST1", "2026-08-07")  # Friday-only service
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")  # system-wide max, Saturday
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 7)
+        assert metrics is not None
+
+    def test_live_metrics_anchor_stays_on_system_date_when_scheduled_but_zero_events(
+        self, db_session, sample_routes
+    ):
+        """Finding 2(a) (pr-reviewer, PR #199): a route SCHEDULED on the
+        system-wide latest date must anchor there and show the outage
+        (`ratio == 0.0`), not silently jump back to its last day with any
+        observations. Discriminating on cache/observation presence instead
+        of GTFS scheduled-ness (the pre-fix behavior) hid total-service-
+        failure days behind a healthy-looking earlier date."""
+        from api.aggregations import get_live_metrics_for_route_today
+
+        # TEST1 ran fine on an earlier Wednesday...
+        self._seed_stop_event(db_session, "TEST1", "2026-08-05")
+        # ...and is GTFS-scheduled on Saturday 8/8 (the system-wide max
+        # below) but delivered nothing that day — no stop_events, no runs.
+        self._seed_gtfs_scheduled(db_session, "TEST1", "2026-08-08")
+        # TEST2 establishes the system-wide max at 2026-08-08.
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 8)
+        assert metrics is not None
+        assert metrics["service_delivered"]["ratio"] == 0.0
+        assert metrics["service_delivered"]["scheduled_trips"] == 1
+        assert metrics["service_delivered"]["delivered_trips"] == 0
+        # No observations that day → the OTP block is the "no data" sentinel.
+        assert metrics["otp_split"]["all_timepoints"]["n"] == 0
+
+    def test_live_metrics_anchor_for_scheduled_outage_is_cache_independent(
+        self, db_session, sample_routes
+    ):
+        """Finding 2(c): same scheduled-but-zero-events scenario, but with a
+        warm cross-route cache for the system date that has NO entry for
+        TEST1 (as if the cross-route pass had somehow skipped it) — proves
+        the anchor decision doesn't depend on cache state. Warm (here) and
+        cold (the test above) must reach the same anchor and the same
+        outage numbers."""
+        import time
+
+        from api.aggregations import _live_metrics_cache, get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-05")
+        self._seed_gtfs_scheduled(db_session, "TEST1", "2026-08-08")
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+
+        _live_metrics_cache["2026-08-08"] = (
+            time.monotonic(),
+            {"TEST2": {"service_delivered": {"ratio": 1.0}}},  # no TEST1 entry
+        )
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 8)
+        assert metrics is not None
+        assert metrics["service_delivered"]["ratio"] == 0.0
+
+    def test_period_drilldown_anchors_on_same_date_as_the_header(self, db_session, sample_routes):
+        """Finding 3 (pr-reviewer, PR #199): `get_route_period_drilldown`'s
+        `service_date` must equal `get_route_detail_metrics`'s
+        `live_metrics_as_of_date` for the same route. Before the fix, the
+        drilldown anchored independently on the system-wide max via
+        `_latest_service_date_with_stop_events`, so a weekday-only route
+        could show a populated header (anchored Friday) over an empty
+        drilldown chart (anchored the following Saturday)."""
+        from api.aggregations import get_route_detail_metrics, get_route_period_drilldown
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")  # Friday, weekday-only route
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")  # system-wide max, Saturday
+
+        header = get_route_detail_metrics(db_session, "TEST1", days=7)
+        drilldown = get_route_period_drilldown(db_session, "TEST1")
+
+        assert header["live_metrics_as_of_date"] == "2026-08-07"
+        assert drilldown["service_date"] == header["live_metrics_as_of_date"]
+
+    def test_route_detail_metrics_reports_anchor_date_and_nonnull_kpis(
+        self, db_session, sample_routes
+    ):
+        """End-to-end: `get_route_detail_metrics` for the weekday-only route
+        returns non-null live KPIs and echoes the date it anchored on."""
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+
+        result = get_route_detail_metrics(db_session, "TEST1", days=7)
+
+        assert result["live_metrics_as_of_date"] == "2026-08-07"
+        assert result["otp_all_pct"] == 100.0
 
 
 class TestGetRouteTrendData:

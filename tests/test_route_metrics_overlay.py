@@ -396,8 +396,9 @@ def test_detail_endpoint_sees_derived_fields_from_overlay_cache(db_session, samp
     get_all_routes_scorecard(db_session, days=7)
 
     # 2. Detail call — should now expose the derived fields, not N/A.
-    bundle = get_live_metrics_for_route_today(db_session, "TEST1")
+    bundle, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
     assert bundle is not None
+    assert anchor_date == end_date
     fields = _live_metric_fields(bundle)
     assert fields["ewt_seconds"] == 300.0
     assert fields["ewt_n_observed"] == 2
