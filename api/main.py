@@ -18,6 +18,7 @@ from api.aggregations import (
     _latest_service_date_with_stop_events,
     compute_block_timeline,
     get_active_blocks,
+    get_agency_comparison_data,
     get_all_routes_scorecard,
     get_corridor_constituent_segments,
     get_corridor_rollup,
@@ -506,6 +507,70 @@ async def get_system_trend(metric: str = "otp", days: int = 30):
         return get_system_trend_data(db, metric=metric, days=days)
     finally:
         db.close()
+
+
+def _open_agency_sessions(agency_names: list[str]) -> dict:
+    """Open one DB session per agency, skipping any without a configured URL.
+
+    Multi-agency is one physical database per agency (src/agency_config.py:
+    `AgencyConfig.database_url_env`), so serving a cross-agency endpoint
+    means opening a session per agency rather than filtering one session
+    by an `agency_id` column. Unlike a pipeline -- which must fail loudly
+    rather than silently write into the wrong database (see
+    `MissingAgencyDatabaseUrlError`) -- this read-only path degrades
+    gracefully: an agency whose database URL isn't configured (e.g. a
+    fresh dev environment without `SFMTA_DATABASE_URL` set) is simply
+    omitted from the result instead of failing the whole request.
+
+    Args:
+        agency_names: Names matching `config/agencies/<name>.yaml`.
+
+    Returns:
+        Dict of agency name -> open Session, for every agency whose URL
+        resolved. Caller owns closing each session.
+    """
+    from src.agency_config import (
+        MissingAgencyDatabaseUrlError,
+        load_agency_config,
+        resolve_agency_db_url,
+    )
+
+    sessions = {}
+    for name in agency_names:
+        cfg = load_agency_config(name)
+        try:
+            db_url = resolve_agency_db_url(cfg)
+        except MissingAgencyDatabaseUrlError:
+            continue
+        sessions[name] = get_session(db_url)
+    return sessions
+
+
+@app.get("/api/agency-comparison")
+async def get_agency_comparison_endpoint():
+    """
+    Agency comparison page data (PR #TBD -- "the north star").
+
+    Headline OTP / service-delivered / EWT / bunching for WMATA and SFMTA
+    side by side over the matched window (SFMTA collection began
+    2026-07-22; the matched window starts 2026-07-23), each computed from
+    that agency's own materialized `system_metrics_daily` table. See
+    `get_agency_comparison_data` for the window-mean / week-over-week
+    delta / caveats contract.
+
+    An agency without a configured database URL (e.g. `SFMTA_DATABASE_URL`
+    unset) is simply absent from `agencies` rather than failing the
+    request -- see `_open_agency_sessions`.
+
+    Returns:
+        Dict with `window_start`, `window_end`, `agencies`, `caveats`.
+    """
+    sessions = _open_agency_sessions(["wmata", "sfmta"])
+    try:
+        return get_agency_comparison_data(sessions)
+    finally:
+        for db in sessions.values():
+            db.close()
 
 
 @app.get("/api/routes/{route_id}/time-periods")

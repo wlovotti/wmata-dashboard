@@ -2358,6 +2358,174 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 
 
 # ---------------------------------------------------------------------------
+# Agency comparison page (PR #TBD -- "the north star"): WMATA vs SFMTA
+# headline KPIs over the matched window, read straight from each agency's
+# own materialized `system_metrics_daily` table. Multi-agency here means
+# one physical database per agency (src/agency_config.py), not an
+# `agency_id` column, so this function -- unlike the rest of this module --
+# takes a dict of already-open sessions rather than a single `db: Session`.
+# The caller (api/main.py) owns opening one session per agency (skipping
+# any whose database URL isn't configured) and closing them afterward.
+# ---------------------------------------------------------------------------
+
+AGENCY_COMPARISON_METRICS = ("otp", "service_delivered", "ewt", "bunching")
+
+# SFMTA GTFS-RT collection began 2026-07-22; 2026-07-23 is the first fully
+# collected service day (see the item body folded into PR #TBD, scope
+# decision 2026-08-09).
+# Fixed rather than derived from "today" so the matched window only grows.
+AGENCY_COMPARISON_WINDOW_START = date_type(2026, 7, 23)
+
+AGENCY_COMPARISON_CAVEATS = [
+    "Frequent-route designation differs per agency: WMATA uses an official "
+    "list (config/frequent_routes.yaml, from WMATA's Better Bus service "
+    "maps); SFMTA has no equivalent published list yet, so EWT here is "
+    "scoped by the same data-driven per-cell-hour gate (src/ewt.py, "
+    "scheduled headway ≤ 15 min) used internally for both agencies.",
+    "On-time performance uses the same −2/+7 minute window for both "
+    "agencies, but each transit agency publishes its own official OTP "
+    "standard -- this comparison does not match either agency's public "
+    "reporting.",
+    "SFMTA schedule and real-time data come from 511.org, which has a "
+    "known duplicate stop_sequence artifact (PR #180) that can affect "
+    "per-stop matching; treat SFMTA figures as directionally reliable "
+    "rather than exact.",
+    "SFMTA rows are collected by a single laptop-only proximity collector "
+    "whose ingest coverage never clears the completeness threshold WMATA "
+    "clears routinely, so every SFMTA day here is flagged data_quality="
+    "'partial' (NOTES-104) even though the metric itself is computed from "
+    "real observations -- 'partial' means lower confidence, not missing "
+    "data.",
+]
+
+
+def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
+    """Matched-window headline KPI comparison across agencies (PR #TBD).
+
+    Reads each agency's own materialized `system_metrics_daily` table over
+    the matched window [`AGENCY_COMPARISON_WINDOW_START`, today] and
+    summarizes the four headline metrics (OTP, service-delivered, EWT,
+    bunching) as a window mean plus a week-over-week delta.
+
+    All agencies share one comparison anchor -- the *earlier* of the
+    agencies' latest available dates -- so both columns are always
+    comparing the same calendar days even when one agency's nightly batch
+    is further behind than the other's. `wow_delta` is the mean of the 7
+    days ending at the anchor minus the mean of the 7 days before that;
+    it stays `None` until the matched window holds a full 14 days (the
+    "deltas where the window allows" scope decision).
+
+    Partial-quality days (see `AGENCY_COMPARISON_CAVEATS`) still
+    contribute their real computed value to `window_mean` -- they are a
+    confidence flag, not a null. `partial_days` reports the count so the
+    frontend/caveats can disclose it.
+
+    Args:
+        sessions: Mapping of agency name (matching a
+            `config/agencies/<name>.yaml`) to an open SQLAlchemy Session
+            bound to that agency's own database. Agencies the caller
+            couldn't open a session for (e.g. no `SFMTA_DATABASE_URL` in
+            a fresh dev environment) are simply absent from this dict --
+            the function degrades to whatever agencies it was given.
+
+    Returns:
+        Dict with `window_start` (ISO date), `window_end` (ISO date of
+        the shared anchor, or `None` if no agency has any data in the
+        window), `agencies` (list of `{agency, display_name, metrics}`,
+        `metrics` keyed by `AGENCY_COMPARISON_METRICS` with `{window_mean,
+        wow_delta, days_included, partial_days}` each), and `caveats`
+        (list of caveat strings for the UI footnotes).
+    """
+    from src.agency_config import load_agency_config
+    from src.timezones import eastern_today
+
+    today = eastern_today()
+    start = AGENCY_COMPARISON_WINDOW_START
+    start_iso = start.isoformat()
+    today_iso = today.isoformat()
+
+    rows_by_agency: dict[str, dict[str, SystemMetricsDaily]] = {}
+    latest_dates: list[str] = []
+    for agency_name, db in sessions.items():
+        rows = (
+            db.query(SystemMetricsDaily)
+            .filter(
+                SystemMetricsDaily.service_date >= start_iso,
+                SystemMetricsDaily.service_date <= today_iso,
+            )
+            .all()
+        )
+        by_date = {row.service_date: row for row in rows}
+        rows_by_agency[agency_name] = by_date
+        if by_date:
+            latest_dates.append(max(by_date))
+
+    # Shared anchor: the earlier of the agencies' latest available dates,
+    # so a lagging nightly batch on one agency doesn't pull the other
+    # agency's week-over-week window off the shared calendar days.
+    anchor_iso = min(latest_dates) if latest_dates else None
+    anchor = date_type.fromisoformat(anchor_iso) if anchor_iso else None
+
+    agencies_out = []
+    for agency_name, by_date in rows_by_agency.items():
+        cfg = load_agency_config(agency_name)
+        metrics_out = {}
+        for metric in AGENCY_COMPARISON_METRICS:
+            column = _METRIC_TO_COLUMN[metric]
+            values = [getattr(row, column) for row in by_date.values()]
+            partial_days = sum(
+                1
+                for row in by_date.values()
+                if getattr(row, column) is not None and row.data_quality == "partial"
+            )
+
+            wow_delta = None
+            if anchor is not None:
+                current_slice = [anchor - timedelta(days=i) for i in range(7)]
+                prior_slice = [anchor - timedelta(days=i) for i in range(7, 14)]
+                # Only compute a delta once the full 14-day comparison
+                # sits inside the matched window -- otherwise the "prior"
+                # slice would reach before data collection began.
+                if prior_slice[-1] >= start:
+                    current_values = [
+                        getattr(by_date[d.isoformat()], column)
+                        for d in current_slice
+                        if d.isoformat() in by_date
+                    ]
+                    prior_values = [
+                        getattr(by_date[d.isoformat()], column)
+                        for d in prior_slice
+                        if d.isoformat() in by_date
+                    ]
+                    current_mean = _mean_skip_null(current_values)
+                    prior_mean = _mean_skip_null(prior_values)
+                    if current_mean is not None and prior_mean is not None:
+                        wow_delta = current_mean - prior_mean
+
+            metrics_out[metric] = {
+                "window_mean": _mean_skip_null(values),
+                "wow_delta": wow_delta,
+                "days_included": sum(1 for v in values if v is not None),
+                "partial_days": partial_days,
+            }
+
+        agencies_out.append(
+            {
+                "agency": agency_name,
+                "display_name": cfg.display_name,
+                "metrics": metrics_out,
+            }
+        )
+
+    return {
+        "window_start": start_iso,
+        "window_end": anchor_iso,
+        "agencies": agencies_out,
+        "caveats": list(AGENCY_COMPARISON_CAVEATS),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Biggest contributors view (NOTES-39): rank routes by absolute impact on
 # system underperformance, not by raw worst percentage.
 #

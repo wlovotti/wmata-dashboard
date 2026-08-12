@@ -1,8 +1,8 @@
 # NOTES-113. Top-up SFMTA 2026-08-09/8-10 after next archive rsync
 
 **Severity: low** *(the comparison window already excludes 8/8–8/9 per
-the NOTES-99 window decision, so this is completeness hygiene, not a
-comparison blocker.)*
+the agency comparison page's matched-window decision (PR #TBD), so
+this is completeness hygiene, not a comparison blocker.)*
 **Effort: low** *(a few manual pipeline invocations once the raw data
 is local.)*
 

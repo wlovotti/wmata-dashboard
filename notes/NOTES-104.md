@@ -35,10 +35,11 @@ had zero downtime.
 — it's not wrong, just conservative (it correctly says "we can't verify
 ingest health from heartbeats/positions for this date," which happens
 to be true for every replayed date, healthy or not). Do not block or
-reinterpret it silently. **NOTES-99 (the comparison page) should
-annotate this explicitly** — e.g. a footnote on the matched-window
-header noting that early SFMTA dates read from replay and carry a
-conservative partial-day label — rather than hide or suppress partial
+reinterpret it silently. **The agency comparison page (PR #TBD)
+annotates this explicitly** — a footnote in its caveats list explains
+that SFMTA's `data_quality='partial'` flag reflects a structural
+laptop-side coverage ceiling (see the 2026-08-11 addendum below), not
+missing or unhealthy data — rather than hiding or suppressing partial
 days for the SFMTA side only, which would quietly break the "identical
 definitions per agency" comparability promise the whole comparison
 sprint is built on.
@@ -63,8 +64,10 @@ To close:
 3. Once a real signal exists, re-run `upsert_system_metrics_daily` /
    `upsert_route_metrics_overlay` for the already-replayed SFMTA window
    so `data_quality` reflects it instead of a blanket 'partial'.
-4. Land the NOTES-99 footnote regardless of whether 1-3 ship first —
-   it's cheap and is the honest-comparability floor either way.
+4. Done (PR #TBD): the comparison page's caveats list explains the
+   partial flag rather than hiding it, regardless of whether 1-3 ship
+   first — it was cheap and is the honest-comparability floor either
+   way.
 
 Scope note: this affects any FUTURE agency onboarded primarily via
 archive replay too, not just SFMTA — worth keeping generic rather than

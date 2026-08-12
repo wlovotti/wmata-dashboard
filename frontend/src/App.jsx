@@ -9,6 +9,7 @@ import ActiveBlocks from './components/ActiveBlocks'
 import Targets from './components/Targets'
 import ScheduleAudit from './components/ScheduleAudit'
 import SegmentDiagnostic from './components/SegmentDiagnostic'
+import AgencyComparison from './components/AgencyComparison'
 import useGtfsFreshness from './hooks/useGtfsFreshness'
 import './App.css'
 
@@ -112,6 +113,11 @@ function App() {
           <Route path="/targets" element={<Targets />} />
           <Route path="/schedule-audit" element={<ScheduleAudit />} />
           <Route path="/segments" element={<SegmentDiagnostic />} />
+          {/* Agency comparison page (PR #TBD): reachable by URL only for now — no nav link, so the
+              baselined pages' shared header chrome (Overview / RouteList /
+              RouteDetail-D72 Playwright visual regressions) is untouched.
+              Add a nav entry once NOTES-84 revisits the header. */}
+          <Route path="/compare" element={<AgencyComparison />} />
         </Routes>
       </div>
     </Router>
