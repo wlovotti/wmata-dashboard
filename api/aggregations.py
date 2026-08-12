@@ -164,6 +164,29 @@ def _latest_service_date_for_day_type(db: Session, day_type_filter: str):
     return None
 
 
+def _latest_service_date_for_route(db: Session, route_id: str):
+    """Return the most recent service_date with stop_events for `route_id`, or None.
+
+    Route-scoped variant of `_latest_service_date_with_stop_events` (NOTES-117).
+    Many routes (e.g. weekday-only ones) have no stop_events on the
+    system-wide latest derived date, so anchoring the route-detail header
+    KPIs on that global max silently renders every such route's KPIs as
+    N/A whenever the global max falls on a day the route doesn't operate
+    (every weekend, Mondays before the nightly derive, or any time the DB
+    lags a few days). This is the anchor `get_live_metrics_for_route_today`
+    falls back to for a route with no data on the system-wide date.
+
+    Other callers that intentionally want the system-wide anchor (the
+    scorecard window end, `get_route_period_drilldown`, etc.) should keep
+    using `_latest_service_date_with_stop_events` — this variant exists
+    for the route-detail live-KPI path only.
+    """
+    row = db.query(func.max(StopEvent.service_date)).filter(StopEvent.route_id == route_id).scalar()
+    if not row:
+        return None
+    return datetime.strptime(row, "%Y-%m-%d").date()
+
+
 def sanitize_float(value):
     """
     Convert float value to None if it's NaN or Infinity
@@ -816,13 +839,14 @@ def get_live_metrics_for_route_today(
     route_id: str,
     day_type_filter: str = ALL_DAY_TYPES,
     period_key: str = ALL_HOURS,
-) -> dict | None:
+) -> tuple[dict | None, date_type | None]:
     """Latest derived service_date's live metrics for one route, cached when warm.
 
-    On a warm cache (any /api/routes call within the TTL), returns the cached
-    bundle for `route_id` instantly. On cold cache, computes single-route
-    directly without warming the full scorecard cache — RouteDetail shouldn't
-    pay the all-routes price.
+    On a warm cache (any /api/routes call within the TTL) for a route that
+    has data on the system-wide latest date, returns the cached bundle for
+    `route_id` instantly. Otherwise computes single-route directly without
+    warming the full scorecard cache — RouteDetail shouldn't pay the
+    all-routes price.
 
     `day_type_filter` (NOTES-41) anchors on the latest service_date matching
     the day_type — so picking "Saturday" on a Tuesday surfaces last
@@ -832,30 +856,52 @@ def get_live_metrics_for_route_today(
     only by service_date). Single-route compute at ~150ms keeps the
     filter interactive without a full cache rebuild per filter combo.
 
-    Returns `None` if no stop_events exist for the requested day_type
-    (DB freshly initialized, or the filter has no matching date yet).
+    Returns `(metrics, anchor_date)`. `metrics` is `None` if no stop_events
+    exist for the requested day_type, or for the route at all (DB freshly
+    initialized). `anchor_date` is the actual service_date the metrics were
+    computed (or read from cache) on, so callers can surface it — `None`
+    iff `metrics` is `None`.
+
+    NOTES-117: the unfiltered (`day_type_filter=all`) path used to anchor
+    unconditionally on the system-wide `MAX(service_date)` across ALL
+    routes. Many routes (weekday-only ones especially) have no stop_events
+    on that date whenever it's a weekend or the DB is a few days stale —
+    they'd render N/A even though they have perfectly good data on their
+    own, earlier, latest date. The fast path below now falls back to
+    `_latest_service_date_for_route` whenever the route has no entry in the
+    warm cross-route cache, rather than treating that as "no data."
     """
     if day_type_filter == ALL_DAY_TYPES and period_key == ALL_HOURS:
-        # Unfiltered fast path — preserves the existing cache behavior.
-        service_date = _latest_service_date_with_stop_events(db)
-        if service_date is None:
-            return None
-        cache_key = service_date.isoformat()
+        # Unfiltered fast path. Try the cross-route cache keyed by the
+        # system-wide latest date first — cheap warm-cache hit for routes
+        # that ran that day (the common case). Fall back to the route's own
+        # latest date (NOTES-117) whenever the route has no entry there,
+        # e.g. a weekday-only route when the system-wide latest date is a
+        # weekend.
+        system_date = _latest_service_date_with_stop_events(db)
+        if system_date is not None:
+            cache_key = system_date.isoformat()
+            with _live_metrics_lock:
+                cached = _live_metrics_cache.get(cache_key)
+            if cached is not None and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC:
+                route_metrics = cached[1].get(route_id)
+                if route_metrics is not None:
+                    return route_metrics, system_date
 
-        with _live_metrics_lock:
-            cached = _live_metrics_cache.get(cache_key)
-        if cached is not None and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC:
-            return cached[1].get(route_id) or _compute_single_route_live_metrics(
-                db, route_id, service_date
-            )
-        return _compute_single_route_live_metrics(db, route_id, service_date)
+        route_date = _latest_service_date_for_route(db, route_id)
+        if route_date is None:
+            return None, None
+        return _compute_single_route_live_metrics(db, route_id, route_date), route_date
 
     # Filtered path — anchor on the day_type's latest matching date and skip
     # the cross-route cache (which holds unfiltered values).
     service_date = _latest_service_date_for_day_type(db, day_type_filter)
     if service_date is None:
-        return None
-    return _compute_single_route_live_metrics(db, route_id, service_date, period_key=period_key)
+        return None, None
+    return (
+        _compute_single_route_live_metrics(db, route_id, service_date, period_key=period_key),
+        service_date,
+    )
 
 
 def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
@@ -1571,7 +1617,11 @@ def get_route_detail_metrics(
     metrics by day-of-week and time-of-day. Service-delivered and
     excess-trip-time are trip-level so the period filter has no effect on
     them; the day_type filter anchors live metrics on the latest matching
-    service_date.
+    service_date. With the default `day_type_filter=all`, the live metrics
+    anchor on the route's own latest service_date rather than the
+    system-wide latest across all routes (NOTES-117) — a weekday-only
+    route no longer renders N/A just because the system-wide latest
+    derived day happens to be a weekend.
 
     Args:
         db: Database session
@@ -1584,19 +1634,24 @@ def get_route_detail_metrics(
     Returns:
         Dictionary with detailed route metrics; echoes the active filter
         values so the frontend can render the chip without a round-trip
-        to its own state.
+        to its own state. `live_metrics_as_of_date` (NOTES-117) is the
+        service_date the live KPI block is actually anchored on, so the
+        frontend can label it — `None` only when the route has no
+        stop_events at all yet.
     """
     # Get route info (current version only)
     route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
     if not route:
         return {"error": f"Route {route_id} not found"}
 
-    # Live metrics for today (single-route compute on cache miss).
-    live_fields = _live_metric_fields(
-        get_live_metrics_for_route_today(
-            db, route_id, day_type_filter=day_type_filter, period_key=period_key
-        )
+    # Live metrics for today (single-route compute on cache miss). Anchored
+    # on the route's own latest service_date when day_type_filter=all
+    # (NOTES-117) — see `get_live_metrics_for_route_today` for why that
+    # differs from the system-wide anchor other endpoints use.
+    live_metrics, live_metrics_as_of_date = get_live_metrics_for_route_today(
+        db, route_id, day_type_filter=day_type_filter, period_key=period_key
     )
+    live_fields = _live_metric_fields(live_metrics)
 
     # Excess trip time (NOTES-43): freshest non-zero value within the window,
     # computed live per-day from `runs` (NOTES-19 migration). Trip-level
@@ -1632,6 +1687,12 @@ def get_route_detail_metrics(
         "time_period_days": days,
         "day_type_filter": day_type_filter,
         "period_key": period_key,
+        # NOTES-117: the service_date the live KPIs below are anchored on
+        # (the route's own latest, not necessarily the system-wide latest).
+        # `None` only when the route has no stop_events at all yet.
+        "live_metrics_as_of_date": (
+            live_metrics_as_of_date.isoformat() if live_metrics_as_of_date else None
+        ),
         "frequency_class": frequency_class,
         # NOTES-56: WMATA-designated frequent-service routes get EWT as
         # the headline KPI on the frontend; standard routes keep OTP.

@@ -10,7 +10,7 @@ Tests the business logic in api/aggregations.py including:
 Run with: pytest tests/test_aggregations.py
 """
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -457,6 +457,140 @@ class TestGetRouteDetailMetrics:
         result = get_route_detail_metrics(db_session, "TEST1", days=14)
 
         assert result["time_period_days"] == 14
+
+
+class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
+    """NOTES-117: route-detail live KPIs anchor on the route's own latest
+    service_date, not the system-wide max across all routes.
+
+    Reproduces the A90-on-a-Saturday bug: a weekday-only route's page
+    rendered N/A across every header KPI whenever the system-wide latest
+    derived day (`MAX(service_date)` over ALL routes) fell on a day the
+    route itself has no stop_events for. `_latest_service_date_for_route`
+    and the `get_live_metrics_for_route_today` fallback below are the fix;
+    `_latest_service_date_with_stop_events` keeps its system-wide meaning
+    for other callers (system scorecard window, drilldown, etc.).
+    """
+
+    def _seed_stop_event(self, db_session, route_id, service_date_str):
+        """One proximity stop_event for `route_id` on `service_date_str`.
+
+        `deviation_sec=0` gives a deterministic 100%-on-time OTP block so
+        tests can assert non-null live KPIs without a full GTFS fixture
+        (service-delivered's ratio needs GTFS trips/calendar, out of scope
+        here — the OTP block alone is enough to prove the anchor flips
+        from null to real values).
+        """
+        from datetime import datetime as _dt
+
+        from src.models import StopEvent
+
+        d = date.fromisoformat(service_date_str)
+        db_session.add(
+            StopEvent(
+                service_date=service_date_str,
+                trip_id=f"TRIP_{route_id}_{service_date_str}",
+                route_id=route_id,
+                direction_id=0,
+                stop_id=f"STOP_ANCHOR_{route_id}",
+                stop_sequence=1,
+                observed_arrival_ts=_dt.combine(d, _dt.min.time()).replace(hour=14),
+                deviation_sec=0,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+        db_session.commit()
+
+    def test_latest_service_date_for_route_is_route_scoped(self, db_session, sample_routes):
+        """The route-scoped helper ignores other routes' later dates."""
+        from api.aggregations import _latest_service_date_for_route
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")  # Friday
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")  # Saturday
+
+        assert _latest_service_date_for_route(db_session, "TEST1") == date(2026, 8, 7)
+        assert _latest_service_date_for_route(db_session, "TEST2") == date(2026, 8, 8)
+        assert _latest_service_date_for_route(db_session, "NONEXISTENT") is None
+
+    def test_live_metrics_anchor_on_route_own_latest_date_when_system_wide_differs(
+        self, db_session, sample_routes
+    ):
+        """A weekday-only route's latest events are earlier than the
+        system-wide max (another route ran later) — the live-metrics
+        anchor must follow the route's own latest date, and report it."""
+        from api.aggregations import get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")  # weekday-only route
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")  # system-wide max
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 7)
+        assert metrics is not None
+        assert metrics["otp_split"]["all_timepoints"]["on_time_pct"] == 100.0
+
+    def test_live_metrics_anchor_matches_system_wide_when_route_has_data_there(
+        self, db_session, sample_routes
+    ):
+        """No regression for the common case: a route WITH events on the
+        system-wide max date still anchors there."""
+        from api.aggregations import get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+        self._seed_stop_event(db_session, "TEST1", "2026-08-08")  # TEST1 also ran the 8th
+
+        metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+        assert anchor_date == date(2026, 8, 8)
+        assert metrics is not None
+
+    def test_live_metrics_anchor_survives_warm_cross_route_cache_miss(
+        self, db_session, sample_routes
+    ):
+        """Reproduces the exact bug mechanism: the cross-route
+        `_live_metrics_cache` is warm for the system-wide date (e.g. from a
+        prior /api/routes scorecard call) but has no entry for this route
+        because the route legitimately has no data that day. The
+        route-detail call must fall back to the route's own latest date
+        instead of treating "missing from a warm cache" as "no data"."""
+        import time
+
+        from api.aggregations import _live_metrics_cache, get_live_metrics_for_route_today
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+
+        _live_metrics_cache.clear()
+        try:
+            # Simulate a warm scorecard cache for the system-wide date that
+            # only has an entry for TEST2 — TEST1 has none, same as
+            # production when the cross-route pass finds nothing for it.
+            _live_metrics_cache["2026-08-08"] = (
+                time.monotonic(),
+                {"TEST2": {"service_delivered": {"ratio": 1.0}}},
+            )
+
+            metrics, anchor_date = get_live_metrics_for_route_today(db_session, "TEST1")
+
+            assert anchor_date == date(2026, 8, 7)
+            assert metrics is not None
+        finally:
+            _live_metrics_cache.clear()
+
+    def test_route_detail_metrics_reports_anchor_date_and_nonnull_kpis(
+        self, db_session, sample_routes
+    ):
+        """End-to-end: `get_route_detail_metrics` for the weekday-only route
+        returns non-null live KPIs and echoes the date it anchored on."""
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+        self._seed_stop_event(db_session, "TEST2", "2026-08-08")
+
+        result = get_route_detail_metrics(db_session, "TEST1", days=7)
+
+        assert result["live_metrics_as_of_date"] == "2026-08-07"
+        assert result["otp_all_pct"] == 100.0
 
 
 class TestGetRouteTrendData:

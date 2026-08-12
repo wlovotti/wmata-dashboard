@@ -25,6 +25,10 @@ identically per agency, shown side by side with honest comparability
 caveats. Audience for now: personal. Every open item below either
 serves this or is explicitly parked.
 
+## Comparison depth (active)
+
+- [NOTES-115](notes/NOTES-115.md) Scheduled wait time / service-level KPI on the comparison page — sev medium / eff medium — unblocked; research aggregation weighting first (TCRP SWT/AWT, NTD revenue-hours)
+
 ## Ops & reliability (parked pending NOTES-95)
 
 - [NOTES-95](notes/NOTES-95.md) Stateless-collector rewrite (Path 2a, second half) — sev medium / eff high — needs its own spec/plan cycle
@@ -36,6 +40,8 @@ serves this or is explicitly parked.
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
 - [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — blocked on next archive rsync
+- [NOTES-116](notes/NOTES-116.md) SFMTA route_service_profile lacks weekday rows (calendar_dates-only weekday service) — sev low-medium / eff low-medium — unblocked; check whether PR #194 fix + profile re-run suffices
+- [NOTES-118](notes/NOTES-118.md) Investigate scheduled-span data quality in runs (A90 67% zero-span, EXP/LCL junk route_ids) — sev low-medium / eff medium — unblocked; investigation first, guard is one possible outcome
 
 ## WMATA depth & UX
 
