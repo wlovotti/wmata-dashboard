@@ -42,7 +42,7 @@ function AgencyColumn({ agency }) {
 }
 
 /**
- * `/compare` page (PR #TBD — "the north star"). Two columns, WMATA vs
+ * `/compare` page (PR #198 — "the north star"). Two columns, WMATA vs
  * SFMTA, side by side on the four headline KPIs (OTP, service-delivered,
  * EWT, bunching) over the matched window that began 2026-07-23. Reads a
  * single endpoint (`/api/agency-comparison`) that already computed the

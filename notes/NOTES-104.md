@@ -35,7 +35,7 @@ had zero downtime.
 — it's not wrong, just conservative (it correctly says "we can't verify
 ingest health from heartbeats/positions for this date," which happens
 to be true for every replayed date, healthy or not). Do not block or
-reinterpret it silently. **The agency comparison page (PR #TBD)
+reinterpret it silently. **The agency comparison page (PR #198)
 annotates this explicitly** — a footnote in its caveats list explains
 that SFMTA's `data_quality='partial'` flag reflects a structural
 laptop-side coverage ceiling (see the 2026-08-11 addendum below), not
@@ -64,7 +64,7 @@ To close:
 3. Once a real signal exists, re-run `upsert_system_metrics_daily` /
    `upsert_route_metrics_overlay` for the already-replayed SFMTA window
    so `data_quality` reflects it instead of a blanket 'partial'.
-4. Done (PR #TBD): the comparison page's caveats list explains the
+4. Done (PR #198): the comparison page's caveats list explains the
    partial flag rather than hiding it, regardless of whether 1-3 ship
    first — it was cheap and is the honest-comparability floor either
    way.

@@ -2358,7 +2358,7 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 
 
 # ---------------------------------------------------------------------------
-# Agency comparison page (PR #TBD -- "the north star"): WMATA vs SFMTA
+# Agency comparison page (PR #198 -- "the north star"): WMATA vs SFMTA
 # headline KPIs over the matched window, read straight from each agency's
 # own materialized `system_metrics_daily` table. Multi-agency here means
 # one physical database per agency (src/agency_config.py), not an
@@ -2371,7 +2371,7 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 AGENCY_COMPARISON_METRICS = ("otp", "service_delivered", "ewt", "bunching")
 
 # SFMTA GTFS-RT collection began 2026-07-22; 2026-07-23 is the first fully
-# collected service day (see the item body folded into PR #TBD, scope
+# collected service day (see the item body folded into PR #198, scope
 # decision 2026-08-09).
 # Fixed rather than derived from "today" so the matched window only grows.
 AGENCY_COMPARISON_WINDOW_START = date_type(2026, 7, 23)
@@ -2400,7 +2400,7 @@ AGENCY_COMPARISON_CAVEATS = [
 
 
 def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
-    """Matched-window headline KPI comparison across agencies (PR #TBD).
+    """Matched-window headline KPI comparison across agencies (PR #198).
 
     Reads each agency's own materialized `system_metrics_daily` table over
     the matched window [`AGENCY_COMPARISON_WINDOW_START`, today] and

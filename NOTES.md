@@ -32,7 +32,7 @@ serves this or is explicitly parked.
 - [NOTES-81](notes/NOTES-81.md) Phantom vehicle-reported timestamps — sev low / eff low — fold guard into NOTES-95 if it starts first
 - [NOTES-82](notes/NOTES-82.md) Redundant vehicle_positions indexes — sev low / eff low — unblocked
 - [NOTES-102](notes/NOTES-102.md) Backfill June recovery-window trip_update truncation — sev low / eff low — unblocked; needs S3 pull for 6/14–16 + snapshot-12 GTFS pin
-- [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189); the agency comparison page (PR #TBD) now annotates this via its caveats list; 2026-08-11 addendum: laptop VP-only numerator caps ~33%, so ALL laptop SFMTA dates flag partial
+- [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189); the agency comparison page (PR #198) now annotates this via its caveats list; 2026-08-11 addendum: laptop VP-only numerator caps ~33%, so ALL laptop SFMTA dates flag partial
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
 - [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — blocked on next archive rsync

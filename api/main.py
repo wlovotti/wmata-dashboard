@@ -549,7 +549,7 @@ def _open_agency_sessions(agency_names: list[str]) -> dict:
 @app.get("/api/agency-comparison")
 async def get_agency_comparison_endpoint():
     """
-    Agency comparison page data (PR #TBD -- "the north star").
+    Agency comparison page data (PR #198 -- "the north star").
 
     Headline OTP / service-delivered / EWT / bunching for WMATA and SFMTA
     side by side over the matched window (SFMTA collection began

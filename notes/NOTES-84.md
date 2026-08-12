@@ -40,5 +40,5 @@ None hard (the SSH tunnel shipped 2026-06-13 and dev runs on a local
 socket, so the site is viewable during iteration). Sequence before
 NOTES-85 (don't restyle panels that are about to be rearranged); both
 touch the same files, so don't stack PRs. The agency comparison page
-(PR #TBD) now exists; fold its placement into this redesign rather
+(PR #198) now exists; fold its placement into this redesign rather
 than designing around it.

@@ -1308,7 +1308,7 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-/* Agency comparison page (PR #TBD — "the north star"). Deliberately
+/* Agency comparison page (PR #198 — "the north star"). Deliberately
    plain: two equal-width columns of stat tiles, reusing the app's
    existing card/table color tokens rather than introducing a new
    palette. Visual polish is a later pass (NOTES-84/85). */

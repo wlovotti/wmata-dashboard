@@ -113,7 +113,7 @@ function App() {
           <Route path="/targets" element={<Targets />} />
           <Route path="/schedule-audit" element={<ScheduleAudit />} />
           <Route path="/segments" element={<SegmentDiagnostic />} />
-          {/* Agency comparison page (PR #TBD): reachable by URL only for now — no nav link, so the
+          {/* Agency comparison page (PR #198): reachable by URL only for now — no nav link, so the
               baselined pages' shared header chrome (Overview / RouteList /
               RouteDetail-D72 Playwright visual regressions) is untouched.
               Add a nav entry once NOTES-84 revisits the header. */}

@@ -1,5 +1,5 @@
 """
-Tests for get_agency_comparison_data — the agency comparison page's (PR #TBD)
+Tests for get_agency_comparison_data — the agency comparison page's (PR #198)
 core aggregation (WMATA vs SFMTA headline KPIs over the matched window).
 
 Multi-agency is one physical database per agency (src/agency_config.py), so
@@ -249,7 +249,7 @@ class TestGetAgencyComparisonData:
         assert result["window_end"] is None or result["window_end"] <= eastern_today().isoformat()
 
     def test_caveats_mention_frequent_route_and_data_completeness(self):
-        """Caveat footnotes cover the honest-comparability points from the item (PR #TBD):
+        """Caveat footnotes cover the honest-comparability points from the item (PR #198):
         frequent-route designation, the OTP window, the 511.org duplicate
         stop_sequence artifact, and SFMTA's structurally-partial coverage
         (NOTES-104).
