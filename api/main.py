@@ -614,7 +614,9 @@ async def get_route_period_drilldown_endpoint(route_id: str):
 
     Returns the AM peak / midday / PM peak / evening / night breakdown that
     the headline scorecard fields (`ewt_seconds`, `bunching_rate`) collapse.
-    Anchors on the same service_date as the headline so the rows reconcile.
+    Anchors via the same route-scoped resolver as `/api/routes/{route_id}`'s
+    `live_metrics_as_of_date` (NOTES-117), so this endpoint's `service_date`
+    always reconciles with the header.
 
     Args:
         route_id: Route identifier (e.g., 'C51')

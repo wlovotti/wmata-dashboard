@@ -137,6 +137,31 @@ def _scheduled_trip_ids_query(
     )
 
 
+def route_scheduled_on_date(
+    db: Session,
+    route_id: str,
+    service_date: date_type,
+    gtfs_snapshot_id: int | None = None,
+) -> bool:
+    """True iff `route_id` has any GTFS-scheduled trip on `service_date`.
+
+    Public wrapper around `_scheduled_trip_ids_query` (NOTES-117 review
+    follow-up) so callers outside this module can ask "was this route
+    supposed to run today?" without hand-rolling a second calendar/
+    calendar_dates resolver. Distinct from "did it deliver any trips" —
+    a route can be scheduled and still deliver zero (an outage), which
+    `compute_service_delivered` reports as `ratio=0.0`, not "no data."
+    Used by the route-detail live-KPI anchor
+    (`api.aggregations.get_live_metrics_for_route_today`) to decide
+    whether a route's absence from a given service_date is "not running
+    that day" (fall back to its own latest date) vs. "scheduled but the
+    service failed" (anchor on that date and show the 0).
+    """
+    return (
+        _scheduled_trip_ids_query(db, route_id, service_date, gtfs_snapshot_id).first() is not None
+    )
+
+
 def compute_service_delivered(
     db: Session,
     route_id: str,

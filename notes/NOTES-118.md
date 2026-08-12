@@ -4,7 +4,7 @@
 excess trip time, "% of trips running long" — are silently garbage for
 affected routes: A90's header showed "95% running long, median trip
 20 min, schedule 0 min (+4286%)")*.
-**Effort: medium (investigation-first — the fix is unscoped until the
+**Effort: medium** *(investigation-first — the fix is unscoped until the
 causes are quantified; a degenerate-span guard is one possible outcome,
 not the mandate)*.
 
