@@ -1,6 +1,6 @@
 /**
- * Characterization tests for utils/agencyComparison.js — the NOTES-99
- * agency comparison page's pure formatting logic (window-mean display +
+ * Characterization tests for utils/agencyComparison.js — the agency
+ * comparison page's (PR #198) pure formatting logic (window-mean display +
  * week-over-week delta tinting).
  */
 import { formatMetricValue, formatDelta } from '../../src/utils/agencyComparison'

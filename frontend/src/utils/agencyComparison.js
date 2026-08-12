@@ -1,4 +1,4 @@
-// Formatting helpers for the agency comparison page (NOTES-99). Split out
+// Formatting helpers for the agency comparison page (PR #198). Split out
 // of AgencyComparison.jsx so the pure display logic is unit-testable the
 // same way utils/formatters.js is.
 
