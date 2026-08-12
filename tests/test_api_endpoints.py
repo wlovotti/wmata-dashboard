@@ -159,23 +159,21 @@ def test_get_route_trend_with_days_parameter(client, sample_route):
 
 
 @pytest.mark.api
-def test_get_route_time_periods_success(client, sample_route):
-    """Test GET /api/routes/{route_id}/time-periods returns performance by time of day"""
+def test_get_route_time_periods_returns_501(client, sample_route):
+    """GET /api/routes/{route_id}/time-periods is a deprecated, unimplemented
+    legacy VehiclePosition-based OTP path (NOTES-114 review) — guarded to
+    return 501 rather than invoking the uncapped, event-loop-blocking
+    `calculate_time_period_otp` query."""
     response = client.get("/api/routes/TEST1/time-periods")
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["route_id"] == "TEST1"
-    assert "periods" in data
-    assert isinstance(data["periods"], dict)
+    assert response.status_code == 501
+    assert "deprecated" in response.json()["detail"].lower()
 
 
 @pytest.mark.api
-def test_get_route_time_periods_with_days(client, sample_route):
-    """Test GET /api/routes/{route_id}/time-periods with days parameter"""
+def test_get_route_time_periods_with_days_still_501(client, sample_route):
+    """The `days` query param doesn't change the guard's behavior."""
     response = client.get("/api/routes/TEST1/time-periods?days=14")
-    assert response.status_code == 200
-    assert response.json()["days"] == 14
+    assert response.status_code == 501
 
 
 @pytest.mark.api

@@ -85,31 +85,14 @@ Get time-series trend data for a metric.
 }
 ```
 
-### `GET /api/routes/{route_id}/time-periods`
-Get performance metrics by time of day.
-
-**Path Parameters:**
-- `route_id` (string): Route identifier
-
-**Query Parameters:**
-- `days` (int, default=7): Number of days to analyze
-
-**Response:**
-```json
-{
-  "route_id": "C51",
-  "periods": {
-    "AM Peak (6-9)": {
-      "otp_percentage": 65.0,
-      "avg_headway_minutes": 15.0
-    },
-    "Midday (9-15)": {
-      "otp_percentage": 72.0,
-      "avg_headway_minutes": 20.0
-    }
-  }
-}
-```
+### `GET /api/routes/{route_id}/time-periods` (deprecated — returns 501)
+Legacy VehiclePosition-based time-of-day OTP breakdown. Predates the
+stop_events/runs architecture that is now the source of truth for
+per-route metrics (see CLAUDE.md); the underlying query is an uncapped
+7-day `get_vehicle_positions` pull with per-row Python loops. Guarded to
+return `501 Not Implemented` rather than run (NOTES-114). Use
+`GET /api/routes/{route_id}/period-drilldown` for the stop_events-based
+per-time-period EWT/bunching breakdown instead.
 
 ## Project Structure
 
@@ -146,7 +129,7 @@ open http://localhost:8000/docs
 **Implemented:**
 - ✅ GET /api/routes (all routes scorecard)
 - ✅ GET /api/routes/{route_id} (route detail)
-- ✅ GET /api/routes/{route_id}/time-periods (time-of-day breakdown)
+- 🚫 GET /api/routes/{route_id}/time-periods (deprecated, returns 501 — see above)
 
 **TODO:**
 - ⏳ GET /api/routes/{route_id}/trend (daily time-series)

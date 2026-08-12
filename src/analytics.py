@@ -5,6 +5,7 @@ Analytics module for calculating transit performance metrics
 import math
 import os
 from datetime import datetime, timedelta
+from threading import Lock
 
 import numpy as np
 import pandas as pd
@@ -13,8 +14,10 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from src.database import get_session
+from src.ewt import _db_identity
 from src.models import (
     CalendarDate,
+    GTFSSnapshot,
     Route,
     Shape,
     Stop,
@@ -1235,31 +1238,97 @@ def calculate_route_headways(
     }
 
 
-# Cache for route stops to avoid repeated database queries
-_route_stops_cache = {}
+# Cache for route stops to avoid repeated database queries.
+#
+# Keyed `(db_identity, snapshot_id, route_id)` — mirrors `src/ewt.py`'s
+# `_schedule_cache` (NOTES-108) rather than inventing a second
+# disambiguation scheme:
+# - `db_identity` (`src/ewt.py:_db_identity`) stops two different
+#   databases (e.g. `wmata_dashboard` vs `sfmta_dashboard`, or any two
+#   whose `snapshot_id` sequences happen to overlap) from colliding when
+#   a single process holds sessions against both (NOTES-114).
+# - `snapshot_id` (`MAX(GTFSSnapshot.snapshot_id)`, scoped to `db`) means
+#   a GTFS reload (`scripts/reload_gtfs_complete.py`) evicts stale
+#   entries instead of an entry surviving indefinitely in a long-lived
+#   process (the API). Storing a fresh entry evicts every OTHER entry
+#   for the SAME database keyed to a different snapshot_id — same
+#   resolve-then-evict semantics as `_schedule_cache`.
+#
+# Cached values are `Stop` instances **expunged** from the session that
+# loaded them (`Session.expunge`): detached, but with all already-loaded
+# columns intact, so callers get normal attribute access without risking
+# `DetachedInstanceError` or stale state from a session that isn't
+# theirs.
+_route_stops_cache: dict[tuple[str, int, str], list[Stop]] = {}
+_route_stops_cache_lock = Lock()
 
 
-def get_route_stops(db: Session, route_id: str) -> list[Stop]:
+def get_route_stops(
+    db: Session, route_id: str, resolved_snapshot_id: int | None = None
+) -> list[Stop]:
     """
     Get all stops for a route, with caching to avoid repeated queries.
 
-    Returns:
-        List of Stop objects for the route
-    """
-    if route_id not in _route_stops_cache:
-        stops = (
-            db.query(Stop)
-            .join(StopTime)
-            .join(Trip)
-            .filter(
-                Trip.route_id == route_id, Trip.is_current, StopTime.is_current, Stop.is_current
-            )
-            .distinct()
-            .all()
-        )
-        _route_stops_cache[route_id] = stops
+    Cache key includes a db-identity and GTFS-snapshot component (see
+    `_route_stops_cache` docstring) — safe to call against multiple
+    databases from a single long-lived process, and across GTFS reloads.
 
-    return _route_stops_cache[route_id]
+    Args:
+        db: Database session.
+        route_id: Route to fetch stops for.
+        resolved_snapshot_id: Pre-resolved `MAX(GTFSSnapshot.snapshot_id)`,
+            for callers that invoke this in a per-row loop (e.g.
+            `calculate_on_time_performance`, `calculate_time_period_otp`
+            via `find_nearest_stop`) and want to resolve it once up front
+            rather than pay a DB round-trip + autoflush on every cache
+            hit. This is CACHE-KEY-ONLY: it does not filter or pin the
+            underlying query, which always reads `is_current` rows.
+            Unlike `src/ewt.py`'s `gtfs_snapshot_id` parameter (which
+            passes through `gtfs_version_filter` to pin the query itself
+            to a historical GTFS snapshot), this value is never used for
+            anything except selecting/evicting cache entries — passing a
+            historical snapshot id here does NOT return historical stops,
+            it just caches today's current-snapshot stops under that key.
+            When `None` (the default), resolved fresh here — same as
+            before.
+
+    Returns:
+        List of detached `Stop` objects for the route (not bound to `db`
+        or any other session — see `_route_stops_cache`).
+    """
+    db_identity = _db_identity(db)
+    if resolved_snapshot_id is not None:
+        snapshot_id = resolved_snapshot_id
+    else:
+        snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+    cache_key = (db_identity, snapshot_id, route_id)
+
+    with _route_stops_cache_lock:
+        cached = _route_stops_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    stops = (
+        db.query(Stop)
+        .join(StopTime, StopTime.stop_id == Stop.stop_id)
+        .join(Trip, Trip.trip_id == StopTime.trip_id)
+        .filter(Trip.route_id == route_id, Trip.is_current, StopTime.is_current, Stop.is_current)
+        .distinct()
+        .all()
+    )
+    for stop in stops:
+        db.expunge(stop)
+
+    with _route_stops_cache_lock:
+        _route_stops_cache[cache_key] = stops
+        # Evict every OTHER entry for the SAME database keyed to a
+        # different snapshot_id — mirrors `_schedule_cache`'s eviction
+        # rule exactly (NOTES-108/NOTES-114).
+        for key in list(_route_stops_cache.keys()):
+            if key[0] == db_identity and key[1] != snapshot_id:
+                del _route_stops_cache[key]
+
+    return stops
 
 
 def find_nearest_stop(
@@ -1268,17 +1337,30 @@ def find_nearest_stop(
     latitude: float,
     longitude: float,
     max_distance_meters: float = 200.0,
+    resolved_snapshot_id: int | None = None,
 ) -> tuple[Stop, float] | None:
     """
     Find the nearest stop on a route to given coordinates.
 
     Uses caching to avoid repeated database queries for the same route.
 
+    Args:
+        db: Database session.
+        route_id: Route to search stops on.
+        latitude: Point latitude.
+        longitude: Point longitude.
+        max_distance_meters: Maximum distance to consider a match.
+        resolved_snapshot_id: Pre-resolved snapshot id to pass through to
+            `get_route_stops` — see that function's docstring. This is
+            purely the cache-key component (does not pin the query to a
+            historical snapshot). Callers that invoke this per-row in a
+            loop should resolve the snapshot id once and pass it here.
+
     Returns:
         Tuple of (Stop, distance_meters) or None if no stop within max_distance
     """
     # Get all stops for this route (cached)
-    stops = get_route_stops(db, route_id)
+    stops = get_route_stops(db, route_id, resolved_snapshot_id=resolved_snapshot_id)
 
     nearest_stop = None
     min_distance = float("inf")
@@ -1351,6 +1433,14 @@ def calculate_on_time_performance(
     matched_count = 0
     unmatched_count = 0
 
+    # Resolve the GTFS snapshot id once for this call, purely as a
+    # cache-key component, rather than paying a DB round-trip on every
+    # `find_nearest_stop` -> `get_route_stops` cache hit inside the loop
+    # below (NOTES-114 review finding 2). This does NOT pin the
+    # underlying stop query to a historical snapshot — see
+    # `get_route_stops`'s docstring.
+    resolved_snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+
     # Process positions and match to scheduled trips
     for pos in positions:
         # Use trip matching to find the scheduled trip this vehicle is running
@@ -1364,7 +1454,9 @@ def calculate_on_time_performance(
         matched_count += 1
 
         # Find nearest stop on this matched trip
-        nearest = find_nearest_stop(db, route_id, pos.latitude, pos.longitude)
+        nearest = find_nearest_stop(
+            db, route_id, pos.latitude, pos.longitude, resolved_snapshot_id=resolved_snapshot_id
+        )
         if not nearest:
             continue
 
@@ -1723,6 +1815,14 @@ def calculate_time_period_otp(
         else:  # 0-6
             return "Night (0-6)"
 
+    # Resolve the GTFS snapshot id once for this call, purely as a
+    # cache-key component, rather than paying a DB round-trip on every
+    # `find_nearest_stop` -> `get_route_stops` cache hit inside the loop
+    # below (NOTES-114 review finding 2). This does NOT pin the
+    # underlying stop query to a historical snapshot — see
+    # `get_route_stops`'s docstring.
+    resolved_snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+
     for pos in positions:
         # Match to trip
         match_result = find_matching_trip(db, pos)
@@ -1733,7 +1833,12 @@ def calculate_time_period_otp(
 
         # Find nearest stop
         nearest = find_nearest_stop(
-            db, route_id, pos.latitude, pos.longitude, max_distance_meters=50.0
+            db,
+            route_id,
+            pos.latitude,
+            pos.longitude,
+            max_distance_meters=50.0,
+            resolved_snapshot_id=resolved_snapshot_id,
         )
         if not nearest:
             continue
