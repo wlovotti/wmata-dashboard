@@ -25,10 +25,6 @@ identically per agency, shown side by side with honest comparability
 caveats. Audience for now: personal. Every open item below either
 serves this or is explicitly parked.
 
-## Comparison depth (active)
-
-- [NOTES-115](notes/NOTES-115.md) Scheduled wait time / service-level KPI on the comparison page — sev medium / eff medium — unblocked; research aggregation weighting first (TCRP SWT/AWT, NTD revenue-hours)
-
 ## Ops & reliability (parked pending NOTES-95)
 
 - [NOTES-95](notes/NOTES-95.md) Stateless-collector rewrite (Path 2a, second half) — sev medium / eff high — needs its own spec/plan cycle
