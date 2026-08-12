@@ -89,14 +89,24 @@ def compute_service_level_stats(
 
 
 def service_level_for_agency(db: Session) -> dict:
-    """Service-level stats for one agency from its current weekday GTFS.
+    """Bus-only service-level stats for one agency from its current weekday GTFS.
 
     Thin wrapper over `fetch_scheduled_cell_hours_for_routes(db,
     "weekday")` (module-cached; inherits the NOTES-106 day-type resolver,
-    so SFMTA's calendar_dates-only weekday service resolves correctly).
-    Raises whatever the schedule fetch raises — the comparison endpoint
-    catches and degrades to a null block.
-    """
-    from src.ewt import fetch_scheduled_cell_hours_for_routes
+    so SFMTA's calendar_dates-only weekday service resolves correctly),
+    filtered to `route_type=3` (bus) via `src.ewt.bus_route_ids` before
+    pooling — the bus-only comparison filtering (PR #TODO): SFMTA's feed
+    also carries Muni Metro light rail and cable car routes, and pooling
+    those in would skew the tile away from a bus-to-bus comparison.
+    WMATA's feed is verified 100% route_type 3, so the filter is a no-op
+    there.
 
-    return compute_service_level_stats(fetch_scheduled_cell_hours_for_routes(db, "weekday"))
+    Raises whatever the schedule fetch or route lookup raises — the
+    comparison endpoint catches and degrades to a null block.
+    """
+    from src.ewt import bus_route_ids, fetch_scheduled_cell_hours_for_routes
+
+    sched = fetch_scheduled_cell_hours_for_routes(db, "weekday")
+    bus_ids = bus_route_ids(db)
+    bus_sched = {route_id: cells for route_id, cells in sched.items() if route_id in bus_ids}
+    return compute_service_level_stats(bus_sched)

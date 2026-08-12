@@ -150,8 +150,41 @@ from sqlalchemy.orm import Session
 from src.frequent_routes import DEFAULT_GATE_SEC, get_cell_hour_gate_sec
 from src.gtfs_calendar import scheduled_service_ids_for_date
 from src.gtfs_versioning import gtfs_version_filter
-from src.models import Calendar, CalendarDate, GTFSSnapshot, StopEvent, StopTime, Trip
+from src.models import Calendar, CalendarDate, GTFSSnapshot, Route, StopEvent, StopTime, Trip
 from src.time_periods import is_hour_in_period
+
+# GTFS route_type for bus service. Used to restrict cross-route schedule
+# pools to bus-only when a feed is mode-mixed -- SFMTA's carries 7 Muni
+# Metro light-rail routes (route_type 0) and 3 cable-car routes
+# (route_type 5) alongside its 58 bus routes, while WMATA's feed is
+# verified 100% route_type 3 (the bus-only comparison filtering, PR #TODO).
+BUS_ROUTE_TYPE = "3"
+
+
+def bus_route_ids(db: Session) -> set[str]:
+    """Route IDs for current bus routes (GTFS route_type=3) in this database.
+
+    Used to post-filter the (module-cached) output of
+    `fetch_scheduled_cell_hours_for_routes` down to a bus-only pool for
+    the system-level EWT/SWT/bunching rollup
+    (`api.aggregations._system_ewt_and_bunching_for_date`) and the
+    comparison page's service-level tile
+    (`src.service_level.service_level_for_agency`) — see the bus-only
+    comparison filtering (PR #TODO).
+
+    Deliberately a separate query rather than a SQL-level filter inside
+    `fetch_scheduled_cell_hours_for_routes` itself: that function's
+    module-level cache is keyed only by `(db_identity, day_type,
+    snapshot_id)` — not by route mode — so filtering post-fetch keeps the
+    cache correct for its other (unfiltered) callers.
+    """
+    return {
+        route_id
+        for (route_id,) in db.query(Route.route_id)
+        .filter(Route.is_current, Route.route_type == BUS_ROUTE_TYPE)
+        .all()
+    }
+
 
 UTC = ZoneInfo("UTC")
 
