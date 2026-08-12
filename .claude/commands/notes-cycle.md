@@ -164,7 +164,11 @@ checklist work in the same turn (e.g. run the full pytest suite in the
 background while folding the punch-list edits in step 5), collecting
 every result before you finish. Practical default: foreground anything
 expected to finish within ~5 minutes; background only commands that
-would outlive the 600 s foreground cap.
+would outlive the 600 s foreground cap. Arming a Monitor does NOT
+satisfy this invariant — a monitor cannot resume a stopped subagent.
+When you run out of other checklist work while a background task is
+still pending, block on it (e.g. TaskOutput with wait, or poll its
+status in a loop) until it completes; never end the turn instead.
 
 1. BRANCH. From `main`:
      git checkout -b <prefix>/notes-{{N}}-<short-slug>
