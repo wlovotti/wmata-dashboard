@@ -29,10 +29,6 @@ serves this or is explicitly parked.
 
 - [NOTES-99](notes/NOTES-99.md) Agency comparison page (the north star) — sev high / eff medium — unblocked (SFMTA backfill done 2026-08-09; owl fixes PR #192/#193; full poisoned-window re-derive done 2026-08-11 — OTP/EWT now clean for 7/22–8/7)
 
-## Ops floor (not frozen — prevents a known recurring failure)
-
-- [NOTES-89](notes/NOTES-89.md) GTFS reload automation on the VM — sev high / eff medium — unblocked
-
 ## Ops & reliability (parked pending NOTES-95)
 
 - [NOTES-95](notes/NOTES-95.md) Stateless-collector rewrite (Path 2a, second half) — sev medium / eff high — needs its own spec/plan cycle

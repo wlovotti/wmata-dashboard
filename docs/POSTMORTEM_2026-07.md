@@ -51,8 +51,21 @@ service-date window (PR #169).
 **RC2 — GTFS feed expiry (6/20).** `scripts/reload_gtfs_complete.py`
 existed and worked, but **was never scheduled on the VM** after the
 June 5 cutover. The schedule data aged past its feed validity window.
-Fixed operationally 7/12 (snapshot 15, 99.2% live match); automation is
-NOTES-89.
+Fixed operationally 7/12 (snapshot 15, 99.2% live match) — but nothing
+was scheduled anywhere to keep it that way, so the fix was a one-time
+manual reload, not a recurring one. Six days later, Path 2a (7/18)
+made the laptop the system of record, meaning the reload's natural
+home was now the laptop `launchd` job
+(`scripts/launchd/com.wmata-dashboard.gtfs-reload.plist`) rather than
+a VM systemd unit — but that job had been disabled since the 6/13
+laptop retirement and stayed disabled. Result: the 7/12 fix silently
+re-staled over the following month (discovered 2026-08-11,
+`gtfs_snapshots.created_at` still pinned at 7/12). PR #196 fixed the
+scoping (laptop, not VM) and confirmed the plist/wrapper aren't
+bitrotted, but **did not load the job** — as of 2026-08-11
+`launchctl list | grep wmata` still returns nothing. RC2 is not fully
+closed until the Install + First-run verification steps in
+`scripts/launchd/README.md` are actually run.
 
 ## Amplifiers (why two bugs became six weeks)
 
@@ -165,7 +178,7 @@ runs locally.
 | # | Lesson | Action | Tracking |
 |---|--------|--------|----------|
 | 1 | Silence is the outage | Dead-man alerting: collector pings healthchecks.io on each successful commit (ping *after* commit, never unconditionally — the 7/17 wedge had a live process and zero writes); S3-staleness alarm after the stateless rewrite | **Done** PR #173; VP path NOTES-94 |
-| 2 | Feed validity is a clock | Feed-expiry alarm; GTFS reload becomes a laptop-side step of on-demand derivation | NOTES-89, NOTES-90 |
+| 2 | Feed validity is a clock | Feed-expiry alarm; GTFS reload becomes a laptop-side step of on-demand derivation | **Done** alarm PR #185 (NOTES-90); reload re-scoped to laptop `launchd` job + install runbook PR #196, job **not yet loaded** as of 2026-08-11 (`launchctl list | grep wmata` empty) — see `scripts/launchd/README.md` |
 | 3 | A cutover needs a job inventory | Checklist in DEPLOYMENT.md: every recurring job, where it runs, how it's verified — applies to the stateless rewrite too | open (fold into rewrite spec) |
 | 4 | Retention must archive before deleting un-derived data | Moot after migration (no DB retention decisions left on the VM); the S3 raw archive now precedes every delete by construction | superseded |
 | 5 | Schedule the archive rotation | Done differently than planned: full archive uploaded to S3 7/18; VM keeps a 14-day buffer pruned manually until the rewrite makes upload the collector's core loop | **Done** (interim) |

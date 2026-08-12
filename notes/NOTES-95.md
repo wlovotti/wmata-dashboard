@@ -36,10 +36,14 @@ they are its acceptance criteria, not separate work:
    to back up), and `bin/pull-and-derive.sh`'s rsync+tunnel path
    (pull from S3 instead).
 
-Also fold in: laptop-side GTFS reload cadence (NOTES-89's home after
-the VM DB retires — the weekly reload targets the laptop DB, likely as
-a step in the pull-and-derive flow) and the collector VP-timestamp
-sanity guard (NOTES-81) if the collector is being rewritten anyway.
+Also fold in: further integrating the laptop-side GTFS reload
+(currently the standalone `launchd` job
+`scripts/launchd/com.wmata-dashboard.gtfs-reload.plist`, re-scoped to
+the laptop with an install runbook in PR #196 — see
+`scripts/launchd/README.md`; not yet loaded as of 2026-08-11) as a
+step in the pull-and-derive flow instead of its own schedule, and the collector
+VP-timestamp sanity guard (NOTES-81) if the collector is being
+rewritten anyway.
 
 Interim state until this lands (documented in DEPLOYMENT.md's 2026-07-18
 banner): VM = collector + backup + VP-archive timers with hc-ping
