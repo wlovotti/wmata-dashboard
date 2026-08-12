@@ -44,6 +44,7 @@ serves this or is explicitly parked.
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
 - [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — blocked on next archive rsync
+- [NOTES-114](notes/NOTES-114.md) `src/analytics.py` `_route_stops_cache` agency-blind key + no snapshot invalidation + caches live ORM instances — sev low-medium / eff low — unblocked; last remaining cache of the class PR #195 fixed
 
 ## WMATA depth & UX (parked during the sprint)
 

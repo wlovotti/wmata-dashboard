@@ -318,10 +318,15 @@ def _db_identity(db: Session) -> str:
     `Connection.engine.url` for sessions bound to a `Connection` rather
     than an `Engine` (e.g. the test suite's transactional fixtures, which
     bind `sessionmaker` to a connection so each test's writes roll back).
-    Falls through to `"unknown"` if no bind/url is resolvable at all —
-    never observed in practice, but a cache key helper must not raise.
+    Falls through to `"unknown"` if no bind/url is resolvable at all
+    (including `UnboundExecutionError` from `get_bind()` on a session
+    with no single bind) — never observed in practice, but a cache key
+    helper must not raise.
     """
-    bind = db.get_bind()
+    try:
+        bind = db.get_bind()
+    except Exception:
+        return "unknown"
     url = getattr(bind, "url", None)
     if url is None:
         url = getattr(getattr(bind, "engine", None), "url", None)
@@ -423,7 +428,10 @@ def _resolve_service_ids_for_day_type(
         # snapshots so the cache doesn't accumulate every historical
         # version — same eviction rule `_schedule_cache` uses below.
         # Scoped to `db_identity` so storing a fresh entry never evicts
-        # another database's cached entries (NOTES-108).
+        # another database's cached entries (NOTES-108). Trade-off: a
+        # database never queried again keeps its entries for the process
+        # lifetime — bounded (one small frozenset per day_type per db)
+        # and accepted.
         for k in list(_service_id_resolution_cache.keys()):
             if k[0] == db_identity and k[2] != snapshot_id:
                 del _service_id_resolution_cache[k]
@@ -948,7 +956,9 @@ def fetch_scheduled_cell_hours_for_routes(
         # entries from older GTFS snapshots so the cache doesn't
         # accumulate every historical version. Scoped to `db_identity` so
         # storing a fresh entry never evicts another database's cached
-        # entries (NOTES-108).
+        # entries (NOTES-108). Trade-off: a database never queried again
+        # keeps its entries for the process lifetime — bounded (at most a
+        # few full-schedule payloads per db) and accepted.
         with _schedule_cache_lock:
             _schedule_cache[cache_key] = sched_by_route_cell_hour
             for k in list(_schedule_cache.keys()):
