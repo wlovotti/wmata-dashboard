@@ -172,6 +172,17 @@ class TestRouteStopsCacheSnapshotInvalidation:
             "not served indefinitely"
         )
 
+        # Cover the eviction loop itself (src/analytics.py's
+        # `get_route_stops`, right after the cache is populated): the
+        # stale `(db_identity, 1, ROUTE)` entry must actually be deleted
+        # from `_route_stops_cache`, not merely shadowed by the new one.
+        db_identity = analytics_module._db_identity(db_session)
+        cache_keys = set(analytics_module._route_stops_cache.keys())
+        assert (db_identity, 1, ROUTE) not in cache_keys, (
+            "stale snapshot_id=1 entry must be evicted from _route_stops_cache"
+        )
+        assert (db_identity, 2, ROUTE) in cache_keys
+
 
 class TestRouteStopsCacheDetachedObjects:
     """NOTES-114: cached `Stop` objects must not be bound to whichever
@@ -179,7 +190,7 @@ class TestRouteStopsCacheDetachedObjects:
     session must be able to read attributes without a
     `DetachedInstanceError` or a query against the wrong session."""
 
-    def test_cached_stops_are_usable_after_originating_session_closes(self, db_session, tmp_path):
+    def test_cached_stops_are_usable_after_originating_session_closes(self, db_session):
         _seed_route_with_stop(db_session, ROUTE, "S1")
 
         stops = get_route_stops(db_session, ROUTE)

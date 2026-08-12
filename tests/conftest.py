@@ -465,3 +465,27 @@ def _reset_ewt_schedule_caches():
     yield
     ewt_module._schedule_cache.clear()
     ewt_module._service_id_resolution_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_route_stops_cache():
+    """Reset `src/analytics.py`'s module-level `_route_stops_cache` before
+    every test.
+
+    Same bleed as `_reset_ewt_schedule_caches` above, for the same reason:
+    `_route_stops_cache` is keyed `(db_identity, resolved snapshot_id,
+    route_id)` (NOTES-114), but every test sharing the `db_session`
+    fixture's underlying bind renders the same `db_identity`, and a
+    SQLite test DB with no `gtfs_snapshots` rows resolves `snapshot_id`
+    to 0 — so two different tests using the same `route_id` collide on
+    the same cache key even though each test's writes are rolled back
+    independently. Without this reset, whichever test populates the
+    cache first "wins" and every later test in the same pytest process
+    reads its stale, rolled-back-DB `Stop` list instead of resolving
+    fresh.
+    """
+    import src.analytics as analytics_module
+
+    analytics_module._route_stops_cache.clear()
+    yield
+    analytics_module._route_stops_cache.clear()

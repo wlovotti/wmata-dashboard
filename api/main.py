@@ -32,7 +32,6 @@ from api.aggregations import (
     get_route_period_drilldown,
     get_route_recent_runs,
     get_route_stop_diagnostics,
-    get_route_time_period_summary,
     get_route_trend_data,
     get_run_deviations,
     get_schedule_audit,
@@ -512,26 +511,35 @@ async def get_system_trend(metric: str = "otp", days: int = 30):
 @app.get("/api/routes/{route_id}/time-periods")
 async def get_route_time_periods(route_id: str, days: int = 7):
     """
-    Get performance metrics by time of day
+    Deprecated, unimplemented legacy time-period OTP endpoint.
 
-    Returns OTP and headway broken down by time periods
-    (AM Peak, Midday, PM Peak, Evening, Night).
+    This path historically computed OTP-by-time-of-day from raw
+    VehiclePosition rows (`calculate_time_period_otp` /
+    `get_route_time_period_summary`), which predates the stop_events/runs
+    architecture that is now the source of truth for per-route metrics
+    (see CLAUDE.md). The underlying query is an uncapped 7-day
+    `get_vehicle_positions` pull with per-row Python loops running
+    directly on this `async def` handler, which would block the API
+    event loop if invoked. Rather than resurrect that path, this handler
+    now returns 501 until a stop_events-based replacement is built.
 
     Args:
         route_id: Route identifier (e.g., 'C51')
-        days: Number of days to analyze (default: 7)
+        days: Number of days to analyze (default: 7) -- unused, endpoint
+            is not implemented
 
     Returns:
-        Performance metrics grouped by time period
+        Never returns; always raises HTTPException(501).
     """
-    db = get_session()
-    try:
-        result = get_route_time_period_summary(db, route_id, days=days)
-        if result.get("error"):
-            raise HTTPException(status_code=404, detail=result["error"])
-        return result
-    finally:
-        db.close()
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "The legacy VehiclePosition-based time-period OTP endpoint is "
+            "deprecated and unimplemented. GTFS/stop_events-based OTP is "
+            "primary; this path is pending a stop_events-based replacement "
+            "(see NOTES-114)."
+        ),
+    )
 
 
 @app.get("/api/routes/{route_id}/period-drilldown")
