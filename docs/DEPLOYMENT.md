@@ -29,6 +29,8 @@ are in the spec §5 runbook.
 > The stateless-collector rewrite (VM → S3-only, no VM Postgres) is a
 > separate follow-up plan. See
 > `docs/superpowers/specs/2026-07-14-laptop-recovery-design.md`.
+> Recurring jobs that now belong on the laptop rather than the VM (GTFS
+> reload, daily batch) are in §12 below.
 >
 > **Manual S3 sync (interim, until NOTES-95 lands):** the permanent raw
 > store is `s3://wmata-dashboard-backups/raw-jsonl-archive/`, with a
@@ -766,5 +768,26 @@ the feed-header snapshot, which can lag further).
 
 ---
 
-**Last Updated:** 2026-07-21
+## 12. Laptop-side scheduled jobs (Path 2a)
+
+Since Path 2a (2026-07-18, §0 banner above) the laptop's local
+PostgreSQL 16 is the system of record, so some recurring jobs that
+would naturally be VM systemd units instead run as laptop `launchd`
+jobs against the laptop DB. Full install/verify runbooks live in
+`scripts/launchd/README.md`; this section is the pointer so the
+existence of these jobs is discoverable from the topology doc, not
+just the scripts directory.
+
+| Job | Schedule | Purpose |
+|---|---|---|
+| `com.wmata-dashboard.gtfs-reload` | weekly, Sun 04:00 local | Reloads WMATA static GTFS (`scripts/reload_gtfs_complete.py`) into the laptop DB. Keeps `trips`/`routes`/`stops` current for derivation (`bin/pull-and-derive.sh` → `pipelines/run_daily_batch.py`), which reads GTFS from the laptop DB, not the VM's. Re-enabled 2026-08 after a month-long gap (last reload 2026-07-12, discovered stale 2026-08-11) — see `scripts/launchd/README.md` for why this belongs here rather than on the VM. |
+| `com.wmata-dashboard.daily-batch` | daily, 03:00 local | Runs `pipelines/run_daily_batch.py` directly. Largely superseded day-to-day by the manual `bin/pull-and-derive.sh` flow (which also derives), but still available. |
+
+Check freshness at any time without waiting for the weekly job:
+`curl -s localhost:8000/api/gtfs/freshness` (requires the API running
+locally) or `psql -d wmata_dashboard -Atc "SELECT max(created_at) FROM gtfs_snapshots;"`.
+
+---
+
+**Last Updated:** 2026-08-11
 **Deployment Cost:** ~$17/mo ($12 instance + ~$5 block disk; S3 negligible at this scale)

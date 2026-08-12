@@ -51,8 +51,11 @@ service-date window (PR #169).
 **RC2 — GTFS feed expiry (6/20).** `scripts/reload_gtfs_complete.py`
 existed and worked, but **was never scheduled on the VM** after the
 June 5 cutover. The schedule data aged past its feed validity window.
-Fixed operationally 7/12 (snapshot 15, 99.2% live match); automation is
-NOTES-89.
+Fixed operationally 7/12 (snapshot 15, 99.2% live match); automation
+went stale again for a month before Path 2a (7/18) made the laptop the
+system of record, at which point scheduling belonged there instead of
+the VM — closed by re-enabling the laptop `launchd` job
+(`scripts/launchd/com.wmata-dashboard.gtfs-reload.plist`, PR #196).
 
 ## Amplifiers (why two bugs became six weeks)
 
@@ -165,7 +168,7 @@ runs locally.
 | # | Lesson | Action | Tracking |
 |---|--------|--------|----------|
 | 1 | Silence is the outage | Dead-man alerting: collector pings healthchecks.io on each successful commit (ping *after* commit, never unconditionally — the 7/17 wedge had a live process and zero writes); S3-staleness alarm after the stateless rewrite | **Done** PR #173; VP path NOTES-94 |
-| 2 | Feed validity is a clock | Feed-expiry alarm; GTFS reload becomes a laptop-side step of on-demand derivation | NOTES-89, NOTES-90 |
+| 2 | Feed validity is a clock | Feed-expiry alarm; GTFS reload becomes a laptop-side step of on-demand derivation | **Done** alarm PR #185 (NOTES-90); reload re-enabled as laptop `launchd` job PR #196 |
 | 3 | A cutover needs a job inventory | Checklist in DEPLOYMENT.md: every recurring job, where it runs, how it's verified — applies to the stateless rewrite too | open (fold into rewrite spec) |
 | 4 | Retention must archive before deleting un-derived data | Moot after migration (no DB retention decisions left on the VM); the S3 raw archive now precedes every delete by construction | superseded |
 | 5 | Schedule the archive rotation | Done differently than planned: full archive uploaded to S3 7/18; VM keeps a 14-day buffer pruned manually until the rewrite makes upload the collector's core loop | **Done** (interim) |
