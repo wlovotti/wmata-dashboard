@@ -3,7 +3,13 @@
  * comparison page's (PR #198) pure formatting logic (window-mean display +
  * week-over-week delta tinting).
  */
-import { formatMetricValue, formatDelta } from '../../src/utils/agencyComparison'
+import { it } from 'vitest'
+import {
+  formatMetricValue,
+  formatDelta,
+  formatServiceLevel,
+  METRIC_ORDER,
+} from '../../src/utils/agencyComparison'
 
 // ── formatMetricValue ────────────────────────────────────────────────────────
 
@@ -98,5 +104,47 @@ describe('formatDelta', () => {
     const result = formatDelta('bunching', -0.005)
     expect(result.tint).toBe('green')
     expect(result.text).toBe('−0.5 pts vs prior week')
+  })
+})
+
+describe('swt metric', () => {
+  it('appears in METRIC_ORDER immediately before ewt', () => {
+    const swtIdx = METRIC_ORDER.indexOf('swt')
+    expect(swtIdx).toBeGreaterThan(-1)
+    expect(METRIC_ORDER[swtIdx + 1]).toBe('ewt')
+  })
+
+  it('formats swt values as minutes like ewt', () => {
+    expect(formatMetricValue('swt', 300)).toBe('5.0 min')
+    expect(formatMetricValue('swt', null)).toBe('—')
+  })
+
+  it('tints a falling swt green (lower promise-wait is better)', () => {
+    const delta = formatDelta('swt', -30)
+    expect(delta.tint).toBe('green')
+    expect(delta.text).toBe('−0.5 min vs prior week')
+  })
+})
+
+describe('formatServiceLevel', () => {
+  it('returns null when the block is missing or empty', () => {
+    expect(formatServiceLevel(null)).toBeNull()
+    expect(formatServiceLevel({ median_headway_seconds: null })).toBeNull()
+  })
+
+  it('formats median headway and the ≤15-min share', () => {
+    const out = formatServiceLevel({
+      median_headway_seconds: 720,
+      pct_at_most_15min: 0.6,
+      n_headways: 100,
+    })
+    expect(out.median).toBe('12.0 min')
+    expect(out.share).toBe('60% of scheduled service every ≤15 min')
+  })
+
+  it('omits the share line when pct is null', () => {
+    const out = formatServiceLevel({ median_headway_seconds: 720, pct_at_most_15min: null })
+    expect(out.median).toBe('12.0 min')
+    expect(out.share).toBeNull()
   })
 })
