@@ -2,16 +2,17 @@
 // of AgencyComparison.jsx so the pure display logic is unit-testable the
 // same way utils/formatters.js is.
 
-// Canonical metric order + labels for the four headline KPIs. Mirrors the
-// OTP / service_delivered / EWT / bunching unit conventions used elsewhere
-// (Targets.jsx's formatTarget, formatters.js's formatContribMetricValue):
-// OTP is 0-100 percent, service_delivered and bunching are 0-1 fractions,
-// EWT is seconds.
-export const METRIC_ORDER = ['otp', 'service_delivered', 'ewt', 'bunching']
+// Canonical metric order + labels for the five headline KPIs. Mirrors the
+// OTP / service_delivered / SWT / EWT / bunching unit conventions used
+// elsewhere (Targets.jsx's formatTarget, formatters.js's
+// formatContribMetricValue): OTP is 0-100 percent, service_delivered and
+// bunching are 0-1 fractions, SWT and EWT are seconds.
+export const METRIC_ORDER = ['otp', 'service_delivered', 'swt', 'ewt', 'bunching']
 
 export const METRIC_LABELS = {
   otp: 'On-time performance',
   service_delivered: 'Service delivered',
+  swt: 'Scheduled wait (frequent svc)',
   ewt: 'Excess wait time',
   bunching: 'Bunching rate',
 }
@@ -21,6 +22,7 @@ export const METRIC_LABELS = {
 export const HIGHER_IS_BETTER = {
   otp: true,
   service_delivered: true,
+  swt: false,
   ewt: false,
   bunching: false,
 }
@@ -29,7 +31,7 @@ export const HIGHER_IS_BETTER = {
  * Format one metric's window-mean value for display, given its canonical
  * unit. Returns '—' for null (no data in the window for that metric).
  *
- * @param {'otp'|'service_delivered'|'ewt'|'bunching'} metric
+ * @param {'otp'|'service_delivered'|'swt'|'ewt'|'bunching'} metric
  * @param {number|null|undefined} value
  * @returns {string}
  */
@@ -37,7 +39,7 @@ export function formatMetricValue(metric, value) {
   if (value == null) return '—'
   if (metric === 'otp') return `${value.toFixed(1)}%`
   if (metric === 'service_delivered') return `${(value * 100).toFixed(1)}%`
-  if (metric === 'ewt') return `${(value / 60).toFixed(1)} min`
+  if (metric === 'ewt' || metric === 'swt') return `${(value / 60).toFixed(1)} min`
   if (metric === 'bunching') return `${(value * 100).toFixed(1)}%`
   return String(value)
 }
@@ -47,7 +49,7 @@ export function formatMetricValue(metric, value) {
  * green/red/neutral tint, or null when the API reported no delta yet (the
  * matched window doesn't hold a full 14 days for that agency).
  *
- * @param {'otp'|'service_delivered'|'ewt'|'bunching'} metric
+ * @param {'otp'|'service_delivered'|'swt'|'ewt'|'bunching'} metric
  * @param {number|null|undefined} delta
  * @returns {{text: string, tint: 'green'|'red'|'neutral'} | null}
  */
@@ -60,7 +62,7 @@ export function formatDelta(metric, delta) {
   let magnitude
   if (metric === 'otp') magnitude = `${Math.abs(delta).toFixed(1)} pts`
   else if (metric === 'service_delivered') magnitude = `${Math.abs(delta * 100).toFixed(1)} pts`
-  else if (metric === 'ewt') magnitude = `${Math.abs(delta / 60).toFixed(1)} min`
+  else if (metric === 'ewt' || metric === 'swt') magnitude = `${Math.abs(delta / 60).toFixed(1)} min`
   else magnitude = `${Math.abs(delta * 100).toFixed(1)} pts`
 
   const sign = delta > 0 ? '+' : delta < 0 ? '−' : '±'
@@ -68,4 +70,22 @@ export function formatDelta(metric, delta) {
     text: `${sign}${magnitude} vs prior week`,
     tint: neutral ? 'neutral' : improving ? 'green' : 'red',
   }
+}
+
+/**
+ * Format the daytime service-level block for its tile. Returns null when
+ * the API degraded to the null block (no schedule available), so the tile
+ * can render its em-dash empty state.
+ *
+ * @param {{median_headway_seconds: number|null, pct_at_most_15min: number|null}|null|undefined} serviceLevel
+ * @returns {{median: string, share: string|null} | null}
+ */
+export function formatServiceLevel(serviceLevel) {
+  if (!serviceLevel || serviceLevel.median_headway_seconds == null) return null
+  const median = `${(serviceLevel.median_headway_seconds / 60).toFixed(1)} min`
+  const share =
+    serviceLevel.pct_at_most_15min == null
+      ? null
+      : `${(serviceLevel.pct_at_most_15min * 100).toFixed(0)}% of scheduled service every ≤15 min`
+  return { median, share }
 }

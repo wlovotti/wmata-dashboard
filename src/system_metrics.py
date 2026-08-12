@@ -2,7 +2,7 @@
 Per-date system-level metric computation (cloud-migration Phase 1).
 
 Wraps the system-rollup helpers in `api/aggregations.py` to compute and
-persist the four headline metrics — OTP, service-delivered, EWT,
+persist the headline metrics — OTP, service-delivered, EWT, SWT,
 bunching — for a single service_date.
 
   - `compute_system_metrics_for_date` returns the computed metrics dict.
@@ -28,12 +28,15 @@ def compute_system_metrics_for_date(
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
 ) -> dict:
-    """Compute system-level OTP / service-delivered / EWT / bunching for one date.
+    """Compute system-level OTP / service-delivered / EWT / SWT / bunching for one date.
 
     Returns a dict with keys `otp_percentage`, `service_delivered_ratio`,
-    `ewt_seconds`, `bunching_rate`. Any individual value may be `None` when
-    the pool is empty for that date (no proximity stop_events, no scheduled
-    trips, no eligible observed pairs, etc.).
+    `ewt_seconds`, `swt_seconds`, `bunching_rate`. Any individual value may
+    be `None` when the pool is empty for that date (no proximity
+    stop_events, no scheduled trips, no eligible observed pairs, etc.).
+    `swt_seconds` is schedule-side only (see
+    `_system_ewt_and_bunching_for_date`) so it can be populated even when
+    `ewt_seconds` is `None` for lack of observed stop_events.
 
     Args:
         db: SQLAlchemy session bound to the metrics database.
@@ -65,7 +68,7 @@ def compute_system_metrics_for_date(
     otp_by_date = _system_otp_series(db, [service_date])
     sd_by_date = _system_service_delivered_series(db, [service_date], gtfs_snapshot_id)
     sched_by_day_type: dict[str, dict] = {}
-    ewt_seconds, bunching_rate = _system_ewt_and_bunching_for_date(
+    ewt_seconds, swt_seconds, bunching_rate = _system_ewt_and_bunching_for_date(
         db, service_date, sched_by_day_type, gtfs_snapshot_id, tz_name=tz_name
     )
 
@@ -74,6 +77,7 @@ def compute_system_metrics_for_date(
         "otp_percentage": otp_by_date.get(iso),
         "service_delivered_ratio": sd_by_date.get(iso),
         "ewt_seconds": ewt_seconds,
+        "swt_seconds": swt_seconds,
         "bunching_rate": bunching_rate,
     }
 
@@ -166,6 +170,7 @@ def upsert_system_metrics_for_date(
         existing.otp_percentage = metrics["otp_percentage"]
         existing.service_delivered_ratio = metrics["service_delivered_ratio"]
         existing.ewt_seconds = metrics["ewt_seconds"]
+        existing.swt_seconds = metrics["swt_seconds"]
         existing.bunching_rate = metrics["bunching_rate"]
         existing.data_quality = data_quality
         existing.coverage_pct = pct
@@ -177,6 +182,7 @@ def upsert_system_metrics_for_date(
                 otp_percentage=metrics["otp_percentage"],
                 service_delivered_ratio=metrics["service_delivered_ratio"],
                 ewt_seconds=metrics["ewt_seconds"],
+                swt_seconds=metrics["swt_seconds"],
                 bunching_rate=metrics["bunching_rate"],
                 data_quality=data_quality,
                 coverage_pct=pct,
@@ -190,6 +196,7 @@ def upsert_system_metrics_for_date(
         f"  ✓ System metrics for {service_date_iso} [{quality_label}]: "
         f"OTP={metrics['otp_percentage']}, "
         f"SD={metrics['service_delivered_ratio']}, "
+        f"SWT={metrics['swt_seconds']}, "
         f"EWT={metrics['ewt_seconds']}, "
         f"BUN={metrics['bunching_rate']}"
     )

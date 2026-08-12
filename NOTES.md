@@ -27,7 +27,7 @@ serves this or is explicitly parked.
 
 ## Comparison depth (active)
 
-- [NOTES-115](notes/NOTES-115.md) Scheduled wait time / service-level KPI on the comparison page — sev medium / eff medium — unblocked; research aggregation weighting first (TCRP SWT/AWT, NTD revenue-hours)
+- [NOTES-119](notes/NOTES-119.md) Bus-only (route_type=3) filtering across the comparison KPIs — service level, EWT, and SWT pools all mix SFMTA's rail/cable routes with bus — sev low-medium / eff low-medium — unblocked; caveat is the interim (PR #200)
 
 ## Ops & reliability (parked pending NOTES-95)
 

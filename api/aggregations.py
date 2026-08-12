@@ -2139,8 +2139,8 @@ def _system_ewt_and_bunching_for_date(
     sched_by_day_type: dict[str, dict],
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
-) -> tuple[float | None, float | None]:
-    """Pooled EWT and bunching across all routes for one service date.
+) -> tuple[float | None, float | None, float | None]:
+    """Pooled EWT, SWT, and bunching across all routes for one service date.
 
     EWT is computed over the union of every route's frequent (direction,
     stop, hour) cell-hours — pooling all observed and scheduled headways into
@@ -2158,8 +2158,12 @@ def _system_ewt_and_bunching_for_date(
     window. `tz_name` (NOTES-103 multi-agency) buckets the observed side by
     the agency's own local hour so it agrees with the scheduled side's
     (always agency-local, GTFS clock-time) hour key; defaults to Eastern.
-    Returns `(ewt_seconds, bunching_rate)` — either may be `None` when the
-    underlying pool is empty or when the date has no observed stop_events.
+
+    Returns `(ewt_seconds, swt_seconds, bunching_rate)`. SWT is
+    schedule-side only — it's computed from the frequent scheduled cell-hour
+    pool alone, so it's still populated even on a date with zero observed
+    stop_events (unlike `ewt_seconds`, which needs the observed pool too).
+    Any of the three may be `None` when its underlying pool is empty.
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
@@ -2263,7 +2267,7 @@ def _system_ewt_and_bunching_for_date(
                     bunched += 1
     bunching_rate = (bunched / total) if total > 0 else None
 
-    return ewt_seconds, bunching_rate
+    return ewt_seconds, swt, bunching_rate
 
 
 def _mean_skip_null(values: list[float | None]) -> float | None:
@@ -2278,6 +2282,7 @@ _METRIC_TO_COLUMN: dict[str, str] = {
     "otp": "otp_percentage",
     "service_delivered": "service_delivered_ratio",
     "ewt": "ewt_seconds",
+    "swt": "swt_seconds",
     "bunching": "bunching_rate",
 }
 
@@ -2441,7 +2446,12 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 
     Args:
         db: Database session
-        metric: One of `otp`, `service_delivered`, `ewt`, `bunching`
+        metric: One of `otp`, `service_delivered`, `ewt`, `swt`,
+            `bunching` -- see `_METRIC_TO_COLUMN`. `swt` is accepted and
+            resolves to `swt_seconds`, but the home-page trend strip
+            (the only caller of this function) doesn't render it yet;
+            it's exercised here for API-level consistency with the
+            agency-comparison endpoint's `swt` metric.
         days: Length of the visible window in days (default: 30)
 
     Returns:
@@ -2476,7 +2486,7 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 # any whose database URL isn't configured) and closing them afterward.
 # ---------------------------------------------------------------------------
 
-AGENCY_COMPARISON_METRICS = ("otp", "service_delivered", "ewt", "bunching")
+AGENCY_COMPARISON_METRICS = ("otp", "service_delivered", "swt", "ewt", "bunching")
 
 # SFMTA GTFS-RT collection began 2026-07-22; 2026-07-23 is the first fully
 # collected service day (see the item body folded into PR #198, scope
@@ -2507,6 +2517,26 @@ AGENCY_COMPARISON_CAVEATS = [
     "every SFMTA day here is flagged data_quality='partial' (NOTES-104) "
     "even though the metric itself is computed from real observations -- "
     "'partial' means lower confidence, not missing data.",
+    "The daytime service-level tile is computed from each agency's "
+    "current GTFS weekday schedule, 7:00-19:00 agency-local: per "
+    "route-direction, the stop with the most scheduled arrivals serves "
+    "as reference stop and all route-directions' headways pool "
+    "together -- a trip-weighted view (frequent routes weigh "
+    "proportionally more), not ridership-weighted (neither pipeline "
+    "has APC data). It reflects the schedule as of today, not the "
+    "historical schedule of the comparison window.",
+    "Scheduled wait covers only frequent-gated cell-hours -- the same "
+    "pool as excess wait, so scheduled + excess = actual wait -- and "
+    "assumes riders arrive at random. Infrequent routes are excluded "
+    "because riders there time their arrivals to the timetable; the "
+    "service-level tile is the all-routes view of the schedule promise.",
+    "SFMTA's GTFS feed is multi-modal -- 7 Muni Metro light-rail routes "
+    "(route_type 0) and 3 cable-car routes (route_type 5) alongside 58 "
+    "bus routes -- while WMATA's feed is bus-only (route_type 3, 128 "
+    "routes). SFMTA's service-level tile and its EWT/SWT pools include "
+    "all modes: measured impact is 10.0 min median / 78.9% <=15 min "
+    "all-modes vs 11.0 min / 74.3% bus-only. Bus-only filtering across "
+    "the comparison KPIs is tracked as follow-up work.",
 ]
 
 
@@ -2515,8 +2545,8 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
 
     Reads each agency's own materialized `system_metrics_daily` table over
     the matched window [`AGENCY_COMPARISON_WINDOW_START`, today] and
-    summarizes the four headline metrics (OTP, service-delivered, EWT,
-    bunching) as a window mean plus a week-over-week delta.
+    summarizes the five headline metrics (OTP, service-delivered, SWT,
+    EWT, bunching) as a window mean plus a week-over-week delta.
 
     All agencies share one comparison anchor -- the *earlier* of the
     agencies' latest available dates -- so both columns are always
@@ -2542,10 +2572,15 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
     Returns:
         Dict with `window_start` (ISO date), `window_end` (ISO date of
         the shared anchor, or `None` if no agency has any data in the
-        window), `agencies` (list of `{agency, display_name, metrics}`,
-        `metrics` keyed by `AGENCY_COMPARISON_METRICS` with `{window_mean,
-        wow_delta, days_included, partial_days}` each), and `caveats`
-        (list of caveat strings for the UI footnotes).
+        window), `agencies` (list of `{agency, display_name, metrics,
+        service_level}`, `metrics` keyed by `AGENCY_COMPARISON_METRICS`
+        with `{window_mean, wow_delta, days_included, partial_days}` each
+        -- including the `swt` key, the scheduled-wait counterpart to
+        `ewt` -- and `service_level` a
+        `{median_headway_seconds, pct_at_most_15min, n_headways}` dict
+        from `src.service_level.service_level_for_agency`, degraded to
+        all-null/zero on fetch failure), and `caveats` (list of caveat
+        strings for the UI footnotes).
     """
     from src.agency_config import load_agency_config
     from src.timezones import eastern_today
@@ -2628,11 +2663,27 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
                 "partial_days": partial_days,
             }
 
+        # Daytime service level (NOTES-115): live from current GTFS via the
+        # module-cached schedule fetch. Degrade to a null block on any
+        # failure (e.g. a dev DB with no GTFS loaded) rather than failing
+        # the whole comparison payload.
+        try:
+            from src.service_level import service_level_for_agency
+
+            service_level = service_level_for_agency(sessions[agency_name])
+        except Exception:
+            service_level = {
+                "median_headway_seconds": None,
+                "pct_at_most_15min": None,
+                "n_headways": 0,
+            }
+
         agencies_out.append(
             {
                 "agency": agency_name,
                 "display_name": cfg.display_name,
                 "metrics": metrics_out,
+                "service_level": service_level,
             }
         )
 

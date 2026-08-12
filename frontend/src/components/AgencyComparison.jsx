@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { METRIC_ORDER, METRIC_LABELS, formatMetricValue, formatDelta } from '../utils/agencyComparison'
+import { METRIC_ORDER, METRIC_LABELS, formatMetricValue, formatDelta, formatServiceLevel } from '../utils/agencyComparison'
 
 /**
  * One headline-KPI tile: big number, week-over-week delta pill, and a
@@ -27,7 +27,31 @@ function MetricTile({ metric, metricData }) {
   )
 }
 
-/** One agency's column: display name heading + its four metric tiles. */
+/**
+ * Schedule-promise tile (NOTES-115): trip-weighted median daytime
+ * scheduled headway + share of service at ≤15-min headways, computed
+ * from the current GTFS — no week-over-week delta by design (it only
+ * changes when an agency ships a new schedule).
+ */
+function ServiceLevelTile({ serviceLevel }) {
+  const formatted = formatServiceLevel(serviceLevel)
+  return (
+    <div className="agency-metric-tile">
+      <div className="agency-metric-label">Daytime service level</div>
+      <div className="agency-metric-value">{formatted ? formatted.median : '—'}</div>
+      {formatted?.share && <div className="agency-metric-partial">{formatted.share}</div>}
+      <div className="agency-metric-partial">
+        Median scheduled headway · weekday 7:00–19:00 · current schedule
+      </div>
+    </div>
+  )
+}
+
+/**
+ * One agency's column: display name heading + its headline-KPI tiles
+ * (OTP, service-delivered, scheduled wait, EWT, bunching) plus the
+ * daytime service-level tile.
+ */
 function AgencyColumn({ agency }) {
   return (
     <div className="agency-column">
@@ -36,6 +60,7 @@ function AgencyColumn({ agency }) {
         {METRIC_ORDER.map((metric) => (
           <MetricTile key={metric} metric={metric} metricData={agency.metrics?.[metric]} />
         ))}
+        <ServiceLevelTile serviceLevel={agency.service_level} />
       </div>
     </div>
   )
@@ -43,8 +68,9 @@ function AgencyColumn({ agency }) {
 
 /**
  * `/compare` page (PR #198 — "the north star"). Two columns, WMATA vs
- * SFMTA, side by side on the four headline KPIs (OTP, service-delivered,
- * EWT, bunching) over the matched window that began 2026-07-23. Reads a
+ * SFMTA, side by side on the headline KPIs (OTP, service-delivered,
+ * scheduled wait, EWT, bunching) plus the daytime service-level tile,
+ * over the matched window that began 2026-07-23. Reads a
  * single endpoint (`/api/agency-comparison`) that already computed the
  * window means, week-over-week deltas, and comparability caveats — this
  * component is a plain renderer over that payload.
