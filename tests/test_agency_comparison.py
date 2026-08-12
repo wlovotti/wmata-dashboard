@@ -126,9 +126,11 @@ class TestGetAgencyComparisonData:
     def test_partial_days_counted_but_still_included_in_mean(self):
         """Partial-quality rows still contribute their real value to window_mean.
 
-        SFMTA's laptop-only VP ingest coverage never clears the completeness
-        threshold (NOTES-104), so every SFMTA row is flagged 'partial' even
-        though the underlying metric is computed from real observations --
+        `collector_heartbeats` rows never reach the laptop database for
+        SFMTA, leaving `vehicle_positions` as the only completeness-check
+        numerator -- a ~33% ceiling regardless of collection health
+        (NOTES-104) -- so every SFMTA row is flagged 'partial' even though
+        the underlying metric is computed from real observations;
         excluding partial rows from the mean would zero out SFMTA entirely.
         """
         sfmta_db = _make_session()
@@ -233,6 +235,55 @@ class TestGetAgencyComparisonData:
             result["window_end"]
             == (AGENCY_COMPARISON_WINDOW_START + timedelta(days=15)).isoformat()
         )
+
+    def test_window_mean_clipped_to_shared_anchor(self):
+        """Every agency's window_mean/days_included/partial_days are clipped
+        to the shared anchor, not just window_end.
+
+        SFMTA has one extra day beyond the anchor (its own nightly batch
+        ran a day ahead of WMATA, the laggard that sets the anchor) with a
+        wildly different, partial-flagged value. That extra day must not
+        leak into SFMTA's mean/counts -- otherwise the two columns would
+        silently average different calendar day sets while the page
+        header claims a matched window (the bug: window_end was clipped
+        correctly but the per-metric aggregates iterated the agency's
+        full unclipped row set).
+        """
+        wmata_db = _make_session()
+        sfmta_db = _make_session()
+        # WMATA has data through day 5 only -- this sets the anchor.
+        for i in range(6):
+            _seed_row(
+                wmata_db, AGENCY_COMPARISON_WINDOW_START + timedelta(days=i), otp_percentage=70.0
+            )
+        # SFMTA has the same 6 days plus one day PAST the anchor with a
+        # very different, partial value that must be excluded.
+        for i in range(6):
+            _seed_row(
+                sfmta_db, AGENCY_COMPARISON_WINDOW_START + timedelta(days=i), otp_percentage=70.0
+            )
+        _seed_row(
+            sfmta_db,
+            AGENCY_COMPARISON_WINDOW_START + timedelta(days=6),
+            otp_percentage=10.0,
+            data_quality="partial",
+        )
+        wmata_db.commit()
+        sfmta_db.commit()
+        try:
+            result = get_agency_comparison_data({"wmata": wmata_db, "sfmta": sfmta_db})
+        finally:
+            wmata_db.close()
+            sfmta_db.close()
+
+        assert (
+            result["window_end"] == (AGENCY_COMPARISON_WINDOW_START + timedelta(days=5)).isoformat()
+        )
+        sfmta = next(a for a in result["agencies"] if a["agency"] == "sfmta")
+        otp = sfmta["metrics"]["otp"]
+        assert otp["window_mean"] == pytest.approx(70.0)
+        assert otp["days_included"] == 6
+        assert otp["partial_days"] == 0
 
     def test_window_end_never_exceeds_today(self):
         """Rows seeded far in the future (bad clock, bad test data) don't

@@ -2390,12 +2390,15 @@ AGENCY_COMPARISON_CAVEATS = [
     "known duplicate stop_sequence artifact (PR #180) that can affect "
     "per-stop matching; treat SFMTA figures as directionally reliable "
     "rather than exact.",
-    "SFMTA rows are collected by a single laptop-only proximity collector "
-    "whose ingest coverage never clears the completeness threshold WMATA "
-    "clears routinely, so every SFMTA day here is flagged data_quality="
-    "'partial' (NOTES-104) even though the metric itself is computed from "
-    "real observations -- 'partial' means lower confidence, not missing "
-    "data.",
+    "SFMTA has its own collector (a systemd unit on the VM against its own "
+    "sfmta_dashboard database, see docs/DEPLOYMENT.md) and these metrics "
+    "are trip_update-sourced like WMATA's, but collector_heartbeats rows "
+    "never reach this (laptop) database for SFMTA, leaving "
+    "vehicle_positions as the only completeness-check numerator -- a "
+    "~33% ceiling regardless of how healthy collection actually is. So "
+    "every SFMTA day here is flagged data_quality='partial' (NOTES-104) "
+    "even though the metric itself is computed from real observations -- "
+    "'partial' means lower confidence, not missing data.",
 ]
 
 
@@ -2469,14 +2472,22 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
     agencies_out = []
     for agency_name, by_date in rows_by_agency.items():
         cfg = load_agency_config(agency_name)
+        # Clip to the shared anchor: `by_date` can hold rows past it
+        # whenever this agency's own nightly batch ran further ahead than
+        # the laggard that set the anchor. Every per-metric aggregate
+        # below (window_mean, days_included, partial_days) must iterate
+        # only the clipped set -- otherwise the two agencies silently
+        # average different calendar day sets while `window_end` (and the
+        # page header built from it) claims a single matched window.
+        clipped_dates = [d for d in by_date if anchor_iso is not None and d <= anchor_iso]
         metrics_out = {}
         for metric in AGENCY_COMPARISON_METRICS:
             column = _METRIC_TO_COLUMN[metric]
-            values = [getattr(row, column) for row in by_date.values()]
+            values = [getattr(by_date[d], column) for d in clipped_dates]
             partial_days = sum(
                 1
-                for row in by_date.values()
-                if getattr(row, column) is not None and row.data_quality == "partial"
+                for d in clipped_dates
+                if getattr(by_date[d], column) is not None and by_date[d].data_quality == "partial"
             )
 
             wow_delta = None

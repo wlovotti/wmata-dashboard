@@ -37,11 +37,11 @@ serves this or is explicitly parked.
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
 - [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — blocked on next archive rsync
 
-## WMATA depth & UX (parked during the sprint)
+## WMATA depth & UX
 
 The dashboard today is observational and route-anchored; these items
 push toward an ops-manager view (trends, Pareto, drill-downs) and a
-designed UI. Resume after the comparison sprint ships.
+designed UI. The comparison sprint shipped with PR #198.
 
 - [NOTES-84](notes/NOTES-84.md) Overview editorial redesign — sev medium / eff high — needs interactive design session
 - [NOTES-85](notes/NOTES-85.md) Frontend design-system pass — sev low / eff medium-high — after NOTES-84
