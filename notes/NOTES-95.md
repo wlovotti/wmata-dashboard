@@ -38,9 +38,10 @@ they are its acceptance criteria, not separate work:
 
 Also fold in: further integrating the laptop-side GTFS reload
 (currently the standalone `launchd` job
-`scripts/launchd/com.wmata-dashboard.gtfs-reload.plist`, re-enabled in
-PR #196 — see `scripts/launchd/README.md`) as a step in the
-pull-and-derive flow instead of its own schedule, and the collector
+`scripts/launchd/com.wmata-dashboard.gtfs-reload.plist`, re-scoped to
+the laptop with an install runbook in PR #196 — see
+`scripts/launchd/README.md`; not yet loaded as of 2026-08-11) as a
+step in the pull-and-derive flow instead of its own schedule, and the collector
 VP-timestamp sanity guard (NOTES-81) if the collector is being
 rewritten anyway.
 

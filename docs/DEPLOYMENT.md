@@ -30,7 +30,9 @@ are in the spec §5 runbook.
 > separate follow-up plan. See
 > `docs/superpowers/specs/2026-07-14-laptop-recovery-design.md`.
 > Recurring jobs that now belong on the laptop rather than the VM (GTFS
-> reload, daily batch) are in §12 below.
+> reload, daily batch, trip-update-state retention) are in §12 below —
+> as of 2026-08-11 all three are installed but **not loaded**
+> (`launchctl list | grep wmata` returns nothing).
 >
 > **Manual S3 sync (interim, until NOTES-95 lands):** the permanent raw
 > store is `s3://wmata-dashboard-backups/raw-jsonl-archive/`, with a
@@ -778,12 +780,26 @@ jobs against the laptop DB. Full install/verify runbooks live in
 existence of these jobs is discoverable from the topology doc, not
 just the scripts directory.
 
-| Job | Schedule | Purpose |
-|---|---|---|
-| `com.wmata-dashboard.gtfs-reload` | weekly, Sun 04:00 local | Reloads WMATA static GTFS (`scripts/reload_gtfs_complete.py`) into the laptop DB. Keeps `trips`/`routes`/`stops` current for derivation (`bin/pull-and-derive.sh` → `pipelines/run_daily_batch.py`), which reads GTFS from the laptop DB, not the VM's. Re-enabled 2026-08 after a month-long gap (last reload 2026-07-12, discovered stale 2026-08-11) — see `scripts/launchd/README.md` for why this belongs here rather than on the VM. |
-| `com.wmata-dashboard.daily-batch` | daily, 03:00 local | Runs `pipelines/run_daily_batch.py` directly. Largely superseded day-to-day by the manual `bin/pull-and-derive.sh` flow (which also derives), but still available. |
+**Status column is load-bearing — check it, don't assume.** All three
+jobs below have a `.plist` in both `scripts/launchd/` and
+`~/Library/LaunchAgents/`, but a plist sitting in `LaunchAgents/`
+proves nothing by itself; only `launchctl load -w` activates it.
+Verify live/actual state with:
 
-Check freshness at any time without waiting for the weekly job:
+```sh
+launchctl list | grep wmata
+```
+
+As of 2026-08-11, this returns **nothing** — all three jobs below are
+installed-but-unloaded, not running on any schedule.
+
+| Job | Schedule (when loaded) | Status as of 2026-08-11 | Purpose |
+|---|---|---|---|
+| `com.wmata-dashboard.gtfs-reload` | weekly, Sun 04:00 local | **not loaded** — install runbook landed PR #196; not yet run (`scripts/launchd/README.md` §"First-run verification") | Reloads WMATA static GTFS (`scripts/reload_gtfs_complete.py`) into the laptop DB. Keeps `trips`/`routes`/`stops` current for derivation (`bin/pull-and-derive.sh` → `pipelines/run_daily_batch.py`), which reads GTFS from the laptop DB, not the VM's. `gtfs_snapshots.created_at` has been stuck at 2026-07-12 since before this job existed as a laptop job — see `scripts/launchd/README.md` for why this belongs here rather than on the VM. |
+| `com.wmata-dashboard.daily-batch` | daily, 03:00 local | **not loaded** | Runs `pipelines/run_daily_batch.py` directly. Largely superseded day-to-day by the manual `bin/pull-and-derive.sh` flow (which also derives). |
+| `com.wmata-dashboard.retain-trip-update-state` | daily, 04:30 local | **not loaded** | Runs `pipelines/retain_trip_update_state.py` — prunes `trip_update_state` to a 14-day default retention window. |
+
+Check GTFS freshness at any time without waiting for the weekly job:
 `curl -s localhost:8000/api/gtfs/freshness` (requires the API running
 locally) or `psql -d wmata_dashboard -Atc "SELECT max(created_at) FROM gtfs_snapshots;"`.
 

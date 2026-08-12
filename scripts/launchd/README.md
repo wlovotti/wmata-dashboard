@@ -64,20 +64,28 @@ quarterly; daily would just be noise. The failure mode this job exists
 to prevent is silent staleness — before PR #48 + this schedule, the
 GTFS snapshot went 6 months stale before someone noticed.
 
-**Re-enabled 2026-08 (Path 2a).** This job was durably disabled
-2026-06-13 during laptop retirement, and the 2026-06/07 incident's RC2
-(feed S1000249 expired 6/20, unnoticed until manually fixed 7/12 — see
-`docs/POSTMORTEM_2026-07.md`) was originally slated to be closed by
-scheduling the reload on the cloud VM instead. That plan didn't survive
-contact with the topology: Path 2a (2026-07-18) made the **laptop's
-local PostgreSQL 16 the system of record** — derivation
-(`bin/pull-and-derive.sh` → `pipelines/run_daily_batch.py`) reads GTFS
-`trips`/`routes`/`stops` from the laptop DB, and nothing on the VM
-reads GTFS at all (the collector only writes raw feed data). So
-re-enabling this laptop launchd job *is* the fix, not a VM systemd
-unit. Before re-enabling, the laptop's `gtfs_snapshots.created_at` had
-gone 30 days stale (last reload 2026-07-12, discovered 2026-08-11) with
-nothing watching it.
+**Install runbook landed 2026-08 (Path 2a) — NOT YET LOADED.** This job
+was durably disabled 2026-06-13 during laptop retirement, and the
+2026-06/07 incident's RC2 (feed S1000249 expired 6/20, unnoticed until
+manually fixed 7/12 — see `docs/POSTMORTEM_2026-07.md`) was originally
+slated to be closed by scheduling the reload on the cloud VM instead.
+That plan didn't survive contact with the topology: Path 2a
+(2026-07-18) made the **laptop's local PostgreSQL 16 the system of
+record** — derivation (`bin/pull-and-derive.sh` →
+`pipelines/run_daily_batch.py`) reads GTFS `trips`/`routes`/`stops`
+from the laptop DB, and nothing on the VM reads GTFS at all (the
+collector only writes raw feed data). So re-enabling this laptop
+launchd job *is* the fix, not a VM systemd unit — PR #196 fixed the
+plist/wrapper/docs and confirmed nothing is bitrotted, but did not
+load the job (a live GTFS reload against the system-of-record DB is a
+human-run step, not something to trigger unattended). **As of
+2026-08-11 the job is still unloaded** — `launchctl list | grep wmata`
+returns nothing and the plist sits in `~/Library/LaunchAgents/`
+un-activated. The laptop's `gtfs_snapshots.created_at` is still stuck
+at 2026-07-12 (30+ days stale and counting) until someone runs the
+Install + First-run verification steps below. Do not treat this
+section as "done" just because the runbook exists — verify with
+`launchctl list | grep wmata` before assuming the job is live.
 
 ### Install
 
