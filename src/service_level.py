@@ -95,7 +95,7 @@ def service_level_for_agency(db: Session) -> dict:
     "weekday")` (module-cached; inherits the NOTES-106 day-type resolver,
     so SFMTA's calendar_dates-only weekday service resolves correctly),
     filtered to `route_type=3` (bus) via `src.ewt.bus_route_ids` before
-    pooling — the bus-only comparison filtering (PR #TODO): SFMTA's feed
+    pooling — the bus-only comparison filtering (PR #201): SFMTA's feed
     also carries Muni Metro light rail and cable car routes, and pooling
     those in would skew the tile away from a bus-to-bus comparison.
     WMATA's feed is verified 100% route_type 3, so the filter is a no-op

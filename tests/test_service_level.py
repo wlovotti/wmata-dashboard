@@ -5,7 +5,7 @@ Pure-function tests only — no database, except for
 exercises the `service_level_for_agency` wrapper with the schedule fetch
 monkeypatched (because `fetch_scheduled_cell_hours_for_routes` caches by
 db identity and in-memory SQLite sessions share one identity) but real
-`Route` rows so the bus-only comparison filtering (PR #TODO) has
+`Route` rows so the bus-only comparison filtering (PR #201) has
 something to query.
 """
 
@@ -101,7 +101,7 @@ def test_reference_stop_tie_broken_by_higher_stop_id():
 
 
 def test_service_level_for_agency_filters_to_bus_routes(db_session, monkeypatch):
-    """Bus-only comparison filtering (PR #TODO): rail/cable headways must
+    """Bus-only comparison filtering (PR #201): rail/cable headways must
     not skew the bus-vs-bus comparison. A mixed-mode feed (SFMTA's Muni
     Metro light rail + cable car alongside its bus routes) should only
     contribute its route_type=3 route's samples to the service-level

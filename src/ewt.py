@@ -157,7 +157,7 @@ from src.time_periods import is_hour_in_period
 # pools to bus-only when a feed is mode-mixed -- SFMTA's carries 7 Muni
 # Metro light-rail routes (route_type 0) and 3 cable-car routes
 # (route_type 5) alongside its 58 bus routes, while WMATA's feed is
-# verified 100% route_type 3 (the bus-only comparison filtering, PR #TODO).
+# verified 100% route_type 3 (the bus-only comparison filtering, PR #201).
 BUS_ROUTE_TYPE = "3"
 
 
@@ -170,7 +170,7 @@ def bus_route_ids(db: Session) -> set[str]:
     (`api.aggregations._system_ewt_and_bunching_for_date`) and the
     comparison page's service-level tile
     (`src.service_level.service_level_for_agency`) — see the bus-only
-    comparison filtering (PR #TODO).
+    comparison filtering (PR #201).
 
     Deliberately a separate query rather than a SQL-level filter inside
     `fetch_scheduled_cell_hours_for_routes` itself: that function's

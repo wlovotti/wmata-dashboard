@@ -2155,7 +2155,7 @@ def _system_ewt_and_bunching_for_date(
     formula extends directly to the system-level union.
 
     The pool is filtered to `route_type=3` (bus) via `src.ewt.bus_route_ids`
-    before pooling (the bus-only comparison filtering, PR #TODO): a
+    before pooling (the bus-only comparison filtering, PR #201): a
     mode-mixed feed (SFMTA carries Muni Metro light rail and cable car
     alongside bus) would otherwise skew this
     system-level rollup — which feeds `system_metrics_daily`, and in turn
@@ -2549,7 +2549,7 @@ AGENCY_COMPARISON_CAVEATS = [
     "bus routes -- while WMATA's feed is bus-only (route_type 3, 128 "
     "routes). The service-level tile and the EWT/SWT/bunching pools are "
     "filtered to route_type=3 for both agencies (the bus-only comparison "
-    "filtering, PR #TODO) so the comparison is bus-to-bus; WMATA's filter "
+    "filtering, PR #201) so the comparison is bus-to-bus; WMATA's filter "
     "is a no-op.",
 ]
 

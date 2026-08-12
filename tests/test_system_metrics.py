@@ -357,7 +357,7 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
     import api.aggregations as agg
     from src.models import Route
 
-    # Bus-only comparison filtering (PR #TODO): the pool is now filtered
+    # Bus-only comparison filtering (PR #201): the pool is now filtered
     # to route_type=3 (bus), so route "64" needs a matching Route row for
     # its schedule data to survive.
     db_session.add(Route(route_id="64", route_short_name="64", route_type=3, is_current=True))
@@ -379,7 +379,7 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
 
 
 def test_system_ewt_swt_bunching_exclude_non_bus_routes(db_session, monkeypatch):
-    """Bus-only comparison filtering (PR #TODO): a rail/cable route mixed
+    """Bus-only comparison filtering (PR #201): a rail/cable route mixed
     into the schedule pool alongside a bus route must not contribute to
     the system-level SWT pool -- this is what feeds the agency-comparison
     page's EWT/SWT tiles via `system_metrics_daily`."""
