@@ -41,6 +41,7 @@ def _seed_row(session, service_date, **kwargs):
         "otp_percentage": 70.0,
         "service_delivered_ratio": 0.9,
         "ewt_seconds": 150.0,
+        "swt_seconds": 300.0,
         "bunching_rate": 0.03,
         "data_quality": "complete",
         "coverage_pct": 1.0,
@@ -316,6 +317,74 @@ class TestGetAgencyComparisonData:
         assert "otp" in joined or "on-time" in joined
         assert "511.org" in joined or "stop_sequence" in joined
         assert "partial" in joined or "coverage" in joined
+
+    def test_swt_metric_window_mean(self):
+        """swt joins the metric set and window-means like ewt."""
+        db = _make_session()
+        try:
+            _seed_row(db, AGENCY_COMPARISON_WINDOW_START, swt_seconds=280.0)
+            _seed_row(db, AGENCY_COMPARISON_WINDOW_START + timedelta(days=1), swt_seconds=320.0)
+            db.commit()
+            result = get_agency_comparison_data({"wmata": db})
+            swt = result["agencies"][0]["metrics"]["swt"]
+            assert swt["window_mean"] == pytest.approx(300.0)
+            assert swt["days_included"] == 2
+        finally:
+            db.close()
+
+    def test_service_level_block_attached_per_agency(self, monkeypatch):
+        """Each agency carries the service_level dict from src.service_level."""
+        monkeypatch.setattr(
+            "src.service_level.service_level_for_agency",
+            lambda db: {
+                "median_headway_seconds": 720.0,
+                "pct_at_most_15min": 0.6,
+                "n_headways": 100,
+            },
+        )
+        db = _make_session()
+        try:
+            _seed_row(db, AGENCY_COMPARISON_WINDOW_START)
+            db.commit()
+            result = get_agency_comparison_data({"wmata": db})
+            assert result["agencies"][0]["service_level"] == {
+                "median_headway_seconds": 720.0,
+                "pct_at_most_15min": 0.6,
+                "n_headways": 100,
+            }
+        finally:
+            db.close()
+
+    def test_service_level_degrades_to_nulls_on_fetch_failure(self, monkeypatch):
+        """A schedule-fetch blow-up must not 500 the whole comparison."""
+
+        def _boom(db):
+            raise RuntimeError("no GTFS here")
+
+        monkeypatch.setattr("src.service_level.service_level_for_agency", _boom)
+        db = _make_session()
+        try:
+            _seed_row(db, AGENCY_COMPARISON_WINDOW_START)
+            db.commit()
+            result = get_agency_comparison_data({"wmata": db})
+            assert result["agencies"][0]["service_level"] == {
+                "median_headway_seconds": None,
+                "pct_at_most_15min": None,
+                "n_headways": 0,
+            }
+        finally:
+            db.close()
+
+    def test_caveats_state_service_level_weighting_and_swt_scope(self):
+        """Acceptance criterion (NOTES-115): the caveats name the weighting
+        choice and window for the service-level tile, and SWT's
+        frequent-only scope."""
+        result = get_agency_comparison_data({})
+        joined = " ".join(result["caveats"])
+        assert "trip-weighted" in joined
+        assert "7:00" in joined and "19:00" in joined
+        assert "current" in joined  # current-schedule disclosure
+        assert "random" in joined  # random-arrival assumption for SWT
 
 
 class TestAgencyComparisonEndpoint:

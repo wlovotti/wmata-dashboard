@@ -2282,6 +2282,7 @@ _METRIC_TO_COLUMN: dict[str, str] = {
     "otp": "otp_percentage",
     "service_delivered": "service_delivered_ratio",
     "ewt": "ewt_seconds",
+    "swt": "swt_seconds",
     "bunching": "bunching_rate",
 }
 
@@ -2480,7 +2481,7 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 # any whose database URL isn't configured) and closing them afterward.
 # ---------------------------------------------------------------------------
 
-AGENCY_COMPARISON_METRICS = ("otp", "service_delivered", "ewt", "bunching")
+AGENCY_COMPARISON_METRICS = ("otp", "service_delivered", "swt", "ewt", "bunching")
 
 # SFMTA GTFS-RT collection began 2026-07-22; 2026-07-23 is the first fully
 # collected service day (see the item body folded into PR #198, scope
@@ -2511,6 +2512,19 @@ AGENCY_COMPARISON_CAVEATS = [
     "every SFMTA day here is flagged data_quality='partial' (NOTES-104) "
     "even though the metric itself is computed from real observations -- "
     "'partial' means lower confidence, not missing data.",
+    "The daytime service-level tile is computed from each agency's "
+    "current GTFS weekday schedule, 7:00-19:00 agency-local: per "
+    "route-direction, the stop with the most scheduled arrivals serves "
+    "as reference stop and all route-directions' headways pool "
+    "together -- a trip-weighted view (frequent routes weigh "
+    "proportionally more), not ridership-weighted (neither pipeline "
+    "has APC data). It reflects the schedule as of today, not the "
+    "historical schedule of the comparison window.",
+    "Scheduled wait covers only frequent-gated cell-hours -- the same "
+    "pool as excess wait, so scheduled + excess = actual wait -- and "
+    "assumes riders arrive at random. Infrequent routes are excluded "
+    "because riders there time their arrivals to the timetable; the "
+    "service-level tile is the all-routes view of the schedule promise.",
 ]
 
 
@@ -2519,8 +2533,8 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
 
     Reads each agency's own materialized `system_metrics_daily` table over
     the matched window [`AGENCY_COMPARISON_WINDOW_START`, today] and
-    summarizes the four headline metrics (OTP, service-delivered, EWT,
-    bunching) as a window mean plus a week-over-week delta.
+    summarizes the five headline metrics (OTP, service-delivered, SWT,
+    EWT, bunching) as a window mean plus a week-over-week delta.
 
     All agencies share one comparison anchor -- the *earlier* of the
     agencies' latest available dates -- so both columns are always
@@ -2546,10 +2560,15 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
     Returns:
         Dict with `window_start` (ISO date), `window_end` (ISO date of
         the shared anchor, or `None` if no agency has any data in the
-        window), `agencies` (list of `{agency, display_name, metrics}`,
-        `metrics` keyed by `AGENCY_COMPARISON_METRICS` with `{window_mean,
-        wow_delta, days_included, partial_days}` each), and `caveats`
-        (list of caveat strings for the UI footnotes).
+        window), `agencies` (list of `{agency, display_name, metrics,
+        service_level}`, `metrics` keyed by `AGENCY_COMPARISON_METRICS`
+        with `{window_mean, wow_delta, days_included, partial_days}` each
+        -- including the `swt` key, the scheduled-wait counterpart to
+        `ewt` -- and `service_level` a
+        `{median_headway_seconds, pct_at_most_15min, n_headways}` dict
+        from `src.service_level.service_level_for_agency`, degraded to
+        all-null/zero on fetch failure), and `caveats` (list of caveat
+        strings for the UI footnotes).
     """
     from src.agency_config import load_agency_config
     from src.timezones import eastern_today
@@ -2632,11 +2651,27 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
                 "partial_days": partial_days,
             }
 
+        # Daytime service level (NOTES-115): live from current GTFS via the
+        # module-cached schedule fetch. Degrade to a null block on any
+        # failure (e.g. a dev DB with no GTFS loaded) rather than failing
+        # the whole comparison payload.
+        try:
+            from src.service_level import service_level_for_agency
+
+            service_level = service_level_for_agency(sessions[agency_name])
+        except Exception:
+            service_level = {
+                "median_headway_seconds": None,
+                "pct_at_most_15min": None,
+                "n_headways": 0,
+            }
+
         agencies_out.append(
             {
                 "agency": agency_name,
                 "display_name": cfg.display_name,
                 "metrics": metrics_out,
+                "service_level": service_level,
             }
         )
 
