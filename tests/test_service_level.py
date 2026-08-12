@@ -81,3 +81,18 @@ def test_share_boundary_is_inclusive_at_900s():
     sched = {"A": {(0, "S1", 10): [900.0, 901.0]}}
     out = compute_service_level_stats(sched)
     assert out["pct_at_most_15min"] == pytest.approx(0.5)
+
+
+def test_reference_stop_tie_broken_by_higher_stop_id():
+    """Two stops tied on sample count -> the higher stop_id's samples win,
+    deterministically (not first-seen, since the upstream SQL has no
+    ORDER BY and dict iteration order isn't a stable tie-break)."""
+    sched = {
+        "A": {
+            (0, "S1", 8): [600.0, 600.0],  # tied count, lower stop_id
+            (0, "S9", 8): [1200.0, 1200.0],  # tied count, higher stop_id
+        }
+    }
+    out = compute_service_level_stats(sched)
+    assert out["n_headways"] == 2
+    assert out["median_headway_seconds"] == pytest.approx(1200.0)

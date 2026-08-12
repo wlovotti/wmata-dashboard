@@ -25,6 +25,10 @@ identically per agency, shown side by side with honest comparability
 caveats. Audience for now: personal. Every open item below either
 serves this or is explicitly parked.
 
+## Comparison depth (active)
+
+- [NOTES-119](notes/NOTES-119.md) Bus-only (route_type=3) filtering across the comparison KPIs — service level, EWT, and SWT pools all mix SFMTA's rail/cable routes with bus — sev low-medium / eff low-medium — unblocked; caveat is the interim (PR #200)
+
 ## Ops & reliability (parked pending NOTES-95)
 
 - [NOTES-95](notes/NOTES-95.md) Stateless-collector rewrite (Path 2a, second half) — sev medium / eff high — needs its own spec/plan cycle

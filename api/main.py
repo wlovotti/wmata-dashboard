@@ -551,19 +551,25 @@ async def get_agency_comparison_endpoint():
     """
     Agency comparison page data (PR #198 -- "the north star").
 
-    Headline OTP / service-delivered / EWT / bunching for WMATA and SFMTA
-    side by side over the matched window (SFMTA collection began
-    2026-07-22; the matched window starts 2026-07-23), each computed from
-    that agency's own materialized `system_metrics_daily` table. See
+    Headline OTP / service-delivered / scheduled wait (SWT) / EWT /
+    bunching for WMATA and SFMTA side by side over the matched window
+    (SFMTA collection began 2026-07-22; the matched window starts
+    2026-07-23), each computed from that agency's own materialized
+    `system_metrics_daily` table. Also includes a per-agency
+    `service_level` block -- schedule-derived daytime headway stats
+    (median headway, share at <=15 min) computed live from each agency's
+    current GTFS, independent of the matched window (NOTES-115; see
+    `src.service_level.service_level_for_agency`). See
     `get_agency_comparison_data` for the window-mean / week-over-week
-    delta / caveats contract.
+    delta / service-level / caveats contract.
 
     An agency without a configured database URL (e.g. `SFMTA_DATABASE_URL`
     unset) is simply absent from `agencies` rather than failing the
     request -- see `_open_agency_sessions`.
 
     Returns:
-        Dict with `window_start`, `window_end`, `agencies`, `caveats`.
+        Dict with `window_start`, `window_end`, `agencies` (each entry
+        including a `service_level` block), and `caveats`.
     """
     sessions = _open_agency_sessions(["wmata", "sfmta"])
     try:

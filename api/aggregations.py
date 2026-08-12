@@ -2446,7 +2446,12 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
 
     Args:
         db: Database session
-        metric: One of `otp`, `service_delivered`, `ewt`, `bunching`
+        metric: One of `otp`, `service_delivered`, `ewt`, `swt`,
+            `bunching` -- see `_METRIC_TO_COLUMN`. `swt` is accepted and
+            resolves to `swt_seconds`, but the home-page trend strip
+            (the only caller of this function) doesn't render it yet;
+            it's exercised here for API-level consistency with the
+            agency-comparison endpoint's `swt` metric.
         days: Length of the visible window in days (default: 30)
 
     Returns:
@@ -2525,6 +2530,13 @@ AGENCY_COMPARISON_CAVEATS = [
     "assumes riders arrive at random. Infrequent routes are excluded "
     "because riders there time their arrivals to the timetable; the "
     "service-level tile is the all-routes view of the schedule promise.",
+    "SFMTA's GTFS feed is multi-modal -- 7 Muni Metro light-rail routes "
+    "(route_type 0) and 3 cable-car routes (route_type 5) alongside 58 "
+    "bus routes -- while WMATA's feed is bus-only (route_type 3, 128 "
+    "routes). SFMTA's service-level tile and its EWT/SWT pools include "
+    "all modes: measured impact is 10.0 min median / 78.9% <=15 min "
+    "all-modes vs 11.0 min / 74.3% bus-only. Bus-only filtering across "
+    "the comparison KPIs is tracked as follow-up work.",
 ]
 
 

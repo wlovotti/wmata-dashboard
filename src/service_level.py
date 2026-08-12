@@ -47,7 +47,9 @@ def compute_service_level_stats(
     so a route-direction's weight is proportional to its scheduled trips
     (TfL-style frequency weighting) rather than its stop count, and
     route-equal averaging (the NYCT Wait Assessment flaw) is avoided.
-    Ties on sample count keep the first-seen stop (stable, arbitrary).
+    Ties on sample count are broken deterministically by the higher
+    `stop_id` (string comparison) — the upstream SQL has no ORDER BY, so
+    "first-seen" would not be stable across processes.
 
     Returns:
         Dict with `median_headway_seconds` (float | None),
@@ -62,13 +64,18 @@ def compute_service_level_stats(
             if not (hour_start <= hour < hour_end):
                 continue
             by_dir_stop.setdefault((direction_id, stop_id), []).extend(headways)
-        # Reference stop per direction: max daytime sample count.
+        # Reference stop per direction: max daytime sample count, ties
+        # broken by the higher stop_id for a deterministic result that
+        # doesn't depend on dict/SQL iteration order.
         best_by_direction: dict = {}
-        for (direction_id, _stop_id), samples in by_dir_stop.items():
+        for (direction_id, stop_id), samples in by_dir_stop.items():
             current = best_by_direction.get(direction_id)
-            if current is None or len(samples) > len(current):
-                best_by_direction[direction_id] = samples
-        for samples in best_by_direction.values():
+            if current is None or (len(samples), stop_id) > (
+                len(current[1]),
+                current[0],
+            ):
+                best_by_direction[direction_id] = (stop_id, samples)
+        for _stop_id, samples in best_by_direction.values():
             pool.extend(samples)
 
     if not pool:
