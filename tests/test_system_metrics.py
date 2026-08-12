@@ -63,6 +63,7 @@ def test_compute_system_metrics_for_date_empty_db(db_session):
         "otp_percentage",
         "service_delivered_ratio",
         "ewt_seconds",
+        "swt_seconds",
         "bunching_rate",
     }
     assert result["otp_percentage"] is None
@@ -70,6 +71,7 @@ def test_compute_system_metrics_for_date_empty_db(db_session):
     # discriminator (matches the per-route rule from PR #77).
     assert result["service_delivered_ratio"] is None
     assert result["ewt_seconds"] is None
+    assert result["swt_seconds"] is None
     assert result["bunching_rate"] is None
 
 
@@ -340,3 +342,69 @@ def test_upsert_system_metrics_default_threshold_is_the_flat_constant(
     upsert_system_metrics_for_date(db_session, target_date)
 
     assert seen_thresholds == [MIN_COVERAGE_FOR_MATERIALIZATION]
+
+
+def test_compute_system_metrics_includes_swt_key_empty_db(db_session):
+    """Empty DB: the metrics dict carries swt_seconds=None, never a missing key."""
+    metrics = compute_system_metrics_for_date(db_session, datetime(2026, 8, 10).date())
+    assert "swt_seconds" in metrics
+    assert metrics["swt_seconds"] is None
+
+
+def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
+    """SWT is schedule-side only: with zero observed stop_events it is still
+    computed from the frequent scheduled pool (EWT stays None)."""
+    import api.aggregations as agg
+
+    def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
+        # One frequent cell: two 600s headways -> SWT = (600²+600²)/(2·1200) = 300.
+        return {"64": {(0, "S1", 8): [600.0, 600.0]}}
+
+    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_routes", _fake_sched)
+    monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
+
+    ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(
+        db_session, datetime(2026, 8, 10).date(), {}
+    )
+    assert ewt is None
+    assert swt == pytest.approx(300.0)
+    assert bunching is None
+
+
+def test_upsert_persists_swt_seconds(db_session, monkeypatch):
+    """The upsert writes swt_seconds on both the insert and update paths."""
+    from src import system_metrics as sm
+
+    def _fake_compute(db, service_date, gtfs_snapshot_id=None, tz_name="America/New_York"):
+        return {
+            "otp_percentage": 70.0,
+            "service_delivered_ratio": 0.9,
+            "ewt_seconds": 150.0,
+            "swt_seconds": 300.0,
+            "bunching_rate": 0.03,
+        }
+
+    monkeypatch.setattr(sm, "compute_system_metrics_for_date", _fake_compute)
+    monkeypatch.setattr(
+        "src.data_completeness.coverage_pct_for_date",
+        lambda db, service_date, tz_name="America/New_York": 1.0,
+    )
+    monkeypatch.setattr(
+        "src.data_completeness.is_date_sufficiently_complete",
+        lambda db, service_date, threshold=0.80, tz_name="America/New_York": True,
+    )
+
+    upsert_system_metrics_for_date(db_session, datetime(2026, 8, 10).date())
+    row = db_session.query(SystemMetricsDaily).filter_by(service_date="2026-08-10").one()
+    assert row.swt_seconds == 300.0
+
+    # Update path: change the value, re-run, confirm overwrite.
+    def _fake_compute_2(db, service_date, gtfs_snapshot_id=None, tz_name="America/New_York"):
+        out = _fake_compute(db, service_date)
+        out["swt_seconds"] = 280.0
+        return out
+
+    monkeypatch.setattr(sm, "compute_system_metrics_for_date", _fake_compute_2)
+    upsert_system_metrics_for_date(db_session, datetime(2026, 8, 10).date())
+    row = db_session.query(SystemMetricsDaily).filter_by(service_date="2026-08-10").one()
+    assert row.swt_seconds == 280.0

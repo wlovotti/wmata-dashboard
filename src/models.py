@@ -740,7 +740,7 @@ class SystemMetricsDaily(Base):
     strip (system trend rollup; see docs/DEPLOYMENT.md).
 
     One row per service_date holding the system-level OTP, service-delivered
-    ratio, EWT, and bunching rate. Populated by
+    ratio, EWT, SWT, and bunching rate. Populated by
     `pipelines/upsert_system_metrics_daily.py`, dispatched per-date from
     `pipelines/run_daily_batch.py` after the derivation pipelines commit
     their stop_events / runs rows.
@@ -766,6 +766,11 @@ class SystemMetricsDaily(Base):
     otp_percentage = Column(Float)
     service_delivered_ratio = Column(Float)
     ewt_seconds = Column(Float)
+    # Pooled random-incidence scheduled wait over the same frequent
+    # cell-hour pool as ewt_seconds (NOTES-115): swt + ewt = pooled AWT
+    # (up to EWT's clamp at 0). Nullable — NULL until the nightly batch
+    # (or a backfill re-run) writes it.
+    swt_seconds = Column(Float)
     bunching_rate = Column(Float)
 
     # Data-quality flag (NOTES-76). 'complete' | 'partial'.

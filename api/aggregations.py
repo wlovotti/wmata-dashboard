@@ -2139,8 +2139,8 @@ def _system_ewt_and_bunching_for_date(
     sched_by_day_type: dict[str, dict],
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
-) -> tuple[float | None, float | None]:
-    """Pooled EWT and bunching across all routes for one service date.
+) -> tuple[float | None, float | None, float | None]:
+    """Pooled EWT, SWT, and bunching across all routes for one service date.
 
     EWT is computed over the union of every route's frequent (direction,
     stop, hour) cell-hours — pooling all observed and scheduled headways into
@@ -2158,8 +2158,12 @@ def _system_ewt_and_bunching_for_date(
     window. `tz_name` (NOTES-103 multi-agency) buckets the observed side by
     the agency's own local hour so it agrees with the scheduled side's
     (always agency-local, GTFS clock-time) hour key; defaults to Eastern.
-    Returns `(ewt_seconds, bunching_rate)` — either may be `None` when the
-    underlying pool is empty or when the date has no observed stop_events.
+
+    Returns `(ewt_seconds, swt_seconds, bunching_rate)`. SWT is
+    schedule-side only — it's computed from the frequent scheduled cell-hour
+    pool alone, so it's still populated even on a date with zero observed
+    stop_events (unlike `ewt_seconds`, which needs the observed pool too).
+    Any of the three may be `None` when its underlying pool is empty.
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
@@ -2263,7 +2267,7 @@ def _system_ewt_and_bunching_for_date(
                     bunched += 1
     bunching_rate = (bunched / total) if total > 0 else None
 
-    return ewt_seconds, bunching_rate
+    return ewt_seconds, swt, bunching_rate
 
 
 def _mean_skip_null(values: list[float | None]) -> float | None:
