@@ -5,6 +5,7 @@ Analytics module for calculating transit performance metrics
 import math
 import os
 from datetime import datetime, timedelta
+from threading import Lock
 
 import numpy as np
 import pandas as pd
@@ -13,8 +14,10 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from src.database import get_session
+from src.ewt import _db_identity
 from src.models import (
     CalendarDate,
+    GTFSSnapshot,
     Route,
     Shape,
     Stop,
@@ -1235,31 +1238,73 @@ def calculate_route_headways(
     }
 
 
-# Cache for route stops to avoid repeated database queries
-_route_stops_cache = {}
+# Cache for route stops to avoid repeated database queries.
+#
+# Keyed `(db_identity, snapshot_id, route_id)` — mirrors `src/ewt.py`'s
+# `_schedule_cache` (NOTES-108) rather than inventing a second
+# disambiguation scheme:
+# - `db_identity` (`src/ewt.py:_db_identity`) stops two different
+#   databases (e.g. `wmata_dashboard` vs `sfmta_dashboard`, or any two
+#   whose `snapshot_id` sequences happen to overlap) from colliding when
+#   a single process holds sessions against both (NOTES-114).
+# - `snapshot_id` (`MAX(GTFSSnapshot.snapshot_id)`, scoped to `db`) means
+#   a GTFS reload (`scripts/reload_gtfs_complete.py`) evicts stale
+#   entries instead of an entry surviving indefinitely in a long-lived
+#   process (the API). Storing a fresh entry evicts every OTHER entry
+#   for the SAME database keyed to a different snapshot_id — same
+#   resolve-then-evict semantics as `_schedule_cache`.
+#
+# Cached values are `Stop` instances **expunged** from the session that
+# loaded them (`Session.expunge`): detached, but with all already-loaded
+# columns intact, so callers get normal attribute access without risking
+# `DetachedInstanceError` or stale state from a session that isn't
+# theirs.
+_route_stops_cache: dict[tuple[str, int, str], list[Stop]] = {}
+_route_stops_cache_lock = Lock()
 
 
 def get_route_stops(db: Session, route_id: str) -> list[Stop]:
     """
     Get all stops for a route, with caching to avoid repeated queries.
 
-    Returns:
-        List of Stop objects for the route
-    """
-    if route_id not in _route_stops_cache:
-        stops = (
-            db.query(Stop)
-            .join(StopTime)
-            .join(Trip)
-            .filter(
-                Trip.route_id == route_id, Trip.is_current, StopTime.is_current, Stop.is_current
-            )
-            .distinct()
-            .all()
-        )
-        _route_stops_cache[route_id] = stops
+    Cache key includes a db-identity and GTFS-snapshot component (see
+    `_route_stops_cache` docstring) — safe to call against multiple
+    databases from a single long-lived process, and across GTFS reloads.
 
-    return _route_stops_cache[route_id]
+    Returns:
+        List of detached `Stop` objects for the route (not bound to `db`
+        or any other session — see `_route_stops_cache`).
+    """
+    db_identity = _db_identity(db)
+    snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+    cache_key = (db_identity, snapshot_id, route_id)
+
+    with _route_stops_cache_lock:
+        cached = _route_stops_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    stops = (
+        db.query(Stop)
+        .join(StopTime, StopTime.stop_id == Stop.stop_id)
+        .join(Trip, Trip.trip_id == StopTime.trip_id)
+        .filter(Trip.route_id == route_id, Trip.is_current, StopTime.is_current, Stop.is_current)
+        .distinct()
+        .all()
+    )
+    for stop in stops:
+        db.expunge(stop)
+
+    with _route_stops_cache_lock:
+        _route_stops_cache[cache_key] = stops
+        # Evict every OTHER entry for the SAME database keyed to a
+        # different snapshot_id — mirrors `_schedule_cache`'s eviction
+        # rule exactly (NOTES-108/NOTES-114).
+        for key in list(_route_stops_cache.keys()):
+            if key[0] == db_identity and key[1] != snapshot_id:
+                del _route_stops_cache[key]
+
+    return stops
 
 
 def find_nearest_stop(
