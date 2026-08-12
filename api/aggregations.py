@@ -2759,6 +2759,15 @@ def get_route_time_period_summary(db: Session, route_id: str, days: int = 7) -> 
     Returns OTP and headway broken down by time periods (AM Peak, Midday, PM Peak, etc.)
     for display on the route detail page.
 
+    Currently unwired: no caller imports this from `api/main.py` — the
+    corresponding `GET /api/routes/{route_id}/time-periods` route is
+    guarded to always raise `HTTPException(501)` instead (see PR #197,
+    NOTES-114). Do not re-wire it without first fixing the underlying
+    issue: it drives `calculate_time_period_otp`, which runs an
+    uncapped multi-day `VehiclePosition` query with per-row Python
+    loops directly inside this synchronous call path; invoking that
+    from an `async def` handler blocks the API event loop.
+
     Args:
         db: Database session
         route_id: Route identifier (e.g., 'C51')
