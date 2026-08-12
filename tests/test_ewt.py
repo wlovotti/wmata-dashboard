@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import date, datetime
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from src.ewt import (
     EWT_TIME_PERIODS,
@@ -29,8 +31,19 @@ from src.ewt import (
     compute_ewt_for_route_date,
     compute_ewt_for_routes,
     compute_ewt_headline_for_route,
+    fetch_scheduled_cell_hours_for_routes,
 )
-from src.models import Calendar, CalendarDate, Route, Stop, StopEvent, StopTime, Trip
+from src.models import (
+    Base,
+    Calendar,
+    CalendarDate,
+    GTFSSnapshot,
+    Route,
+    Stop,
+    StopEvent,
+    StopTime,
+    Trip,
+)
 
 ROUTE = "TEST1"
 SERVICE_DATE = date(2026, 4, 14)  # Tuesday, EDT
@@ -721,8 +734,10 @@ class TestResolveServiceIdsForDayTypeMemoization:
     across a route loop. These tests assert the module-level memo
     (`_service_id_resolution_cache`) actually avoids re-running that work,
     and that it doesn't cross-contaminate across snapshot_ids — mirroring
-    `_schedule_cache`'s exact `(day_type, resolved snapshot_id)` keying
-    and eviction semantics.
+    `_schedule_cache`'s exact `(db_identity, day_type, resolved
+    snapshot_id)` keying and eviction semantics. Cross-database isolation
+    (the `db_identity` component, NOTES-108) is covered separately by
+    `TestScheduleCacheAgencyIsolation` below.
     """
 
     def test_second_call_for_same_day_type_and_snapshot_reuses_cached_result(
@@ -1296,3 +1311,122 @@ class TestSfmtaShapedPacificHourBucketing:
         assert am["frequent_cell_hours"] == 1
         assert am["n_observed_headways"] == 0
         assert am["awt_seconds"] is None
+
+
+@pytest.fixture
+def other_agency_db_session(tmp_path):
+    """A second, physically distinct database — simulates a different
+    agency's database (e.g. `sfmta_dashboard`) whose `gtfs_snapshots`
+    table has its own independent `snapshot_id` sequence that can reach
+    the same integer value as the primary `db_session` fixture's, purely
+    by coincidence (NOTES-108). File-backed (not `:memory:`) so its bind
+    URL is guaranteed to differ from `db_session`'s.
+    """
+    db_path = tmp_path / "other_agency.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    yield session
+    session.close()
+    engine.dispose()
+
+
+class TestScheduleCacheAgencyIsolation:
+    """NOTES-108: `_service_id_resolution_cache` and `_schedule_cache` are
+    both keyed `(day_type, snapshot_id)` with no database/agency
+    component. `gtfs_snapshot_id` is `MAX(GTFSSnapshot.snapshot_id)`
+    scoped to whichever `db` session is passed in — a per-database
+    sequence — so two different databases whose sequences happen to
+    collide on the same integer must never share a cache entry.
+
+    Both tests seed `db_session` and `other_agency_db_session` (a
+    physically separate SQLite file — see fixture above) with
+    `gtfs_snapshots.snapshot_id=1` in EACH database independently, so the
+    resolved cache key collides on `("weekday", 1)` pre-fix. Each database
+    is seeded with agency-distinguishing schedule data; a query against
+    the second database must return the SECOND database's data, never a
+    cached result served from the first.
+    """
+
+    def test_service_id_resolution_cache_does_not_leak_across_databases(
+        self, db_session, other_agency_db_session
+    ):
+        db_session.add(GTFSSnapshot(snapshot_id=1, snapshot_date=datetime(2026, 5, 1)))
+        db_session.add(
+            Calendar(
+                service_id="WMATA_SVC",
+                monday=1,
+                tuesday=1,
+                wednesday=1,
+                thursday=1,
+                friday=1,
+                saturday=0,
+                sunday=0,
+                start_date="20260101",
+                end_date="20261231",
+                is_current=True,
+            )
+        )
+        db_session.commit()
+
+        other_agency_db_session.add(GTFSSnapshot(snapshot_id=1, snapshot_date=datetime(2026, 5, 1)))
+        other_agency_db_session.add(
+            Calendar(
+                service_id="SFMTA_SVC",
+                monday=1,
+                tuesday=1,
+                wednesday=1,
+                thursday=1,
+                friday=1,
+                saturday=0,
+                sunday=0,
+                start_date="20260101",
+                end_date="20261231",
+                is_current=True,
+            )
+        )
+        other_agency_db_session.commit()
+
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"WMATA_SVC"}
+        # Pre-fix, this collides on cache key ("weekday", 1) and would
+        # incorrectly return db_session's cached {"WMATA_SVC"}.
+        assert _resolve_service_ids_for_day_type(other_agency_db_session, "weekday") == {
+            "SFMTA_SVC"
+        }
+        # Re-querying the first database must still return its own result
+        # — not evicted or clobbered by the second database's store.
+        assert _resolve_service_ids_for_day_type(db_session, "weekday") == {"WMATA_SVC"}
+
+    def test_schedule_cache_does_not_leak_across_databases(
+        self, db_session, other_agency_db_session
+    ):
+        db_session.add(GTFSSnapshot(snapshot_id=1, snapshot_date=datetime(2026, 5, 1)))
+        _seed_route(db_session, "RTE")
+        _seed_calendar(db_session)
+        _seed_stop(db_session, "S1")
+        _seed_trip(db_session, "T1", "RTE")
+        _seed_trip(db_session, "T2", "RTE")
+        _seed_stop_time(db_session, "T1", "S1", "7:00:00")
+        _seed_stop_time(db_session, "T2", "S1", "7:10:00")
+
+        other_agency_db_session.add(GTFSSnapshot(snapshot_id=1, snapshot_date=datetime(2026, 5, 1)))
+        _seed_route(other_agency_db_session, "RTE")
+        _seed_calendar(other_agency_db_session)
+        _seed_stop(other_agency_db_session, "S1")
+        _seed_trip(other_agency_db_session, "T1", "RTE")
+        _seed_trip(other_agency_db_session, "T2", "RTE")
+        _seed_stop_time(other_agency_db_session, "T1", "S1", "7:00:00")
+        _seed_stop_time(other_agency_db_session, "T2", "S1", "7:05:00")
+
+        sched_a = fetch_scheduled_cell_hours_for_routes(db_session, "weekday")
+        assert sched_a["RTE"][(0, "S1", 7)] == [600.0]
+
+        # Pre-fix, this collides on cache key ("weekday", 1) and would
+        # incorrectly return db_session's cached 600.0-second headway.
+        sched_b = fetch_scheduled_cell_hours_for_routes(other_agency_db_session, "weekday")
+        assert sched_b["RTE"][(0, "S1", 7)] == [300.0]
+
+        # Re-querying the first database must still return its own result.
+        sched_a_again = fetch_scheduled_cell_hours_for_routes(db_session, "weekday")
+        assert sched_a_again["RTE"][(0, "S1", 7)] == [600.0]

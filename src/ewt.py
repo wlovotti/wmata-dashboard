@@ -301,15 +301,47 @@ def _dates_matching_weekday(
     return out
 
 
+def _db_identity(db: Session) -> str:
+    """Best-effort identifier for the database `db` is bound to.
+
+    `gtfs_snapshot_id` is `MAX(GTFSSnapshot.snapshot_id)` scoped to
+    whichever `db` session is passed in — a per-database sequence, not a
+    globally unique id (NOTES-108). Namespacing the module-level schedule
+    caches below by this identity, alongside `(day_type, snapshot_id)`,
+    means two different databases (`wmata_dashboard` vs `sfmta_dashboard`,
+    or any two databases whose `snapshot_id` sequences happen to overlap)
+    can never collide, even if a single long-lived process (e.g. a future
+    API comparison endpoint) ends up holding sessions against both.
+
+    Renders the bind's URL with the password hidden — safe to use as a
+    plain dict key and safe to hold in process memory. Falls through to
+    `Connection.engine.url` for sessions bound to a `Connection` rather
+    than an `Engine` (e.g. the test suite's transactional fixtures, which
+    bind `sessionmaker` to a connection so each test's writes roll back).
+    Falls through to `"unknown"` if no bind/url is resolvable at all —
+    never observed in practice, but a cache key helper must not raise.
+    """
+    bind = db.get_bind()
+    url = getattr(bind, "url", None)
+    if url is None:
+        url = getattr(getattr(bind, "engine", None), "url", None)
+    if url is None:
+        return "unknown"
+    return url.render_as_string(hide_password=True)
+
+
 # Module-level memo for the per-day_type modal service_id resolution.
-# Keyed `(day_type, snapshot_id)` with the SAME resolve-then-evict
-# semantics `_schedule_cache` below uses (mirrored exactly, not
-# reinvented): `gtfs_snapshot_id=None` resolves to the concrete current
-# snapshot id via `MAX(GTFSSnapshot.snapshot_id)` BEFORE keying, so the
-# cache naturally invalidates the moment `reload_gtfs_complete.py` writes
-# a new `gtfs_snapshots` row — storing a fresh entry evicts every entry
-# keyed to a different snapshot_id. Explicit historical `gtfs_snapshot_id`
-# values (backfill) cache under their own id and never need invalidating.
+# Keyed `(db_identity, day_type, snapshot_id)` with the SAME
+# resolve-then-evict semantics `_schedule_cache` below uses (mirrored
+# exactly, not reinvented): `gtfs_snapshot_id=None` resolves to the
+# concrete current snapshot id via `MAX(GTFSSnapshot.snapshot_id)` BEFORE
+# keying, so the cache naturally invalidates the moment
+# `reload_gtfs_complete.py` writes a new `gtfs_snapshots` row — storing a
+# fresh entry evicts every OTHER entry for the SAME database keyed to a
+# different snapshot_id (entries for other databases are left alone —
+# see `_db_identity` above; NOTES-108). Explicit historical
+# `gtfs_snapshot_id` values (backfill) cache under their own id and never
+# need invalidating.
 #
 # Needed because `_scheduled_headways_by_cell_hour` (the per-route path,
 # called once per route per pass — ~128 routes on WMATA) invokes
@@ -320,7 +352,7 @@ def _dates_matching_weekday(
 # WMATA's typical window) — unmemoized, that's ~40 queries × ~128 routes
 # ≈ 5,100 extra round-trips per day_type per pass, which multiplies badly
 # over the SSH tunnel (NOTES-88).
-_service_id_resolution_cache: dict[tuple[str, int], frozenset[str]] = {}
+_service_id_resolution_cache: dict[tuple[str, str, int], frozenset[str]] = {}
 _service_id_resolution_cache_lock = Lock()
 
 
@@ -343,9 +375,10 @@ def _resolve_service_ids_for_day_type(
     recent contributing date is later (a deterministic, data-driven
     tiebreak rather than an arbitrary one).
 
-    Memoized at module level by `(day_type, resolved snapshot_id)` — see
-    `_service_id_resolution_cache` above for the exact invalidation
-    semantics (mirrors `_schedule_cache`).
+    Memoized at module level by `(db_identity, day_type, resolved
+    snapshot_id)` — see `_service_id_resolution_cache` above for the exact
+    invalidation semantics (mirrors `_schedule_cache`) and `_db_identity`
+    for why the database component is required (NOTES-108).
 
     Shared by `_scheduled_headways_by_cell_hour` and
     `fetch_scheduled_cell_hours_for_routes` so bunching (which imports both
@@ -356,7 +389,8 @@ def _resolve_service_ids_for_day_type(
         snapshot_id = gtfs_snapshot_id
     else:
         snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
-    cache_key = (day_type, snapshot_id)
+    db_identity = _db_identity(db)
+    cache_key = (db_identity, day_type, snapshot_id)
     with _service_id_resolution_cache_lock:
         cached = _service_id_resolution_cache.get(cache_key)
     if cached is not None:
@@ -385,11 +419,13 @@ def _resolve_service_ids_for_day_type(
 
     with _service_id_resolution_cache_lock:
         _service_id_resolution_cache[cache_key] = result
-        # Evict entries from older/other GTFS snapshots so the cache
-        # doesn't accumulate every historical version — same eviction
-        # rule `_schedule_cache` uses below.
+        # Evict this SAME database's entries from older/other GTFS
+        # snapshots so the cache doesn't accumulate every historical
+        # version — same eviction rule `_schedule_cache` uses below.
+        # Scoped to `db_identity` so storing a fresh entry never evicts
+        # another database's cached entries (NOTES-108).
         for k in list(_service_id_resolution_cache.keys()):
-            if k[1] != snapshot_id:
+            if k[0] == db_identity and k[2] != snapshot_id:
                 del _service_id_resolution_cache[k]
     return set(result)
 
@@ -807,14 +843,17 @@ def compute_ewt_headline_for_route(
 # Module-level cache for the scheduled-cell-hour fetch. The schedule depends
 # only on the active GTFS snapshot (which versions trips/stop_times/calendar
 # via `is_current`), so the result is valid until a new snapshot is loaded.
-# Keying by `(day_type, snapshot_id)` means the cache naturally invalidates
-# the moment `reload_gtfs_complete.py` writes a new gtfs_snapshots row — no
-# TTL or restart needed.
+# Keying by `(db_identity, day_type, snapshot_id)` means the cache naturally
+# invalidates the moment `reload_gtfs_complete.py` writes a new
+# gtfs_snapshots row — no TTL or restart needed — and the `db_identity`
+# component (see `_db_identity`) means two different databases can never
+# collide even when their `snapshot_id` sequences happen to overlap
+# (NOTES-108).
 #
 # Only the unfiltered (`route_ids is None`) path is cached. The filtered
 # path is uncommon and could legitimately collide with a cached entry's key
 # space without proper isolation.
-_schedule_cache: dict[tuple[str, int], dict[str, dict[CellHour, list[float]]]] = {}
+_schedule_cache: dict[tuple[str, str, int], dict[str, dict[CellHour, list[float]]]] = {}
 _schedule_cache_lock = Lock()
 
 
@@ -835,11 +874,13 @@ def fetch_scheduled_cell_hours_for_routes(
     — each list is consecutive scheduled headways within that cell, bucketed
     by the earlier arrival's hour-of-day.
 
-    Cached at module level by `(day_type, gtfs_snapshot_id)` when called with
-    `route_ids=None` (the dashboard path). The cost is ~1.5s for the full
-    SQL pass + Python pairing; the cache invalidates automatically when
-    `reload_gtfs_complete.py` writes a new `gtfs_snapshots` row, so no
-    manual flush is needed after a GTFS refresh.
+    Cached at module level by `(db_identity, day_type, gtfs_snapshot_id)`
+    when called with `route_ids=None` (the dashboard path) — see
+    `_db_identity` for why the database component is required (NOTES-108).
+    The cost is ~1.5s for the full SQL pass + Python pairing; the cache
+    invalidates automatically when `reload_gtfs_complete.py` writes a new
+    `gtfs_snapshots` row, so no manual flush is needed after a GTFS
+    refresh.
 
     Pass `gtfs_snapshot_id` to pin the schedule to a historical snapshot
     (backfill); the default reads the live `is_current` snapshot. Explicit
@@ -856,7 +897,8 @@ def fetch_scheduled_cell_hours_for_routes(
             snapshot_id = gtfs_snapshot_id
         else:
             snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
-        cache_key = (day_type, snapshot_id)
+        db_identity = _db_identity(db)
+        cache_key = (db_identity, day_type, snapshot_id)
         with _schedule_cache_lock:
             cached = _schedule_cache.get(cache_key)
         if cached is not None:
@@ -902,12 +944,15 @@ def fetch_scheduled_cell_hours_for_routes(
                 sched_by_route_cell_hour[route_id][(direction, stop, hour)].append(float(delta))
 
     if route_ids is None:
-        # Stash the unfiltered result and evict any entries from older GTFS
-        # snapshots so the cache doesn't accumulate every historical version.
+        # Stash the unfiltered result and evict this SAME database's
+        # entries from older GTFS snapshots so the cache doesn't
+        # accumulate every historical version. Scoped to `db_identity` so
+        # storing a fresh entry never evicts another database's cached
+        # entries (NOTES-108).
         with _schedule_cache_lock:
             _schedule_cache[cache_key] = sched_by_route_cell_hour
             for k in list(_schedule_cache.keys()):
-                if k[1] != snapshot_id:
+                if k[0] == db_identity and k[2] != snapshot_id:
                     del _schedule_cache[k]
     return sched_by_route_cell_hour
 
