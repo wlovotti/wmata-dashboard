@@ -1,5 +1,5 @@
 import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Overview from './components/Overview'
 import RouteList from './components/RouteList'
 import RouteDetail from './components/RouteDetail'
@@ -28,6 +28,53 @@ function formatFeedDate(yyyymmdd) {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
+// Refresh button (the frontend-chrome honesty fixes, PR #204). Previously a
+// bare `window.location.reload()` masquerading as an in-app refresh — it
+// worked, but paid for it with a full browser navigation (re-downloads the
+// JS bundle, flashes white, drops in-memory state) to do something React
+// can do by just remounting the current page. `onRefresh` is expected to
+// force that remount (see `handleRefresh` in `App`); this component only
+// owns the button's own transient spinner state, since it has no way to
+// observe when the remounted page's fetches actually resolve — the spin
+// duration is a fixed visual cue, not a completion signal.
+//
+// Deliberately rendered OUTSIDE the keyed subtree that `App` remounts on
+// refresh (see `App`'s render): if this button were inside that subtree,
+// clicking it would remount RefreshButton itself in the same render that
+// `onRefresh` fires, wiping the `refreshing` state we just set before the
+// spinner/disabled feedback ever paints.
+const REFRESH_SPIN_MS = 600
+
+export function RefreshButton({ onRefresh }) {
+  const [refreshing, setRefreshing] = useState(false)
+  const timeoutRef = useRef(null)
+
+  useEffect(() => {
+    // Clear any in-flight spin timer on unmount so it doesn't fire
+    // setState on an unmounted component.
+    return () => {
+      if (timeoutRef.current != null) clearTimeout(timeoutRef.current)
+    }
+  }, [])
+
+  const handleClick = () => {
+    if (refreshing) return
+    setRefreshing(true)
+    onRefresh()
+    timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = null
+      setRefreshing(false)
+    }, REFRESH_SPIN_MS)
+  }
+
+  return (
+    <button onClick={handleClick} disabled={refreshing} className="refresh-btn" title="Refresh data">
+      <span className={refreshing ? 'refresh-icon spinning' : 'refresh-icon'}>↻</span>
+      {refreshing ? 'Refreshing...' : 'Refresh'}
+    </button>
+  )
+}
+
 // Feed-expiry alarm (NOTES-90): renders only when the schedule is already
 // expired or expiring within 7 days — silent (returns null) for `ok` or an
 // unknown status (no feed_info row yet), so it never shows on a healthy or
@@ -50,14 +97,18 @@ function GtfsExpiryBanner({ freshness }) {
 }
 
 function App() {
-  const [refreshing, setRefreshing] = useState(false)
-  const gtfsFreshness = useGtfsFreshness()
-
-  const handleRefresh = () => {
-    setRefreshing(true)
-    // Trigger refresh - this will be handled by child components
-    window.location.reload()
-  }
+  // Bumping this key remounts only the routed subtree below (wrapped
+  // separately, not the whole `.app`), which re-runs each page's
+  // data-fetching effects — a real in-place refetch instead of the old
+  // `window.location.reload()` (the frontend-chrome honesty fixes, PR #204).
+  // Kept outside the keyed subtree: RefreshButton itself (so its own
+  // `refreshing` spinner state survives the remount it triggers — see
+  // RefreshButton's comment) and the GTFS-expiry banner (refetched instead
+  // via `refreshKey` threaded into `useGtfsFreshness`, since remounting it
+  // would just replay the cached value rather than force a real refetch).
+  const [refreshKey, setRefreshKey] = useState(0)
+  const gtfsFreshness = useGtfsFreshness(refreshKey)
+  const handleRefresh = () => setRefreshKey((k) => k + 1)
 
   return (
     <Router>
@@ -66,18 +117,10 @@ function App() {
           <div className="header-content">
             <div>
               <h1>WMATA Performance Dashboard</h1>
-              <p className="subtitle">Real-time transit performance metrics</p>
+              <p className="subtitle">Daily bus network performance metrics</p>
             </div>
             <div className="header-actions">
-              <button
-                onClick={handleRefresh}
-                disabled={refreshing}
-                className="refresh-btn"
-                title="Refresh data"
-              >
-                <span className={refreshing ? 'refresh-icon spinning' : 'refresh-icon'}>↻</span>
-                {refreshing ? 'Refreshing...' : 'Refresh'}
-              </button>
+              <RefreshButton onRefresh={handleRefresh} />
             </div>
           </div>
           <GtfsExpiryBanner freshness={gtfsFreshness} />
@@ -103,22 +146,24 @@ function App() {
           </nav>
         </header>
 
-        <Routes>
-          <Route path="/" element={<Overview />} />
-          <Route path="/routes" element={<RouteList />} />
-          <Route path="/route/:routeId" element={<RouteDetail />} />
-          <Route path="/runs/:runId" element={<RunDetail />} />
-          <Route path="/blocks" element={<ActiveBlocks />} />
-          <Route path="/blocks/:blockId" element={<BlockTimeline />} />
-          <Route path="/targets" element={<Targets />} />
-          <Route path="/schedule-audit" element={<ScheduleAudit />} />
-          <Route path="/segments" element={<SegmentDiagnostic />} />
-          {/* Agency comparison page (PR #198): reachable by URL only for now — no nav link, so the
-              baselined pages' shared header chrome (Overview / RouteList /
-              RouteDetail-D72 Playwright visual regressions) is untouched.
-              Add a nav entry once NOTES-84 revisits the header. */}
-          <Route path="/compare" element={<AgencyComparison />} />
-        </Routes>
+        <div key={refreshKey}>
+          <Routes>
+            <Route path="/" element={<Overview />} />
+            <Route path="/routes" element={<RouteList />} />
+            <Route path="/route/:routeId" element={<RouteDetail />} />
+            <Route path="/runs/:runId" element={<RunDetail />} />
+            <Route path="/blocks" element={<ActiveBlocks />} />
+            <Route path="/blocks/:blockId" element={<BlockTimeline />} />
+            <Route path="/targets" element={<Targets />} />
+            <Route path="/schedule-audit" element={<ScheduleAudit />} />
+            <Route path="/segments" element={<SegmentDiagnostic />} />
+            {/* Agency comparison page (PR #198): reachable by URL only for now — no nav link, so the
+                baselined pages' shared header chrome (Overview / RouteList /
+                RouteDetail-D72 Playwright visual regressions) is untouched.
+                Add a nav entry once NOTES-84 revisits the header. */}
+            <Route path="/compare" element={<AgencyComparison />} />
+          </Routes>
+        </div>
       </div>
     </Router>
   )
