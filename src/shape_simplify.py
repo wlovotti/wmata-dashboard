@@ -61,4 +61,4 @@ def simplify_polyline(points, tolerance_deg=DEFAULT_TOLERANCE_DEG):
             keep[max_idx] = True
             stack.append((start, max_idx))
             stack.append((max_idx, end))
-    return [p for p, k in zip(points, keep) if k]
+    return [p for p, k in zip(points, keep, strict=True) if k]
