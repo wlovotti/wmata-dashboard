@@ -36,6 +36,7 @@ from api.aggregations import (
     get_route_trend_data,
     get_run_deviations,
     get_schedule_audit,
+    get_system_shapes,
     get_system_trend_data,
 )
 from api.config import settings
@@ -69,6 +70,8 @@ def _warm_scorecard_cache_sync():
                 logger.info("Scorecard warm-up skipped: no derived stop_events yet")
                 return
             get_live_metrics_for_window(db, end_date, 7)
+            get_system_shapes(db)
+            logger.info("System shapes cache warmed")
             logger.info("Scorecard cache warmed for window ending %s", end_date)
         finally:
             db.close()
@@ -786,6 +789,22 @@ async def get_route_bunching_causes_endpoint(
             day_type=day_type,
             period=period,
         )
+    finally:
+        db.close()
+
+
+@app.get("/api/shapes")
+async def get_system_shapes_endpoint():
+    """All current routes' representative simplified polylines, in one payload.
+
+    Feeds the Overview system map (NOTES-84): the frontend joins these
+    polylines to `/api/routes` metrics by route_id for coloring. Cached
+    server-side (60s TTL; effectively always hot — the payload only changes
+    on GTFS reload).
+    """
+    db = get_session()
+    try:
+        return get_system_shapes(db)
     finally:
         db.close()
 
