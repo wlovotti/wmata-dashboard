@@ -1,15 +1,17 @@
 """Unit tests for the schedule-derived daytime service-level stats (NOTES-115).
 
-Pure-function tests only — no database. The wrapper
-`service_level_for_agency` is exercised through the comparison-endpoint
-tests (tests/test_agency_comparison.py) with the schedule fetch
-monkeypatched, because `fetch_scheduled_cell_hours_for_routes` caches by
-db identity and in-memory SQLite sessions share one identity.
+Pure-function tests only — no database, except for
+`test_service_level_for_agency_filters_to_bus_routes` below, which
+exercises the `service_level_for_agency` wrapper with the schedule fetch
+monkeypatched (because `fetch_scheduled_cell_hours_for_routes` caches by
+db identity and in-memory SQLite sessions share one identity) but real
+`Route` rows so the bus-only comparison filtering (PR #201) has
+something to query.
 """
 
 import pytest
 
-from src.service_level import compute_service_level_stats
+from src.service_level import compute_service_level_stats, service_level_for_agency
 
 
 def test_empty_schedule_returns_nulls():
@@ -96,3 +98,34 @@ def test_reference_stop_tie_broken_by_higher_stop_id():
     out = compute_service_level_stats(sched)
     assert out["n_headways"] == 2
     assert out["median_headway_seconds"] == pytest.approx(1200.0)
+
+
+def test_service_level_for_agency_filters_to_bus_routes(db_session, monkeypatch):
+    """Bus-only comparison filtering (PR #201): rail/cable headways must
+    not skew the bus-vs-bus comparison. A mixed-mode feed (SFMTA's Muni
+    Metro light rail + cable car alongside its bus routes) should only
+    contribute its route_type=3 route's samples to the service-level
+    pool."""
+    import src.ewt as ewt_module
+    from src.models import Route
+
+    db_session.add_all(
+        [
+            Route(route_id="BUS1", route_short_name="B1", route_type=3, is_current=True),
+            Route(route_id="RAIL1", route_short_name="R1", route_type=0, is_current=True),
+        ]
+    )
+    db_session.commit()
+
+    def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
+        return {
+            "BUS1": {(0, "S1", 9): [600.0, 600.0]},
+            "RAIL1": {(0, "S2", 9): [120.0, 120.0]},
+        }
+
+    monkeypatch.setattr(ewt_module, "fetch_scheduled_cell_hours_for_routes", _fake_sched)
+
+    out = service_level_for_agency(db_session)
+
+    assert out["n_headways"] == 2
+    assert out["median_headway_seconds"] == pytest.approx(600.0)

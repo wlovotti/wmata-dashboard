@@ -27,6 +27,7 @@ from src.ewt import (
     _period_for_hour,
     _resolve_service_ids_for_day_type,
     _scheduled_headways_by_cell_hour,
+    bus_route_ids,
     compute_awt,
     compute_ewt_for_route_date,
     compute_ewt_for_routes,
@@ -1430,3 +1431,80 @@ class TestScheduleCacheAgencyIsolation:
         # Re-querying the first database must still return its own result.
         sched_a_again = fetch_scheduled_cell_hours_for_routes(db_session, "weekday")
         assert sched_a_again["RTE"][(0, "S1", 7)] == [600.0]
+
+
+class TestBusRouteIds:
+    """`bus_route_ids` (PR #201) selects route_type=3 route IDs, optionally
+    pinned to a historical GTFS snapshot rather than the live `is_current`
+    set (PR #201 review, SUBSTANTIVE 3) — needed because
+    `_system_ewt_and_bunching_for_date` backfills against a historical
+    snapshot pin, and intersecting that historical schedule pool against
+    the *current* route set would silently drop routes retired since."""
+
+    def test_default_snapshot_selects_current_bus_routes_only(self, db_session):
+        """No `gtfs_snapshot_id` passed -> filters on `is_current`, same as
+        every other unpinned query in this codebase."""
+        db_session.add_all(
+            [
+                Route(
+                    route_id="BUS_CURRENT",
+                    route_short_name="B1",
+                    route_type=3,
+                    is_current=True,
+                ),
+                Route(
+                    route_id="RAIL_CURRENT",
+                    route_short_name="R1",
+                    route_type=0,
+                    is_current=True,
+                ),
+                Route(
+                    route_id="BUS_RETIRED",
+                    route_short_name="B0",
+                    route_type=3,
+                    is_current=False,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        assert bus_route_ids(db_session) == {"BUS_CURRENT"}
+
+    def test_snapshot_pin_selects_bus_routes_retired_since(self, db_session):
+        """A route retired (is_current=False) after the pinned snapshot
+        must still be included when that snapshot is explicitly requested
+        -- otherwise a historical schedule fetch pinned to the same
+        snapshot would get intersected against a route set missing routes
+        the schedule data actually has."""
+        db_session.add_all(
+            [
+                GTFSSnapshot(snapshot_id=1, snapshot_date=datetime(2026, 5, 1)),
+                GTFSSnapshot(snapshot_id=2, snapshot_date=datetime(2026, 7, 1)),
+                # Present in snapshot 1, retired by snapshot 2's reload.
+                Route(
+                    route_id="BUS_OLD",
+                    route_short_name="B_OLD",
+                    route_type=3,
+                    snapshot_id=1,
+                    is_current=False,
+                ),
+                # The live route set as of snapshot 2.
+                Route(
+                    route_id="BUS_NEW",
+                    route_short_name="B_NEW",
+                    route_type=3,
+                    snapshot_id=2,
+                    is_current=True,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        # Pinned to the historical snapshot: only the retired route that
+        # was live at that time.
+        assert bus_route_ids(db_session, gtfs_snapshot_id=1) == {"BUS_OLD"}
+        # Pinned to the newer snapshot: only the route live there.
+        assert bus_route_ids(db_session, gtfs_snapshot_id=2) == {"BUS_NEW"}
+        # Unpinned: falls back to is_current, matching neither snapshot
+        # filter -- only the currently-active route.
+        assert bus_route_ids(db_session) == {"BUS_NEW"}

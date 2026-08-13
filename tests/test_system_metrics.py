@@ -355,6 +355,13 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
     """SWT is schedule-side only: with zero observed stop_events it is still
     computed from the frequent scheduled pool (EWT stays None)."""
     import api.aggregations as agg
+    from src.models import Route
+
+    # Bus-only comparison filtering (PR #201): the pool is now filtered
+    # to route_type=3 (bus), so route "64" needs a matching Route row for
+    # its schedule data to survive.
+    db_session.add(Route(route_id="64", route_short_name="64", route_type=3, is_current=True))
+    db_session.commit()
 
     def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
         # One frequent cell: two 600s headways -> SWT = (600²+600²)/(2·1200) = 300.
@@ -368,6 +375,51 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
     )
     assert ewt is None
     assert swt == pytest.approx(300.0)
+    assert bunching is None
+
+
+def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monkeypatch):
+    """Bus-only comparison filtering (PR #201): a rail/cable route mixed
+    into the schedule pool alongside a bus route must not contribute to
+    the system-level SWT pool -- this is what feeds the agency-comparison
+    page's SWT tile via `system_metrics_daily`.
+
+    Named SWT-only (not EWT/bunching, despite the function returning all
+    three): no `stop_events` are seeded here, so `ewt` and `bunching` are
+    trivially `None` regardless of whether the bus filter works -- they
+    don't exercise the filter this test is about. EWT's own filtering is
+    covered by the observed-side pool sharing the same `sched_by_route`
+    this test checks; a dedicated observed-pool exclusion test would need
+    seeded `StopEvent` rows and isn't in scope here (COSMETIC 6, PR #201
+    review)."""
+    import api.aggregations as agg
+    from src.models import Route
+
+    db_session.add_all(
+        [
+            Route(route_id="BUS1", route_short_name="B1", route_type=3, is_current=True),
+            Route(route_id="RAIL1", route_short_name="R1", route_type=0, is_current=True),
+        ]
+    )
+    db_session.commit()
+
+    def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
+        return {
+            "BUS1": {(0, "S1", 8): [600.0, 600.0]},
+            # Much shorter headway -- if pooled in, it would pull SWT well
+            # below the bus-only value of 300.
+            "RAIL1": {(0, "S2", 8): [60.0, 60.0]},
+        }
+
+    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_routes", _fake_sched)
+    monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
+
+    ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(
+        db_session, datetime(2026, 8, 10).date(), {}
+    )
+    assert swt == pytest.approx(300.0)
+    # No stop_events seeded -> trivially None; see docstring above.
+    assert ewt is None
     assert bunching is None
 
 
