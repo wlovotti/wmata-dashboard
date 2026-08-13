@@ -1,0 +1,14 @@
+{
+  "route_id": "D72",
+  "days": 30,
+  "day_type": "all",
+  "period": "all",
+  "n_bunched_pairs": 42,
+  "breakdown": {
+    "leader_late_only": { "count": 18, "pct": 0.4286 },
+    "trailer_early_only": { "count": 11, "pct": 0.2619 },
+    "both_off": { "count": 6, "pct": 0.1429 },
+    "neither_off": { "count": 5, "pct": 0.119 },
+    "unknown": { "count": 2, "pct": 0.0476 }
+  }
+}

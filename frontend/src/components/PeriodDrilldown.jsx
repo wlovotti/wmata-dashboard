@@ -113,7 +113,11 @@ function bunchingTooltip({ active, payload }) {
 // textbook (late leaders pick up more passengers, trailers run light), but
 // the five-bucket decomposition is this dashboard's, not industry-standard.
 function BunchingCauseBar({ data }) {
-  if (!data || data.n_bunched_pairs === 0) {
+  // `!data.breakdown` also catches malformed/short-circuit-fulfilled
+  // responses (e.g. a test stub or an old cached payload) that have
+  // `n_bunched_pairs` but no `breakdown` object — without it the lookup
+  // below throws and takes down the whole route (no error boundary here).
+  if (!data || !data.breakdown || data.n_bunched_pairs === 0) {
     return (
       <div className="bunching-cause-block">
         <h3>Bunching cause decomposition</h3>
@@ -351,4 +355,5 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
   )
 }
 
+export { BunchingCauseBar }
 export default PeriodDrilldown

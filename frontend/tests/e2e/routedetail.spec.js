@@ -1,9 +1,17 @@
 // Visual regression for RouteDetail page (/route/D72).
 //
 // The RouteDetail path in App.jsx is /route/:routeId (not /routes/:routeId).
-// Fixtures cover /api/routes/D72 (the detail payload) and the three trend
-// endpoints (/api/routes/D72/trend?metric=...). All other /api/** calls
-// return empty-safe defaults so the page renders without crashing.
+// Fixtures cover /api/routes/D72 (the detail payload), the three trend
+// endpoints (/api/routes/D72/trend?metric=...), and bunching-causes (the
+// PeriodDrilldown sub-component). All other /api/** calls return
+// empty-safe defaults so the page renders without crashing.
+//
+// bunching-causes needs its own fixture (rather than falling through to
+// the generic EMPTY_OBJECT catch-all below): the real endpoint always
+// returns `n_bunched_pairs` + `breakdown` together (see
+// src/bunching.py:compute_bunching_cause_breakdown), but `{}` has
+// neither, which used to crash BunchingCauseBar (NOTES-83) and blank the
+// whole page before the fullPage screenshot.
 
 import { test, expect } from '@playwright/test'
 import { readFileSync } from 'fs'
@@ -41,6 +49,11 @@ test.beforeEach(async ({ page }) => {
     }
     if (url.includes('/api/routes/D72/trend') && url.includes('metric=excess_trip_time')) {
       return route.fulfill({ json: fixture('route_d72_trend_excess_trip_time.json') })
+    }
+
+    // Bunching-cause decomposition (PeriodDrilldown's BunchingCauseBar).
+    if (url.includes('/api/routes/D72/bunching-causes')) {
+      return route.fulfill({ json: fixture('route_d72_bunching_causes.json') })
     }
 
     // Sub-component endpoints — return safe empty defaults so their

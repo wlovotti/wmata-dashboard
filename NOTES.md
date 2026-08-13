@@ -49,7 +49,6 @@ designed UI. The comparison sprint shipped with PR #198.
 - [NOTES-85](notes/NOTES-85.md) Frontend design-system pass — sev low / eff medium-high — after NOTES-84
 - [NOTES-86](notes/NOTES-86.md) System-level weekly narrative — sev low / eff medium — coordinate placement with NOTES-84
 - [NOTES-87](notes/NOTES-87.md) Small honesty fixes in frontend chrome — sev low / eff low — baseline regen user-run
-- [NOTES-83](notes/NOTES-83.md) Blank RouteDetail visual baselines — sev medium / eff low — regen user-run
 - [NOTES-61](notes/NOTES-61.md) Hold-down policy / dispatching candidates page — sev low — unblocked
 - [NOTES-20](notes/NOTES-20.md) Tighter rider-experience OTP — sev low — deferred
 
