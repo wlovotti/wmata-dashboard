@@ -161,8 +161,8 @@ from src.time_periods import is_hour_in_period
 BUS_ROUTE_TYPE = "3"
 
 
-def bus_route_ids(db: Session) -> set[str]:
-    """Route IDs for current bus routes (GTFS route_type=3) in this database.
+def bus_route_ids(db: Session, gtfs_snapshot_id: int | None = None) -> set[str]:
+    """Route IDs for bus routes (GTFS route_type=3) in this database.
 
     Used to post-filter the (module-cached) output of
     `fetch_scheduled_cell_hours_for_routes` down to a bus-only pool for
@@ -177,11 +177,23 @@ def bus_route_ids(db: Session) -> set[str]:
     module-level cache is keyed only by `(db_identity, day_type,
     snapshot_id)` — not by route mode — so filtering post-fetch keeps the
     cache correct for its other (unfiltered) callers.
+
+    Args:
+        db: SQLAlchemy session.
+        gtfs_snapshot_id: Selects the route set from that historical
+            snapshot via `gtfs_version_filter` instead of the live
+            `is_current` snapshot. Must match whatever snapshot pin the
+            caller already used to fetch the schedule pool being
+            filtered — `_system_ewt_and_bunching_for_date` backfills
+            against a historical snapshot, and intersecting its schedule
+            pool against the *current* route set would silently drop
+            routes retired since that snapshot. `service_level_for_agency`
+            always wants the live snapshot, so it passes nothing.
     """
     return {
         route_id
         for (route_id,) in db.query(Route.route_id)
-        .filter(Route.is_current, Route.route_type == BUS_ROUTE_TYPE)
+        .filter(gtfs_version_filter(Route, gtfs_snapshot_id), Route.route_type == BUS_ROUTE_TYPE)
         .all()
     }
 

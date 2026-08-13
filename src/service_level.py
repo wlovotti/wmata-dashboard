@@ -12,9 +12,12 @@ headway distribution stats instead — see the design spec
 `docs/superpowers/specs/2026-08-12-swt-service-level-kpi-design.md`.
 """
 
+import logging
 from statistics import median
 
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 # Daytime window, agency-local clock hours: [start, end) — matches the
 # NOTES-115 motivating measurement (weekday 7:00–19:00).
@@ -109,4 +112,17 @@ def service_level_for_agency(db: Session) -> dict:
     sched = fetch_scheduled_cell_hours_for_routes(db, "weekday")
     bus_ids = bus_route_ids(db)
     bus_sched = {route_id: cells for route_id, cells in sched.items() if route_id in bus_ids}
+    if not bus_sched and sched:
+        # The unfiltered pool had routes but none matched route_type=3 --
+        # e.g. a `routes` table with stale/missing route_type data, or a
+        # feed whose route_ids don't line up with the schedule pool's keys.
+        # Without this, the caller gets a silent all-null tile that's
+        # indistinguishable from "no schedule data at all" (COSMETIC 5,
+        # PR #201 review).
+        logger.warning(
+            "service_level_for_agency: bus-route filter (route_type=3) emptied a "
+            "non-empty schedule pool of %d routes -- returning null service-level "
+            "stats. Check Route.route_type / Route.is_current data for this agency.",
+            len(sched),
+        )
     return compute_service_level_stats(bus_sched)

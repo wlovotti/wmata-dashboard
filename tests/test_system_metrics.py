@@ -378,11 +378,20 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
     assert bunching is None
 
 
-def test_system_ewt_swt_bunching_exclude_non_bus_routes(db_session, monkeypatch):
+def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monkeypatch):
     """Bus-only comparison filtering (PR #201): a rail/cable route mixed
     into the schedule pool alongside a bus route must not contribute to
     the system-level SWT pool -- this is what feeds the agency-comparison
-    page's EWT/SWT tiles via `system_metrics_daily`."""
+    page's SWT tile via `system_metrics_daily`.
+
+    Named SWT-only (not EWT/bunching, despite the function returning all
+    three): no `stop_events` are seeded here, so `ewt` and `bunching` are
+    trivially `None` regardless of whether the bus filter works -- they
+    don't exercise the filter this test is about. EWT's own filtering is
+    covered by the observed-side pool sharing the same `sched_by_route`
+    this test checks; a dedicated observed-pool exclusion test would need
+    seeded `StopEvent` rows and isn't in scope here (COSMETIC 6, PR #201
+    review)."""
     import api.aggregations as agg
     from src.models import Route
 
@@ -409,6 +418,9 @@ def test_system_ewt_swt_bunching_exclude_non_bus_routes(db_session, monkeypatch)
         db_session, datetime(2026, 8, 10).date(), {}
     )
     assert swt == pytest.approx(300.0)
+    # No stop_events seeded -> trivially None; see docstring above.
+    assert ewt is None
+    assert bunching is None
 
 
 def test_upsert_persists_swt_seconds(db_session, monkeypatch):

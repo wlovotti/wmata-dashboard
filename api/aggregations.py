@@ -2164,9 +2164,17 @@ def _system_ewt_and_bunching_for_date(
 
     `sched_by_day_type` is a memoized fetch of per-route schedule data per
     day_type so the schedule cost is amortized across many days in the
-    window. `tz_name` (NOTES-103 multi-agency) buckets the observed side by
-    the agency's own local hour so it agrees with the scheduled side's
-    (always agency-local, GTFS clock-time) hour key; defaults to Eastern.
+    window. Caller-provided invariant: because the bus-route filter above
+    is only applied on this function's own cache-miss fill (the `if
+    day_type not in sched_by_day_type` branch below), any dict passed in
+    here must either be empty/fresh or already bus-filtered by a prior
+    call to this same function -- do not share this dict with
+    `_compute_live_metrics_for_window_uncached`'s identically-named local
+    (~line 719), which fills it unfiltered for the per-route headline
+    path and does not need bus filtering. `tz_name` (NOTES-103
+    multi-agency) buckets the observed side by the agency's own local
+    hour so it agrees with the scheduled side's (always agency-local,
+    GTFS clock-time) hour key; defaults to Eastern.
 
     Returns `(ewt_seconds, swt_seconds, bunching_rate)`. SWT is
     schedule-side only — it's computed from the frequent scheduled cell-hour
@@ -2180,7 +2188,7 @@ def _system_ewt_and_bunching_for_date(
         all_sched = fetch_scheduled_cell_hours_for_routes(
             db, day_type, gtfs_snapshot_id=gtfs_snapshot_id
         )
-        bus_ids = bus_route_ids(db)
+        bus_ids = bus_route_ids(db, gtfs_snapshot_id=gtfs_snapshot_id)
         sched_by_day_type[day_type] = {
             route_id: cells for route_id, cells in all_sched.items() if route_id in bus_ids
         }
@@ -2547,10 +2555,19 @@ AGENCY_COMPARISON_CAVEATS = [
     "SFMTA's GTFS feed is multi-modal -- 7 Muni Metro light-rail routes "
     "(route_type 0) and 3 cable-car routes (route_type 5) alongside 58 "
     "bus routes -- while WMATA's feed is bus-only (route_type 3, 128 "
-    "routes). The service-level tile and the EWT/SWT/bunching pools are "
-    "filtered to route_type=3 for both agencies (the bus-only comparison "
-    "filtering, PR #201) so the comparison is bus-to-bus; WMATA's filter "
-    "is a no-op.",
+    "routes). The service-level tile (computed live) and the "
+    "EWT/SWT/bunching pools are filtered to route_type=3 for both "
+    "agencies (the bus-only comparison filtering, PR #201); WMATA's "
+    "filter is a no-op. EWT/SWT/bunching are read from the materialized "
+    "system_metrics_daily table, though, so the filter only takes "
+    "effect for dates computed after PR #201 landed -- SFMTA dates "
+    "already in this window (2026-07-23 onward) may still hold their "
+    "pre-fix all-modes values until a one-time backfill re-upserts "
+    "them (see PR #201's body for the backfill command). The OTP and "
+    "service-delivered tiles are not mode-filtered and still pool "
+    "every route in each agency's feed, so SFMTA's figures there "
+    "include its light-rail and cable-car service (~15% of SFMTA's "
+    "stop_events).",
 ]
 
 
