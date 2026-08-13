@@ -18,6 +18,17 @@ stays under against a full-page screenshot. The baselines are therefore
 the gate will keep passing until someone notices and manually
 regenerates them.
 
+**2026-08-13 addendum (from the PR #205 baseline regen):** the
+insensitivity also breaks the *regen* workflow, not just the gate.
+Playwright's `--update-snapshots` defaults to mode `changed`, which
+only rewrites snapshots that **fail** comparison — so for a copy-sized
+diff inside the 1% tolerance, the documented regen commands in
+`frontend/README.md` silently write nothing (this bit the first regen
+pass on PR #205; `git status` came back clean after both platforms
+"passed"). `--update-snapshots=all` forces the rewrite. The closing PR
+should update `frontend/README.md`'s regen commands to use `=all` (or
+explain when it's needed) regardless of which gate mechanism is chosen.
+
 Investigate before fixing: whether tightening
 `maxDiffPixelRatio` system-wide reintroduces flakiness from
 anti-aliasing (the reason it was set to 0.01 in the first place, per
