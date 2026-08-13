@@ -28,6 +28,34 @@ function formatFeedDate(yyyymmdd) {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
+// Refresh button (NOTES-87 item 2). Previously a bare `window.location.reload()`
+// masquerading as an in-app refresh — it worked, but paid for it with a full
+// browser navigation (re-downloads the JS bundle, flashes white, drops
+// in-memory state) to do something React can do by just remounting the
+// current page. `onRefresh` is expected to force that remount (see
+// `handleRefresh` in `App`); this component only owns the button's own
+// transient spinner state, since it has no way to observe when the
+// remounted page's fetches actually resolve — the spin duration is a fixed
+// visual cue, not a completion signal.
+const REFRESH_SPIN_MS = 600
+
+export function RefreshButton({ onRefresh }) {
+  const [refreshing, setRefreshing] = useState(false)
+
+  const handleClick = () => {
+    setRefreshing(true)
+    onRefresh()
+    setTimeout(() => setRefreshing(false), REFRESH_SPIN_MS)
+  }
+
+  return (
+    <button onClick={handleClick} disabled={refreshing} className="refresh-btn" title="Refresh data">
+      <span className={refreshing ? 'refresh-icon spinning' : 'refresh-icon'}>↻</span>
+      {refreshing ? 'Refreshing...' : 'Refresh'}
+    </button>
+  )
+}
+
 // Feed-expiry alarm (NOTES-90): renders only when the schedule is already
 // expired or expiring within 7 days — silent (returns null) for `ok` or an
 // unknown status (no feed_info row yet), so it never shows on a healthy or
@@ -50,34 +78,24 @@ function GtfsExpiryBanner({ freshness }) {
 }
 
 function App() {
-  const [refreshing, setRefreshing] = useState(false)
   const gtfsFreshness = useGtfsFreshness()
-
-  const handleRefresh = () => {
-    setRefreshing(true)
-    // Trigger refresh - this will be handled by child components
-    window.location.reload()
-  }
+  // Bumping this key remounts everything below it, which re-runs each
+  // page's data-fetching effects — a real in-place refetch instead of the
+  // old `window.location.reload()` (NOTES-87 item 2).
+  const [refreshKey, setRefreshKey] = useState(0)
+  const handleRefresh = () => setRefreshKey((k) => k + 1)
 
   return (
     <Router>
-      <div className="app">
+      <div className="app" key={refreshKey}>
         <header>
           <div className="header-content">
             <div>
               <h1>WMATA Performance Dashboard</h1>
-              <p className="subtitle">Real-time transit performance metrics</p>
+              <p className="subtitle">Daily bus network performance metrics</p>
             </div>
             <div className="header-actions">
-              <button
-                onClick={handleRefresh}
-                disabled={refreshing}
-                className="refresh-btn"
-                title="Refresh data"
-              >
-                <span className={refreshing ? 'refresh-icon spinning' : 'refresh-icon'}>↻</span>
-                {refreshing ? 'Refreshing...' : 'Refresh'}
-              </button>
+              <RefreshButton onRefresh={handleRefresh} />
             </div>
           </div>
           <GtfsExpiryBanner freshness={gtfsFreshness} />

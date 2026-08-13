@@ -240,6 +240,42 @@ const OVERVIEW_TREND_URLS = [
 ]
 
 /**
+ * Off-target panel body when there are no rows to rank (NOTES-87 item 3).
+ *
+ * The panel only ever shows routes with a hand-edited override in
+ * `config/route_targets.yaml` (`routes:` block) — it is empty out of the
+ * box (`routes: {}`) and stays empty until someone commits an override, not
+ * because of a bug or missing data. Distinguishes that "nothing has been
+ * configured at all" case from "overrides exist, just none for the
+ * currently-selected metric," since the latter is a narrower, more
+ * reassuring claim (the config isn't empty, this metric just isn't in it).
+ *
+ * @param {boolean} hasAnyOverrides - whether `/api/targets`' `routes` block
+ *   has at least one entry, for any metric.
+ * @param {string} metricLabel - display label of the currently-selected
+ *   metric (e.g. "EWT"), used only in the narrower sub-message.
+ */
+export function OffTargetEmptyState({ hasAnyOverrides, metricLabel }) {
+  if (!hasAnyOverrides) {
+    return (
+      <p style={{ padding: '0 1.5rem 1.5rem' }}>
+        This panel is empty because no route has a per-route target — the
+        default <code>config/route_targets.yaml</code> ships with an empty{' '}
+        <code>routes:</code> block, so every route currently just inherits
+        the same system-wide target already summarized in "Where to look"
+        above. It only populates after someone hand-edits that file to add
+        per-route overrides (see the file's header comment for the schema).
+      </p>
+    )
+  }
+  return (
+    <p style={{ padding: '0 1.5rem 1.5rem' }}>
+      No per-route overrides configured for {metricLabel}.
+    </p>
+  )
+}
+
+/**
  * Overview landing page (PR #105). Single screen that answers "are we OK
  * right now, and where should I look?" without parsing the full route
  * table. Composed of:
@@ -563,18 +599,14 @@ function Overview() {
           showing up as a big system contributor.
         </p>
 
-        {!hasAnyOverrides ? (
-          <p style={{ padding: '0 1.5rem 1.5rem' }}>
-            Set per-route targets in <code>config/route_targets.yaml</code>{' '}
-            to populate this view.
-          </p>
-        ) : offTargetRows.length === 0 ? (
-          <p style={{ padding: '0 1.5rem 1.5rem' }}>
-            No per-route overrides configured for{' '}
-            {CONTRIB_METRICS.find((m) => m.key === contribMetric)?.label ??
-              contribMetric}
-            .
-          </p>
+        {offTargetRows.length === 0 ? (
+          <OffTargetEmptyState
+            hasAnyOverrides={hasAnyOverrides}
+            metricLabel={
+              CONTRIB_METRICS.find((m) => m.key === contribMetric)?.label ??
+              contribMetric
+            }
+          />
         ) : (
           <table className="routes-table">
             <thead>
