@@ -35,7 +35,7 @@ serves this or is explicitly parked.
 - [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189); the agency comparison page (PR #198) now annotates this via its caveats list; 2026-08-11 addendum: laptop VP-only numerator caps ~33%, so ALL laptop SFMTA dates flag partial
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
-- [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — blocked on next archive rsync
+- [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — unblocked; 8/9–8/10 archives landed locally 2026-08-12
 - [NOTES-116](notes/NOTES-116.md) SFMTA route_service_profile lacks weekday rows (calendar_dates-only weekday service) — sev low-medium / eff low-medium — unblocked; check whether PR #194 fix + profile re-run suffices
 - [NOTES-118](notes/NOTES-118.md) Investigate scheduled-span data quality in runs (A90 67% zero-span, EXP/LCL junk route_ids) — sev low-medium / eff medium — unblocked; investigation first, guard is one possible outcome
 
@@ -56,5 +56,4 @@ designed UI. The comparison sprint shipped with PR #198.
 ## Deferred / trigger-based
 
 - [NOTES-88](notes/NOTES-88.md) `/api/routes` N+1 latency cliff over the tunnel — sev medium / eff medium — blocks public deploy only
-- [NOTES-49](notes/NOTES-49.md) Cloud migration phase 2 — managed Postgres — trigger-based; partly mooted by NOTES-95
-- [NOTES-50](notes/NOTES-50.md) Cloud migration phase 3 — deploy API + frontend — trigger: audience beyond personal
+- [NOTES-50](notes/NOTES-50.md) Cloud migration phase 3 — deploy API + frontend + hosted DB — trigger: audience beyond personal; absorbed the retired phase-2 managed-Postgres item 2026-08-12

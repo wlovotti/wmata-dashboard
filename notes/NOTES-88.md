@@ -18,8 +18,9 @@ slow link — it's almost certainly a per-route **N+1 query pattern**
 (iterating ~126 routes, ×metrics, ×days, plus the server-side `deltas`
 block from PR #125) that was free on the old sub-millisecond local
 Unix socket and explodes at ~9ms × thousands of round-trips over the
-network. The "warm path ~37ms" figure in NOTES-49 was measured against
-the local socket and silently stopped holding at cutover.
+network. The "warm path ~37ms" figure from the phase-1 cloud-migration
+notes was measured against the local socket and silently stopped
+holding at cutover.
 
 Recontextualized 2026-06-14: dev now runs on a local socket (no tunnel),
 so this no longer blocks dev or NOTES-84. It becomes a
