@@ -694,7 +694,7 @@ du -sh /mnt/pgdata/main    # Postgres data dir
 - **AWS Lightsail docs:** <https://docs.aws.amazon.com/lightsail/>
 - **Systemd units:** `deployment/systemd/`
 - **Backup script:** `deployment/scripts/backup_db.sh`
-- **NOTES-49**, **NOTES-50** (later phases; Phase 1 / NOTES-48 closed 2026-06-13)
+- **NOTES-50** (deploy API + frontend + hosted DB; Phase 1 / NOTES-48 closed 2026-06-13; the phase-2 managed-Postgres item was closed as superseded 2026-08-12 and folded into NOTES-50)
 
 ---
 

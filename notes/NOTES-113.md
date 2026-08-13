@@ -30,4 +30,5 @@ archive over, force the top-up manually:
 
 ## Dependencies
 
-Blocked on the next SFMTA archive rsync (`bin/pull-and-derive.sh`).
+Unblocked — the 2026-08-09 and 2026-08-10 SFMTA archive files landed
+in `archive/sfmta_raw_snapshots/` (verified locally 2026-08-12).

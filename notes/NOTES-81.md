@@ -21,7 +21,8 @@ Work:
 2. **Check downstream contamination** — per-date pipelines only process
    recent service dates, so the phantom dates were almost certainly
    never derived into `stop_events`; verify with a quick query against
-   `stop_events`/`runs` for those dates and note the result here.
+   `stop_events`/`runs` for those dates **in the laptop DB** (the
+   system of record since 2026-07-18) and note the result here.
 3. Optional forensics: the archived parquet files preserve the rows if
    the "which vehicles / which collection days" question ever matters.
 
