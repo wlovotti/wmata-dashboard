@@ -5262,9 +5262,7 @@ def get_system_shapes(db: Session) -> dict:
         _, shape_id = best[route_id]
         simplified = simplify_polyline(points_by_shape.get(shape_id, []))
         if len(simplified) >= 2:
-            routes.append(
-                {"route_id": route_id, "points": [[lat, lon] for lat, lon in simplified]}
-            )
+            routes.append({"route_id": route_id, "points": [[lat, lon] for lat, lon in simplified]})
 
     result = {"routes": routes}
     _shapes_cache["system"] = (time.monotonic(), result)
