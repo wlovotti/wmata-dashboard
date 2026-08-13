@@ -57,6 +57,7 @@ from src.models import (
     RouteMetricsDailyOverlay,
     RouteServiceProfile,
     Run,
+    Shape,
     Stop,
     StopEvent,
     StopTime,
@@ -79,6 +80,7 @@ from src.service_profile import (
     classify_route_frequency,
     compute_route_frequency_classes,
 )
+from src.shape_simplify import simplify_polyline
 from src.time_periods import (
     ALL_DAY_TYPES,
     ALL_HOURS,
@@ -5202,3 +5204,66 @@ def get_corridor_constituent_segments(
         "period": period,
         "segments": segments_payload,
     }
+
+
+# Bulk system-map shapes (NOTES-84). One representative simplified polyline
+# per current route. Keyed by a constant because the payload only changes on
+# GTFS reload; the short TTL exists to pick that reload up without a restart.
+_SHAPES_TTL_SEC = 60.0
+_shapes_cache: dict[str, tuple[float, dict]] = {}
+
+
+def get_system_shapes(db: Session) -> dict:
+    """All current routes' representative polylines for the Overview system map.
+
+    For each route with at least one ``is_current`` trip, elects the
+    ``shape_id`` serving the most current trips (ties broken by shape_id for
+    determinism) and returns its points, Douglas-Peucker-simplified, as
+    compact ``[lat, lon]`` pair-arrays.
+
+    Returns:
+        ``{"routes": [{"route_id": ..., "points": [[lat, lon], ...]}, ...]}``
+        sorted by route_id. Routes whose elected shape has < 2 points are
+        omitted (nothing drawable).
+
+    Cached for ``_SHAPES_TTL_SEC`` under a constant key — the payload is a
+    pure function of the current GTFS snapshot.
+    """
+    cached = _shapes_cache.get("system")
+    if cached is not None and (time.monotonic() - cached[0]) < _SHAPES_TTL_SEC:
+        return cached[1]
+
+    trip_counts = (
+        db.query(Trip.route_id, Trip.shape_id, func.count(Trip.id).label("n"))
+        .filter(Trip.is_current.is_(True), Trip.shape_id.isnot(None))
+        .group_by(Trip.route_id, Trip.shape_id)
+        .all()
+    )
+    best: dict[str, tuple[int, str]] = {}
+    for route_id, shape_id, n in trip_counts:
+        candidate = (n, shape_id)
+        if route_id not in best or candidate > best[route_id]:
+            best[route_id] = candidate
+
+    shape_ids = {shape_id for (_, shape_id) in best.values()}
+    points_by_shape: dict[str, list[tuple[float, float]]] = {s: [] for s in shape_ids}
+    if shape_ids:
+        rows = (
+            db.query(Shape.shape_id, Shape.shape_pt_lat, Shape.shape_pt_lon)
+            .filter(Shape.shape_id.in_(shape_ids))
+            .order_by(Shape.shape_id, Shape.shape_pt_sequence)
+            .all()
+        )
+        for shape_id, lat, lon in rows:
+            points_by_shape[shape_id].append((lat, lon))
+
+    routes = []
+    for route_id in sorted(best):
+        _, shape_id = best[route_id]
+        simplified = simplify_polyline(points_by_shape.get(shape_id, []))
+        if len(simplified) >= 2:
+            routes.append({"route_id": route_id, "points": [[lat, lon] for lat, lon in simplified]})
+
+    result = {"routes": routes}
+    _shapes_cache["system"] = (time.monotonic(), result)
+    return result

@@ -593,3 +593,34 @@ def test_schedule_audit_invalid_direction(client):
     response = client.get("/api/schedule-audit?direction_id=2")
     assert response.status_code == 400
     assert "direction" in response.json()["detail"].lower()
+
+
+@pytest.mark.api
+def test_get_system_shapes_empty(client):
+    """GET /api/shapes on an empty DB returns an empty routes list, not 404."""
+    import api.aggregations as agg
+
+    agg._shapes_cache.clear()
+    response = client.get("/api/shapes")
+    assert response.status_code == 200
+    assert response.json() == {"routes": []}
+
+
+@pytest.mark.api
+def test_get_system_shapes_returns_current_route_polyline(client, db_session):
+    """GET /api/shapes returns one simplified polyline per current route."""
+    import api.aggregations as agg
+
+    agg._shapes_cache.clear()
+    db_session.add(Trip(trip_id="s1", route_id="TESTS", shape_id="SH", is_current=True))
+    db_session.add_all(
+        [
+            Shape(shape_id="SH", shape_pt_lat=38.90, shape_pt_lon=-77.00, shape_pt_sequence=1),
+            Shape(shape_id="SH", shape_pt_lat=38.91, shape_pt_lon=-77.00, shape_pt_sequence=2),
+        ]
+    )
+    db_session.commit()
+    response = client.get("/api/shapes")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["routes"] == [{"route_id": "TESTS", "points": [[38.90, -77.00], [38.91, -77.00]]}]
