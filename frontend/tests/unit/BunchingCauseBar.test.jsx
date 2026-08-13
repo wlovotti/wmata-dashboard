@@ -9,25 +9,32 @@
  * so the component fell through to `data.breakdown[key]` and threw —
  * with no error boundary above it, that unmounted the whole RouteDetail
  * page (the blank checked-in Playwright baselines this item closes).
+ *
+ * Missing/malformed data is a distinct claim from "confirmed zero bunched
+ * pairs": the former renders "Cause breakdown unavailable.", the latter
+ * renders "No bunched pairs in the selected window." — asserting on the
+ * exact text keeps this from silently reverting to a false zero-claim.
  */
 import { render } from '@testing-library/react'
 import { BunchingCauseBar } from '../../src/components/PeriodDrilldown'
 
 describe('BunchingCauseBar', () => {
-  test('malformed data (no breakdown, non-zero n_bunched_pairs) renders empty state instead of throwing', () => {
-    expect(() => render(<BunchingCauseBar data={{ n_bunched_pairs: undefined }} />)).not.toThrow()
+  test('non-zero n_bunched_pairs with no breakdown renders "unavailable", not a zero-claim, without throwing', () => {
+    const { getByText } = render(<BunchingCauseBar data={{ n_bunched_pairs: 42 }} />)
+    expect(getByText('Cause breakdown unavailable.')).toBeInTheDocument()
   })
 
-  test('empty object payload renders empty state instead of throwing', () => {
-    expect(() => render(<BunchingCauseBar data={{}} />)).not.toThrow()
+  test('empty object payload renders "unavailable" without throwing', () => {
+    const { getByText } = render(<BunchingCauseBar data={{}} />)
+    expect(getByText('Cause breakdown unavailable.')).toBeInTheDocument()
   })
 
-  test('null data renders the "no bunched pairs" empty state', () => {
+  test('null data renders "unavailable" (not a zero-claim — no fetch response yet)', () => {
     const { getByText } = render(<BunchingCauseBar data={null} />)
-    expect(getByText('No bunched pairs in the selected window.')).toBeInTheDocument()
+    expect(getByText('Cause breakdown unavailable.')).toBeInTheDocument()
   })
 
-  test('n_bunched_pairs === 0 renders the empty state', () => {
+  test('n_bunched_pairs === 0 with a present breakdown renders the true empty state', () => {
     const { getByText } = render(
       <BunchingCauseBar data={{ n_bunched_pairs: 0, breakdown: {} }} />,
     )

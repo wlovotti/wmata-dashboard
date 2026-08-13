@@ -113,11 +113,23 @@ function bunchingTooltip({ active, payload }) {
 // textbook (late leaders pick up more passengers, trailers run light), but
 // the five-bucket decomposition is this dashboard's, not industry-standard.
 function BunchingCauseBar({ data }) {
-  // `!data.breakdown` also catches malformed/short-circuit-fulfilled
-  // responses (e.g. a test stub or an old cached payload) that have
-  // `n_bunched_pairs` but no `breakdown` object — without it the lookup
-  // below throws and takes down the whole route (no error boundary here).
-  if (!data || !data.breakdown || data.n_bunched_pairs === 0) {
+  // Missing/malformed data (no `data` yet — the initial pre-fetch state —
+  // or a short-circuit-fulfilled response, e.g. a test stub or a stale
+  // cached payload, that has `n_bunched_pairs` but no `breakdown` object)
+  // is NOT the same claim as "confirmed zero bunched pairs": say so
+  // explicitly rather than falling into the zero-claim empty state below.
+  // Without the `!data.breakdown` guard specifically, the lookup further
+  // down throws and takes down the whole route (no error boundary here).
+  if (!data || !data.breakdown) {
+    return (
+      <div className="bunching-cause-block">
+        <h3>Bunching cause decomposition</h3>
+        <p className="drilldown-empty">Cause breakdown unavailable.</p>
+      </div>
+    )
+  }
+
+  if (data.n_bunched_pairs === 0) {
     return (
       <div className="bunching-cause-block">
         <h3>Bunching cause decomposition</h3>
