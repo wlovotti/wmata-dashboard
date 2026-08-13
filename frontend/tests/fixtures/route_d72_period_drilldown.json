@@ -1,0 +1,73 @@
+{
+  "route_id": "D72",
+  "service_date": "2026-05-16",
+  "day_type": "weekday",
+  "ewt": [
+    {
+      "time_period": "AM Peak (6-9)",
+      "ewt_seconds": 112.4,
+      "awt_seconds": 302.1,
+      "swt_seconds": 189.7,
+      "n_observed_headways": 24,
+      "n_scheduled_headways": 26,
+      "coverage_ratio": 0.923,
+      "frequent_cell_hours": 3
+    },
+    {
+      "time_period": "Midday (9-15)",
+      "ewt_seconds": 78.9,
+      "awt_seconds": 245.3,
+      "swt_seconds": 166.4,
+      "n_observed_headways": 40,
+      "n_scheduled_headways": 44,
+      "coverage_ratio": 0.909,
+      "frequent_cell_hours": 6
+    },
+    {
+      "time_period": "PM Peak (15-19)",
+      "ewt_seconds": 143.6,
+      "awt_seconds": 331.8,
+      "swt_seconds": 188.2,
+      "n_observed_headways": 30,
+      "n_scheduled_headways": 34,
+      "coverage_ratio": 0.882,
+      "frequent_cell_hours": 4
+    },
+    {
+      "time_period": "Evening (19-24)",
+      "ewt_seconds": 95.2,
+      "awt_seconds": 270.5,
+      "swt_seconds": 175.3,
+      "n_observed_headways": 18,
+      "n_scheduled_headways": 21,
+      "coverage_ratio": 0.857,
+      "frequent_cell_hours": 2
+    }
+  ],
+  "bunching": [
+    {
+      "time_period": "AM Peak (6-9)",
+      "bunching_rate": 0.167,
+      "bunching_count": 4,
+      "total_headways": 24
+    },
+    {
+      "time_period": "Midday (9-15)",
+      "bunching_rate": 0.1,
+      "bunching_count": 4,
+      "total_headways": 40
+    },
+    {
+      "time_period": "PM Peak (15-19)",
+      "bunching_rate": 0.233,
+      "bunching_count": 7,
+      "total_headways": 30
+    },
+    {
+      "time_period": "Evening (19-24)",
+      "bunching_rate": 0.111,
+      "bunching_count": 2,
+      "total_headways": 18
+    }
+  ]
+}
