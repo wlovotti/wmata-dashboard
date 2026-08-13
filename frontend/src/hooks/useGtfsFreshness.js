@@ -63,11 +63,17 @@ function fetchGtfsFreshness() {
  * banner/footer don't render (or keep showing the last good value); it
  * must never block or error the page.
  *
+ * @param {*} [refetchTrigger] - Optional value to include in the effect's
+ *   dependency array so a caller can force an immediate refetch (and reset
+ *   of the polling interval) by changing it — e.g. App.jsx's header Refresh
+ *   button bumps a counter here instead of remounting this hook's owner,
+ *   since remounting alone would just replay the module-level cache rather
+ *   than hit the network again (the frontend-chrome honesty fixes, PR #204).
  * @returns {object|null} The freshness payload (`snapshot_date`,
  *   `created_at`, `feed_version`, `feed_start_date`, `feed_end_date`,
  *   `status`), or null until the first successful response.
  */
-function useGtfsFreshness() {
+function useGtfsFreshness(refetchTrigger) {
   const [gtfsFreshness, setGtfsFreshness] = useState(_cachedGtfsFreshness)
 
   useEffect(() => {
@@ -88,7 +94,7 @@ function useGtfsFreshness() {
       cancelled = true
       clearInterval(intervalId)
     }
-  }, [])
+  }, [refetchTrigger])
 
   return gtfsFreshness
 }

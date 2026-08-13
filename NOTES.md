@@ -50,6 +50,7 @@ designed UI. The comparison sprint shipped with PR #198.
 - [NOTES-86](notes/NOTES-86.md) System-level weekly narrative — sev low / eff medium — coordinate placement with NOTES-84
 - [NOTES-61](notes/NOTES-61.md) Hold-down policy / dispatching candidates page — sev low — unblocked
 - [NOTES-20](notes/NOTES-20.md) Tighter rider-experience OTP — sev low — deferred
+- [NOTES-120](notes/NOTES-120.md) Playwright visual-regression gate insensitive to copy-sized diffs — sev low / eff low — unblocked
 
 ## Deferred / trigger-based
 

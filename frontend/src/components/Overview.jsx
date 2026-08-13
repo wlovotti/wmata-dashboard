@@ -240,7 +240,8 @@ const OVERVIEW_TREND_URLS = [
 ]
 
 /**
- * Off-target panel body when there are no rows to rank (NOTES-87 item 3).
+ * Off-target panel body when there are no rows to rank (the frontend-chrome
+ * honesty fixes, PR #204).
  *
  * The panel only ever shows routes with a hand-edited override in
  * `config/route_targets.yaml` (`routes:` block) — it is empty out of the
@@ -250,12 +251,32 @@ const OVERVIEW_TREND_URLS = [
  * currently-selected metric," since the latter is a narrower, more
  * reassuring claim (the config isn't empty, this metric just isn't in it).
  *
+ * A third, distinct case: `targetsData` hasn't loaded yet (fetch still in
+ * flight) or failed (swallowed by Overview's `.catch`, which degrades to
+ * the empty state rather than blocking the page). Neither of those is "the
+ * config file is empty" — asserting that while we don't actually know the
+ * config's contents would be its own dishonesty, so this case gets a
+ * neutral message instead of the confident claim about
+ * `route_targets.yaml`.
+ *
  * @param {boolean} hasAnyOverrides - whether `/api/targets`' `routes` block
- *   has at least one entry, for any metric.
+ *   has at least one entry, for any metric. Only meaningful when
+ *   `targetsLoaded` is true.
+ * @param {boolean} targetsLoaded - whether `/api/targets` has resolved
+ *   (successfully or not) — i.e. `targetsData != null` in Overview. False
+ *   while the fetch is in flight, or forever if it failed.
  * @param {string} metricLabel - display label of the currently-selected
  *   metric (e.g. "EWT"), used only in the narrower sub-message.
  */
-export function OffTargetEmptyState({ hasAnyOverrides, metricLabel }) {
+export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabel }) {
+  if (!targetsLoaded) {
+    return (
+      <p style={{ padding: '0 1.5rem 1.5rem' }}>
+        Per-route target configuration isn't available right now, so this
+        panel can't say whether any overrides are configured.
+      </p>
+    )
+  }
   if (!hasAnyOverrides) {
     return (
       <p style={{ padding: '0 1.5rem 1.5rem' }}>
@@ -602,6 +623,7 @@ function Overview() {
         {offTargetRows.length === 0 ? (
           <OffTargetEmptyState
             hasAnyOverrides={hasAnyOverrides}
+            targetsLoaded={targetsData != null}
             metricLabel={
               CONTRIB_METRICS.find((m) => m.key === contribMetric)?.label ??
               contribMetric

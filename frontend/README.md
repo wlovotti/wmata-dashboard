@@ -42,10 +42,11 @@ npx playwright test --update-snapshots   # regenerate baselines after UI changes
 npx playwright test --ui                 # interactive UI mode for debugging
 ```
 
-Playwright specs live in `tests/e2e/` and cover three pages: Overview (`/`),
-RouteList (`/routes`), and RouteDetail for route D72 (`/route/D72`). All
-`/api/**` calls are intercepted by `page.route()` and served from committed
-JSON fixtures in `tests/fixtures/` — no backend is required.
+Playwright specs live in `tests/e2e/` and cover four pages: Overview (`/`),
+RouteList (`/routes`), RouteDetail for route D72 (`/route/D72`), and
+Segments (`/segments`). All `/api/**` calls are intercepted by `page.route()`
+and served from committed JSON fixtures in `tests/fixtures/` — no backend is
+required.
 
 **Baseline snapshots are platform-specific.** Playwright stores one PNG per
 platform (`*-chromium-linux.png`, `*-chromium-darwin.png`). CI runs on Linux
