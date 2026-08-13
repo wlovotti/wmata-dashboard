@@ -29,9 +29,11 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-test('Segments: nav link visible', async ({ page }) => {
+test('Segments: reachable via the Diagnostics nav link', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByRole('link', { name: 'Segments' })).toBeVisible()
+  // Segments no longer has its own top-level nav link (NOTES-84 nav
+  // collapse) — it's reached via the Diagnostics index page instead.
+  await expect(page.getByRole('link', { name: 'Diagnostics' })).toBeVisible()
 })
 
 test('Segments: page heading renders', async ({ page }) => {
