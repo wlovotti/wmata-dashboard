@@ -1411,3 +1411,36 @@ main {
 .agency-comparison-caveats li {
   margin-bottom: 0.5rem;
 }
+
+/* Diagnostics index (NOTES-84 nav collapse) */
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  padding: 0.5rem 0 0.5rem;
+}
+
+.diagnostics-card {
+  display: block;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.diagnostics-card:hover {
+  border-color: #94a3b8;
+}
+
+.diagnostics-card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+.diagnostics-card p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
