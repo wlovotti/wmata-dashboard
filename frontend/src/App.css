@@ -1,3 +1,15 @@
+/* Design tokens (NOTES-84 — seeded from the existing hardcoded palette;
+   NOTES-85 migrates the rest of this file onto them). New rules only —
+   do not rewrite existing rules to tokens in this PR. */
+:root {
+  --color-good: #0E8A6F;
+  --color-warn: #D97706;
+  --color-bad: #C8102E;
+  --color-brand: #002F6C;
+  --color-muted: #64748b;
+  --color-neutral: #94a3b8;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -1443,4 +1455,58 @@ main {
   margin: 0;
   font-size: 0.85rem;
   color: #64748b;
+}
+
+/* Overview hero (NOTES-84 editorial redesign) */
+.overview-hero {
+  border-radius: 0.75rem;
+  padding: 1.75rem 2rem;
+  margin-bottom: 1.5rem;
+  border-left: 6px solid var(--color-neutral);
+  background: #f8fafc;
+}
+
+.overview-hero-green { border-left-color: var(--color-good); }
+.overview-hero-yellow { border-left-color: var(--color-warn); }
+.overview-hero-red { border-left-color: var(--color-bad); }
+.overview-hero-neutral { border-left-color: var(--color-neutral); }
+
+.overview-hero-headline {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.overview-hero-delta {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: var(--color-muted);
+}
+
+.overview-hero-subline {
+  margin: 0.4rem 0 0;
+  font-size: 0.95rem;
+  color: var(--color-muted);
+}
+
+.compare-strip {
+  margin: 0.9rem 0 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+}
+
+/* Suffixes match formatDelta's actual tint values in agencyComparison.js
+   (green / red / neutral) — NOT the good/bad/flat names used elsewhere. */
+.compare-strip-delta-green { color: var(--color-good); }
+.compare-strip-delta-red { color: var(--color-bad); }
+.compare-strip-delta-neutral { color: var(--color-muted); }
+
+.compare-strip-link {
+  color: var(--color-brand);
+  text-decoration: none;
+  font-weight: 600;
 }
