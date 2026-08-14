@@ -180,6 +180,12 @@ function Overview() {
           underperformance — the routes whose attention would move the
           system the most.
         </p>
+        {contribData?.days_included != null && contribData.days_included < contribData.days && (
+          <p style={{ color: 'var(--color-muted)', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
+            Based on {contribData.days_included} of {contribData.days} days —{' '}
+            {contribData.days - contribData.days_included} excluded for partial data collection.
+          </p>
+        )}
         <div className="filters" style={{ marginBottom: '0.75rem' }}>
           <div>
             <label htmlFor="overview-contrib-metric" style={{ marginRight: '0.5rem' }}>

@@ -1,6 +1,7 @@
 {
   "metric": "otp",
   "days": 30,
+  "days_included": 30,
   "baseline_value": 73.2,
   "system_target_value": 75.0,
   "contributors": [

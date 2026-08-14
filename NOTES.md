@@ -52,7 +52,6 @@ designed UI. The comparison sprint shipped with PR #198.
 - [NOTES-120](notes/NOTES-120.md) Playwright visual-regression gate insensitive to copy-sized diffs — sev low / eff low — unblocked
 - [NOTES-121](notes/NOTES-121.md) Movers-panel magnitude floor for week-over-week deltas — sev low / eff low-medium — unblocked
 - [NOTES-122](notes/NOTES-122.md) Client-side caching for page navigation (Overview refetches everything on every visit) — sev low-medium / eff medium — unblocked; related to NOTES-88 (server-side, distinct)
-- [NOTES-123](notes/NOTES-123.md) Contributors ranking averages partial-collection days into raw means (EWT 10x-inflated) — sev low-medium / eff low-medium — unblocked; consumers-of-flag issue, distinct from NOTES-104
 - [NOTES-125](notes/NOTES-125.md) Segment-slip origin exclusion misses multi-bay terminals (layover contaminates the "second" segment) — sev low-medium / eff low-medium — unblocked; M60 Fort Totten case verified 2026-08-13
 
 ## Deferred / trigger-based
