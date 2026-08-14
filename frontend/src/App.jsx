@@ -10,6 +10,7 @@ import Targets from './components/Targets'
 import ScheduleAudit from './components/ScheduleAudit'
 import SegmentDiagnostic from './components/SegmentDiagnostic'
 import AgencyComparison from './components/AgencyComparison'
+import DiagnosticsIndex from './components/DiagnosticsIndex'
 import useGtfsFreshness from './hooks/useGtfsFreshness'
 import './App.css'
 
@@ -131,17 +132,11 @@ function App() {
             <NavLink to="/routes" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
               Routes
             </NavLink>
-            <NavLink to="/blocks" end className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Blocks
+            <NavLink to="/compare" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Compare
             </NavLink>
-            <NavLink to="/targets" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Targets
-            </NavLink>
-            <NavLink to="/schedule-audit" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Schedule audit
-            </NavLink>
-            <NavLink to="/segments" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Segments
+            <NavLink to="/diagnostics" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              Diagnostics
             </NavLink>
           </nav>
         </header>
@@ -157,10 +152,9 @@ function App() {
             <Route path="/targets" element={<Targets />} />
             <Route path="/schedule-audit" element={<ScheduleAudit />} />
             <Route path="/segments" element={<SegmentDiagnostic />} />
-            {/* Agency comparison page (PR #198): reachable by URL only for now — no nav link, so the
-                baselined pages' shared header chrome (Overview / RouteList /
-                RouteDetail-D72 Playwright visual regressions) is untouched.
-                Add a nav entry once NOTES-84 revisits the header. */}
+            <Route path="/diagnostics" element={<DiagnosticsIndex />} />
+            {/* Agency comparison page (PR #198), promoted to the nav by the
+                NOTES-84 nav collapse. */}
             <Route path="/compare" element={<AgencyComparison />} />
           </Routes>
         </div>
