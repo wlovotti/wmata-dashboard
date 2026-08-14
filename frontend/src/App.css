@@ -1088,6 +1088,14 @@ main {
     min-width: 800px;
   }
 
+  /* Override .routes-table's 800px mobile min-width for the 3-column
+     agency comparison table (PR #211 review) — that width was sized
+     for RouteList's ~10-column grid and forces this narrower table to
+     overflow unnecessarily. */
+  .agency-compare-table {
+    min-width: 0;
+  }
+
   .filters {
     flex-direction: column;
     align-items: stretch;
@@ -1282,51 +1290,43 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-/* Agency comparison page (PR #198 — "the north star"). Deliberately
-   plain: two equal-width columns of stat tiles, reusing the app's
-   existing card/table color tokens rather than introducing a new
-   palette. Visual polish is a later pass (NOTES-84/85). */
-.agency-comparison-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1.5rem;
+/* Agency comparison page (PR #198 — "the north star"; reformatted to a
+   table by the comparison-table reformat, PR #211). One row per metric, one column per agency, so
+   comparing WMATA vs Muni on any metric reads across a single row
+   instead of jumping between per-agency columns of tiles. Built on
+   .routes-table; reuses the app's existing card/table color tokens
+   rather than introducing a new palette. Visual polish is a later
+   pass (NOTES-85). */
+.agency-compare-table-wrapper {
+  overflow-x: auto;
 }
 
-.agency-column {
-  border: 1px solid #e2e8f0;
-  border-radius: 0.5rem;
-  padding: 1.25rem;
+.agency-compare-table th,
+.agency-compare-table td {
+  text-align: center;
 }
 
-.agency-column h3 {
-  margin: 0 0 1rem;
-  color: #1e293b;
-  font-size: 1.05rem;
+.agency-compare-table th {
+  text-transform: none;
 }
 
-.agency-metric-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 1rem;
+.agency-compare-table th:first-child,
+.agency-compare-table td.agency-compare-metric-label {
+  text-align: left;
 }
 
-.agency-metric-tile {
-  background: #f8fafc;
-  border-radius: 0.5rem;
-  padding: 0.85rem 1rem;
-}
-
-.agency-metric-label {
-  font-size: 0.75rem;
+.agency-compare-metric-label {
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #64748b;
-  margin-bottom: 0.35rem;
+  color: #1e293b;
+  white-space: nowrap;
+}
+
+.agency-compare-cell {
+  min-width: 9rem;
 }
 
 .agency-metric-value {
-  font-size: 1.6rem;
+  font-size: 1.3rem;
   font-weight: 700;
   color: #1e293b;
   font-variant-numeric: tabular-nums;
