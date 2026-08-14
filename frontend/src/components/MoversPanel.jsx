@@ -71,7 +71,7 @@ function MoversPanel({ routes }) {
       // move isn't "worse" or "better," and letting it count toward the
       // 3-mover floor would understate how thin the ranking really is.
       // Sub-noise magnitude floors (e.g. treating |delta| < X as flat too)
-      // are a tracked follow-up, not handled here.
+      // are a tracked follow-up (NOTES-121), not handled here.
       if (delta.value === 0) continue
       const isImprovement = higherBetter ? delta.value > 0 : delta.value < 0
       if (isImprovement !== wantImproving) continue

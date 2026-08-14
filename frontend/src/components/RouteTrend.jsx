@@ -172,7 +172,12 @@ function visibleGhostRows(ghostData) {
  * `ghostData` (NOTES-84) is an optional parallel series rendered as small
  * low-opacity dots over the same x-axis — e.g. the raw daily points ghosted
  * under a smoothed 7-day line. Ghost rows must use dates present in `data`;
- * a ghost date outside the line's x-axis domain will not place a dot.
+ * a ghost date outside the line's x-axis domain will not place a dot. Ghost
+ * rows with `data_quality === 'partial'` render larger and near-opaque
+ * (matching the complete-series partial-day dot styling) rather than the
+ * default small/faint ghost dot — `data` itself may be a smoothed series
+ * with `data_quality` stripped (e.g. `rollingMean`'s output), so a ghost
+ * point is often the only place partial-day coverage is still visible.
  */
 function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) {
   // Separate partial rows from complete rows. Partial rows are kept in the
@@ -192,11 +197,20 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
     }
   })
 
+  // Ghost rows are computed here (rather than down with the rest of the
+  // dot/domain math below) so the "no trend data" guard can see them —
+  // SystemTrend passes smoothed `data` with data_quality stripped
+  // (rollingMean drops it), so an all-partial window has no complete or
+  // partial rows in `augmented` at all; without counting ghostRows the
+  // guard would render "no trend data" instead of the ghost dots that are
+  // the only signal available for that window.
+  const ghostRows = visibleGhostRows(ghostData)
+
   // For the "no trend data" guard: check whether any complete OR partial row
-  // has a non-null value.
-  const hasAnyData = augmented.some(
-    (row) => row.value != null || (row._partial && row._partialValue != null),
-  )
+  // has a non-null value, OR there's at least one ghost point to show.
+  const hasAnyData =
+    augmented.some((row) => row.value != null || (row._partial && row._partialValue != null)) ||
+    ghostRows.length > 0
 
   if (!hasAnyData) {
     return (
@@ -241,7 +255,6 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
     .filter((row) => !row._partial && row.value != null)
     .map((row) => row.value)
   const partialValues = partialDots.map((row) => row._partialValue)
-  const ghostRows = visibleGhostRows(ghostData)
   const ghostValues = ghostRows.map((row) => row.value)
   const allValues = [...completeValues, ...partialValues, ...ghostValues]
   const domainMin = allValues.length ? Math.min(...allValues) : 0
@@ -305,9 +318,9 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
             key={`ghost-${row.date}`}
             x={row.date}
             y={row.value}
-            r={1.75}
+            r={row.data_quality === 'partial' ? 3 : 1.75}
             fill={row.data_quality === 'partial' ? '#94a3b8' : color}
-            fillOpacity={0.35}
+            fillOpacity={row.data_quality === 'partial' ? 0.9 : 0.35}
             stroke="none"
             className="sparkline-ghost-dot"
             ifOverflow="extendDomain"

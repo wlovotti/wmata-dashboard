@@ -18,7 +18,7 @@
     { "date": "2026-04-28", "otp_percentage": 70.7 },
     { "date": "2026-04-29", "otp_percentage": 74.5 },
     { "date": "2026-04-30", "otp_percentage": 73.2 },
-    { "date": "2026-05-01", "otp_percentage": 72.8 },
+    { "date": "2026-05-01", "otp_percentage": 72.8, "data_quality": "partial", "coverage_pct": 0.41 },
     { "date": "2026-05-02", "otp_percentage": 71.5 },
     { "date": "2026-05-03", "otp_percentage": 70.9 },
     { "date": "2026-05-04", "otp_percentage": 74.1 },
