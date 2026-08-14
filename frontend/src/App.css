@@ -1488,7 +1488,21 @@ main {
   }
 }
 
-/* When the map errors, let the quiet note shrink and the movers dominate. */
+/* Fail-quiet fold collapse: when the map errors, drop the 3fr/2fr split
+   entirely rather than leaving a mostly-empty ~60%-wide box beside the
+   movers panel — this is what makes SystemMap's "the movers list carries
+   the answer alone" docstring claim actually true. :has() is supported by
+   all current evergreen browsers (including CI's Chromium lane), so no
+   fallback is needed. */
+.overview-fold-with-map:has(.system-map-error) {
+  grid-template-columns: 1fr;
+}
+
+/* Belt-and-suspenders only: keeps the error box from stretching to match a
+   taller sibling if it and the movers panel ever end up sharing a grid row
+   again. A no-op today — the :has() rule above already collapses to a
+   single column (and thus a single-item row) whenever the error box is
+   present. */
 .overview-fold-with-map .system-map-error {
   align-self: stretch;
 }

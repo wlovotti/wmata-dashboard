@@ -56,6 +56,15 @@ function SystemMap({ scorecardRoutes }) {
     [scorecardRoutes],
   )
 
+  // Memoized on `shapes` alone so its identity is stable across unrelated
+  // Overview re-renders (e.g. the "Biggest drags" metric select) — an
+  // inline flatMap in the render body would hand FitBounds a new array
+  // every render, whose effect deps would then re-fire and snap a
+  // panned/zoomed map back to full extent. Hooks must run unconditionally,
+  // so this sits above the early returns below; `shapes` can still be null
+  // pre-load, hence the `?? []`.
+  const bounds = useMemo(() => (shapes ?? []).flatMap((route) => route.points), [shapes])
+
   if (error) {
     return (
       <div className="chart-container system-map-error">
@@ -80,7 +89,6 @@ function SystemMap({ scorecardRoutes }) {
     )
   }
 
-  const bounds = shapes.flatMap((route) => route.points)
   const defaultCenter = [38.9072, -77.0369]
 
   return (
