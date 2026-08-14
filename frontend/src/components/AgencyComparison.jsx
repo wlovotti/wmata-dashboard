@@ -2,15 +2,16 @@ import { useEffect, useState } from 'react'
 import { METRIC_ORDER, METRIC_LABELS, formatMetricValue, formatDelta, formatServiceLevel } from '../utils/agencyComparison'
 
 /**
- * One headline-KPI tile: big number, week-over-week delta pill, and a
+ * One headline-KPI cell: big number, week-over-week delta pill, and a
  * small partial-day disclosure when any of the window's days for this
- * metric were flagged `data_quality='partial'` (NOTES-104).
+ * metric were flagged `data_quality='partial'` (NOTES-104). Rendered as
+ * a `<td>` so a metric's values line up across agencies on one table
+ * row (the comparison-table reformat, PR TODO).
  */
-function MetricTile({ metric, metricData }) {
+function MetricCell({ metric, metricData }) {
   const delta = metricData ? formatDelta(metric, metricData.wow_delta) : null
   return (
-    <div className="agency-metric-tile">
-      <div className="agency-metric-label">{METRIC_LABELS[metric]}</div>
+    <td className="agency-compare-cell">
       <div className="agency-metric-value">
         {formatMetricValue(metric, metricData?.window_mean)}
       </div>
@@ -23,63 +24,46 @@ function MetricTile({ metric, metricData }) {
           {metricData.days_included === 1 ? '' : 's'} flagged partial
         </div>
       )}
-    </div>
+    </td>
   )
 }
 
 /**
- * Schedule-promise tile (NOTES-115): trip-weighted median daytime
+ * Schedule-promise cell (NOTES-115): trip-weighted median daytime
  * scheduled headway + share of service at ≤15-min headways, computed
  * from the current GTFS — no week-over-week delta by design (it only
  * changes when an agency ships a new schedule).
  */
-function ServiceLevelTile({ serviceLevel }) {
+function ServiceLevelCell({ serviceLevel }) {
   const formatted = formatServiceLevel(serviceLevel)
   return (
-    <div className="agency-metric-tile">
-      <div className="agency-metric-label">Daytime service level</div>
+    <td className="agency-compare-cell">
       <div className="agency-metric-value">{formatted ? formatted.median : '—'}</div>
       {formatted?.share && <div className="agency-metric-partial">{formatted.share}</div>}
       <div className="agency-metric-partial">
         Median scheduled headway · weekday 7:00–19:00 · current schedule
       </div>
-    </div>
+    </td>
   )
 }
 
 /**
- * One agency's column: display name heading + its headline-KPI tiles
- * (OTP, service-delivered, scheduled wait, EWT, bunching) plus the
- * daytime service-level tile.
- */
-function AgencyColumn({ agency }) {
-  return (
-    <div className="agency-column">
-      <h3>{agency.display_name}</h3>
-      <div className="agency-metric-grid">
-        {METRIC_ORDER.map((metric) => (
-          <MetricTile key={metric} metric={metric} metricData={agency.metrics?.[metric]} />
-        ))}
-        <ServiceLevelTile serviceLevel={agency.service_level} />
-      </div>
-    </div>
-  )
-}
-
-/**
- * `/compare` page (PR #198 — "the north star"). Two columns, WMATA vs
- * SFMTA, side by side on the headline KPIs (OTP, service-delivered,
- * scheduled wait, EWT, bunching) plus the daytime service-level tile,
- * over the matched window that began 2026-07-23. Reads a
- * single endpoint (`/api/agency-comparison`) that already computed the
- * window means, week-over-week deltas, and comparability caveats — this
- * component is a plain renderer over that payload.
+ * `/compare` page (PR #198 — "the north star"). One row per headline
+ * metric (OTP, service-delivered, scheduled wait, EWT, bunching, plus
+ * the daytime service-level row), one column per agency (WMATA vs
+ * SFMTA), over the matched window that began 2026-07-23 — a table
+ * layout so comparing one metric across agencies reads left-to-right
+ * on a single row instead of jumping between per-agency columns of
+ * tiles (the comparison-table reformat, PR TODO). Reads a single endpoint (`/api/agency-comparison`)
+ * that already computed the window means, week-over-week deltas, and
+ * comparability caveats — this component is a plain renderer over that
+ * payload.
  *
- * Deliberately plain per the item's scope decision: ship ugly-but-honest
- * now, defer visual polish to the Overview editorial redesign (PR #209)
- * and NOTES-85. The comparability caveats are rendered in the page body
- * (not a tooltip) per the same scope decision — a comparison that hides
- * its caveats is worse than none.
+ * Deliberately plain per the item's scope decision: reuse the app's
+ * existing `routes-table` styling rather than a new palette, defer
+ * further visual polish to NOTES-85. The comparability caveats are
+ * rendered in the page body (not a tooltip) per the PR #198 scope
+ * decision — a comparison that hides its caveats is worse than none.
  */
 function AgencyComparison() {
   const [data, setData] = useState(null)
@@ -153,10 +137,37 @@ function AgencyComparison() {
             <code>DATABASE_URL</code> / <code>SFMTA_DATABASE_URL</code> and reload.
           </p>
         ) : (
-          <div className="agency-comparison-grid">
-            {agencies.map((agency) => (
-              <AgencyColumn key={agency.agency} agency={agency} />
-            ))}
+          <div className="agency-compare-table-wrapper">
+            <table className="routes-table agency-compare-table">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  {agencies.map((agency) => (
+                    <th key={agency.agency}>{agency.display_name}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {METRIC_ORDER.map((metric) => (
+                  <tr key={metric}>
+                    <td className="agency-compare-metric-label">{METRIC_LABELS[metric]}</td>
+                    {agencies.map((agency) => (
+                      <MetricCell
+                        key={agency.agency}
+                        metric={metric}
+                        metricData={agency.metrics?.[metric]}
+                      />
+                    ))}
+                  </tr>
+                ))}
+                <tr>
+                  <td className="agency-compare-metric-label">Daytime service level</td>
+                  {agencies.map((agency) => (
+                    <ServiceLevelCell key={agency.agency} serviceLevel={agency.service_level} />
+                  ))}
+                </tr>
+              </tbody>
+            </table>
           </div>
         )}
 
