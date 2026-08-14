@@ -74,6 +74,10 @@ test('Overview: smoke — nav link visible', async ({ page }) => {
 test('Overview: hero verdict renders', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByText(/on time this week/i)).toBeVisible()
+  // CompareStrip renders inside the hero from an async /api/agency-comparison
+  // fetch — wait for it too so this test's timing matches the visual
+  // regression test below.
+  await expect(page.getByRole('link', { name: /full comparison/i })).toBeVisible()
 })
 
 test('Overview: movers panel renders', async ({ page }) => {
@@ -91,6 +95,11 @@ test('Overview: visual regression', async ({ page }) => {
   await expect(page.getByText(/on time this week/i)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Getting worse' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Biggest drags' })).toBeVisible()
+  // The CompareStrip inside the hero renders from an async
+  // /api/agency-comparison fetch and can land after the settle below on a
+  // cold CI server, reflowing the whole page underneath it — wait for it
+  // explicitly so the screenshot is deterministic.
+  await expect(page.getByRole('link', { name: /full comparison/i })).toBeVisible()
   await page.waitForTimeout(500)
   await expect(page).toHaveScreenshot('overview.png', { fullPage: true })
 })
