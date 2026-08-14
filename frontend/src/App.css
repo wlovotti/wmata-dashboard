@@ -1510,3 +1510,21 @@ main {
   text-decoration: none;
   font-weight: 600;
 }
+
+/* Movers panel (NOTES-84) */
+.movers-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.movers-panel-toggle {
+  background: none;
+  border: none;
+  color: var(--color-brand);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
