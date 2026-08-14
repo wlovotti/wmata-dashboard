@@ -45,7 +45,7 @@ The dashboard today is observational and route-anchored; these items
 push toward an ops-manager view (trends, Pareto, drill-downs) and a
 designed UI. The comparison sprint shipped with PR #198.
 
-- [NOTES-85](notes/NOTES-85.md) Frontend design-system pass — sev low / eff medium-high — after the Overview editorial redesign (PR #209/#<PR4>)
+- [NOTES-85](notes/NOTES-85.md) Frontend design-system pass — sev low / eff medium-high — after the Overview editorial redesign (PR #209/#210)
 - [NOTES-86](notes/NOTES-86.md) System-level weekly narrative — sev low / eff medium — coordinate placement with the editorial Overview layout (PR #209)
 - [NOTES-61](notes/NOTES-61.md) Hold-down policy / dispatching candidates page — sev low — unblocked
 - [NOTES-20](notes/NOTES-20.md) Tighter rider-experience OTP — sev low — deferred
