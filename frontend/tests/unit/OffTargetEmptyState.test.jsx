@@ -1,5 +1,5 @@
 /**
- * Regression test for OffTargetEmptyState (Overview.jsx) — the
+ * Regression test for OffTargetEmptyState (Targets.jsx) — the
  * frontend-chrome honesty fixes (PR #204).
  *
  * The Off-target panel only ranks routes with a hand-edited override in
@@ -16,7 +16,7 @@
  * idea whether the config is actually empty.
  */
 import { render, screen } from '@testing-library/react'
-import { OffTargetEmptyState } from '../../src/components/Overview'
+import { OffTargetEmptyState } from '../../src/components/Targets'
 
 describe('OffTargetEmptyState', () => {
   test('targetsLoaded=false shows a neutral message, not the config-is-empty claim', () => {

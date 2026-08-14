@@ -12,6 +12,7 @@
 //   /api/routes                          → routes_scorecard.json
 //   /api/routes/contributors?...         → routes_contributors.json
 //   /api/targets                         → targets.json
+//   /api/agency-comparison               → agency_comparison.json
 
 import { test, expect } from '@playwright/test'
 import { readFileSync } from 'fs'
@@ -43,6 +44,9 @@ test.beforeEach(async ({ page }) => {
     if (url.includes('/api/system/trend') && url.includes('metric=bunching')) {
       return route.fulfill({ json: fixture('system_trend_bunching.json') })
     }
+    if (url.includes('/api/agency-comparison')) {
+      return route.fulfill({ json: fixture('agency_comparison.json') })
+    }
     if (url.includes('/api/routes/contributors')) {
       return route.fulfill({ json: fixture('routes_contributors.json') })
     }
@@ -67,25 +71,35 @@ test('Overview: smoke — nav link visible', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Overview' })).toBeVisible()
 })
 
-test('Overview: "Where to look" heading renders', async ({ page }) => {
+test('Overview: hero verdict renders', async ({ page }) => {
   await page.goto('/')
-  // Use role heading to be specific — the text also appears in a paragraph.
-  await expect(page.getByRole('heading', { name: 'Where to look' })).toBeVisible()
+  await expect(page.getByText(/on time this week/i)).toBeVisible()
+  // CompareStrip renders inside the hero from an async /api/agency-comparison
+  // fetch — wait for it too so this test's timing matches the visual
+  // regression test below.
+  await expect(page.getByRole('link', { name: /full comparison/i })).toBeVisible()
 })
 
-test('Overview: "What changed" panel renders', async ({ page }) => {
+test('Overview: movers panel renders', async ({ page }) => {
   await page.goto('/')
-  // Wait for the panel heading to appear (scorecard fetch must complete).
-  await expect(page.getByRole('heading', { name: 'What changed' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Getting worse' })).toBeVisible()
+})
+
+test('Overview: biggest drags renders', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: 'Biggest drags' })).toBeVisible()
 })
 
 test('Overview: visual regression', async ({ page }) => {
   await page.goto('/')
-  // Wait for async content: contributors heading and "What changed" panel.
-  await expect(page.getByRole('heading', { name: 'Where to look' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'What changed' })).toBeVisible()
-  // Additional settle: sparklines are async recharts renders; a short wait
-  // reduces flicker without making the test brittle.
+  await expect(page.getByText(/on time this week/i)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Getting worse' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Biggest drags' })).toBeVisible()
+  // The CompareStrip inside the hero renders from an async
+  // /api/agency-comparison fetch and can land after the settle below on a
+  // cold CI server, reflowing the whole page underneath it — wait for it
+  // explicitly so the screenshot is deterministic.
+  await expect(page.getByRole('link', { name: /full comparison/i })).toBeVisible()
   await page.waitForTimeout(500)
   await expect(page).toHaveScreenshot('overview.png', { fullPage: true })
 })

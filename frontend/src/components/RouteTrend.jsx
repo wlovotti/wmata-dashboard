@@ -150,6 +150,14 @@ function SparklineDot({ cx, cy, payload, isSingle }) {
 }
 
 /**
+ * Ghost rows that should render as dots: non-null values only (NOTES-84 —
+ * the raw daily points ghosted under the smoothed 7-day line).
+ */
+function visibleGhostRows(ghostData) {
+  return (ghostData || []).filter((row) => row.value != null)
+}
+
+/**
  * Mini 30-day sparkline rendered with recharts.
  *
  * `data` is an array of `{ date, value, data_quality?, coverage_pct? }` rows.
@@ -160,8 +168,13 @@ function SparklineDot({ cx, cy, payload, isSingle }) {
  *
  * If only one complete point survives, recharts won't draw a line — fall
  * back to a single dot so the user still sees the measurement.
+ *
+ * `ghostData` (NOTES-84) is an optional parallel series rendered as small
+ * low-opacity dots over the same x-axis — e.g. the raw daily points ghosted
+ * under a smoothed 7-day line. Ghost rows must use dates present in `data`;
+ * a ghost date outside the line's x-axis domain will not place a dot.
  */
-function Sparkline({ data, color, valueFormat, height = 60 }) {
+function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) {
   // Separate partial rows from complete rows. Partial rows are kept in the
   // dataset with their value (for dot placement) but will be styled grey.
   // We set `_partial` and `_coveragePct` as synthetic fields so the custom
@@ -228,7 +241,9 @@ function Sparkline({ data, color, valueFormat, height = 60 }) {
     .filter((row) => !row._partial && row.value != null)
     .map((row) => row.value)
   const partialValues = partialDots.map((row) => row._partialValue)
-  const allValues = [...completeValues, ...partialValues]
+  const ghostRows = visibleGhostRows(ghostData)
+  const ghostValues = ghostRows.map((row) => row.value)
+  const allValues = [...completeValues, ...partialValues, ...ghostValues]
   const domainMin = allValues.length ? Math.min(...allValues) : 0
   const domainMax = allValues.length ? Math.max(...allValues) : 1
   const pad = (domainMax - domainMin) * 0.05 || 1
@@ -283,6 +298,19 @@ function Sparkline({ data, color, valueFormat, height = 60 }) {
             fill="#94a3b8"
             stroke="white"
             strokeWidth={1}
+          />
+        ))}
+        {ghostRows.map((row) => (
+          <ReferenceDot
+            key={`ghost-${row.date}`}
+            x={row.date}
+            y={row.value}
+            r={1.75}
+            fill={row.data_quality === 'partial' ? '#94a3b8' : color}
+            fillOpacity={0.35}
+            stroke="none"
+            className="sparkline-ghost-dot"
+            ifOverflow="extendDomain"
           />
         ))}
       </LineChart>
@@ -428,5 +456,10 @@ function RouteTrend({
   )
 }
 
-export { DeltaIndicator, Sparkline, TargetIndicator }
+// visibleGhostRows is a plain helper, not a component — react-refresh's
+// only-export-components rule would rather it live in its own module, but
+// the NOTES-84 Sparkline tests need it colocated (jsdom can't render
+// recharts' SVG output, so the ghost-filtering logic is tested directly).
+// eslint-disable-next-line react-refresh/only-export-components
+export { DeltaIndicator, Sparkline, TargetIndicator, visibleGhostRows }
 export default RouteTrend

@@ -29,10 +29,16 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-test('Segments: reachable via the Diagnostics nav link', async ({ page }) => {
-  await page.goto('/')
+test('Segments: Diagnostics nav link visible from the page', async ({ page }) => {
   // Segments no longer has its own top-level nav link (NOTES-84 nav
-  // collapse) — it's reached via the Diagnostics index page instead.
+  // collapse) — it's reached via the Diagnostics index page instead. The
+  // header renders on every page, so asserting it from /segments (rather
+  // than '/', which is the Overview page and isn't stubbed by this file's
+  // beforeEach) keeps the assertion's meaning without dragging in
+  // Overview's unrelated fetch set — those unstubbed requests fell through
+  // to the dev-server proxy and sprayed ECONNREFUSED noise into CI's test
+  // output.
+  await page.goto('/segments')
   await expect(page.getByRole('link', { name: 'Diagnostics' })).toBeVisible()
 })
 

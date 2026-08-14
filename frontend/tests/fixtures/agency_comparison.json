@@ -1,0 +1,17 @@
+{
+  "window_start": "2026-07-23",
+  "window_end": "2026-08-12",
+  "agencies": [
+    {
+      "agency": "wmata",
+      "display_name": "WMATA",
+      "metrics": { "otp": { "window_mean": 75.2, "wow_delta": -2.1, "partial_days": 0, "days_included": 7 } }
+    },
+    {
+      "agency": "sfmta",
+      "display_name": "SFMTA (Muni)",
+      "metrics": { "otp": { "window_mean": 71.0, "wow_delta": 0.8, "partial_days": 0, "days_included": 7 } }
+    }
+  ],
+  "caveats": []
+}
