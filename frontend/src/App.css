@@ -1088,6 +1088,14 @@ main {
     min-width: 800px;
   }
 
+  /* Override .routes-table's 800px mobile min-width for the 3-column
+     agency comparison table (PR #211 review) — that width was sized
+     for RouteList's ~10-column grid and forces this narrower table to
+     overflow unnecessarily. */
+  .agency-compare-table {
+    min-width: 0;
+  }
+
   .filters {
     flex-direction: column;
     align-items: stretch;
@@ -1296,6 +1304,10 @@ main {
 .agency-compare-table th,
 .agency-compare-table td {
   text-align: center;
+}
+
+.agency-compare-table th {
+  text-transform: none;
 }
 
 .agency-compare-table th:first-child,
