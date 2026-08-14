@@ -110,13 +110,16 @@ function formatGap(metric, current, target) {
  * currently-selected metric," since the latter is a narrower, more
  * reassuring claim (the config isn't empty, this metric just isn't in it).
  *
- * A third, distinct case: `targetsData` hasn't loaded yet (fetch still in
- * flight) or failed (swallowed by the page's `.catch`, which degrades to
- * the empty state rather than blocking render). Neither of those is "the
- * config file is empty" — asserting that while we don't actually know the
- * config's contents would be its own dishonesty, so this case gets a
- * neutral message instead of the confident claim about
- * `route_targets.yaml`.
+ * A third, distinct case guards `targetsData` not having loaded yet —
+ * kept for defensive completeness and because it's pinned by this
+ * component's unit test, but on Targets.jsx it's effectively
+ * unreachable: a failed `/api/targets` fetch sets `error` and the page
+ * early-returns "Unable to load targets" before the off-target section
+ * (and this component) ever renders, so `targetsLoaded` is always `true`
+ * by the time `OffTargetEmptyState` mounts here. The branch exists for
+ * this component's other potential callers, where a load failure might
+ * legitimately degrade to this empty state instead of blocking the whole
+ * page.
  *
  * @param {boolean} hasAnyOverrides - whether this page's `routes` block
  *   has at least one entry, for any metric. Only meaningful when
@@ -142,10 +145,9 @@ export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabe
         This panel is empty because no route has a per-route target — the
         default <code>config/route_targets.yaml</code> ships with an empty{' '}
         <code>routes:</code> block, so every route currently just inherits
-        the same system-wide target already summarized in the Overview
-        page's "Biggest drags" table. It only populates after someone
-        hand-edits that file to add per-route overrides (see the file's
-        header comment for the schema).
+        the same system-wide target shown in the System defaults table
+        above. It only populates after someone hand-edits that file to add
+        per-route overrides (see the file's header comment for the schema).
       </p>
     )
   }
@@ -343,10 +345,12 @@ function Targets() {
 
         <h3 style={{ marginTop: '1.5rem' }}>Off target</h3>
         <p className="drilldown-anchor" style={{ marginBottom: '0.75rem' }}>
-          Routes with a configured per-route target above, ranked by gap to
-          that target on the metric selected below. Complementary to the
-          Overview page's "Biggest drags" table — a small-volume route can
-          be far off target without showing up as a big system contributor.
+          Routes with a configured per-route target in{' '}
+          <code>config/route_targets.yaml</code> (listed under Per-route
+          overrides below), ranked by gap to that target on the metric
+          selected below. Complementary to the Overview page's "Biggest
+          drags" table — a small-volume route can be far off target without
+          showing up as a big system contributor.
         </p>
         <div className="filters" style={{ marginBottom: '0.75rem' }}>
           <div>
