@@ -76,9 +76,10 @@ function AgencyColumn({ agency }) {
  * component is a plain renderer over that payload.
  *
  * Deliberately plain per the item's scope decision: ship ugly-but-honest
- * now, defer visual polish to NOTES-84/85. The comparability caveats are
- * rendered in the page body (not a tooltip) per the same scope decision —
- * a comparison that hides its caveats is worse than none.
+ * now, defer visual polish to the Overview editorial redesign (PR #209)
+ * and NOTES-85. The comparability caveats are rendered in the page body
+ * (not a tooltip) per the same scope decision — a comparison that hides
+ * its caveats is worse than none.
  */
 function AgencyComparison() {
   const [data, setData] = useState(null)
