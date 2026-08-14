@@ -656,6 +656,14 @@ def _read_overlay_for_dates(db: Session, dates: list[date_type]) -> dict[str, di
     )
     out: dict[str, dict[str, dict]] = {}
     for row in rows:
+        # Skip partial-quality rows (NOTES-123) -- a thin-collection day's
+        # sufficient statistics shouldn't contribute to the pooled window.
+        # The (route, date) combo simply doesn't appear for this date, same
+        # treatment as a route that didn't run that day. Mirrors
+        # `_overlay_per_route_per_day`, which already excludes these rows
+        # from the deltas window.
+        if row.data_quality == "partial":
+            continue
         out.setdefault(row.service_date, {})[row.route_id] = _hydrate_overlay_row(row)
     return out
 
@@ -2752,22 +2760,27 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
 # (would inflate the volume proxy by ~2x). Same reasoning as
 # `src/service_delivered.py`.
 #
-# Snapshot semantics for `route_value`:
+# Window semantics for `route_value` (NOTES-123 — all four metrics are
+# genuine `days`-window figures, not single-day snapshots):
 #   - OTP: window-mean computed live from `stop_events` via
 #     `_route_otp_window_mean` (one per-day OTP per date in the window,
 #     averaged with null-skip).
-#   - service_delivered / EWT / bunching: latest single-day value from the
-#     live cache (`get_live_metrics_for_today`). These metrics are not
-#     materialized per-route per-day, so a window mean would require N×
-#     per-day computes per route — too expensive for an interactive
-#     ranking endpoint. The single-day snapshot is the freshest reasonable
-#     signal.
+#   - service_delivered / EWT / bunching: pooled sufficient statistics
+#     across the window via `get_live_metrics_for_window` (the same
+#     machinery the 7-day scorecard uses), anchored on the latest
+#     service_date with any derived stop_events.
+#
+# Both paths exclude dates flagged `data_quality='partial'` in
+# `system_metrics_daily` — a collection-outage day's thin sample would
+# otherwise stand in for (OTP's single-day case) or disproportionately
+# swing (EWT's squared-gap formula) an entire window of signal. See
+# `_partial_service_dates_in_window` and `_read_overlay_for_dates`.
 #
 # `baseline_value` always uses the window-mean from `system_metrics_daily`
-# regardless of metric, since that table holds all four metrics per day. The
-# baseline is therefore a window value while the route value may be a
-# single-day snapshot for SD/EWT/bunching — we surface the anchor date in
-# the response so the frontend can disclose the asymmetry.
+# regardless of metric, since that table holds all four metrics per day —
+# same exclusion, so `route_value` and `baseline_value` are now symmetric
+# window figures for every metric. `days_included` on the response reports
+# how many of the `days` calendar dates were not partial-flagged.
 # ---------------------------------------------------------------------------
 
 _CONTRIBUTORS_TTL_SEC = 60.0
@@ -2812,15 +2825,41 @@ def _system_baseline_for_window(
     return sum(values) / len(values)
 
 
+def _partial_service_dates_in_window(db: Session, end_date: date_type, days: int) -> set[str]:
+    """ISO service dates in `[end_date-days+1, end_date]` flagged `data_quality='partial'`.
+
+    Reads `system_metrics_daily` — the same day-set `get_system_trend_data`
+    excludes from its prior-window mean. Shared by the per-route window
+    means below and the contributors envelope's `days_included` field
+    (NOTES-123) so every window-mean consumer treats a thin-collection day
+    the same way.
+    """
+    start_iso = (end_date - timedelta(days=days - 1)).isoformat()
+    end_iso = end_date.isoformat()
+    rows = (
+        db.query(SystemMetricsDaily.service_date)
+        .filter(
+            SystemMetricsDaily.service_date >= start_iso,
+            SystemMetricsDaily.service_date <= end_iso,
+            SystemMetricsDaily.data_quality == "partial",
+        )
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
 def _route_otp_window_mean(
     db: Session, route_id: str, end_date: date_type, days: int
 ) -> float | None:
     """Mean of per-day OTP for one route over the window.
 
     Skips dates with no observations so a single empty day doesn't
-    poison the mean. Returns None when no day in the window has any
-    qualifying proximity stop_events — the route either didn't run or
-    the derivation pipeline hasn't materialized events yet.
+    poison the mean, and skips dates flagged `data_quality='partial'`
+    in `system_metrics_daily` (NOTES-123) so a collection-outage day's
+    thin, unrepresentative daily rate doesn't skew the mean either.
+    Returns None when no day in the window has any qualifying proximity
+    stop_events — the route either didn't run or the derivation pipeline
+    hasn't materialized events yet.
 
     Source is proximity `stop_events.deviation_sec` bucketed via the WMATA
     OTP window — same path as `_compute_otp_per_day_with_filters` and
@@ -2830,7 +2869,8 @@ def _route_otp_window_mean(
     """
     start_date = end_date - timedelta(days=days - 1)
     by_date = _compute_otp_per_day_with_filters(db, route_id, start_date, end_date, ALL_HOURS)
-    values = [v for v in by_date.values() if v is not None]
+    partial_dates = _partial_service_dates_in_window(db, end_date, days)
+    values = [v for d, v in by_date.items() if v is not None and d not in partial_dates]
     if not values:
         return None
     return sum(values) / len(values)
@@ -2911,18 +2951,24 @@ def _scheduled_trips_in_window_by_route(
 def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     """Compute the contributors payload for one metric / window.
 
-    Anchors `route_value` and `baseline_value` together so they're directly
-    comparable: OTP uses the window mean for both; service_delivered, EWT,
-    and bunching use the latest single-day value the live cache observed
-    (`_latest_service_date_with_stop_events`) for the route value, and the
-    same single date's row from `system_metrics_daily` for the baseline
-    when available — falling back to a window mean if today's row hasn't
-    been materialized.
+    `route_value` is a genuine `days`-window figure for every metric: OTP
+    averages per-day percentages (`_route_otp_window_mean`); service_delivered,
+    EWT, and bunching pool sufficient statistics across the window
+    (`get_live_metrics_for_window`, anchored on the latest service_date with
+    stop_events) the same way the scorecard does. Both paths exclude dates
+    flagged `data_quality='partial'` in `system_metrics_daily` (NOTES-123) —
+    a collection-outage day's thin observation count would otherwise stand
+    in for (OTP) or disproportionately swing (EWT's squared-gap formula) an
+    entire window's worth of signal. `baseline_value` uses the same
+    exclusion via `_system_baseline_for_window`.
 
-    Returns `{metric, days, anchor_date, baseline_value, contributors}`
+    Returns `{metric, days, days_included, baseline_value, contributors}`
     where `contributors` is a list ranked by `contribution_score` desc
     (most-dragging routes first). Routes without enough data to score
     (route_value or baseline missing) are dropped, not listed.
+    `days_included` is `days` minus the count of partial-flagged dates in
+    the window — a coarse signal for "how thin is this window" the
+    frontend can surface next to the metric toggle.
     """
     if metric not in _CONTRIBUTORS_METRIC_CONFIG:
         raise ValueError(f"Unsupported contributors metric: {metric}")
@@ -2936,13 +2982,13 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     # the route's configured target (PR #99) or this baseline as fallback.
     baseline_value = _system_baseline_for_window(db, metric_column, end_date, days)
 
+    days_included = days - len(_partial_service_dates_in_window(db, end_date, days))
+
     # Volume proxy: total scheduled trips per route over the window.
     sched_trips_by_route = _scheduled_trips_in_window_by_route(db, end_date, days)
 
-    # Per-route metric values. OTP comes from the materialized daily table;
-    # the other three come from the live cache (latest service_date with
-    # stop_events). The live cache is a single-day snapshot — see module
-    # comment for the tradeoff.
+    # Per-route metric values, all genuine `days`-window figures (see
+    # docstring above for the two computation paths).
     routes = db.query(Route).filter(Route.is_current).all()
     route_short_names = {r.route_id: r.route_short_name for r in routes}
     route_long_names = {r.route_id: r.route_long_name for r in routes}
@@ -2952,10 +2998,13 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
         for r in routes:
             route_values[r.route_id] = _route_otp_window_mean(db, r.route_id, end_date, days)
     else:
-        # service_delivered / EWT / bunching: snapshot from live cache.
-        live = get_live_metrics_for_today(db)
+        # service_delivered / EWT / bunching: pooled over the window,
+        # anchored on the latest service_date with any derived stop_events
+        # (same anchor the prior single-day snapshot used).
+        anchor_date = _latest_service_date_with_stop_events(db)
+        windowed = get_live_metrics_for_window(db, anchor_date, days) if anchor_date else {}
         for r in routes:
-            metrics_bundle = live.get(r.route_id)
+            metrics_bundle = windowed.get(r.route_id)
             fields = _live_metric_fields(metrics_bundle)
             if metric == "service_delivered":
                 route_values[r.route_id] = fields.get("service_delivered_ratio")
@@ -3027,6 +3076,7 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     return {
         "metric": metric,
         "days": days,
+        "days_included": days_included,
         "baseline_value": baseline_value,
         "system_target_value": system_target_value,
         "higher_is_better": higher_is_better,

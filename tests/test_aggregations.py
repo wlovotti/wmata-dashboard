@@ -1372,6 +1372,74 @@ class TestGetRouteContributors:
         second = get_route_contributors(db_session, metric="otp", days=30)
         assert first is second
 
+    def test_contributors_otp_window_mean_excludes_partial_day(self, db_session, sample_routes):
+        """A `data_quality='partial'` date is excluded from the OTP window mean (NOTES-123).
+
+        Seeds 5 clean days at 90% OTP plus a 6th day with a 0%-on-time
+        StopEvent flagged `partial` in `system_metrics_daily` -- the same
+        kind of collection-outage day that squares multi-hour observation
+        gaps into inflated EWT elsewhere. Without exclusion the raw window
+        mean would blend all 6 days ((90*5 + 0) / 6 = 75); with it, the
+        partial day contributes nothing and the mean stays at the clean
+        5-day value.
+        """
+        self._clear_cache()
+        from datetime import datetime as _dt
+
+        from api.aggregations import get_route_contributors
+        from src.models import StopEvent, SystemMetricsDaily
+
+        # Push the baseline seed window back so it doesn't collide with the
+        # partial date seeded below (1-6 days ago).
+        self._seed_system_baseline(db_session, otp=80.0, days_back=10)
+        self._seed_route_otp(db_session, "TEST1", 90.0, n_days=5)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        partial_date = eastern_today() - timedelta(days=6)
+        base_ts = _dt.combine(partial_date, _dt.min.time()).replace(hour=14)
+        db_session.add(
+            StopEvent(
+                service_date=partial_date.isoformat(),
+                trip_id="TRIP_TEST1_PARTIAL",
+                route_id="TEST1",
+                direction_id=0,
+                stop_id="STOP_OTP_TEST1",
+                stop_sequence=1,
+                observed_arrival_ts=base_ts,
+                deviation_sec=600,  # late -> 0% on-time this day
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+        db_session.add(
+            SystemMetricsDaily(service_date=partial_date.isoformat(), data_quality="partial")
+        )
+        db_session.commit()
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        ours = next((c for c in result["contributors"] if c["route_id"] == "TEST1"), None)
+        assert ours is not None
+        assert ours["route_value"] == 90.0
+
+    def test_contributors_days_included_excludes_partial_dates(self, db_session, sample_routes):
+        """`days_included` reports the window length minus partial-flagged dates.
+
+        Two dates flagged `partial` in `system_metrics_daily` within the
+        30-day window; `days_included` should read `30 - 2`.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+        from src.models import SystemMetricsDaily
+
+        self._seed_system_baseline(db_session, otp=80.0, days_back=10)
+        for offset in (1, 2):
+            d = eastern_today() - timedelta(days=offset)
+            db_session.add(SystemMetricsDaily(service_date=d.isoformat(), data_quality="partial"))
+        db_session.commit()
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        assert result["days_included"] == 30 - 2
+
     def test_contributors_per_route_target_overrides_baseline(
         self, db_session, sample_routes, tmp_path, monkeypatch
     ):

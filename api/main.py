@@ -317,20 +317,24 @@ async def get_routes_contributors(metric: str = "otp", days: int = 30):
     the score answers "where would moving the needle move the system
     most?" rather than just "which route looks worst."
 
-    For OTP, `route_value` is the window mean computed live from
-    `stop_events`. For service-delivered, EWT, and bunching, `route_value`
-    is the latest single-day snapshot from the live-metrics cache (those
-    metrics aren't materialized per-route per-day; a window mean would
-    require N× per-day computes per route). The baseline is always a
-    window mean from `system_metrics_daily`.
+    `route_value` is a genuine `days`-window figure for every metric
+    (NOTES-123): OTP averages per-day percentages; service-delivered, EWT,
+    and bunching pool sufficient statistics across the window (the same
+    machinery the routes scorecard uses). Both paths, and the baseline
+    window mean, exclude dates flagged `data_quality='partial'` in
+    `system_metrics_daily` so a collection-outage day doesn't stand in for
+    (or disproportionately swing) an entire window's worth of signal.
+    `days_included` reports how many of the `days` calendar dates were not
+    partial-flagged.
 
     Args:
         metric: One of `otp`, `service_delivered`, `ewt`, `bunching`
         days: Window length in days (default: 30, capped at 90)
 
     Returns:
-        Dict with `metric`, `days`, `baseline_value`, `higher_is_better`,
-        and `contributors` (list ranked by `contribution_score` desc).
+        Dict with `metric`, `days`, `days_included`, `baseline_value`,
+        `higher_is_better`, and `contributors` (list ranked by
+        `contribution_score` desc).
     """
     valid_metrics = ["otp", "service_delivered", "ewt", "bunching"]
     if metric not in valid_metrics:
