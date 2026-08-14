@@ -1463,7 +1463,18 @@ main {
   padding: 1.75rem 2rem;
   margin-bottom: 1.5rem;
   border-left: 6px solid var(--color-neutral);
-  background: #f8fafc;
+  /* #f8fafc is the page background — using it here renders the hero as a
+     bare left border rather than a card, so it's white instead. */
+  background: #ffffff;
+}
+
+/* Overview map+movers fold (NOTES-84). Single column until the system map
+   lands (PR 4 makes this a 3fr/2fr split at desktop widths). */
+.overview-fold {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
 }
 
 .overview-hero-green { border-left-color: var(--color-good); }
