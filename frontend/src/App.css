@@ -1283,7 +1283,7 @@ main {
 }
 
 /* Agency comparison page (PR #198 — "the north star"; reformatted to a
-   table by the comparison-table reformat, PR TODO). One row per metric, one column per agency, so
+   table by the comparison-table reformat, PR #211). One row per metric, one column per agency, so
    comparing WMATA vs Muni on any metric reads across a single row
    instead of jumping between per-agency columns of tiles. Built on
    .routes-table; reuses the app's existing card/table color tokens

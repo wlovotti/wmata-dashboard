@@ -6,7 +6,7 @@ import { METRIC_ORDER, METRIC_LABELS, formatMetricValue, formatDelta, formatServ
  * small partial-day disclosure when any of the window's days for this
  * metric were flagged `data_quality='partial'` (NOTES-104). Rendered as
  * a `<td>` so a metric's values line up across agencies on one table
- * row (the comparison-table reformat, PR TODO).
+ * row (the comparison-table reformat, PR #211).
  */
 function MetricCell({ metric, metricData }) {
   const delta = metricData ? formatDelta(metric, metricData.wow_delta) : null
@@ -54,7 +54,7 @@ function ServiceLevelCell({ serviceLevel }) {
  * SFMTA), over the matched window that began 2026-07-23 — a table
  * layout so comparing one metric across agencies reads left-to-right
  * on a single row instead of jumping between per-agency columns of
- * tiles (the comparison-table reformat, PR TODO). Reads a single endpoint (`/api/agency-comparison`)
+ * tiles (the comparison-table reformat, PR #211). Reads a single endpoint (`/api/agency-comparison`)
  * that already computed the window means, week-over-week deltas, and
  * comparability caveats — this component is a plain renderer over that
  * payload.

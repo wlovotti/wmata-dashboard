@@ -1,6 +1,6 @@
 /**
  * AgencyComparison (PR #198; reformatted to a metric-row table by
- * the comparison-table reformat, PR TODO). Verifies the table shape — one row per metric, one column
+ * the comparison-table reformat, PR #211). Verifies the table shape — one row per metric, one column
  * per agency — plus the loading/error/empty states and the caveats list
  * that the reformat had to preserve unchanged.
  */
