@@ -6,6 +6,7 @@ import { formatContribMetricValue } from '../utils/formatters'
 import { latestNonNull } from '../utils/heroSummary'
 import OverviewHero from './OverviewHero'
 import MoversPanel from './MoversPanel'
+import SystemMap from './SystemMap'
 import SystemTrend from './SystemTrend'
 
 // Metric options for the "Biggest drags" table. Same 4-entry list as
@@ -33,8 +34,8 @@ const OVERVIEW_TREND_URLS = [
  *
  *   1. OverviewHero  — big-number verdict + compare teaser (absorbs the
  *                      retired HealthPulse banner)
- *   2. Fold          — MoversPanel ("getting worse" promoted to the top
- *                      fold; the system map joins this grid in the next PR)
+ *   2. Fold          — SystemMap + MoversPanel side by side ("getting
+ *                      worse" and "where" promoted to the top fold)
  *   3. SystemTrend   — 7-day-smoothed trend cards, daily points ghosted
  *   4. Biggest drags — the contributors table, demoted to the bottom
  *
@@ -164,10 +165,9 @@ function Overview() {
         otpSeries={otpSeries}
       />
 
-      {/* "Where is it going badly" fold. The system map (NOTES-84 PR 4)
-          joins this grid as the left column; until then the movers panel
-          spans it alone. */}
-      <div className="overview-fold">
+      {/* "Where is it going badly" fold: system map + movers side by side. */}
+      <div className="overview-fold overview-fold-with-map">
+        <SystemMap scorecardRoutes={scorecard?.routes ?? null} />
         <MoversPanel routes={scorecard?.routes ?? null} />
       </div>
 

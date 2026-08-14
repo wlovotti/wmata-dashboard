@@ -1468,13 +1468,29 @@ main {
   background: #ffffff;
 }
 
-/* Overview map+movers fold (NOTES-84). Single column until the system map
-   lands (PR 4 makes this a 3fr/2fr split at desktop widths). */
+/* Overview map+movers fold (NOTES-84). Single column by default; the
+   system map variant below splits it 3fr/2fr at desktop widths. */
 .overview-fold {
   display: grid;
   grid-template-columns: 1fr;
   gap: 1.5rem;
   margin-bottom: 1.5rem;
+}
+
+.overview-fold-with-map {
+  grid-template-columns: 3fr 2fr;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .overview-fold-with-map {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* When the map errors, let the quiet note shrink and the movers dominate. */
+.overview-fold-with-map .system-map-error {
+  align-self: stretch;
 }
 
 .overview-hero-green { border-left-color: var(--color-good); }
