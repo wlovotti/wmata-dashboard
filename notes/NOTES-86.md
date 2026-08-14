@@ -24,5 +24,5 @@ not invoke it.
 ## Dependencies
 
 Independent, but the rendered placement should land after (or inside)
-the NOTES-84 Overview redesign so the lede has a home; coordinate to
-avoid same-file PR stacking on `Overview.jsx`.
+the editorial Overview layout (PR #209) so the lede has a home;
+coordinate to avoid same-file PR stacking on `Overview.jsx`.

@@ -23,8 +23,9 @@ notes was measured against the local socket and silently stopped
 holding at cutover.
 
 Recontextualized 2026-06-14: dev now runs on a local socket (no tunnel),
-so this no longer blocks dev or NOTES-84. It becomes a
-co-locate-API+DB task for the NOTES-50 public deploy.
+so this no longer blocks dev or the Overview editorial redesign (PR
+#209). It becomes a co-locate-API+DB task for the NOTES-50 public
+deploy.
 
 Work:
 1. Profile the endpoint's query count (SQLAlchemy echo / `pg_stat_statements`

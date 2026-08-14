@@ -24,6 +24,6 @@ tokens are agreed could be subagent work, but not the design itself.
 
 ## Dependencies
 
-After NOTES-84 — restyling panels the redesign is about to rearrange is
-wasted work, and the two would conflict on the same files (no stacked
-PRs).
+After the Overview editorial redesign (PR #209/#210) — restyling
+panels the redesign is about to rearrange is wasted work, and the two
+would conflict on the same files (no stacked PRs).

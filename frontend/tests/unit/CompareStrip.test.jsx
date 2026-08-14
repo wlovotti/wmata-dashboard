@@ -8,6 +8,7 @@ import { vi } from 'vitest'
 import CompareStrip from '../../src/components/CompareStrip'
 
 const payload = {
+  window_start: '2026-07-23',
   agencies: [
     {
       agency: 'wmata',
@@ -42,6 +43,10 @@ describe('CompareStrip', () => {
       'href',
       '/compare',
     )
+    // Window disclosure (final-review wave): the strip's means cover the
+    // whole matched window, not the hero's 7-day figure above it — the
+    // trailing label makes that explicit.
+    expect(screen.getByText(/since 2026-07-23/)).toBeVisible()
   })
 
   test('renders nothing on fetch failure', async () => {

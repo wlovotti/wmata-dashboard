@@ -154,7 +154,7 @@ function App() {
             <Route path="/segments" element={<SegmentDiagnostic />} />
             <Route path="/diagnostics" element={<DiagnosticsIndex />} />
             {/* Agency comparison page (PR #198), promoted to the nav by the
-                NOTES-84 nav collapse. */}
+                nav collapse (PR #208). */}
             <Route path="/compare" element={<AgencyComparison />} />
           </Routes>
         </div>

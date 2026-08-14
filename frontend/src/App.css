@@ -132,44 +132,6 @@ header h1 {
   border-bottom-color: white;
 }
 
-/* Health-pulse banner (NOTES-52). Single-line system status above the
-   trend strip on Overview. Color tint tracks worst-of-{OTP, SD, EWT,
-   bunching} gap to target — green when meeting all four, yellow within
-   10% of target, red beyond. Neutral grey when no system metrics
-   have a target / current value pair. */
-.health-pulse {
-  padding: 0.85rem 1.25rem;
-  margin-bottom: 1.25rem;
-  border-radius: 6px;
-  font-size: 1.05rem;
-  font-weight: 500;
-  border: 1px solid transparent;
-}
-
-.health-pulse-green {
-  background: #ecfdf5;
-  border-color: #a7f3d0;
-  color: #065f46;
-}
-
-.health-pulse-yellow {
-  background: #fffbeb;
-  border-color: #fcd34d;
-  color: #92400e;
-}
-
-.health-pulse-red {
-  background: #fef2f2;
-  border-color: #fecaca;
-  color: #991b1b;
-}
-
-.health-pulse-neutral {
-  background: #f1f5f9;
-  border-color: #cbd5e1;
-  color: #475569;
-}
-
 /* Feed-expiry alarm (NOTES-90). Sits in the app chrome between the header
    actions row and the primary nav, so it's visible on every page — a stale
    GTFS schedule (feed_end_date passed unnoticed) is now a visible signal
@@ -1468,13 +1430,43 @@ main {
   background: #ffffff;
 }
 
-/* Overview map+movers fold (NOTES-84). Single column until the system map
-   lands (PR 4 makes this a 3fr/2fr split at desktop widths). */
+/* Overview map+movers fold (NOTES-84). Single column by default; the
+   system map variant below splits it 3fr/2fr at desktop widths. */
 .overview-fold {
   display: grid;
   grid-template-columns: 1fr;
   gap: 1.5rem;
   margin-bottom: 1.5rem;
+}
+
+.overview-fold-with-map {
+  grid-template-columns: 3fr 2fr;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .overview-fold-with-map {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Fail-quiet fold collapse: when the map errors, drop the 3fr/2fr split
+   entirely rather than leaving a mostly-empty ~60%-wide box beside the
+   movers panel — this is what makes SystemMap's "the movers list carries
+   the answer alone" docstring claim actually true. :has() is supported by
+   all current evergreen browsers (including CI's Chromium lane), so no
+   fallback is needed. */
+.overview-fold-with-map:has(.system-map-error) {
+  grid-template-columns: 1fr;
+}
+
+/* Belt-and-suspenders only: keeps the error box from stretching to match a
+   taller sibling if it and the movers panel ever end up sharing a grid row
+   again. A no-op today — the :has() rule above already collapses to a
+   single column (and thus a single-item row) whenever the error box is
+   present. */
+.overview-fold-with-map .system-map-error {
+  align-self: stretch;
 }
 
 .overview-hero-green { border-left-color: var(--color-good); }
@@ -1520,6 +1512,13 @@ main {
   color: var(--color-brand);
   text-decoration: none;
   font-weight: 600;
+}
+
+/* Window-disclosure label (final-review wave): the strip's means cover the
+   whole matched window, not the hero's 7-day figure directly above it —
+   this makes that explicit instead of implying an apples-to-apples span. */
+.compare-strip-window {
+  color: var(--color-muted);
 }
 
 /* Movers panel (NOTES-84) */

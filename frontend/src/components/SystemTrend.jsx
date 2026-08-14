@@ -219,7 +219,7 @@ function SystemTrend({ trendData, loading, error }) {
             {ewtDelta && (
               <DeltaIndicator
                 delta={-ewtDelta.delta}
-                format={(d) => `${(-d).toFixed(0)}s`}
+                format={(d) => `${Math.abs(d).toFixed(0)}s`}
                 title={ewtDeltaTitle(ewtDelta)}
               />
             )}
@@ -250,7 +250,7 @@ function SystemTrend({ trendData, loading, error }) {
             {bunDelta && (
               <DeltaIndicator
                 delta={-bunDelta.delta}
-                format={(d) => `${(-d).toFixed(2)} pp`}
+                format={(d) => `${Math.abs(d).toFixed(2)} pp`}
                 title={bunDeltaTitle(bunDelta)}
               />
             )}

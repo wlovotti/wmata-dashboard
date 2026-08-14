@@ -135,4 +135,26 @@ describe('Sparkline ghostData (NOTES-84 smoothing)', () => {
     render(<Sparkline data={data} color="#002F6C" valueFormat={(v) => `${v}%`} />)
     expect(screen.queryByText('no trend data')).not.toBeInTheDocument()
   })
+
+  // Final-review wave fix: SystemTrend passes rollingMean's output as `data`,
+  // which strips data_quality and nulls out `value` for any date with zero
+  // clean days in its trailing window. An all-partial window therefore has
+  // no complete/partial rows in `data` at all — only `ghostData` (the raw
+  // daily series) still carries a value. The guard must count ghostRows too,
+  // or this renders "no trend data" instead of the ghost dots that are the
+  // only signal available.
+  test('all-null smoothed data with populated ghostData still renders (not "no trend data")', () => {
+    const data = [
+      { date: '2026-08-01', value: null },
+      { date: '2026-08-02', value: null },
+    ]
+    const ghostData = [
+      { date: '2026-08-01', value: 48, data_quality: 'partial' },
+      { date: '2026-08-02', value: 50, data_quality: 'partial' },
+    ]
+    render(
+      <Sparkline data={data} ghostData={ghostData} color="#002F6C" valueFormat={(v) => `${v}%`} />,
+    )
+    expect(screen.queryByText('no trend data')).not.toBeInTheDocument()
+  })
 })
