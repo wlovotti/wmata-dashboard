@@ -199,6 +199,224 @@ class TestGetAllRoutesScorecard:
         assert result["window"]["days"] == 1
 
 
+class TestLiveMetricsWindowPartialDayExclusion:
+    """Partial-day exclusion in the pooled live-metrics window (NOTES-123 review).
+
+    `_compute_live_metrics_for_window_uncached` -- shared by the routes
+    scorecard (`get_all_routes_scorecard`) and the contributors ranking
+    (`get_route_contributors`) -- pools SD/EWT/bunching over
+    `[end_date-days+1, end_date]`. A `data_quality='partial'` date must be
+    dropped from that window before any tier (in-memory cache, overlay
+    read, live compute) is consulted. Filtering it out only inside the
+    overlay reader makes a partial date's absence indistinguishable from
+    "not materialized yet," so it falls through to the live-compute
+    fallback over raw `stop_events` -- which doesn't exclude partial days
+    -- pooling it right back in (review finding 1) and paying the ~35s
+    live-compute cost on every cache expiry (finding 3).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_module_caches(self):
+        """Process-global cache isolation.
+
+        Same reasoning as `TestRouteHeaderAnchorsOnRouteOwnLatestDate`'s
+        `_clear_live_metrics_cache` fixture: `_live_metrics_cache` and
+        `_window_metrics_cache` are module-level and keyed by date, so a
+        leftover entry from another test run in the same process could
+        leak into these tests' lookups.
+        """
+        from api.aggregations import _live_metrics_cache, _window_metrics_cache
+
+        _live_metrics_cache.clear()
+        _window_metrics_cache.clear()
+        yield
+        _live_metrics_cache.clear()
+        _window_metrics_cache.clear()
+
+    def test_scorecard_pooled_ewt_excludes_partial_day(self, db_session, sample_route, monkeypatch):
+        """The routes scorecard's pooled EWT excludes a partial-flagged day.
+
+        Two clean overlay days pool to a modest EWT; a third day flagged
+        `partial` carries an extreme observed-headway spread that would
+        blow up the pooled EWT if it leaked in. Also asserts the
+        live-compute fetch is never invoked at all: with no raw
+        `stop_events` seeded for the partial day, a value-only assertion
+        would pass even under the bug (live compute finds nothing for
+        that date and silently contributes zero) -- the call-count
+        assertion is what actually pins the exclusion happening at the
+        right layer (review findings 1/2/3).
+        """
+        import src.ewt as ewt_module
+        from api.aggregations import _derive_ewt_metrics, get_all_routes_scorecard
+        from src.models import RouteMetricsDailyOverlay, StopEvent, SystemMetricsDaily
+
+        calls = []
+        original = ewt_module.fetch_observed_stop_events_for_window
+
+        def spy(db, service_dates, route_ids=None):
+            """Record every window of dates handed to the live-compute fetch."""
+            calls.append(list(service_dates))
+            return original(db, service_dates, route_ids=route_ids)
+
+        monkeypatch.setattr(ewt_module, "fetch_observed_stop_events_for_window", spy)
+
+        # One raw stop_event sets `_latest_service_date_with_stop_events`
+        # (the scorecard's window anchor) -- its own content is irrelevant.
+        db_session.add(
+            StopEvent(
+                service_date=eastern_today().isoformat(),
+                trip_id="TRIP_ANCHOR",
+                route_id="TEST1",
+                direction_id=0,
+                stop_id="STOP_ANCHOR",
+                stop_sequence=1,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+
+        clean_stats = [
+            {
+                "obs_sum_h": 1200.0,
+                "obs_sum_h_sq": 1200.0**2 / 2,
+                "n_obs": 2,
+                "sched_sum_h": 1200.0,
+                "sched_sum_h_sq": 1200.0**2 / 2,
+                "n_sched": 2,
+            }
+            for _ in range(2)
+        ]
+        for i, stats in enumerate(clean_stats):
+            d = eastern_today() - timedelta(days=i)
+            db_session.add(
+                RouteMetricsDailyOverlay(
+                    route_id="TEST1",
+                    service_date=d.isoformat(),
+                    day_type="weekday",
+                    data_quality="complete",
+                    ewt_obs_sum_h=stats["obs_sum_h"],
+                    ewt_obs_sum_h_sq=stats["obs_sum_h_sq"],
+                    ewt_n_observed_headways=stats["n_obs"],
+                    ewt_sched_sum_h=stats["sched_sum_h"],
+                    ewt_sched_sum_h_sq=stats["sched_sum_h_sq"],
+                    ewt_n_scheduled_headways=stats["n_sched"],
+                )
+            )
+
+        partial_date = eastern_today() - timedelta(days=2)
+        db_session.add(
+            RouteMetricsDailyOverlay(
+                route_id="TEST1",
+                service_date=partial_date.isoformat(),
+                day_type="weekday",
+                data_quality="partial",
+                ewt_obs_sum_h=36000.0,
+                ewt_obs_sum_h_sq=36000.0**2,
+                ewt_n_observed_headways=1,
+                ewt_sched_sum_h=600.0,
+                ewt_sched_sum_h_sq=600.0**2,
+                ewt_n_scheduled_headways=1,
+            )
+        )
+        db_session.add(
+            SystemMetricsDaily(service_date=partial_date.isoformat(), data_quality="partial")
+        )
+        db_session.commit()
+
+        expected = _derive_ewt_metrics(
+            sum(s["obs_sum_h"] for s in clean_stats),
+            sum(s["obs_sum_h_sq"] for s in clean_stats),
+            sum(s["sched_sum_h"] for s in clean_stats),
+            sum(s["sched_sum_h_sq"] for s in clean_stats),
+            sum(s["n_obs"] for s in clean_stats),
+            sum(s["n_sched"] for s in clean_stats),
+        )["ewt_seconds"]
+
+        result = get_all_routes_scorecard(db_session, days=3)
+        route_row = next((r for r in result["routes"] if r["route_id"] == "TEST1"), None)
+        assert route_row is not None
+        assert route_row["ewt_seconds"] == pytest.approx(expected)
+        assert calls == []
+
+    def test_partial_day_never_reaches_live_compute(self, db_session, sample_route, monkeypatch):
+        """A partial-flagged date never falls through to the live-compute tier.
+
+        Window is `[partial_date, clean_date]`. `clean_date` resolves from
+        the materialized overlay (tier 2); `partial_date` should be
+        filtered out of the window before tier 2 is even consulted. If
+        instead the exclusion happened inside the overlay reader (the
+        pre-fix layer), the missing key would read as "not materialized
+        yet" and the raw-`stop_events` live-compute helper
+        (`fetch_observed_stop_events_for_window`) would be invoked for it
+        -- reproduces review findings 1/2/3.
+        """
+        import src.ewt as ewt_module
+        from api.aggregations import _compute_live_metrics_for_window_uncached
+        from src.models import RouteMetricsDailyOverlay, StopEvent, SystemMetricsDaily
+
+        calls = []
+        original = ewt_module.fetch_observed_stop_events_for_window
+
+        def spy(db, service_dates, route_ids=None):
+            """Record every window of dates handed to the live-compute fetch."""
+            calls.append(list(service_dates))
+            return original(db, service_dates, route_ids=route_ids)
+
+        monkeypatch.setattr(ewt_module, "fetch_observed_stop_events_for_window", spy)
+
+        clean_date = eastern_today()
+        partial_date = eastern_today() - timedelta(days=1)
+
+        db_session.add(
+            StopEvent(
+                service_date=clean_date.isoformat(),
+                trip_id="TRIP_ANCHOR",
+                route_id="TEST1",
+                direction_id=0,
+                stop_id="STOP_ANCHOR",
+                stop_sequence=1,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+        db_session.add(
+            RouteMetricsDailyOverlay(
+                route_id="TEST1",
+                service_date=clean_date.isoformat(),
+                day_type="weekday",
+                data_quality="complete",
+                ewt_obs_sum_h=1200.0,
+                ewt_obs_sum_h_sq=1200.0**2 / 2,
+                ewt_n_observed_headways=2,
+                ewt_sched_sum_h=1200.0,
+                ewt_sched_sum_h_sq=1200.0**2 / 2,
+                ewt_n_scheduled_headways=2,
+            )
+        )
+        db_session.add(
+            RouteMetricsDailyOverlay(
+                route_id="TEST1",
+                service_date=partial_date.isoformat(),
+                day_type="weekday",
+                data_quality="partial",
+                ewt_obs_sum_h=36000.0,
+                ewt_obs_sum_h_sq=36000.0**2,
+                ewt_n_observed_headways=1,
+                ewt_sched_sum_h=600.0,
+                ewt_sched_sum_h_sq=600.0**2,
+                ewt_n_scheduled_headways=1,
+            )
+        )
+        db_session.add(
+            SystemMetricsDaily(service_date=partial_date.isoformat(), data_quality="partial")
+        )
+        db_session.commit()
+
+        _compute_live_metrics_for_window_uncached(db_session, clean_date, 2)
+
+        assert calls == []
+
+
 class TestMakeOtpBlock:
     """Shape contract for the shared `_make_otp_block` factory (NOTES-66).
 
@@ -1421,24 +1639,193 @@ class TestGetRouteContributors:
         assert ours is not None
         assert ours["route_value"] == 90.0
 
-    def test_contributors_days_included_excludes_partial_dates(self, db_session, sample_routes):
-        """`days_included` reports the window length minus partial-flagged dates.
+    def test_contributors_days_included_counts_dates_that_fed_the_baseline(
+        self, db_session, sample_routes
+    ):
+        """`days_included` matches `_system_baseline_for_window`'s real denominator (review finding 5).
 
-        Two dates flagged `partial` in `system_metrics_daily` within the
-        30-day window; `days_included` should read `30 - 2`.
+        Seeds 5 `complete` rows with an `otp_percentage` value plus 2
+        `partial` rows with no value, all inside the 30-day window. Most of
+        the 30 calendar days have no `system_metrics_daily` row at all —
+        `days_included` must read 5 (the count of rows that actually fed
+        the baseline mean), not `30 - 2 = 28`, which would silently count
+        every date with no row as "included."
         """
         self._clear_cache()
         from api.aggregations import get_route_contributors
         from src.models import SystemMetricsDaily
 
-        self._seed_system_baseline(db_session, otp=80.0, days_back=10)
-        for offset in (1, 2):
+        for offset in range(1, 6):
+            d = eastern_today() - timedelta(days=offset)
+            db_session.add(SystemMetricsDaily(service_date=d.isoformat(), otp_percentage=80.0))
+        for offset in (10, 11):
             d = eastern_today() - timedelta(days=offset)
             db_session.add(SystemMetricsDaily(service_date=d.isoformat(), data_quality="partial"))
         db_session.commit()
 
         result = get_route_contributors(db_session, metric="otp", days=30)
-        assert result["days_included"] == 30 - 2
+        assert result["baseline_value"] == 80.0
+        assert result["days_included"] == 5
+
+    def test_contributors_ewt_window_excludes_partial_day(
+        self, db_session, sample_routes, monkeypatch
+    ):
+        """A `data_quality='partial'` date is excluded from the pooled EWT window (review finding 1).
+
+        Two clean `route_metrics_daily_overlay` days pool to a modest EWT;
+        a third day flagged `partial` carries an extreme observed-headway
+        spread that would blow up the pooled EWT if it leaked in. Also
+        asserts the partial date is never among the dates handed to the
+        live-compute fetch: with no raw `stop_events` seeded for the
+        partial day, a value-only assertion would pass even under the bug
+        (live compute finds nothing for that date and silently
+        contributes zero) -- this is what actually pins the exclusion
+        happening at the right layer. (The 30-day window is otherwise
+        sparse -- only the 3 seeded dates have overlay rows -- so the
+        other ~27 dates legitimately fall through to live compute; that's
+        real "not backfilled yet" behavior, not the bug, hence asserting
+        the partial date's absence rather than an empty call list.)
+        Proves the fix sits there: with the overlay row present but
+        flagged partial, a buggy per-row skip inside the overlay reader
+        would make the date look "not materialized yet" and fall through
+        to a live recompute over raw `stop_events` that does NOT exclude
+        partial days — pooling it right back in (review findings 1/2/3).
+        """
+        self._clear_cache()
+        import src.ewt as ewt_module
+        from api.aggregations import _derive_ewt_metrics, get_route_contributors
+        from src.models import RouteMetricsDailyOverlay, StopEvent, SystemMetricsDaily
+
+        calls = []
+        original = ewt_module.fetch_observed_stop_events_for_window
+
+        def spy(db, service_dates, route_ids=None):
+            """Record every window of dates handed to the live-compute fetch."""
+            calls.append(list(service_dates))
+            return original(db, service_dates, route_ids=route_ids)
+
+        monkeypatch.setattr(ewt_module, "fetch_observed_stop_events_for_window", spy)
+
+        self._seed_system_baseline(db_session, days_back=10)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        # One raw stop_event just sets `_latest_service_date_with_stop_events`
+        # (the pooled window's anchor) -- its own content is irrelevant here.
+        db_session.add(
+            StopEvent(
+                service_date=(eastern_today() - timedelta(days=1)).isoformat(),
+                trip_id="TRIP_ANCHOR",
+                route_id="TEST1",
+                direction_id=0,
+                stop_id="STOP_ANCHOR",
+                stop_sequence=1,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+
+        clean_stats = [
+            {
+                "obs_sum_h": 1200.0,
+                "obs_sum_h_sq": 1200.0**2 / 2,
+                "n_obs": 2,
+                "sched_sum_h": 1200.0,
+                "sched_sum_h_sq": 1200.0**2 / 2,
+                "n_sched": 2,
+            }
+            for _ in range(2)
+        ]
+        for i, stats in enumerate(clean_stats):
+            d = eastern_today() - timedelta(days=i + 1)
+            db_session.add(
+                RouteMetricsDailyOverlay(
+                    route_id="TEST1",
+                    service_date=d.isoformat(),
+                    day_type="weekday",
+                    data_quality="complete",
+                    ewt_obs_sum_h=stats["obs_sum_h"],
+                    ewt_obs_sum_h_sq=stats["obs_sum_h_sq"],
+                    ewt_n_observed_headways=stats["n_obs"],
+                    ewt_sched_sum_h=stats["sched_sum_h"],
+                    ewt_sched_sum_h_sq=stats["sched_sum_h_sq"],
+                    ewt_n_scheduled_headways=stats["n_sched"],
+                )
+            )
+
+        partial_date = eastern_today() - timedelta(days=3)
+        db_session.add(
+            RouteMetricsDailyOverlay(
+                route_id="TEST1",
+                service_date=partial_date.isoformat(),
+                day_type="weekday",
+                data_quality="partial",
+                ewt_obs_sum_h=36000.0,
+                ewt_obs_sum_h_sq=36000.0**2,
+                ewt_n_observed_headways=1,
+                ewt_sched_sum_h=600.0,
+                ewt_sched_sum_h_sq=600.0**2,
+                ewt_n_scheduled_headways=1,
+            )
+        )
+        db_session.add(
+            SystemMetricsDaily(service_date=partial_date.isoformat(), data_quality="partial")
+        )
+        db_session.commit()
+
+        expected = _derive_ewt_metrics(
+            sum(s["obs_sum_h"] for s in clean_stats),
+            sum(s["obs_sum_h_sq"] for s in clean_stats),
+            sum(s["sched_sum_h"] for s in clean_stats),
+            sum(s["sched_sum_h_sq"] for s in clean_stats),
+            sum(s["n_obs"] for s in clean_stats),
+            sum(s["n_sched"] for s in clean_stats),
+        )["ewt_seconds"]
+
+        result = get_route_contributors(db_session, metric="ewt", days=30)
+        ours = next((c for c in result["contributors"] if c["route_id"] == "TEST1"), None)
+        assert ours is not None
+        assert ours["route_value"] == pytest.approx(expected)
+        assert all(partial_date not in call_dates for call_dates in calls)
+
+    def test_contributors_baseline_anchors_on_same_window_as_route_value(
+        self, db_session, sample_routes
+    ):
+        """`baseline_value`/`days_included` anchor on the same date `route_value` pools (review finding 4).
+
+        Seeds one raw `stop_event` 3 days ago (so the pooled-metrics
+        anchor, `_latest_service_date_with_stop_events`, is `today - 3`)
+        plus a `system_metrics_daily` row dated *today* with an extreme
+        OTP value. Anchoring the baseline on `eastern_today()` (the
+        pre-fix behavior) would pull today's row into the 30-day baseline
+        window even though it falls after the anchor the pooled
+        SD/EWT/bunching `route_value` actually uses -- the two 30-day
+        spans wouldn't even share the same calendar days. Anchoring both
+        on the same date excludes it.
+        """
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+        from src.models import StopEvent, SystemMetricsDaily
+
+        self._seed_system_baseline(db_session, otp=80.0, days_back=10)
+        db_session.add(
+            SystemMetricsDaily(service_date=eastern_today().isoformat(), otp_percentage=999.0)
+        )
+        db_session.add(
+            StopEvent(
+                service_date=(eastern_today() - timedelta(days=3)).isoformat(),
+                trip_id="TRIP_ANCHOR",
+                route_id="TEST1",
+                direction_id=0,
+                stop_id="STOP_ANCHOR",
+                stop_sequence=1,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+        db_session.commit()
+
+        result = get_route_contributors(db_session, metric="otp", days=30)
+        assert result["baseline_value"] == 80.0
 
     def test_contributors_per_route_target_overrides_baseline(
         self, db_session, sample_routes, tmp_path, monkeypatch

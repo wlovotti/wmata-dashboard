@@ -645,6 +645,16 @@ def _read_overlay_for_dates(db: Session, dates: list[date_type]) -> dict[str, di
     One SQL query for the whole window, then a Python pass to reshape —
     cost is dominated by ~126 routes × N days rows being materialized
     (well under 1k for a 7-day window). Sub-100ms on a warm Postgres.
+
+    Callers are expected to have already dropped `data_quality='partial'`
+    dates from `dates` (see `_compute_live_metrics_for_window_uncached`,
+    which filters via `_partial_service_dates_in_window` before calling
+    this). NOTES-123 review finding 1: filtering partial rows out *here*
+    instead — after the query, per-row — used to make a partial date's
+    absence indistinguishable from "not materialized yet," sending it
+    through the live-compute fallback (which doesn't exclude partial
+    days) and pooling it right back in. Excluding it from `dates` up
+    front avoids that trap entirely.
     """
     if not dates:
         return {}
@@ -656,14 +666,6 @@ def _read_overlay_for_dates(db: Session, dates: list[date_type]) -> dict[str, di
     )
     out: dict[str, dict[str, dict]] = {}
     for row in rows:
-        # Skip partial-quality rows (NOTES-123) -- a thin-collection day's
-        # sufficient statistics shouldn't contribute to the pooled window.
-        # The (route, date) combo simply doesn't appear for this date, same
-        # treatment as a route that didn't run that day. Mirrors
-        # `_overlay_per_route_per_day`, which already excludes these rows
-        # from the deltas window.
-        if row.data_quality == "partial":
-            continue
         out.setdefault(row.service_date, {})[row.route_id] = _hydrate_overlay_row(row)
     return out
 
@@ -674,6 +676,15 @@ def _compute_live_metrics_for_window_uncached(
     days: int,
 ) -> dict[str, dict]:
     """Pool the four scorecard metrics over `[end_date - days + 1, end_date]`.
+
+    `data_quality='partial'` dates (NOTES-123) are dropped from the window
+    up front, before any tier below is consulted — same treatment as a
+    date the route didn't run on. This has to happen here, not inside the
+    overlay reader: a date missing from the overlay result reads as "not
+    materialized yet" and falls through to tier 3, which recomputes from
+    raw `stop_events` and does NOT exclude partial days — filtering after
+    the fact would silently pool the partial day right back in (NOTES-123
+    review findings 1-3).
 
     Three-tier read path, fastest first:
       1. In-memory per-date cache (`_live_metrics_cache`, 1-hour TTL).
@@ -693,7 +704,9 @@ def _compute_live_metrics_for_window_uncached(
         fetch_observed_stop_events_for_window,
     )
 
-    dates = [end_date - timedelta(days=i) for i in range(days)]
+    all_dates = [end_date - timedelta(days=i) for i in range(days)]
+    partial_dates = _partial_service_dates_in_window(db, end_date, days)
+    dates = [d for d in all_dates if d.isoformat() not in partial_dates]
     cached_results: dict[str, dict[str, dict]] = {}
     uncached_dates: list[date_type] = []
 
@@ -2767,20 +2780,36 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
 #     averaged with null-skip).
 #   - service_delivered / EWT / bunching: pooled sufficient statistics
 #     across the window via `get_live_metrics_for_window` (the same
-#     machinery the 7-day scorecard uses), anchored on the latest
-#     service_date with any derived stop_events.
+#     machinery the 7-day scorecard uses).
 #
-# Both paths exclude dates flagged `data_quality='partial'` in
+# `baseline_value`, `days_included`, and both `route_value` paths all
+# anchor on the same date, `_latest_service_date_with_stop_events`
+# (falling back to `eastern_today()` only when no stop_events exist
+# anywhere yet). A prior version anchored the OTP/baseline/days_included
+# trio on `eastern_today()` while the pooled path anchored on the latest
+# derived service_date — two "30-day" windows that didn't even cover the
+# same 30 calendar days (NOTES-123 review finding 4).
+#
+# Every path excludes dates flagged `data_quality='partial'` in
 # `system_metrics_daily` — a collection-outage day's thin sample would
 # otherwise stand in for (OTP's single-day case) or disproportionately
-# swing (EWT's squared-gap formula) an entire window of signal. See
-# `_partial_service_dates_in_window` and `_read_overlay_for_dates`.
+# swing (EWT's squared-gap formula) an entire window of signal.
+# `_partial_service_dates_in_window` is the shared source of truth;
+# `_compute_live_metrics_for_window_uncached` applies it to `dates` up
+# front, before any read tier (cache / overlay / live compute) is
+# consulted — NOT inside `_read_overlay_for_dates`, which would make a
+# partial date's absence indistinguishable from "not materialized yet"
+# and send it through the live-compute fallback instead (review findings
+# 1-3).
 #
 # `baseline_value` always uses the window-mean from `system_metrics_daily`
 # regardless of metric, since that table holds all four metrics per day —
-# same exclusion, so `route_value` and `baseline_value` are now symmetric
-# window figures for every metric. `days_included` on the response reports
-# how many of the `days` calendar dates were not partial-flagged.
+# same exclusion and now the same anchor, so `route_value` and
+# `baseline_value` are genuinely symmetric window figures for every
+# metric. `days_included` on the response is the count of dates that
+# actually fed `baseline_value` (`_system_baseline_for_window`'s real
+# denominator), not `days` minus the partial-flagged count (review
+# finding 5).
 # ---------------------------------------------------------------------------
 
 _CONTRIBUTORS_TTL_SEC = 60.0
@@ -2799,13 +2828,21 @@ _CONTRIBUTORS_METRIC_CONFIG: dict[str, tuple[str, bool]] = {
 
 def _system_baseline_for_window(
     db: Session, metric_column: str, end_date: date_type, days: int
-) -> float | None:
+) -> tuple[float | None, int]:
     """Mean of `system_metrics_daily.<metric_column>` over the past `days` days.
 
     Skips null rows and partial-quality rows (days with no data or partial
-    ingest) so a single incomplete day doesn't poison the mean. Returns None
-    when no rows in the window have a non-null value (fresh DB, or the
-    materialization pipeline hasn't run).
+    ingest) so a single incomplete day doesn't poison the mean. Returns
+    `(None, 0)` when no rows in the window have a non-null value (fresh
+    DB, or the materialization pipeline hasn't run).
+
+    Returns `(mean, count)` — `count` is the number of dates that actually
+    fed the mean (`data_quality='complete'` with a non-null value), the
+    same set the query filters to. The contributors envelope's
+    `days_included` field reuses this count (NOTES-123 review finding 5)
+    instead of `days` minus the partial-flagged count, which silently
+    treated every date with no `system_metrics_daily` row at all — not
+    just partial ones — as "included."
     """
     start_iso = (end_date - timedelta(days=days - 1)).isoformat()
     end_iso = end_date.isoformat()
@@ -2821,8 +2858,8 @@ def _system_baseline_for_window(
     )
     values = [row[0] for row in rows if row[0] is not None]
     if not values:
-        return None
-    return sum(values) / len(values)
+        return None, 0
+    return sum(values) / len(values), len(values)
 
 
 def _partial_service_dates_in_window(db: Session, end_date: date_type, days: int) -> set[str]:
@@ -2849,7 +2886,11 @@ def _partial_service_dates_in_window(db: Session, end_date: date_type, days: int
 
 
 def _route_otp_window_mean(
-    db: Session, route_id: str, end_date: date_type, days: int
+    db: Session,
+    route_id: str,
+    end_date: date_type,
+    days: int,
+    partial_dates: set[str] | None = None,
 ) -> float | None:
     """Mean of per-day OTP for one route over the window.
 
@@ -2866,10 +2907,17 @@ def _route_otp_window_mean(
     `_system_otp_series`. Mean-of-daily-percentages (not pooled) so the
     route value stays comparable to the system baseline computed by
     `_system_baseline_for_window`, which also averages per-day rates.
+
+    `partial_dates` — precomputed via `_partial_service_dates_in_window` —
+    lets a caller iterating every route share one query across the whole
+    call instead of each route re-querying the identical window (NOTES-123
+    review finding 8: this was ~126 identical queries per OTP contributors
+    build). Computed internally when not supplied, for standalone callers.
     """
     start_date = end_date - timedelta(days=days - 1)
     by_date = _compute_otp_per_day_with_filters(db, route_id, start_date, end_date, ALL_HOURS)
-    partial_dates = _partial_service_dates_in_window(db, end_date, days)
+    if partial_dates is None:
+        partial_dates = _partial_service_dates_in_window(db, end_date, days)
     values = [v for d, v in by_date.items() if v is not None and d not in partial_dates]
     if not values:
         return None
@@ -2954,21 +3002,37 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     `route_value` is a genuine `days`-window figure for every metric: OTP
     averages per-day percentages (`_route_otp_window_mean`); service_delivered,
     EWT, and bunching pool sufficient statistics across the window
-    (`get_live_metrics_for_window`, anchored on the latest service_date with
-    stop_events) the same way the scorecard does. Both paths exclude dates
-    flagged `data_quality='partial'` in `system_metrics_daily` (NOTES-123) —
-    a collection-outage day's thin observation count would otherwise stand
-    in for (OTP) or disproportionately swing (EWT's squared-gap formula) an
-    entire window's worth of signal. `baseline_value` uses the same
-    exclusion via `_system_baseline_for_window`.
+    (`get_live_metrics_for_window`) the same way the scorecard does. Every
+    window figure here — `baseline_value`, `days_included`, and both
+    `route_value` paths — anchors on the same date,
+    `_latest_service_date_with_stop_events` (falling back to
+    `eastern_today()` only when no stop_events exist anywhere yet, in
+    which case the pooled SD/EWT/bunching call is skipped entirely rather
+    than paying for a live compute over nothing). NOTES-123 review finding
+    4: before this, `baseline_value`/`days_included`/OTP anchored on
+    `eastern_today()` while the pooled path anchored on the latest
+    service_date with stop_events — two 30-day windows that could share as
+    few as 25 of their 30 calendar days. All four also exclude dates
+    flagged `data_quality='partial'` in `system_metrics_daily`
+    (`_partial_service_dates_in_window`) — a collection-outage day's thin
+    observation count would otherwise stand in for (OTP) or
+    disproportionately swing (EWT's squared-gap formula) an entire
+    window's worth of signal.
 
     Returns `{metric, days, days_included, baseline_value, contributors}`
     where `contributors` is a list ranked by `contribution_score` desc
     (most-dragging routes first). Routes without enough data to score
     (route_value or baseline missing) are dropped, not listed.
-    `days_included` is `days` minus the count of partial-flagged dates in
-    the window — a coarse signal for "how thin is this window" the
-    frontend can surface next to the metric toggle.
+    `days_included` is the count of dates that actually fed
+    `baseline_value` — `data_quality='complete'` rows with a non-null
+    value for this metric (NOTES-123 review finding 5) — not `days` minus
+    the partial-flagged count, which silently counted every date with no
+    `system_metrics_daily` row at all (not just partial ones) as
+    included. This is the same "days that actually contributed a value"
+    meaning as `days_included` on the agency-comparison payload (review
+    finding 9), though the eligibility differs by design: agency
+    comparison keeps partial days in its mean (flagged separately via
+    `partial_days`) while this endpoint excludes them outright.
     """
     if metric not in _CONTRIBUTORS_METRIC_CONFIG:
         raise ValueError(f"Unsupported contributors metric: {metric}")
@@ -2976,13 +3040,17 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
 
     from src.timezones import eastern_today
 
-    end_date = eastern_today()
+    anchor_date = _latest_service_date_with_stop_events(db)
+    end_date = anchor_date or eastern_today()
 
     # System window-mean baseline. Per-row reference comes from either
     # the route's configured target (PR #99) or this baseline as fallback.
-    baseline_value = _system_baseline_for_window(db, metric_column, end_date, days)
+    baseline_value, days_included = _system_baseline_for_window(db, metric_column, end_date, days)
 
-    days_included = days - len(_partial_service_dates_in_window(db, end_date, days))
+    # Partial-flagged dates in the window (NOTES-123) -- computed once and
+    # shared across every route's OTP call below instead of each route
+    # re-querying the identical window (review finding 8).
+    partial_dates = _partial_service_dates_in_window(db, end_date, days)
 
     # Volume proxy: total scheduled trips per route over the window.
     sched_trips_by_route = _scheduled_trips_in_window_by_route(db, end_date, days)
@@ -2996,13 +3064,14 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     route_values: dict[str, float | None] = {}
     if metric == "otp":
         for r in routes:
-            route_values[r.route_id] = _route_otp_window_mean(db, r.route_id, end_date, days)
+            route_values[r.route_id] = _route_otp_window_mean(
+                db, r.route_id, end_date, days, partial_dates=partial_dates
+            )
     else:
         # service_delivered / EWT / bunching: pooled over the window,
-        # anchored on the latest service_date with any derived stop_events
-        # (same anchor the prior single-day snapshot used).
-        anchor_date = _latest_service_date_with_stop_events(db)
-        windowed = get_live_metrics_for_window(db, anchor_date, days) if anchor_date else {}
+        # same anchor as above. Skipped entirely (not a live compute over
+        # an empty DB) when there are no stop_events anywhere yet.
+        windowed = get_live_metrics_for_window(db, end_date, days) if anchor_date else {}
         for r in routes:
             metrics_bundle = windowed.get(r.route_id)
             fields = _live_metric_fields(metrics_bundle)

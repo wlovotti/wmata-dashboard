@@ -321,11 +321,14 @@ async def get_routes_contributors(metric: str = "otp", days: int = 30):
     (NOTES-123): OTP averages per-day percentages; service-delivered, EWT,
     and bunching pool sufficient statistics across the window (the same
     machinery the routes scorecard uses). Both paths, and the baseline
-    window mean, exclude dates flagged `data_quality='partial'` in
-    `system_metrics_daily` so a collection-outage day doesn't stand in for
-    (or disproportionately swing) an entire window's worth of signal.
-    `days_included` reports how many of the `days` calendar dates were not
-    partial-flagged.
+    window mean, anchor on the same date (the latest service_date with any
+    derived stop_events) and exclude dates flagged `data_quality='partial'`
+    in `system_metrics_daily` so a collection-outage day doesn't stand in
+    for (or disproportionately swing) an entire window's worth of signal.
+    `days_included` reports how many dates in the window actually fed
+    `baseline_value` — not just `days` minus the partial-flagged count, so
+    a stretch of not-yet-materialized trailing days also shows up as a
+    thinner window.
 
     Args:
         metric: One of `otp`, `service_delivered`, `ewt`, `bunching`
