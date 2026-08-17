@@ -10,6 +10,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
+import { assertHeaderCopy } from './helpers/headerCopy'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -82,5 +83,8 @@ test('RouteList: visual regression', async ({ page }) => {
   // Wait for contributors to load.
   await expect(page.getByRole('cell', { name: 'D72' })).toBeVisible()
   await page.waitForTimeout(500)
+  // DOM-level header copy check alongside the pixel snapshot (TODO: PR#) —
+  // see helpers/headerCopy.js for why.
+  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('routelist.png', { fullPage: true })
 })

@@ -8,6 +8,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
+import { assertHeaderCopy } from './helpers/headerCopy'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -69,5 +70,8 @@ test('Segments: visual regression', async ({ page }) => {
   await page.goto('/segments')
   // Wait for the table to be fully rendered
   await page.waitForSelector('tbody tr')
+  // DOM-level header copy check alongside the pixel snapshot (TODO: PR#) —
+  // see helpers/headerCopy.js for why.
+  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('segments-chromium.png', { fullPage: false })
 })

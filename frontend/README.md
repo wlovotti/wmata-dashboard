@@ -36,10 +36,10 @@ test to match rather than "fixing" the test silently.
 ### Visual regression tests (Playwright)
 
 ```bash
-npx playwright install chromium          # first-time browser install
-npx playwright test                      # run all specs (must pass unit first)
-npx playwright test --update-snapshots   # regenerate baselines after UI changes
-npx playwright test --ui                 # interactive UI mode for debugging
+npx playwright install chromium              # first-time browser install
+npx playwright test                          # run all specs (must pass unit first)
+npx playwright test --update-snapshots=all   # regenerate baselines after UI changes
+npx playwright test --ui                     # interactive UI mode for debugging
 ```
 
 Playwright specs live in `tests/e2e/` and cover four pages: Overview (`/`),
@@ -53,16 +53,22 @@ platform (`*-chromium-linux.png`, `*-chromium-darwin.png`). CI runs on Linux
 and validates against the `*-linux.png` baselines; macOS devs see `*-darwin.png`
 locally. Both are committed.
 
-When you change UI that affects a baselined page, regenerate **both** sets:
+When you change UI that affects a baselined page, regenerate **both** sets.
+Use `--update-snapshots=all`, not the bare `--update-snapshots` (which
+defaults to Playwright's `changed` mode — it only rewrites snapshots that
+**fail** comparison, so a copy-sized diff that stays inside
+`maxDiffPixelRatio` silently writes nothing; this bit the first regen pass
+on PR #205, where `git status` came back clean after both platforms
+"passed" — see the header-copy-check PR (TODO: PR#) for the fuller story):
 
 ```bash
 # macOS baselines (run locally on your Mac):
-npx playwright test --update-snapshots
+npx playwright test --update-snapshots=all
 
 # Linux baselines (run via Docker so CI passes):
 docker run --rm -v "$(pwd):/work" -v /work/node_modules -w /work \
   mcr.microsoft.com/playwright:v1.60.0-noble \
-  bash -c "npm ci --silent && npx playwright test --update-snapshots"
+  bash -c "npm ci --silent && npx playwright test --update-snapshots=all"
 ```
 
 If you only regenerate the macOS set, CI will fail on the stale Linux baseline.

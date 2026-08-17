@@ -25,6 +25,7 @@ import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
 import { stubMapTiles } from './helpers/tileStub'
+import { assertHeaderCopy } from './helpers/headerCopy'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -124,5 +125,9 @@ test('Overview: visual regression', async ({ page }) => {
   // wait for at least one so the screenshot doesn't catch a half-drawn map.
   await expect(page.locator('.leaflet-overlay-pane path').first()).toBeVisible()
   await page.waitForTimeout(500)
+  // Pixel diffing alone doesn't reliably catch small-area text changes (a
+  // header subtitle swap stayed under maxDiffPixelRatio in PR #204) —
+  // assert the exact header copy as a DOM-level check too (TODO: PR#).
+  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('overview.png', { fullPage: true })
 })
