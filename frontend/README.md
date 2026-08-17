@@ -74,3 +74,10 @@ docker run --rm -v "$(pwd):/work" -v /work/node_modules -w /work \
 If you only regenerate the macOS set, CI will fail on the stale Linux baseline.
 If you skip Docker and only regenerate Linux via a CI-update PR, your local
 runs will diff against an outdated darwin snapshot.
+
+Each spec also calls `assertHeaderCopy(page)` (see
+`tests/e2e/helpers/headerCopy.js`) immediately before its pixel snapshot,
+asserting the header title and subtitle text exactly. If you're
+intentionally changing the header copy, update `EXPECTED_HEADER_TITLE` /
+`EXPECTED_HEADER_SUBTITLE` in that helper first — otherwise the regen run
+aborts on the copy assertion before it writes any new baselines.

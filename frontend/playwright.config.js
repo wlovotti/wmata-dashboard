@@ -6,7 +6,7 @@
 // Visual regression baselines are platform-specific. Baselines committed
 // in this repo were generated on macOS. CI (Linux) must regenerate them
 // via:
-//   npx playwright test --update-snapshots
+//   npx playwright test --update-snapshots=all
 // and commit the result in a follow-up PR (see PR body for the exact steps).
 
 import { defineConfig, devices } from '@playwright/test'

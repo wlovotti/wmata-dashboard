@@ -43,6 +43,9 @@ export const EXPECTED_HEADER_SUBTITLE = 'Daily bus network performance metrics'
  * @returns {Promise<void>}
  */
 export async function assertHeaderCopy(page) {
-  await expect(page.getByRole('heading', { name: EXPECTED_HEADER_TITLE, level: 1 })).toBeVisible()
+  // getByRole's `name` option is a case-insensitive substring match by
+  // default, so a title like "WMATA Performance Dashboard (Beta)" would
+  // still pass — mirror the subtitle's exact toHaveText check instead.
+  await expect(page.locator('header h1')).toHaveText(EXPECTED_HEADER_TITLE)
   await expect(page.locator('header .subtitle')).toHaveText(EXPECTED_HEADER_SUBTITLE)
 }
