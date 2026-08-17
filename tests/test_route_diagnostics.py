@@ -16,23 +16,27 @@ the hold-down candidates list (NOTES-61). Tests cover:
     Python helpers; the SQL path is exercised in integration).
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
-from src.models import Route, StopEvent
+from src.models import Route, Stop, StopEvent
 from src.route_diagnostics import (
     ASYMMETRY_MARGIN_PCT,
     EARLY_THRESHOLD_SEC,
     LATE_THRESHOLD_SEC,
+    LAYOVER_MEDIAN_DEV_THRESHOLD_SEC,
     LEAKY_P10_DROP_SEC,
     MIN_TIMEPOINT_OBSERVATIONS,
     NEUTRAL_MEDIAN_BAND_SEC,
+    ORIGIN_PROXIMITY_GUARD_METERS,
     RECOVERY_MEDIAN_DROP_SEC,
     UNDERPOWERED_ENTERING_MEDIAN_SEC,
     _assemble_segment_slip_output,
+    _haversine_meters,
     classify_timepoint,
     compute_canonical_stop_mapping,
+    compute_layover_stop_ids,
     default_service_date_range,
 )
 
@@ -759,3 +763,268 @@ def test_origin_departure_segment_dropped_before_cumsum():
     # origin's 50.0 / 100.0 are nowhere in the running total.
     assert out[0]["from_seq"] == 2
     assert out[0]["cum_slip_sec"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-bay-terminal layover exclusion (segment-slip origin guard, TODO(PR): fill in PR number)
+#
+# `_assemble_segment_slip_output` originally excluded only the single
+# minimum-`from_seq` segment per direction. A multi-bay terminal (e.g. Fort
+# Totten+Bay A / Bay K, ~39m apart) puts a laying-over bus "at" every bay in
+# the loop, so the *second* bay's from-stop timestamp is equally
+# layover-contaminated even though its `from_seq` isn't the minimum. The
+# `layover_stop_ids` param generalizes the exclusion to any from-stop the
+# caller has identified as layover-contaminated, regardless of its
+# from_seq.
+# ---------------------------------------------------------------------------
+
+
+def test_layover_stop_ids_drops_non_origin_from_stop():
+    """A from-stop flagged as layover-contaminated is dropped even though
+    it isn't the minimum from_seq (the Fort Totten Bay-K case)."""
+    rows = [
+        # Origin (from_seq=1, Bay A) — dropped by the existing min-from_seq rule.
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "BAY_A",
+            "to_seq": 2,
+            "to_stop_id": "BAY_K",
+            "n_observations": 100,
+            "mean_slip_sec": 1.0,
+        },
+        # Second bay (from_seq=2, Bay K) — NOT the minimum from_seq, but
+        # its from-stop is layover-contaminated (flagged in the set below).
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "BAY_K",
+            "to_seq": 3,
+            "to_stop_id": "STREET",
+            "n_observations": 100,
+            "mean_slip_sec": 522.0,
+        },
+        # First genuine street segment — kept, unaffected.
+        {
+            "direction_id": 0,
+            "from_seq": 3,
+            "from_stop_id": "STREET",
+            "to_seq": 4,
+            "to_stop_id": "STREET2",
+            "n_observations": 100,
+            "mean_slip_sec": 15.0,
+        },
+    ]
+    out = _assemble_segment_slip_output(rows, period="all", layover_stop_ids={0: {"BAY_K"}})
+    # Both the origin (from_seq=1) and the flagged Bay-K row (from_seq=2)
+    # are dropped; only the genuine street segment survives.
+    assert [r["from_seq"] for r in out] == [3]
+    # Cumsum restarts from zero at the first surviving segment — the
+    # dropped Bay-K row's 522.0 must not leak into the running total.
+    assert out[0]["cum_slip_sec"] == 15.0
+
+
+def test_layover_stop_ids_none_is_backward_compatible():
+    """Omitting `layover_stop_ids` reproduces the original min-from_seq-only
+    exclusion (no behavior change for callers that don't pass it)."""
+    rows = [
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 2,
+            "to_stop_id": "S2",
+            "n_observations": 100,
+            "mean_slip_sec": 5.0,
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "S2",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 100,
+            "mean_slip_sec": 10.0,
+        },
+    ]
+    without_param = _assemble_segment_slip_output(rows, period="all")
+    with_none = _assemble_segment_slip_output(rows, period="all", layover_stop_ids=None)
+    with_empty = _assemble_segment_slip_output(rows, period="all", layover_stop_ids={})
+    assert without_param == with_none == with_empty
+
+
+def test_layover_stop_ids_scoped_per_direction():
+    """A flagged stop_id in direction 0 doesn't suppress the same stop_id
+    appearing as a from-stop in direction 1 (stop_id isn't direction-unique
+    — CLAUDE.md)."""
+    rows = [
+        {
+            "direction_id": 0,
+            "from_seq": 1,
+            "from_stop_id": "S1",
+            "to_seq": 2,
+            "to_stop_id": "SHARED",
+            "n_observations": 100,
+            "mean_slip_sec": 1.0,
+        },
+        {
+            "direction_id": 0,
+            "from_seq": 2,
+            "from_stop_id": "SHARED",
+            "to_seq": 3,
+            "to_stop_id": "S3",
+            "n_observations": 100,
+            "mean_slip_sec": 400.0,
+        },
+        {
+            "direction_id": 1,
+            "from_seq": 1,
+            "from_stop_id": "S3",
+            "to_seq": 2,
+            "to_stop_id": "SHARED",
+            "n_observations": 100,
+            "mean_slip_sec": 1.0,
+        },
+        {
+            "direction_id": 1,
+            "from_seq": 2,
+            "from_stop_id": "SHARED",
+            "to_seq": 3,
+            "to_stop_id": "S1",
+            "n_observations": 100,
+            "mean_slip_sec": 8.0,
+        },
+    ]
+    out = _assemble_segment_slip_output(rows, period="all", layover_stop_ids={0: {"SHARED"}})
+    by_dir = {(r["direction_id"], r["from_seq"]) for r in out}
+    # Direction 0's SHARED-origin row (from_seq=2) is dropped.
+    assert (0, 2) not in by_dir
+    # Direction 1's SHARED-origin row (from_seq=2) is unaffected — no entry
+    # for direction 1 in layover_stop_ids.
+    assert (1, 2) in by_dir
+
+
+# ---------------------------------------------------------------------------
+# Layover guard-choice constants + haversine helper
+# ---------------------------------------------------------------------------
+
+
+def test_haversine_meters_known_distance():
+    """Sanity check against a known short distance (Fort Totten Bay A/K,
+    ~39m apart per the blast-radius sweep)."""
+    # Fort Totten+Bay A (15403) / Fort Totten+Bay K (21559) approximate
+    # coordinates — not exact, just close enough to assert "small".
+    d = _haversine_meters(38.9530, -77.0021, 38.9532, -77.0022)
+    assert 0 < d < 100
+
+
+def test_haversine_meters_zero_for_same_point():
+    assert _haversine_meters(38.95, -77.00, 38.95, -77.00) == 0.0
+
+
+def test_layover_guard_constants_are_sane():
+    """Spatial radius is a small multiple of the 50m proximity-matcher
+    radius (`src/analytics.py` `proximity_meters` default); behavioral
+    threshold is a materially-early median, distinct from the module's
+    existing -120s OTP `EARLY_THRESHOLD_SEC` (validated against production
+    data in the closing PR's blast-radius sweep — see PR body)."""
+    assert ORIGIN_PROXIMITY_GUARD_METERS == 100.0
+    assert LAYOVER_MEDIAN_DEV_THRESHOLD_SEC < 0
+
+
+# ---------------------------------------------------------------------------
+# compute_layover_stop_ids — Postgres-only (PERCENTILE_CONT + ANY(:ids)),
+# mirrors the production combined spatial+behavioral guard against a
+# synthetic multi-bay-terminal fixture. Marked `pg` per pyproject.toml;
+# run via `bin/test-with-pg` or directly against a local Postgres.
+# ---------------------------------------------------------------------------
+
+
+def _seed_layover_fixture(pg_session, route_id: str = "LAYOVERTEST") -> None:
+    """Seed a synthetic multi-bay-terminal route on Postgres.
+
+    Direction 0: Bay A (seq 1) -> Bay B (seq 2, ~10m from Bay A, grossly
+    early like a layover bay) -> Street (seq 3, ~90m from Bay A but NOT
+    grossly early — a genuine nearby street stop, the C71-style
+    counter-example from the blast-radius sweep) -> Street2 (seq 4, far
+    away, grossly early for an unrelated reason — must NOT be flagged
+    because it fails the spatial condition).
+    """
+    pg_session.add(
+        Route(
+            route_id=route_id,
+            route_short_name=route_id,
+            route_long_name="Layover fixture route",
+            route_type=3,
+            is_current=True,
+        )
+    )
+    stops = [
+        # (stop_id, lat, lon)
+        ("BAY_A", 38.9530, -77.0021),
+        ("BAY_B", 38.9531, -77.0021),  # ~11m from BAY_A
+        ("STREET", 38.9538, -77.0021),  # ~89m from BAY_A
+        ("FAR", 39.0530, -77.0021),  # ~11km from BAY_A — spatially out of range
+    ]
+    for stop_id, lat, lon in stops:
+        pg_session.add(
+            Stop(
+                stop_id=stop_id,
+                stop_name=stop_id,
+                stop_lat=lat,
+                stop_lon=lon,
+                is_current=True,
+            )
+        )
+    pg_session.flush()
+
+    base_ts = datetime(2026, 5, 1, 14, 0, 0)
+    # 40 trips: BAY_A (dev 0) -> BAY_B (dev -400s, grossly early: layover)
+    #   -> STREET (dev +60s, NOT grossly early: genuine street stop)
+    #   -> FAR (dev -400s, grossly early but spatially out of range)
+    for i in range(40):
+        trip_id = f"TRIP_{i}"
+        for seq, stop_id, dev in [
+            (1, "BAY_A", 0),
+            (2, "BAY_B", -400),
+            (3, "STREET", 60),
+            (4, "FAR", -400),
+        ]:
+            obs_ts = base_ts + timedelta(seconds=dev)
+            pg_session.add(
+                StopEvent(
+                    service_date="2026-05-01",
+                    trip_id=trip_id,
+                    route_id=route_id,
+                    direction_id=0,
+                    stop_id=stop_id,
+                    stop_sequence=seq,
+                    scheduled_arrival_ts=base_ts,
+                    observed_arrival_ts=obs_ts,
+                    deviation_sec=dev,
+                    source="proximity",
+                    schedule_relationship="SCHEDULED",
+                )
+            )
+    pg_session.flush()
+
+
+@pytest.mark.pg
+def test_compute_layover_stop_ids_combines_spatial_and_behavioral(pg_session):
+    """End-to-end: only the spatially-close AND grossly-early stop (BAY_B)
+    is flagged; the spatially-close-but-on-time STREET stop and the
+    grossly-early-but-far FAR stop are both left alone."""
+    canonical_mapping = {
+        (0, 1): "BAY_A",
+        (0, 2): "BAY_B",
+        (0, 3): "STREET",
+        (0, 4): "FAR",
+    }
+    _seed_layover_fixture(pg_session, route_id="LAYOVERTEST")
+    result = compute_layover_stop_ids(
+        pg_session,
+        route_id="LAYOVERTEST",
+        canonical_mapping=canonical_mapping,
+        service_date_range=(date(2026, 5, 1), date(2026, 5, 1)),
+    )
+    assert result[0] == {"BAY_B"}

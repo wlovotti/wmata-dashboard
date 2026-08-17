@@ -23,12 +23,18 @@ and would systematically blind us to the very segment we exclude on
 purpose. ``proximity`` covers every stop the bus pings near and is
 the right source for OTP / per-stop spatial analysis (CLAUDE.md).
 
-Origin-departure segment is excluded
-------------------------------------
+Origin-departure + multi-bay-terminal segments are excluded
+-------------------------------------------------------------
 The "slip" of the first observed segment is dominated by layover
 artifact (the bus parking at the layover well before pull-out, not
 real on-route slippage). Mirrors the drop applied in
-``visualizations/slip_trajectory.py:fetch_slip``.
+``visualizations/slip_trajectory.py:fetch_slip``. At multi-bay
+terminals this artifact isn't confined to the single canonical origin
+bay — a laying-over bus pings every bay in the loop — so
+``compute_layover_stop_ids`` generalizes the exclusion to any
+from-stop that is both near the route's true origin and behaviorally
+grossly-early (see the guard-choice comment above
+``ORIGIN_PROXIMITY_GUARD_METERS`` below).
 
 Period bucketing
 ----------------
@@ -48,6 +54,7 @@ CLAUDE.md.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import date as date_type
@@ -119,6 +126,62 @@ LATE_THRESHOLD_SEC = 7 * 60  # +7 min, per OTP standard
 # A direction is "early-dominant" if early% exceeds late% by this margin (and
 # vice versa for late-dominant). Below the margin it's "balanced".
 ASYMMETRY_MARGIN_PCT = 5.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-bay-terminal layover guard
+# ---------------------------------------------------------------------------
+#
+# `_assemble_segment_slip_output`'s original origin-departure exclusion
+# drops only the minimum-`from_seq` segment per direction. That misses
+# multi-bay terminals: a bus laying over in a terminal loop registers a
+# proximity ping at every bay in the loop while parked, so a *second* bay's
+# from-stop timestamp can be just as layover-contaminated as the origin's,
+# even though its `from_seq` isn't the minimum (e.g. Fort Totten+Bay A ->
+# Bay K, ~39m apart, both inside the loop — the matched proximity radius is
+# 50m, `src/analytics.py` `calculate_headways` `proximity_meters` default).
+#
+# `compute_layover_stop_ids` flags a from-stop as layover-contaminated only
+# when BOTH conditions hold:
+#
+#   1. Spatial — it sits within `ORIGIN_PROXIMITY_GUARD_METERS` of its
+#      direction's true schedule-origin stop (2x the 50m proximity-matcher
+#      radius, generous enough to cover the ~39-90m bay spacing seen at
+#      real WMATA multi-bay terminals).
+#   2. Behavioral — its median `deviation_sec` over the window is at or
+#      below `LAYOVER_MEDIAN_DEV_THRESHOLD_SEC` (grossly early — the
+#      layover-dwell signature, not ordinary early running).
+#
+# Neither condition alone is reliable. A blast-radius sweep of
+# `route_diagnostic_segment` (documented in the closing PR body) found:
+#   - Spatial-only false positive: C71 dir-0's "N Capitol St NE+E St NE"
+#     sits ~96m from its origin but runs LATE (median +59s) — a genuine
+#     street segment, not a layover bay. Four other near-origin stops
+#     (C43 x2, C53, C33) showed the same pattern (median +24.5s to
+#     +170.5s).
+#   - Behavioral-only risk: applied with no spatial scope, a "grossly
+#     early median" filter would also catch legitimate mid-route
+#     recovery / leaky-timepoint segments (`classify_timepoint`) that are
+#     a real, distinct diagnostic signal this module already surfaces —
+#     conflating the two would silently suppress that signal.
+#   - Combined: six routes (D10, D24, C63, C23, M60, C75) had a
+#     near-origin from-stop with grossly-early median deviation (-74s to
+#     -467s); every one of those six stop_names carries "+Bay" terminal
+#     naming (Southern Av, Deanwood, Fort Totten, Georgia Av-Petworth),
+#     confirming multi-bay terminals. The five non-"+Bay" near-origin
+#     stops above all had positive median deviation and are correctly
+#     left alone by the AND.
+ORIGIN_PROXIMITY_GUARD_METERS = 100.0  # 2x the 50m proximity-matcher radius
+
+# Chosen from the sweep's observed gap: contaminated stops' medians ranged
+# -74s to -467s; non-contaminated near-origin stops' medians ranged +24.5s
+# to +170.5s. -60s sits in that gap with margin on both sides. Deliberately
+# more lenient than the module's existing -120s OTP `EARLY_THRESHOLD_SEC` —
+# that threshold buckets individual observations for the −2/+7 OTP window,
+# not medians, and reusing it here would have missed half the confirmed
+# multi-bay cases (C63 -220.5s, D24 -190s, C75 -74s all clear -60s but not
+# a stricter bar tied to the OTP bucket).
+LAYOVER_MEDIAN_DEV_THRESHOLD_SEC = -60.0
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +278,136 @@ def compute_canonical_stop_mapping(
     return {(int(r.direction_id), int(r.stop_sequence)): r.stop_id for r in rows}
 
 
+def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters between two lat/lon points.
+
+    Pure-Python mirror of the haversine expression used in
+    ``fetch_route_timepoint_stops``'s SQL — needed here in Python because
+    :func:`compute_layover_stop_ids` clusters a small, already-fetched set
+    of canonical stop coordinates rather than doing the distance
+    computation in SQL.
+    """
+    r = 6371000.0  # Earth radius, meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def compute_layover_stop_ids(
+    db: Session,
+    route_id: str,
+    canonical_mapping: dict[tuple[int, int], str],
+    service_date_range: tuple[date_type, date_type],
+) -> dict[int, set[str]]:
+    """Per-direction set of from-stop ``stop_id``s that are layover-contaminated.
+
+    Generalizes the single-segment origin-departure exclusion in
+    :func:`_assemble_segment_slip_output` to every bay of a multi-bay
+    terminal, not just the canonical minimum-``stop_sequence`` bay. See
+    the module-level comment above ``ORIGIN_PROXIMITY_GUARD_METERS`` for
+    the guard-choice rationale (spatial AND behavioral, not either alone).
+
+    A canonical stop (from ``canonical_mapping``, as produced by
+    :func:`compute_canonical_stop_mapping`) qualifies only when both hold:
+
+    1. **Spatial** — it's within ``ORIGIN_PROXIMITY_GUARD_METERS`` of its
+       direction's true schedule-origin stop (the canonical stop at the
+       minimum ``stop_sequence`` for that direction).
+    2. **Behavioral** — its median ``deviation_sec`` (``stop_events``,
+       ``source='proximity'``, ``schedule_relationship='SCHEDULED'``) over
+       ``service_date_range`` is at or below
+       ``LAYOVER_MEDIAN_DEV_THRESHOLD_SEC``.
+
+    Returns ``{direction_id: {stop_id, ...}}`` for every direction present
+    in ``canonical_mapping``, defaulting to an empty set when no stop
+    qualifies (the common case — most routes have no multi-bay terminal).
+    Callers should use ``.get(direction_id, set())`` regardless, since a
+    route with no canonical mapping at all returns ``{}``.
+    """
+    if not canonical_mapping:
+        return {}
+
+    stop_ids = sorted(set(canonical_mapping.values()))
+    latlon_rows = db.execute(
+        text(
+            """
+            SELECT stop_id, stop_lat, stop_lon
+            FROM stops
+            WHERE is_current AND stop_id = ANY(:ids)
+            """
+        ),
+        {"ids": stop_ids},
+    ).fetchall()
+    latlon = {r.stop_id: (float(r.stop_lat), float(r.stop_lon)) for r in latlon_rows}
+
+    by_dir: dict[int, list[tuple[int, str]]] = defaultdict(list)
+    for (direction_id, stop_sequence), stop_id in canonical_mapping.items():
+        by_dir[direction_id].append((stop_sequence, stop_id))
+
+    # Spatial pass: for each direction, find canonical stops (other than
+    # the origin itself) within the guard radius of the true origin.
+    spatial_candidates: dict[int, set[str]] = {}
+    for direction_id, seqs in by_dir.items():
+        seqs.sort()
+        _origin_seq, origin_stop_id = seqs[0]
+        if origin_stop_id not in latlon:
+            spatial_candidates[direction_id] = set()
+            continue
+        olat, olon = latlon[origin_stop_id]
+        candidates: set[str] = set()
+        for _seq, stop_id in seqs[1:]:
+            if stop_id not in latlon:
+                continue
+            lat, lon = latlon[stop_id]
+            if _haversine_meters(olat, olon, lat, lon) <= ORIGIN_PROXIMITY_GUARD_METERS:
+                candidates.add(stop_id)
+        spatial_candidates[direction_id] = candidates
+
+    all_candidates = sorted({s for cands in spatial_candidates.values() for s in cands})
+    if not all_candidates:
+        return {direction_id: set() for direction_id in by_dir}
+
+    # Behavioral pass: median deviation, restricted to the (already small)
+    # spatially-qualifying candidate set.
+    start, end = service_date_range
+    dev_rows = db.execute(
+        text(
+            """
+            SELECT
+              direction_id,
+              stop_id,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY deviation_sec) AS median_dev
+            FROM stop_events
+            WHERE route_id = :route_id
+              AND source = 'proximity'
+              AND schedule_relationship = 'SCHEDULED'
+              AND deviation_sec IS NOT NULL
+              AND stop_id = ANY(:stop_ids)
+              AND service_date BETWEEN :start AND :end
+            GROUP BY direction_id, stop_id
+            """
+        ),
+        {
+            "route_id": route_id,
+            "stop_ids": all_candidates,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+    ).fetchall()
+    median_dev = {(int(r.direction_id), r.stop_id): float(r.median_dev) for r in dev_rows}
+
+    out: dict[int, set[str]] = {}
+    for direction_id, candidates in spatial_candidates.items():
+        out[direction_id] = {
+            stop_id
+            for stop_id in candidates
+            if median_dev.get((direction_id, stop_id), 0.0) <= LAYOVER_MEDIAN_DEV_THRESHOLD_SEC
+        }
+    return out
+
+
 def compute_segment_slip(
     db: Session,
     route_id: str,
@@ -264,6 +457,11 @@ def compute_segment_slip(
     canonical_mapping = compute_canonical_stop_mapping(db, route_id, service_date_range)
     if not canonical_mapping:
         return []
+
+    # Per-direction from-stops that are layover-contaminated beyond the
+    # single canonical origin bay (multi-bay terminals) — see the
+    # module-level comment above ORIGIN_PROXIMITY_GUARD_METERS.
+    layover_stop_ids = compute_layover_stop_ids(db, route_id, canonical_mapping, service_date_range)
 
     # Period filter on the *scheduled* hour of the from-stop in Eastern. We
     # don't filter on observed hour because chronic lateness would push
@@ -388,17 +586,36 @@ def compute_segment_slip(
         }
         for r in rows
     ]
-    return _assemble_segment_slip_output(raw_rows, period)
+    return _assemble_segment_slip_output(raw_rows, period, layover_stop_ids)
 
 
 def _assemble_segment_slip_output(
     raw_rows: list[dict[str, Any]],
     period: str,
+    layover_stop_ids: dict[int, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Drop the origin-departure segment per direction and attach cum_slip_sec.
+    """Drop layover-contaminated from-stops per direction and attach cum_slip_sec.
 
     Splits from :func:`compute_segment_slip` so the cumsum walk is unit-
     testable without standing up the Postgres-only slip SQL.
+
+    Origin-departure + multi-bay-terminal exclusion
+    ------------------------------------------------
+    Two exclusions run before the cumsum walk, both scoped per
+    ``direction_id`` (stop_id isn't direction-unique — CLAUDE.md):
+
+    1. The minimum-``from_seq`` segment is always dropped — its "slip" is
+       dominated by layover artifact (the bus parking at the origin bay
+       well before pull-out).
+    2. Any segment whose ``from_stop_id`` appears in
+       ``layover_stop_ids[direction_id]`` is also dropped. This generalizes
+       (1) to multi-bay terminals, where a laying-over bus registers a
+       proximity ping at every bay in the loop, not just the canonical
+       minimum-``from_seq`` bay — see the guard-choice comment above
+       ``ORIGIN_PROXIMITY_GUARD_METERS`` in this module.
+
+    ``layover_stop_ids`` defaults to ``None`` (treated as empty), so
+    omitting it reproduces the original min-``from_seq``-only behavior.
 
     Skip-N edges (NOTES-57 fast-follow)
     -----------------------------------
@@ -433,6 +650,8 @@ def _assemble_segment_slip_output(
     to consecutive-edge rows; the canonical filter that runs upstream
     no longer enforces "one row per (direction_id, from_seq)".
     """
+    layover_stop_ids = layover_stop_ids or {}
+
     by_dir: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         by_dir[r["direction_id"]].append(dict(r))
@@ -444,9 +663,16 @@ def _assemble_segment_slip_output(
         # Sort by (from_seq, to_seq) so the consecutive edge (min to_seq
         # per from_seq) is visited before any of its skip-N siblings.
         segs.sort(key=lambda d: (d["from_seq"], d["to_seq"]))
-        # Drop origin-departure (minimum from_seq for this direction).
+        # Drop origin-departure (minimum from_seq for this direction) and
+        # any other from-stop flagged as layover-contaminated (multi-bay
+        # terminals — see the class comment above).
         min_from = segs[0]["from_seq"]
-        kept = [s for s in segs if s["from_seq"] != min_from]
+        dir_layover_stop_ids = layover_stop_ids.get(direction_id, set())
+        kept = [
+            s
+            for s in segs
+            if s["from_seq"] != min_from and s["from_stop_id"] not in dir_layover_stop_ids
+        ]
         if not kept:
             continue
 
