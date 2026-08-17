@@ -8,8 +8,8 @@ follow-on precision improvement, not a correctness gap)*.
 `stop_events` column plus new logic in the proximity matcher to detect
 "last ping before pull-out" rather than "first ping within radius")*.
 
-Deferred from work item 4 of the segment-slip origin guard item (PR #213)
-(formerly NOTES-125, closed without this): that item's guard excludes
+Deferred from work item 4 of the segment-slip origin guard item (PR #213):
+that item's guard excludes
 any from-stop that is spatially near the route's origin AND
 behaviorally grossly-early (median deviation), which correctly
 suppresses multi-bay-terminal layover contamination but is still a
@@ -24,7 +24,7 @@ layover bay this is very close to true pull-out time; for an ordinary
 street stop it's very close to the existing arrival timestamp (dwell
 time is short), so the change should be low-risk for non-terminal
 segments. With `observed_departure_ts` available, segment slip could
-be computed as `observed_departure_ts` (at the from-stop) → 
+be computed as `observed_departure_ts` (at the from-stop) →
 `observed_arrival_ts` (at the to-stop) instead of arrival-to-arrival,
 which would make the origin-exclusion guards in
 `compute_layover_stop_ids` / `_assemble_segment_slip_output`
