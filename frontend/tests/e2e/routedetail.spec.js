@@ -26,6 +26,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import { fulfillGtfsFreshness } from './helpers/gtfsFreshnessStub'
+import { assertHeaderCopy } from './helpers/headerCopy'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixturesDir = join(__dirname, '../fixtures')
@@ -113,5 +114,8 @@ test('RouteDetail: visual regression', async ({ page }) => {
   // Wait for the trend section and sparklines to render.
   await expect(page.getByText('30-Day Trend')).toBeVisible()
   await page.waitForTimeout(500)
+  // DOM-level header copy check alongside the pixel snapshot (PR #214) —
+  // see helpers/headerCopy.js for why.
+  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('routedetail-d72.png', { fullPage: true })
 })
