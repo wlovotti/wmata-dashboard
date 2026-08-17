@@ -766,7 +766,7 @@ def test_origin_departure_segment_dropped_before_cumsum():
 
 
 # ---------------------------------------------------------------------------
-# Multi-bay-terminal layover exclusion (segment-slip origin guard, TODO(PR): fill in PR number)
+# Multi-bay-terminal layover exclusion (segment-slip origin guard, PR #213)
 #
 # `_assemble_segment_slip_output` originally excluded only the single
 # minimum-`from_seq` segment per direction. A multi-bay terminal (e.g. Fort

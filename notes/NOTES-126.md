@@ -1,14 +1,14 @@
 # NOTES-126. Add an observed-departure timestamp to stop_events for a principled slip-origin exclusion
 
 **Severity: low** *(the layover-contamination guard shipped in the
-segment-slip origin guard PR closes the immediate measurement-artifact
+segment-slip origin guard (PR #213) closes the immediate measurement-artifact
 problem well enough for the schedule-audit page; this is a
 follow-on precision improvement, not a correctness gap)*.
 **Effort: medium-high** *(derivation-schema change — a new
 `stop_events` column plus new logic in the proximity matcher to detect
 "last ping before pull-out" rather than "first ping within radius")*.
 
-Deferred from work item 4 of the segment-slip origin guard item
+Deferred from work item 4 of the segment-slip origin guard item (PR #213)
 (formerly NOTES-125, closed without this): that item's guard excludes
 any from-stop that is spatially near the route's origin AND
 behaviorally grossly-early (median deviation), which correctly
