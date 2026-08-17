@@ -127,7 +127,7 @@ test('Overview: visual regression', async ({ page }) => {
   await page.waitForTimeout(500)
   // Pixel diffing alone doesn't reliably catch small-area text changes (a
   // header subtitle swap stayed under maxDiffPixelRatio in PR #204) —
-  // assert the exact header copy as a DOM-level check too (TODO: PR#).
+  // assert the exact header copy as a DOM-level check too (PR #214).
   await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('overview.png', { fullPage: true })
 })

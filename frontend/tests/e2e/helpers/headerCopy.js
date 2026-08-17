@@ -1,5 +1,5 @@
 // Shared header-copy assertion for visual-regression specs (closes the
-// visual-regression copy-sensitivity gap, TODO: PR#).
+// visual-regression copy-sensitivity gap, PR #214).
 //
 // The pixel-diff gate (`playwright.config.js`'s
 // `expect.toHaveScreenshot.maxDiffPixelRatio: 0.01`) tolerates up to 1% of

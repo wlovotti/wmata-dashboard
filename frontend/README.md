@@ -59,7 +59,7 @@ defaults to Playwright's `changed` mode — it only rewrites snapshots that
 **fail** comparison, so a copy-sized diff that stays inside
 `maxDiffPixelRatio` silently writes nothing; this bit the first regen pass
 on PR #205, where `git status` came back clean after both platforms
-"passed" — see the header-copy-check PR (TODO: PR#) for the fuller story):
+"passed" — see the header-copy-check PR (#214) for the fuller story):
 
 ```bash
 # macOS baselines (run locally on your Mac):

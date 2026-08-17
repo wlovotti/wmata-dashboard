@@ -70,7 +70,7 @@ test('Segments: visual regression', async ({ page }) => {
   await page.goto('/segments')
   // Wait for the table to be fully rendered
   await page.waitForSelector('tbody tr')
-  // DOM-level header copy check alongside the pixel snapshot (TODO: PR#) —
+  // DOM-level header copy check alongside the pixel snapshot (PR #214) —
   // see helpers/headerCopy.js for why.
   await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('segments-chromium.png', { fullPage: false })

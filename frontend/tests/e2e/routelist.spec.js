@@ -83,7 +83,7 @@ test('RouteList: visual regression', async ({ page }) => {
   // Wait for contributors to load.
   await expect(page.getByRole('cell', { name: 'D72' })).toBeVisible()
   await page.waitForTimeout(500)
-  // DOM-level header copy check alongside the pixel snapshot (TODO: PR#) —
+  // DOM-level header copy check alongside the pixel snapshot (PR #214) —
   // see helpers/headerCopy.js for why.
   await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('routelist.png', { fullPage: true })
