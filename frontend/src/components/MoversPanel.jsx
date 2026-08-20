@@ -59,6 +59,22 @@ const MOVERS_FLAT_FLOOR = {
   bunching: 0.005, // fraction (== 0.5 pp)
 }
 
+/**
+ * Single source of truth for a metric's magnitude floor, shared by the
+ * ranking filter and the `flatThreshold` prop passed to each row's
+ * DeltaIndicator. A metric absent from MOVERS_FLAT_FLOOR (e.g. a future
+ * metric added to MOVER_METRICS without a floor entry) falls back to 0.5 —
+ * DeltaIndicator's own default — at both call sites identically, so the
+ * ranked-implies-non-flat invariant holds structurally rather than by
+ * keeping two independently-written `?? ...` fallbacks in sync by hand.
+ *
+ * @param {string} metric - one of the MOVER_METRICS keys.
+ * @returns {number} the magnitude floor in that metric's native delta units.
+ */
+function getMoversFloor(metric) {
+  return MOVERS_FLAT_FLOOR[metric] ?? 0.5
+}
+
 /** True when a larger raw delta is operationally good for `metric`. */
 function isHigherBetter(metric) {
   return metric === 'otp' || metric === 'service_delivered'
@@ -102,6 +118,10 @@ function MoversPanel({ routes }) {
   const [metric, setMetric] = useState('otp')
   const [direction, setDirection] = useState('worse')
 
+  // See getMoversFloor above — one shared floor for both the ranking filter
+  // and the DeltaIndicator flatThreshold prop below.
+  const floor = getMoversFloor(metric)
+
   const movers = (() => {
     if (!routes) return []
     const higherBetter = isHigherBetter(metric)
@@ -116,7 +136,7 @@ function MoversPanel({ routes }) {
       // toward the 3-mover floor would understate how thin the ranking
       // really is (NOTES-121). This also subsumes the old zero-delta
       // exclusion since 0 never clears a positive floor.
-      if (Math.abs(delta.value) <= (MOVERS_FLAT_FLOOR[metric] ?? 0)) continue
+      if (Math.abs(delta.value) <= floor) continue
       const isImprovement = higherBetter ? delta.value > 0 : delta.value < 0
       if (isImprovement !== wantImproving) continue
       rows.push({
@@ -171,8 +191,8 @@ function MoversPanel({ routes }) {
       {routes == null ? null : movers.length < MIN_VALID_MOVERS ? (
         <p style={{ color: 'var(--color-muted)', padding: '0 1.5rem 1.5rem' }}>
           Not enough history this week to rank {direction === 'worse' ? 'worsening' : 'improving'}{' '}
-          routes on {metricLabel} — fewer than {MIN_VALID_MOVERS} routes have valid
-          week-over-week deltas.
+          routes — fewer than {MIN_VALID_MOVERS} routes moved meaningfully on {metricLabel}{' '}
+          week-over-week.
         </p>
       ) : (
         <table className="routes-table">
@@ -202,7 +222,7 @@ function MoversPanel({ routes }) {
                   <DeltaIndicator
                     delta={r.deltaValue}
                     format={fmt}
-                    flatThreshold={MOVERS_FLAT_FLOOR[metric] ?? 0.5}
+                    flatThreshold={floor}
                     lowerIsBetter={lowerIsBetter}
                     title={`Last 7 days vs prior 7 days (${r.currentN}/${r.priorN} valid days)`}
                   />
@@ -216,4 +236,10 @@ function MoversPanel({ routes }) {
   )
 }
 
+// getMoversFloor is a plain helper, not a component — react-refresh's
+// only-export-components rule would rather it live in its own module, but
+// the review-finding test for the shared-fallback invariant (PR #215) needs
+// it colocated with MOVERS_FLAT_FLOOR to test the fallback directly.
+// eslint-disable-next-line react-refresh/only-export-components
+export { getMoversFloor }
 export default MoversPanel

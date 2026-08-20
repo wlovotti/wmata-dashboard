@@ -7,7 +7,7 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
-import MoversPanel from '../../src/components/MoversPanel'
+import MoversPanel, { getMoversFloor } from '../../src/components/MoversPanel'
 
 const route = (id, otpDelta, valid = true) => ({
   route_id: id,
@@ -56,6 +56,27 @@ describe('MoversPanel', () => {
   test('fewer than 3 valid movers renders the not-enough-history message', () => {
     renderPanel([route('A', -1.0), route('B', -2.0)])
     expect(screen.getByText(/not enough history this week/i)).toBeVisible()
+    expect(
+      screen.getByText(/fewer than 3 routes moved meaningfully on on-time % week-over-week/i),
+    ).toBeVisible()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  // A quiet week where many routes have *valid* but sub-floor deltas must
+  // still explain itself as "didn't move enough," not "didn't have valid
+  // deltas" — the two are different failure modes since NOTES-121 (empty
+  // state copy must track the actual filter, not just MIN_VALID_MOVERS).
+  test('all-valid but all-sub-floor deltas still render the meaningful-movement message', () => {
+    renderPanel([
+      route('A', -0.1),
+      route('B', -0.2),
+      route('C', -0.3),
+      route('D', -0.4),
+      route('E', 0.1),
+    ])
+    expect(
+      screen.getByText(/fewer than 3 routes moved meaningfully on on-time % week-over-week/i),
+    ).toBeVisible()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
   })
 
@@ -152,5 +173,21 @@ describe('MoversPanel', () => {
     for (const row of rows) {
       expect(row).not.toHaveTextContent('→')
     }
+  })
+
+  // Review finding (PR #215): the ranking filter and the DeltaIndicator
+  // flatThreshold prop must derive from the same fallback, not two
+  // independently-written `?? ...` defaults — otherwise a metric key absent
+  // from MOVERS_FLAT_FLOOR could rank a row whose arrow renders flat again
+  // (the exact bug NOTES-121 fixed, reintroduced for any future metric).
+  // getMoversFloor is the single source of truth both call sites read from
+  // (MoversPanel.jsx); testing it directly pins the fallback itself rather
+  // than depending on MOVER_METRICS happening to expose an unlisted key
+  // through the UI today.
+  test('getMoversFloor falls back to 0.5 for a metric absent from MOVERS_FLAT_FLOOR', () => {
+    expect(getMoversFloor('some_future_metric')).toBe(0.5)
+    // And known metrics still get their explicit per-metric value, not the
+    // fallback.
+    expect(getMoversFloor('ewt')).toBe(10)
   })
 })
