@@ -12,6 +12,7 @@ import SegmentDiagnostic from './components/SegmentDiagnostic'
 import AgencyComparison from './components/AgencyComparison'
 import DiagnosticsIndex from './components/DiagnosticsIndex'
 import useGtfsFreshness from './hooks/useGtfsFreshness'
+import { clearFetchCache } from './hooks/fetchCache'
 import './App.css'
 
 // Format a raw GTFS YYYYMMDD string (e.g. `feed_end_date`) as a
@@ -109,7 +110,14 @@ function App() {
   // would just replay the cached value rather than force a real refetch).
   const [refreshKey, setRefreshKey] = useState(0)
   const gtfsFreshness = useGtfsFreshness(refreshKey)
-  const handleRefresh = () => setRefreshKey((k) => k + 1)
+  // Manual invalidation path for the stale-while-revalidate fetch cache
+  // (NOTES-122): clear every cached entry before remounting the routed
+  // subtree so the remount's fetches are all cold misses instead of an
+  // instant replay of whatever was cached before the click.
+  const handleRefresh = () => {
+    clearFetchCache()
+    setRefreshKey((k) => k + 1)
+  }
 
   return (
     <Router>

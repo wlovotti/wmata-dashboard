@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { MapContainer, TileLayer, Polyline, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { routeLineColor } from '../utils/mapColors'
+import useMultiFetch from '../hooks/useMultiFetch'
 
 /** Fit the map viewport to the full network extent once bounds are known. */
 function FitBounds({ bounds }) {
@@ -28,28 +29,22 @@ function FitBounds({ bounds }) {
  * fetch failure renders a quiet inline note and the fold's movers panel
  * carries the answer alone (Overview's CSS lets this cell collapse).
  *
+ * /api/shapes is the largest single payload Overview pulls (~200 KB) and
+ * changes only on a GTFS reload, making it the prime candidate for the
+ * stale-while-revalidate fetch cache (NOTES-122) — routed through
+ * `useMultiFetch` so returning to Overview re-renders the map instantly
+ * from the cached shapes instead of re-fetching and re-parsing ~200 KB of
+ * polylines on every visit.
+ *
  * Props:
  *   scorecardRoutes – `routes` array from /api/routes, or null while loading.
  */
 function SystemMap({ scorecardRoutes }) {
   const navigate = useNavigate()
-  const [shapes, setShapes] = useState(null)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    let cancelled = false
-    fetch('/api/shapes')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((json) => {
-        if (!cancelled) setShapes(json?.routes ?? [])
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err.message || String(err))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const {
+    data: shapes,
+    error,
+  } = useMultiFetch(['/api/shapes'], ([json]) => json?.routes ?? [])
 
   const byRouteId = useMemo(
     () => new Map((scorecardRoutes || []).map((r) => [r.route_id, r])),
