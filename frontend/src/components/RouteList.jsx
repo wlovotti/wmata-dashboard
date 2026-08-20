@@ -90,7 +90,7 @@ function SpectrumBar({ current, target, higherIsBetter }) {
 // `lowerIsBetter` flips color mapping for EWT/bunching/excess-trip-time
 // (raw sign is preserved on the wire; the consumer encodes "is up good?").
 // `metric` selects the per-metric magnitude floor (../moversFloor,
-// NOTES-127) passed as `flatThreshold` — without it, DeltaIndicator's own
+// PR #216) passed as `flatThreshold` — without it, DeltaIndicator's own
 // 0.5 default is two orders of magnitude too tight for the 0..1-fraction
 // service_delivered/bunching deltas, rendering every real change flat.
 function renderServerDelta(metric, deltaBlock, unitFormat, lowerIsBetter = false) {

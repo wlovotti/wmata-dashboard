@@ -5,10 +5,10 @@
 // render as a colored up/down arrow rather than DeltaIndicator's default
 // flat gray → — otherwise a route could rank as "worse"/"better" (or show a
 // non-trivial percentage) while its own arrow renders flat, which reads as
-// self-contradictory (NOTES-121, NOTES-127).
+// self-contradictory (NOTES-121, PR #216).
 //
 // Originally introduced for MoversPanel's ranking filter (NOTES-121);
-// hoisted here (NOTES-127) so RouteList's and RouteDetail's
+// hoisted here (PR #216) so RouteList's and RouteDetail's
 // `renderServerDelta` helpers use the same floor instead of silently
 // falling back to DeltaIndicator's unit-blind 0.5 default. That default is
 // fine for `otp` (deltas arrive already in percentage points) but two

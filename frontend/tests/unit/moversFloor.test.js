@@ -1,5 +1,5 @@
 /**
- * moversFloor (NOTES-127): the per-metric magnitude floor hoisted out of
+ * moversFloor (PR #216): the per-metric magnitude floor hoisted out of
  * MoversPanel.jsx into a shared module so RouteList and RouteDetail's
  * `renderServerDelta` helpers can pass the same `flatThreshold` MoversPanel
  * uses, instead of silently falling back to DeltaIndicator's unit-blind 0.5

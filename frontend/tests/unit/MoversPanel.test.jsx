@@ -181,7 +181,7 @@ describe('MoversPanel', () => {
   // independently-written `?? ...` defaults — otherwise a metric key absent
   // from MOVERS_FLAT_FLOOR could rank a row whose arrow renders flat again
   // (the exact bug NOTES-121 fixed, reintroduced for any future metric).
-  // getMoversFloor (../../src/moversFloor, NOTES-127) is the single source
+  // getMoversFloor (../../src/moversFloor, PR #216) is the single source
   // of truth every call site reads from — MoversPanel, RouteList, and
   // RouteDetail; testing it directly pins the fallback itself rather than
   // depending on MOVER_METRICS happening to expose an unlisted key through

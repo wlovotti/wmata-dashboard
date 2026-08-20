@@ -354,7 +354,7 @@ function RouteDetail() {
         // The trend block above keeps its own client-side deltas because
         // they pair with the sparkline render (different code path, same window).
         // `metric` selects the per-metric magnitude floor (../moversFloor,
-        // NOTES-127) passed as `flatThreshold` — without it, DeltaIndicator's
+        // PR #216) passed as `flatThreshold` — without it, DeltaIndicator's
         // own 0.5 default is two orders of magnitude too tight for the
         // 0..1-fraction service_delivered/bunching deltas, rendering every
         // real change flat.

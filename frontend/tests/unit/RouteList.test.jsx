@@ -1,5 +1,5 @@
 /**
- * RouteList server-delta flatThreshold pass-through (NOTES-127).
+ * RouteList server-delta flatThreshold pass-through (PR #216).
  *
  * `renderServerDelta` wraps `DeltaIndicator` but historically never passed
  * a `flatThreshold`, so it fell back to `DeltaIndicator`'s own 0.5 default.

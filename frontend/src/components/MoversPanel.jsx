@@ -27,7 +27,7 @@ const MIN_VALID_MOVERS = 3
 // DeltaIndicator arrow renders flat (gray →), which reads as
 // self-contradictory: a "worsening" row whose own badge says "no change."
 // The floor map itself (MOVERS_FLAT_FLOOR) and its accessor (getMoversFloor)
-// live in ../moversFloor — hoisted out (NOTES-127) so RouteList and
+// live in ../moversFloor — hoisted out (PR #216) so RouteList and
 // RouteDetail's `renderServerDelta` helpers can pass the same
 // per-metric floor instead of falling back to DeltaIndicator's unit-blind
 // 0.5 default.

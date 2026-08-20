@@ -1,5 +1,5 @@
 /**
- * RouteDetail server-delta flatThreshold pass-through (NOTES-127).
+ * RouteDetail server-delta flatThreshold pass-through (PR #216).
  *
  * Same fix as RouteList.test.jsx: RouteDetail's local `renderServerDelta`
  * historically never passed a `flatThreshold`, so service_delivered/bunching
