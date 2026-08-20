@@ -23,7 +23,7 @@ function readCache(urls) {
  *   array of JSON responses before storing in state. Receives the array in the
  *   same order as `urls` and must return the value to store in `data`. When
  *   omitted the raw array is stored.
- * @returns {{ data: *, loading: boolean, error: string|null }}
+ * @returns {{ data: *, loading: boolean, error: string|null, revalidateError: string|null }}
  *   - `data`    – the resolved (and optionally transformed) fetch results, or
  *                 null until the first successful resolution (or the cached
  *                 value, instantly, on a cache hit).
@@ -33,20 +33,32 @@ function readCache(urls) {
  *                 revalidate is invisible to the caller.
  *   - `error`   – stringified error on a failed cold fetch (no cache entry
  *                 to fall back on). A background revalidate failure with a
- *                 cache hit is swallowed instead — the stale data stays on
+ *                 cache hit does NOT set this — the stale data stays on
  *                 screen rather than flashing an error over good content.
+ *   - `revalidateError` – stringified error when a background revalidate
+ *                 (cache-hit path) fails, or null otherwise. This is the
+ *                 staleness signal a cache-hit render is missing without
+ *                 it: `error` stays null and `loading` stays false, so
+ *                 without this field a downed API (backend restart, a
+ *                 dropped tunnel) would leave stale data on screen
+ *                 indefinitely with nothing indicating it stopped
+ *                 refreshing. Cleared on the next revalidate that
+ *                 succeeds. Never set on the cold-load path (a fetch
+ *                 failure there sets `error` instead).
  *
  * Caching: every URL is looked up in the shared, module-level `fetchCache`
  * (keyed by URL, no TTL). If every URL in `urls` has a cache entry, that
  * value is served synchronously (no spinner) on mount/re-render, and a
  * background fetch still runs to revalidate — on success the cache and
- * `data` are updated; on failure the stale `data` is left alone and no
- * `error` is surfaced. If any URL is a cache miss, behavior is the
- * original cold-load path: `loading` starts true, `data` starts null,
- * and a fetch failure sets `error`. The app's header Refresh button is
- * the manual invalidation path — it calls `fetchCache`'s
- * `clearFetchCache()` before remounting, so every URL is a cold miss on
- * the next mount instead of an instant replay of stale data.
+ * `data` are updated and `revalidateError` is cleared; on failure the
+ * stale `data` is left alone, no `error` is surfaced, but
+ * `revalidateError` is set so callers can show a non-blocking staleness
+ * note. If any URL is a cache miss, behavior is the original cold-load
+ * path: `loading` starts true, `data` starts null, and a fetch failure
+ * sets `error`. The app's header Refresh button is the manual
+ * invalidation path — it calls `fetchCache`'s `clearFetchCache()` before
+ * remounting, so every URL is a cold miss on the next mount instead of
+ * an instant replay of stale data.
  *
  * Cancellation: an AbortController is created per effect run and its signal is
  * passed to every fetch call. When the component unmounts or `urls` changes the
@@ -72,6 +84,7 @@ function useMultiFetch(urls, transform) {
   })
   const [loading, setLoading] = useState(() => hasUrls && !initialHit.hit)
   const [error, setError] = useState(null)
+  const [revalidateError, setRevalidateError] = useState(null)
 
   // Serialize urls to a stable key so the effect only re-runs when the
   // URL set actually changes. JSON.stringify is safe here because the
@@ -113,13 +126,17 @@ function useMultiFetch(urls, transform) {
         setData(transform ? transform(results) : results)
         setLoading(false)
         setError(null)
+        setRevalidateError(null)
       })
       .catch((err) => {
         if (err.name === 'AbortError') return
         if (hit) {
           // Background revalidate failed but we already have stale data on
           // screen — keep showing it rather than replacing good content
-          // with an error banner.
+          // with an error banner. Still surface it via `revalidateError` so
+          // an outage isn't invisible: without this, a downed API leaves
+          // stale data on screen forever with no staleness signal anywhere.
+          setRevalidateError(err.message || String(err))
           return
         }
         setError(err.message || String(err))
@@ -132,7 +149,7 @@ function useMultiFetch(urls, transform) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKey])
 
-  return { data, loading, error }
+  return { data, loading, error, revalidateError }
 }
 
 export default useMultiFetch

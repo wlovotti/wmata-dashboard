@@ -99,6 +99,7 @@ function RouteDetail() {
     data: trendData,
     loading: trendLoading,
     error: trendError,
+    revalidateError: trendRevalidateError,
   } = useMultiFetch(trendUrls)
 
   // Unpack the parallel responses into named variables for the downstream
@@ -586,6 +587,15 @@ function RouteDetail() {
           </div>
         )
       })()}
+
+      {trendRevalidateError && (
+        <p
+          className="stale-data-note"
+          style={{ color: 'var(--color-muted)', fontSize: '0.85rem', margin: '0 0 0.75rem' }}
+        >
+          Showing cached trend data — last refresh failed. Retrying in the background.
+        </p>
+      )}
 
       {hasMetrics && (
         <RouteTrend

@@ -237,6 +237,59 @@ describe('useMultiFetch stale-while-revalidate caching (NOTES-122)', () => {
     expect(result.current.error).toBeNull()
   })
 
+  test('background revalidate failure sets revalidateError while data stays visible and error stays null (PR #217 review finding 1)', async () => {
+    setCacheEntry('/api/revalidate-flag', { v: 'stale' })
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('Network failure'))))
+
+    const { result } = renderHook(() => useMultiFetch(['/api/revalidate-flag']))
+
+    expect(result.current.loading).toBe(false)
+    expect(result.current.data).toEqual([{ v: 'stale' }])
+    expect(result.current.revalidateError).toBeNull()
+
+    await waitFor(() => expect(result.current.revalidateError).not.toBeNull())
+
+    // Stale data is still on screen and `error` (the cold-load field) is
+    // still null — the flag is a distinct signal, not a repurposing of
+    // the existing error state.
+    expect(result.current.data).toEqual([{ v: 'stale' }])
+    expect(result.current.error).toBeNull()
+  })
+
+  test('a later successful revalidate clears revalidateError', async () => {
+    setCacheEntry('/api/revalidate-recover', { v: 'stale' })
+    let shouldFail = true
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        if (shouldFail) return Promise.reject(new Error('Network failure'))
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ v: 'fresh' }),
+        })
+      }),
+    )
+
+    const { result, rerender } = renderHook(
+      ({ urls }) => useMultiFetch(urls),
+      { initialProps: { urls: ['/api/revalidate-recover'] } },
+    )
+
+    await waitFor(() => expect(result.current.revalidateError).not.toBeNull())
+
+    // A second revalidate succeeds this time. `urlKey` (JSON.stringify(urls))
+    // only changes — and thus only re-runs the effect — when the URL set
+    // itself changes, so add a second (also-cached) URL to trigger it
+    // rather than passing a same-content array by a new reference.
+    shouldFail = false
+    setCacheEntry('/api/revalidate-recover-2', { v: 'stale-2' })
+    rerender({ urls: ['/api/revalidate-recover', '/api/revalidate-recover-2'] })
+
+    await waitFor(() => expect(result.current.revalidateError).toBeNull())
+    expect(result.current.data).toEqual([{ v: 'fresh' }, { v: 'fresh' }])
+  })
+
   test('Refresh invalidation: clearFetchCache() makes the next mount a cold miss again', async () => {
     const mockFetch = makeFetchMock({
       '/api/invalidate-me': { status: 200, data: { v: 1 } },

@@ -52,7 +52,9 @@ function Overview() {
   const navigate = useNavigate()
   const [contribMetric, setContribMetric] = useState('otp')
 
-  const { data: scorecardResults } = useMultiFetch(['/api/routes'])
+  const { data: scorecardResults, revalidateError: scorecardRevalidateError } = useMultiFetch([
+    '/api/routes',
+  ])
   // Hero and movers degrade gracefully while this is null (loading, or a
   // fetch failure — the raw-fetch predecessor of this effect silently
   // ignored errors the same way).
@@ -62,6 +64,7 @@ function Overview() {
     data: rawSystemTrendData,
     loading: trendLoading,
     error: trendError,
+    revalidateError: trendRevalidateError,
   } = useMultiFetch(OVERVIEW_TREND_URLS, ([otp, sd, ewt, bun]) => ({
     otp,
     service_delivered: sd,
@@ -74,8 +77,18 @@ function Overview() {
     data: contribResults,
     loading: contribLoading,
     error: contribError,
+    revalidateError: contribRevalidateError,
   } = useMultiFetch([`/api/routes/contributors?metric=${contribMetric}&days=30`])
   const contribData = contribResults ? contribResults[0] : null
+
+  // Background-revalidate failure on any of the page's cached fetches
+  // (NOTES-122 review finding 1): none of these ever blank the page — the
+  // stale cached data keeps rendering — but a downed API otherwise leaves
+  // that stale data on screen indefinitely with `error === null` and no
+  // signal anywhere that it stopped refreshing. This can only be non-null
+  // after at least one successful cache hit + failed revalidate, so it
+  // never renders on a cold load.
+  const staleData = scorecardRevalidateError || trendRevalidateError || contribRevalidateError
 
   // The 4-entry worst-of-four input for the hero — same construction the
   // retired HealthPulse used (percent-scaled fractions, trend targets).
@@ -136,6 +149,14 @@ function Overview() {
 
   return (
     <main>
+      {staleData && (
+        <p
+          className="stale-data-note"
+          style={{ color: 'var(--color-muted)', fontSize: '0.85rem', marginBottom: '0.75rem' }}
+        >
+          Showing cached data — last refresh failed. Retrying in the background.
+        </p>
+      )}
       <OverviewHero
         systemMetrics={systemMetrics}
         scorecardRoutes={scorecard?.routes ?? null}
