@@ -49,7 +49,6 @@ designed UI. The comparison sprint shipped with PR #198.
 - [NOTES-86](notes/NOTES-86.md) System-level weekly narrative — sev low / eff medium — coordinate placement with the editorial Overview layout (PR #209)
 - [NOTES-61](notes/NOTES-61.md) Hold-down policy / dispatching candidates page — sev low — unblocked
 - [NOTES-20](notes/NOTES-20.md) Tighter rider-experience OTP — sev low — deferred
-- [NOTES-122](notes/NOTES-122.md) Client-side caching for page navigation (Overview refetches everything on every visit) — sev low-medium / eff medium — unblocked; related to NOTES-88 (server-side, distinct)
 - [NOTES-126](notes/NOTES-126.md) Add an observed-departure timestamp to stop_events for a principled slip-origin exclusion — sev low / eff medium-high — unblocked; deferred from the segment-slip origin guard (PR #213)
 
 ## Deferred / trigger-based

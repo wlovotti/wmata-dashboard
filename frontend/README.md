@@ -27,7 +27,7 @@ npm run test:watch  # watch mode for local development
 Unit tests live in `tests/unit/` and cover the shared primitives:
 `DeltaIndicator`, `computeWindowDelta`, `TargetIndicator`, `Sparkline`
 (from `RouteTrend.jsx`), `formatters.js`, `spectrumBar.js`,
-`frequencyClass.js`, and `useMultiFetch.js`.
+`frequencyClass.js`, `useMultiFetch.js`, and `fetchCache.js`.
 
 These are **characterization tests** — they assert what the current code
 does, not aspirational behavior. When you change a primitive, update the

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
@@ -41,34 +41,30 @@ const OVERVIEW_TREND_URLS = [
  *
  * One page-level fetch each for /api/routes and the trend fan-out, passed
  * down as props; the off-target panel moved to the Targets page.
+ *
+ * All three fetches route through `useMultiFetch`, which gives them
+ * stale-while-revalidate caching for free (NOTES-122): returning to
+ * Overview from a route page renders the last-known scorecard/trend/
+ * contributors data instantly while a background fetch refreshes it,
+ * instead of remounting cold into a wall of spinners.
  */
 function Overview() {
   const navigate = useNavigate()
-  const [scorecard, setScorecard] = useState(null)
   const [contribMetric, setContribMetric] = useState('otp')
-  const [contribData, setContribData] = useState(null)
-  const [contribLoading, setContribLoading] = useState(false)
-  const [contribError, setContribError] = useState(null)
 
-  useEffect(() => {
-    let cancelled = false
-    fetch('/api/routes')
-      .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
-      .then((json) => {
-        if (!cancelled) setScorecard(json)
-      })
-      .catch(() => {
-        // Hero and movers degrade gracefully without the scorecard.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { data: scorecardResults, revalidateError: scorecardRevalidateError } = useMultiFetch([
+    '/api/routes',
+  ])
+  // Hero and movers degrade gracefully while this is null (loading, or a
+  // fetch failure — the raw-fetch predecessor of this effect silently
+  // ignored errors the same way).
+  const scorecard = scorecardResults ? scorecardResults[0] : null
 
   const {
     data: rawSystemTrendData,
     loading: trendLoading,
     error: trendError,
+    revalidateError: trendRevalidateError,
   } = useMultiFetch(OVERVIEW_TREND_URLS, ([otp, sd, ewt, bun]) => ({
     otp,
     service_delivered: sd,
@@ -77,28 +73,22 @@ function Overview() {
   }))
   const systemTrendData = rawSystemTrendData ?? null
 
-  useEffect(() => {
-    let cancelled = false
-    setContribLoading(true)
-    setContribError(null)
-    fetch(`/api/routes/contributors?metric=${contribMetric}&days=30`)
-      .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
-      .then((json) => {
-        if (!cancelled) {
-          setContribData(json)
-          setContribLoading(false)
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setContribError(err.message || String(err))
-          setContribLoading(false)
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [contribMetric])
+  const {
+    data: contribResults,
+    loading: contribLoading,
+    error: contribError,
+    revalidateError: contribRevalidateError,
+  } = useMultiFetch([`/api/routes/contributors?metric=${contribMetric}&days=30`])
+  const contribData = contribResults ? contribResults[0] : null
+
+  // Background-revalidate failure on any of the page's cached fetches
+  // (NOTES-122 review finding 1): none of these ever blank the page — the
+  // stale cached data keeps rendering — but a downed API otherwise leaves
+  // that stale data on screen indefinitely with `error === null` and no
+  // signal anywhere that it stopped refreshing. This can only be non-null
+  // after at least one successful cache hit + failed revalidate, so it
+  // never renders on a cold load.
+  const staleData = scorecardRevalidateError || trendRevalidateError || contribRevalidateError
 
   // The 4-entry worst-of-four input for the hero — same construction the
   // retired HealthPulse used (percent-scaled fractions, trend targets).
@@ -159,6 +149,14 @@ function Overview() {
 
   return (
     <main>
+      {staleData && (
+        <p
+          className="stale-data-note"
+          style={{ color: 'var(--color-muted)', fontSize: '0.85rem', marginBottom: '0.75rem' }}
+        >
+          Showing cached data — last refresh failed. Retrying in the background.
+        </p>
+      )}
       <OverviewHero
         systemMetrics={systemMetrics}
         scorecardRoutes={scorecard?.routes ?? null}
