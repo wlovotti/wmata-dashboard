@@ -7,7 +7,8 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
-import MoversPanel, { getMoversFloor } from '../../src/components/MoversPanel'
+import MoversPanel from '../../src/components/MoversPanel'
+import { getMoversFloor } from '../../src/moversFloor'
 
 const route = (id, otpDelta, valid = true) => ({
   route_id: id,
@@ -180,10 +181,11 @@ describe('MoversPanel', () => {
   // independently-written `?? ...` defaults — otherwise a metric key absent
   // from MOVERS_FLAT_FLOOR could rank a row whose arrow renders flat again
   // (the exact bug NOTES-121 fixed, reintroduced for any future metric).
-  // getMoversFloor is the single source of truth both call sites read from
-  // (MoversPanel.jsx); testing it directly pins the fallback itself rather
-  // than depending on MOVER_METRICS happening to expose an unlisted key
-  // through the UI today.
+  // getMoversFloor (../../src/moversFloor, PR #216) is the single source
+  // of truth every call site reads from — MoversPanel, RouteList, and
+  // RouteDetail; testing it directly pins the fallback itself rather than
+  // depending on MOVER_METRICS happening to expose an unlisted key through
+  // the UI today.
   test('getMoversFloor falls back to 0.5 for a metric absent from MOVERS_FLAT_FLOOR', () => {
     expect(getMoversFloor('some_future_metric')).toBe(0.5)
     // And known metrics still get their explicit per-metric value, not the

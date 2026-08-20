@@ -13,6 +13,7 @@ import { computeWindowDelta } from '../utils/computeWindowDelta'
 import StopDiagnostic from './StopDiagnostic'
 import RouteDiagnosisPanel from './RouteDiagnosisPanel'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
+import { getMoversFloor } from '../moversFloor'
 
 // Day-type / time-period filter options (NOTES-41). Keys must match the API's
 // accepted values (src/time_periods.py: VALID_DAY_TYPES / VALID_PERIOD_KEYS).
@@ -352,13 +353,19 @@ function RouteDetail() {
         // null when `valid=false` (thin data) — no misleading arrow shown.
         // The trend block above keeps its own client-side deltas because
         // they pair with the sparkline render (different code path, same window).
+        // `metric` selects the per-metric magnitude floor (../moversFloor,
+        // PR #216) passed as `flatThreshold` — without it, DeltaIndicator's
+        // own 0.5 default is two orders of magnitude too tight for the
+        // 0..1-fraction service_delivered/bunching deltas, rendering every
+        // real change flat.
         const serverDeltas = routeData.deltas || {}
-        const renderServerDelta = (block, unitFormat, lowerIsBetter = false) => {
+        const renderServerDelta = (metric, block, unitFormat, lowerIsBetter = false) => {
           if (!block || !block.valid || block.value == null) return null
           return (
             <DeltaIndicator
               delta={block.value}
               format={unitFormat}
+              flatThreshold={getMoversFloor(metric)}
               lowerIsBetter={lowerIsBetter}
               title={`Last 7 days vs prior 7 days (${block.current_n}/${block.prior_n} valid days)`}
             />
@@ -373,7 +380,7 @@ function RouteDetail() {
             </div>
             <div className="stat-label">
               On-Time Performance
-              <div>{renderServerDelta(serverDeltas.otp, (d) => `${d.toFixed(1)} pp`)}</div>
+              <div>{renderServerDelta('otp', serverDeltas.otp, (d) => `${d.toFixed(1)} pp`)}</div>
               <div>
                 <TargetIndicator
                   value={routeData.otp_all_pct}
@@ -405,7 +412,7 @@ function RouteDetail() {
             </div>
             <div className="stat-label">
               Excess Wait Time
-              <div>{renderServerDelta(serverDeltas.ewt, (d) => `${Math.round(d)}s`, true)}</div>
+              <div>{renderServerDelta('ewt', serverDeltas.ewt, (d) => `${Math.round(d)}s`, true)}</div>
               {routeData.is_frequent && (
                 <div>
                   <span
@@ -464,6 +471,7 @@ function RouteDetail() {
                 {/* SD ratio is 0..1; the server delta is also 0..1 so scale to pp. */}
                 <div>
                   {renderServerDelta(
+                    'service_delivered',
                     serverDeltas.service_delivered,
                     (d) => `${(d * 100).toFixed(1)} pp`,
                   )}
@@ -517,6 +525,7 @@ function RouteDetail() {
                 Bunching Rate
                 <div>
                   {renderServerDelta(
+                    'bunching',
                     serverDeltas.bunching,
                     (d) => `${(d * 100).toFixed(1)} pp`,
                     true,
@@ -555,6 +564,7 @@ function RouteDetail() {
                 % of Trips Running Long
                 <div>
                   {renderServerDelta(
+                    'excess_trip_time_pct',
                     serverDeltas.excess_trip_time_pct,
                     (d) => `${d.toFixed(1)} pp`,
                     true,

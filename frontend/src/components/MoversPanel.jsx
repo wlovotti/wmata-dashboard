@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { DeltaIndicator } from './RouteTrend'
 import { formatContribMetricValue } from '../utils/formatters'
+import { getMoversFloor } from '../moversFloor'
 
 // Metric options — same 4-entry list as Overview/RouteList (kept inline per
 // the existing convention comment in those files).
@@ -25,55 +26,11 @@ const MIN_VALID_MOVERS = 3
 // worse" or "Getting better" — otherwise a row could rank while its own
 // DeltaIndicator arrow renders flat (gray →), which reads as
 // self-contradictory: a "worsening" row whose own badge says "no change."
-//
-// Research (2026-08-19): a short pass over TRB/TCRP literature (TCRP
-// Report 95 - Transit Reliability, TCRP Report 100 - Transit Capacity and
-// Quality of Service Manual, FHWA travel-time-reliability guidance) plus
-// public agency dashboards (VIA Metro, MnDOT) surfaced OTP *target*
-// conventions (e.g. 90% of trips within a lateness window) but no
-// agency-published or TRB-published week-over-week "noise floor" figure
-// for any of these four metrics specifically — the literature is thin on
-// this exact question. Per project convention (anchor to the existing
-// flat-rendering band when the literature doesn't supply a number):
-//   - otp, service_delivered, and bunching are all percentage-point-like
-//     metrics already anchored elsewhere in this codebase to a 0.5 pp
-//     flat band (DeltaIndicator's own default flatThreshold, and
-//     OverviewHero's HERO_FLAT_PP built on the same rationale) — reuse
-//     that 0.5 pp floor here, expressed in each metric's wire units: otp
-//     deltas arrive already in pp, service_delivered/bunching deltas
-//     arrive as 0..1 fractions (0.5 pp == 0.005).
-//   - ewt has no existing pp-based precedent (its unit is seconds, not a
-//     percentage), so reusing 0.5 unit-blind (what DeltaIndicator's
-//     un-overridden default silently does elsewhere in the app today,
-//     e.g. SystemTrend/RouteTrend's EWT cards) would mean a 0.5-SECOND
-//     floor — far too tight, effectively never flat. Chosen
-//     independently instead: 10s, roughly 5-6% of the system EWT
-//     baseline/target (~150-200s observed, 180s target per
-//     config/route_targets.yaml) — comfortably above Math.round()
-//     display noise (~1s) and below the tens-of-seconds gaps that
-//     separate routes actually worth flagging.
-const MOVERS_FLAT_FLOOR = {
-  otp: 0.5, // percentage points
-  service_delivered: 0.005, // fraction (== 0.5 pp)
-  ewt: 10, // seconds
-  bunching: 0.005, // fraction (== 0.5 pp)
-}
-
-/**
- * Single source of truth for a metric's magnitude floor, shared by the
- * ranking filter and the `flatThreshold` prop passed to each row's
- * DeltaIndicator. A metric absent from MOVERS_FLAT_FLOOR (e.g. a future
- * metric added to MOVER_METRICS without a floor entry) falls back to 0.5 —
- * DeltaIndicator's own default — at both call sites identically, so the
- * ranked-implies-non-flat invariant holds structurally rather than by
- * keeping two independently-written `?? ...` fallbacks in sync by hand.
- *
- * @param {string} metric - one of the MOVER_METRICS keys.
- * @returns {number} the magnitude floor in that metric's native delta units.
- */
-function getMoversFloor(metric) {
-  return MOVERS_FLAT_FLOOR[metric] ?? 0.5
-}
+// The floor map itself (MOVERS_FLAT_FLOOR) and its accessor (getMoversFloor)
+// live in ../moversFloor — hoisted out (PR #216) so RouteList and
+// RouteDetail's `renderServerDelta` helpers can pass the same
+// per-metric floor instead of falling back to DeltaIndicator's unit-blind
+// 0.5 default.
 
 /** True when a larger raw delta is operationally good for `metric`. */
 function isHigherBetter(metric) {
@@ -118,8 +75,8 @@ function MoversPanel({ routes }) {
   const [metric, setMetric] = useState('otp')
   const [direction, setDirection] = useState('worse')
 
-  // See getMoversFloor above — one shared floor for both the ranking filter
-  // and the DeltaIndicator flatThreshold prop below.
+  // See getMoversFloor in ../moversFloor — one shared floor for both the
+  // ranking filter and the DeltaIndicator flatThreshold prop below.
   const floor = getMoversFloor(metric)
 
   const movers = (() => {
@@ -236,10 +193,4 @@ function MoversPanel({ routes }) {
   )
 }
 
-// getMoversFloor is a plain helper, not a component — react-refresh's
-// only-export-components rule would rather it live in its own module, but
-// the review-finding test for the shared-fallback invariant (PR #215) needs
-// it colocated with MOVERS_FLAT_FLOOR to test the fallback directly.
-// eslint-disable-next-line react-refresh/only-export-components
-export { getMoversFloor }
 export default MoversPanel
