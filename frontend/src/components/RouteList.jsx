@@ -5,6 +5,7 @@ import { computeSpectrumBar } from '../utils/spectrumBar'
 import { formatContribMetricValue } from '../utils/formatters'
 import { DeltaIndicator } from './RouteTrend'
 import useGtfsFreshness from '../hooks/useGtfsFreshness'
+import { getMoversFloor } from '../moversFloor'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -88,12 +89,17 @@ function SpectrumBar({ current, target, higherIsBetter }) {
 // scaled-pp for the 0..1 SD / bunching ratios, sec for EWT raw seconds).
 // `lowerIsBetter` flips color mapping for EWT/bunching/excess-trip-time
 // (raw sign is preserved on the wire; the consumer encodes "is up good?").
-function renderServerDelta(deltaBlock, unitFormat, lowerIsBetter = false) {
+// `metric` selects the per-metric magnitude floor (../moversFloor,
+// NOTES-127) passed as `flatThreshold` — without it, DeltaIndicator's own
+// 0.5 default is two orders of magnitude too tight for the 0..1-fraction
+// service_delivered/bunching deltas, rendering every real change flat.
+function renderServerDelta(metric, deltaBlock, unitFormat, lowerIsBetter = false) {
   if (!deltaBlock || !deltaBlock.valid || deltaBlock.value == null) return null
   return (
     <DeltaIndicator
       delta={deltaBlock.value}
       format={unitFormat}
+      flatThreshold={getMoversFloor(metric)}
       lowerIsBetter={lowerIsBetter}
       title={`Last 7 days vs prior 7 days (${deltaBlock.current_n}/${deltaBlock.prior_n} valid days)`}
     />
@@ -706,6 +712,7 @@ function RouteList() {
                   {/* Period-over-period delta arrow (NOTES-38). `valid=false`
                       when either 7-day window has fewer than 3 daily samples. */}
                   {renderServerDelta(
+                    'otp',
                     route.deltas?.otp,
                     (d) => `${d.toFixed(1)} pp`,
                   )}
@@ -727,6 +734,7 @@ function RouteList() {
                     : '—'}
                   {/* SD ratio is 0..1; the server delta is also 0..1 so scale to pp. */}
                   {renderServerDelta(
+                    'service_delivered',
                     route.deltas?.service_delivered,
                     (d) => `${(d * 100).toFixed(1)} pp`,
                   )}
@@ -767,6 +775,7 @@ function RouteList() {
                       : '—'}
                   </span>
                   {renderServerDelta(
+                    'ewt',
                     route.deltas?.ewt,
                     (d) => `${Math.round(d)}s`,
                     true,
@@ -796,6 +805,7 @@ function RouteList() {
                     ? `${(route.bunching_rate * 100).toFixed(1)}%`
                     : '—'}
                   {renderServerDelta(
+                    'bunching',
                     route.deltas?.bunching,
                     (d) => `${(d * 100).toFixed(1)} pp`,
                     true,
