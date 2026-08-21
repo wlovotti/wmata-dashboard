@@ -8,11 +8,11 @@
  *   - transform function is applied
  *   - cleanup/abort on unmount (AbortError is swallowed)
  *   - HTTP error (non-ok status) surfaces in error state
- *   - PR #TBD finding 3: a sibling URL that resolves is still cached
+ *   - PR #218 finding 3: a sibling URL that resolves is still cached
  *     even when another URL in the same group fails (Promise.allSettled)
- *   - PR #TBD finding 4: a cache-hit mount with a transform does not
+ *   - PR #218 finding 4: a cache-hit mount with a transform does not
  *     force an extra render before the background revalidate resolves
- *   - PR #TBD finding 5: an empty `urls` array resolves to `data: []`
+ *   - PR #218 finding 5: an empty `urls` array resolves to `data: []`
  *     synchronously on the very first render, not after an effect flush
  */
 import React from 'react'
@@ -320,7 +320,7 @@ describe('useMultiFetch stale-while-revalidate caching (NOTES-122)', () => {
   })
 })
 
-describe('useMultiFetch sibling caching on partial group failure (PR #TBD finding 3)', () => {
+describe('useMultiFetch sibling caching on partial group failure (PR #218 finding 3)', () => {
   test('a URL that resolves is cached even when a sibling in the same group fails', async () => {
     const mockFetch = vi.fn((url) => {
       if (url === '/api/sibling-good') {
@@ -355,7 +355,7 @@ describe('useMultiFetch sibling caching on partial group failure (PR #TBD findin
   })
 })
 
-describe('useMultiFetch empty-urls contract (PR #TBD finding 5)', () => {
+describe('useMultiFetch empty-urls contract (PR #218 finding 5)', () => {
   test('data is [] synchronously on the very first render, not null before an effect flush', () => {
     let capturedOnFirstRender
     function Probe() {
@@ -372,7 +372,7 @@ describe('useMultiFetch empty-urls contract (PR #TBD finding 5)', () => {
   })
 })
 
-describe('useMultiFetch cache-hit mount avoids a redundant extra render (PR #TBD finding 4)', () => {
+describe('useMultiFetch cache-hit mount avoids a redundant extra render (PR #218 finding 4)', () => {
   test('a cache hit with a transform does not re-render before the background revalidate resolves', async () => {
     setCacheEntry('/api/render-count', { v: 1 })
     let resolveFetch

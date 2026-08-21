@@ -22,7 +22,7 @@ const COMPARE_STRIP_URLS = ['/api/agency-comparison']
  * trailing "since {window_start}" label so the two numbers are never read
  * as directly comparable time spans.
  *
- * Routed through `useMultiFetch` (PR #TBD finding 2) instead of a raw
+ * Routed through `useMultiFetch` (PR #218 finding 2) instead of a raw
  * fetch: previously this was the one Overview-hero fetch left uncached, so
  * the strip popped in on every return visit even though every other
  * Overview fetch already had stale-while-revalidate caching (NOTES-122).

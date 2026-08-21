@@ -22,7 +22,7 @@ function readCache(urls) {
  *   hook's documented contract, even though a fresh array literal each
  *   render no longer forces a re-fetch. An empty (or null/undefined) array
  *   resolves immediately, on the very first render, with `data: []` — no
- *   effect flush is required to observe that value (PR #TBD finding 5).
+ *   effect flush is required to observe that value (PR #218 finding 5).
  * @param {function} [transform] - Optional transform applied to the resolved
  *   array of JSON responses before storing in state. Receives the array in the
  *   same order as `urls` and must return the value to store in `data`. When
@@ -64,7 +64,7 @@ function readCache(urls) {
  * before remounting, so every URL is a cold miss on the next mount instead
  * of an instant replay of stale data.
  *
- * Sibling caching (PR #TBD finding 3): the group fetch uses
+ * Sibling caching (PR #218 finding 3): the group fetch uses
  * `Promise.allSettled`, not `Promise.all`. Every URL that resolves
  * successfully is cached individually, even when a sibling in the same
  * `urls` array fails — a single flaky metric (e.g. one `/api/system/trend`
@@ -92,9 +92,9 @@ function useMultiFetch(urls, transform) {
   // Lazy useState initializers run exactly once, at mount — unlike a plain
   // `readCache(urls)` call inline in the render body (the pre-fix version),
   // which re-ran on every re-render just to feed these once-only values
-  // (PR #TBD finding 4). An empty/null `urls` resolves immediately to
+  // (PR #218 finding 4). An empty/null `urls` resolves immediately to
   // `data: []` here, matching the docstring's promise without waiting for
-  // the effect below to run (PR #TBD finding 5).
+  // the effect below to run (PR #218 finding 5).
   const [data, setData] = useState(() => {
     if (!hasUrls) return transform ? transform([]) : []
     const { cached, hit } = readCache(urls)
@@ -118,7 +118,7 @@ function useMultiFetch(urls, transform) {
   // the effect's `if (hit)` branch below would call setData again with an
   // equivalent-but-new value (transform() runs again, producing a fresh
   // reference) on that same mount — costing an extra render on every
-  // cache-hit mount (PR #TBD finding 4).
+  // cache-hit mount (PR #218 finding 4).
   const isFirstRun = useRef(true)
 
   useEffect(() => {
@@ -161,7 +161,7 @@ function useMultiFetch(urls, transform) {
       ),
     ).then((settled) => {
       // Cache every URL that resolved, even if a sibling in this group
-      // failed (PR #TBD finding 3) — the next mount of a URL cached here
+      // failed (PR #218 finding 3) — the next mount of a URL cached here
       // is a cache hit regardless of how the rest of this group fared.
       settled.forEach((outcome, i) => {
         if (outcome.status === 'fulfilled') setCacheEntry(urls[i], outcome.value)

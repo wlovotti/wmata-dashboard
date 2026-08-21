@@ -2,7 +2,7 @@
  * CompareStrip (NOTES-84): one-row WMATA-vs-Muni OTP teaser inside the hero,
  * linking to /compare. Never load-bearing: any fetch problem renders nothing.
  *
- * PR #TBD finding 2: CompareStrip was the one Overview-hero fetch left
+ * PR #218 finding 2: CompareStrip was the one Overview-hero fetch left
  * uncached after PR #217 — it fetched raw instead of routing through
  * useMultiFetch, so it popped in on every return visit. The last test below
  * pins the fix: a second mount serves the cached value instantly (no
@@ -34,7 +34,7 @@ function mockFetch(impl) {
 }
 
 // CompareStrip now shares the module-level fetchCache with every other
-// useMultiFetch caller (PR #TBD finding 2); tests/setup.js's global
+// useMultiFetch caller (PR #218 finding 2); tests/setup.js's global
 // afterEach already clears it between tests, so an earlier test's cached
 // payload never bleeds into a later one here.
 afterEach(() => vi.unstubAllGlobals())
@@ -86,7 +86,7 @@ describe('CompareStrip', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  test('a second mount serves the cached payload instantly, without waiting on the network (PR #TBD finding 2)', async () => {
+  test('a second mount serves the cached payload instantly, without waiting on the network (PR #218 finding 2)', async () => {
     mockFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) }))
     const { unmount } = render(
       <MemoryRouter>

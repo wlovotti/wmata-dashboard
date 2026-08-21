@@ -1,5 +1,5 @@
 /**
- * App.jsx refresh invalidation (PR #TBD finding 6).
+ * App.jsx refresh invalidation (PR #218 finding 6).
  *
  * `clearFetchCache()` in App.jsx's `handleRefresh` is the sole manual
  * invalidation path for the stale-while-revalidate fetch cache (NOTES-122)

@@ -9,7 +9,7 @@
  *   - overwrite: setCacheEntry replaces a prior entry for the same URL
  *   - independence: entries for different URLs don't collide
  *   - clearFetchCache empties every entry
- *   - LRU size cap (PR #TBD finding 1): the oldest untouched entry is
+ *   - LRU size cap (PR #218 finding 1): the oldest untouched entry is
  *     evicted once the cache exceeds MAX_ENTRIES (50), and reading an
  *     entry via getCacheEntry refreshes its recency so it survives an
  *     eviction sweep that would otherwise have dropped it

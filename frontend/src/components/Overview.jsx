@@ -29,7 +29,7 @@ const OVERVIEW_TREND_URLS = [
   '/api/system/trend?metric=bunching&days=30',
 ]
 
-// Stable module-level array (PR #TBD finding 4) — this URL never depends
+// Stable module-level array (PR #218 finding 4) — this URL never depends
 // on props/state, so it's hoisted alongside OVERVIEW_TREND_URLS to honor
 // useMultiFetch's documented "memoize `urls`" contract instead of passing
 // a fresh `['/api/routes']` literal every render.
@@ -78,7 +78,7 @@ function Overview() {
   }))
   const systemTrendData = rawSystemTrendData ?? null
 
-  // Memoized (PR #TBD finding 4) so the array reference is stable across
+  // Memoized (PR #218 finding 4) so the array reference is stable across
   // renders that don't change `contribMetric` — a fresh literal here would
   // still work (useMultiFetch keys its effect on a JSON.stringify of the
   // URLs, not reference identity), but the hook's docstring documents

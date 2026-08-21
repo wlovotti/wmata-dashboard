@@ -20,7 +20,7 @@
  * within a single hook instance via `Promise.all`, and cross-instance
  * request coalescing is not something the surfaced issue asked for.
  *
- * SIZE CAP (PR #TBD finding 1): the only removal path used to be
+ * SIZE CAP (PR #218 finding 1): the only removal path used to be
  * `clearFetchCache()`, so a tab left open for days grows the cache
  * monotonically — RouteDetail alone keys three trend URLs per
  * (routeId, dayType, period) combination, alongside the ~200 KB
