@@ -18,7 +18,7 @@
 import React from 'react'
 import { renderHook, act, waitFor, render } from '@testing-library/react'
 import useMultiFetch from '../../src/hooks/useMultiFetch'
-import { setCacheEntry, clearFetchCache } from '../../src/hooks/fetchCache'
+import { setCacheEntry, getCacheEntry, clearFetchCache } from '../../src/hooks/fetchCache'
 
 // Helper: build a fetch mock that resolves with `data` after an optional delay.
 function makeFetchMock(responses) {
@@ -408,6 +408,86 @@ describe('useMultiFetch cache-hit mount avoids a redundant extra render (PR #218
     // hanging promise / act() warning.
     await act(async () => {
       resolveFetch({ ok: true, json: () => Promise.resolve({ v: 1 }) })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  })
+})
+
+describe('useMultiFetch: aborted run must not write stale state or repopulate cache (PR #218 review finding)', () => {
+  test('an aborted group whose settled results include a non-abort rejection does not set error/loading or cache entries after abort', async () => {
+    let resolveSuccessor
+    const mockFetch = vi.fn((url, opts) => {
+      if (url === '/api/mix-good') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ v: 'good' }),
+        })
+      }
+      if (url === '/api/mix-bad') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
+      }
+      if (url === '/api/mix-pending') {
+        return new Promise((_, reject) => {
+          opts.signal.addEventListener('abort', () => {
+            reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }))
+          })
+        })
+      }
+      if (url === '/api/mix-successor') {
+        return new Promise((resolve) => {
+          resolveSuccessor = resolve
+        })
+      }
+      throw new Error(`unexpected url ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result, rerender } = renderHook(({ urls }) => useMultiFetch(urls), {
+      initialProps: { urls: ['/api/mix-good', '/api/mix-bad', '/api/mix-pending'] },
+    })
+
+    expect(result.current.loading).toBe(true)
+
+    // Switch URL groups before the first group settles — mirrors RouteDetail's
+    // trendUrls group changing mid-flight when the user toggles dayType/period.
+    // This aborts the in-flight first-group fetches (cleanup calls
+    // controller.abort()) and starts a fresh cold-load effect run for the
+    // successor group.
+    rerender({ urls: ['/api/mix-successor'] })
+
+    expect(result.current.loading).toBe(true)
+    expect(result.current.error).toBeNull()
+
+    // Let the aborted first group's Promise.allSettled(...).then() handler
+    // run. '/api/mix-good' fulfills, '/api/mix-bad' rejects for a real
+    // (non-abort) reason, and '/api/mix-pending' rejects with AbortError
+    // from the abort() call above. `settled.find` picks by array index,
+    // landing on '/api/mix-bad' first — which is NOT an AbortError — so
+    // without an `if (signal.aborted) return` guard the aborted handler
+    // proceeds to stomp the successor group's freshly-reset state, and to
+    // cache '/api/mix-good' even though this run was aborted.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // The successor's own fetch is still pending (never resolved), so any
+    // state change here can only be contamination from the aborted first
+    // group.
+    expect(result.current.loading).toBe(true)
+    expect(result.current.error).toBeNull()
+    expect(result.current.revalidateError).toBeNull()
+
+    // The aborted run must not repopulate the cache either — this is the
+    // path that defeats handleRefresh's clearFetchCache() invalidation.
+    expect(getCacheEntry('/api/mix-good')).toBeUndefined()
+
+    // Clean up the still-pending successor fetch so it doesn't leak into
+    // other tests.
+    await act(async () => {
+      resolveSuccessor({ ok: true, json: () => Promise.resolve({ v: 1 }) })
       await Promise.resolve()
       await Promise.resolve()
     })

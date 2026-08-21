@@ -160,6 +160,16 @@ function useMultiFetch(urls, transform) {
         ),
       ),
     ).then((settled) => {
+      // This run was superseded (unmount, or `urls` changed) before every
+      // URL in the group settled. `settled.find` below picks a rejection by
+      // array index, not by time — if a non-abort rejection (e.g. a real
+      // HTTP 500) sits at a lower index than an abort-triggered rejection,
+      // it would otherwise slip past the `AbortError` check and write this
+      // stale run's error/loading/cache state into whatever group replaced
+      // it (PR #218 review finding). Bail out before touching state or the
+      // cache at all once the signal is aborted.
+      if (signal.aborted) return
+
       // Cache every URL that resolved, even if a sibling in this group
       // failed (PR #218 finding 3) — the next mount of a URL cached here
       // is a cache hit regardless of how the rest of this group fared.
