@@ -1,6 +1,12 @@
 /**
  * CompareStrip (NOTES-84): one-row WMATA-vs-Muni OTP teaser inside the hero,
  * linking to /compare. Never load-bearing: any fetch problem renders nothing.
+ *
+ * PR #218 finding 2: CompareStrip was the one Overview-hero fetch left
+ * uncached after PR #217 — it fetched raw instead of routing through
+ * useMultiFetch, so it popped in on every return visit. The last test below
+ * pins the fix: a second mount serves the cached value instantly (no
+ * network round-trip needed before the strip renders).
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -27,6 +33,10 @@ function mockFetch(impl) {
   vi.stubGlobal('fetch', vi.fn(impl))
 }
 
+// CompareStrip now shares the module-level fetchCache with every other
+// useMultiFetch caller (PR #218 finding 2); tests/setup.js's global
+// afterEach already clears it between tests, so an earlier test's cached
+// payload never bleeds into a later one here.
 afterEach(() => vi.unstubAllGlobals())
 
 describe('CompareStrip', () => {
@@ -74,5 +84,27 @@ describe('CompareStrip', () => {
     )
     await waitFor(() => expect(fetch).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
+  })
+
+  test('a second mount serves the cached payload instantly, without waiting on the network (PR #218 finding 2)', async () => {
+    mockFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) }))
+    const { unmount } = render(
+      <MemoryRouter>
+        <CompareStrip />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText(/WMATA/)).toBeVisible())
+    unmount()
+
+    // Second mount: even though the mock fetch would resolve fine again,
+    // the assertion below runs synchronously (no `waitFor`) — it only
+    // passes if the cached value from the first mount painted immediately.
+    render(
+      <MemoryRouter>
+        <CompareStrip />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText(/WMATA/)).toBeVisible()
+    expect(screen.getByText(/SFMTA \(Muni\)/)).toBeVisible()
   })
 })

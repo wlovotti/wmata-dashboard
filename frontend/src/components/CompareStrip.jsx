@@ -1,6 +1,10 @@
-import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { formatMetricValue, formatDelta } from '../utils/agencyComparison'
+import useMultiFetch from '../hooks/useMultiFetch'
+
+// Stable module-level array so useMultiFetch's memoization contract holds
+// and the URL set never changes across renders.
+const COMPARE_STRIP_URLS = ['/api/agency-comparison']
 
 /**
  * One-row WMATA-vs-Muni OTP teaser inside the Overview hero (NOTES-84),
@@ -17,28 +21,19 @@ import { formatMetricValue, formatDelta } from '../utils/agencyComparison'
  * AgencyComparison.jsx), the strip discloses its window inline via a
  * trailing "since {window_start}" label so the two numbers are never read
  * as directly comparable time spans.
+ *
+ * Routed through `useMultiFetch` (PR #218 finding 2) instead of a raw
+ * fetch: previously this was the one Overview-hero fetch left uncached, so
+ * the strip popped in on every return visit even though every other
+ * Overview fetch already had stale-while-revalidate caching (NOTES-122).
  */
 function CompareStrip() {
-  const [agencies, setAgencies] = useState(null)
-  const [windowStart, setWindowStart] = useState(null)
-
-  useEffect(() => {
-    let cancelled = false
-    fetch('/api/agency-comparison')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((json) => {
-        if (!cancelled) {
-          setAgencies(json?.agencies ?? null)
-          setWindowStart(json?.window_start ?? null)
-        }
-      })
-      .catch(() => {
-        // Teaser only — swallow and render nothing.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { data } = useMultiFetch(COMPARE_STRIP_URLS, ([json]) => ({
+    agencies: json?.agencies ?? null,
+    windowStart: json?.window_start ?? null,
+  }))
+  const agencies = data?.agencies ?? null
+  const windowStart = data?.windowStart ?? null
 
   if (!Array.isArray(agencies) || agencies.length < 2) return null
 

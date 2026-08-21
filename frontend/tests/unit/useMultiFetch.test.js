@@ -8,10 +8,17 @@
  *   - transform function is applied
  *   - cleanup/abort on unmount (AbortError is swallowed)
  *   - HTTP error (non-ok status) surfaces in error state
+ *   - PR #218 finding 3: a sibling URL that resolves is still cached
+ *     even when another URL in the same group fails (Promise.allSettled)
+ *   - PR #218 finding 4: a cache-hit mount with a transform does not
+ *     force an extra render before the background revalidate resolves
+ *   - PR #218 finding 5: an empty `urls` array resolves to `data: []`
+ *     synchronously on the very first render, not after an effect flush
  */
-import { renderHook, act, waitFor } from '@testing-library/react'
+import React from 'react'
+import { renderHook, act, waitFor, render } from '@testing-library/react'
 import useMultiFetch from '../../src/hooks/useMultiFetch'
-import { setCacheEntry, clearFetchCache } from '../../src/hooks/fetchCache'
+import { setCacheEntry, getCacheEntry, clearFetchCache } from '../../src/hooks/fetchCache'
 
 // Helper: build a fetch mock that resolves with `data` after an optional delay.
 function makeFetchMock(responses) {
@@ -310,5 +317,179 @@ describe('useMultiFetch stale-while-revalidate caching (NOTES-122)', () => {
 
     await waitFor(() => expect(result2.current.loading).toBe(false))
     expect(result2.current.data).toEqual([{ v: 1 }])
+  })
+})
+
+describe('useMultiFetch sibling caching on partial group failure (PR #218 finding 3)', () => {
+  test('a URL that resolves is cached even when a sibling in the same group fails', async () => {
+    const mockFetch = vi.fn((url) => {
+      if (url === '/api/sibling-good') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ v: 'good' }),
+        })
+      }
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result, unmount } = renderHook(() =>
+      useMultiFetch(['/api/sibling-good', '/api/sibling-bad']),
+    )
+
+    // The group as a whole still surfaces the failure — partial success
+    // does not populate `data`.
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(result.current.data).toBeNull()
+    unmount()
+
+    // But the sibling that succeeded was cached individually: mounting the
+    // hook for just that URL is an instant cache hit, not a cold fetch —
+    // pre-fix (Promise.all), the failing sibling would have prevented this
+    // URL from ever being cached.
+    mockFetch.mockClear()
+    const { result: result2 } = renderHook(() => useMultiFetch(['/api/sibling-good']))
+    expect(result2.current.loading).toBe(false)
+    expect(result2.current.data).toEqual([{ v: 'good' }])
+  })
+})
+
+describe('useMultiFetch empty-urls contract (PR #218 finding 5)', () => {
+  test('data is [] synchronously on the very first render, not null before an effect flush', () => {
+    let capturedOnFirstRender
+    function Probe() {
+      const { data } = useMultiFetch([])
+      // Captured during the render phase itself (not an effect), so this
+      // reflects exactly what the lazy useState initializer produced for
+      // the very first paint — the docstring promises `data: []`
+      // immediately, with no effect flush required to observe it.
+      if (capturedOnFirstRender === undefined) capturedOnFirstRender = data
+      return null
+    }
+    render(React.createElement(Probe))
+    expect(capturedOnFirstRender).toEqual([])
+  })
+})
+
+describe('useMultiFetch cache-hit mount avoids a redundant extra render (PR #218 finding 4)', () => {
+  test('a cache hit with a transform does not re-render before the background revalidate resolves', async () => {
+    setCacheEntry('/api/render-count', { v: 1 })
+    let resolveFetch
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveFetch = resolve
+          }),
+      ),
+    )
+
+    let renderCount = 0
+    function Probe() {
+      renderCount++
+      // A transform that returns a fresh object reference every call — the
+      // exact shape (`([json]) => ({...})`) Overview's trend fan-out uses.
+      // Pre-fix, the effect's `if (hit)` branch called setData again with
+      // this transform's new reference on the SAME mount, forcing a second
+      // render before the fetch below ever resolves.
+      return useMultiFetch(['/api/render-count'], ([json]) => ({ ...json }))
+    }
+
+    const { result } = renderHook(() => Probe())
+
+    // Only the initial mount render has happened — the revalidate fetch is
+    // still pending, so nothing should have re-rendered the hook yet.
+    expect(renderCount).toBe(1)
+    expect(result.current.data).toEqual({ v: 1 })
+
+    // Resolve the pending fetch so it doesn't leak into later tests as a
+    // hanging promise / act() warning.
+    await act(async () => {
+      resolveFetch({ ok: true, json: () => Promise.resolve({ v: 1 }) })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  })
+})
+
+describe('useMultiFetch: aborted run must not write stale state or repopulate cache (PR #218 review finding)', () => {
+  test('an aborted group whose settled results include a non-abort rejection does not set error/loading or cache entries after abort', async () => {
+    let resolveSuccessor
+    const mockFetch = vi.fn((url, opts) => {
+      if (url === '/api/mix-good') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ v: 'good' }),
+        })
+      }
+      if (url === '/api/mix-bad') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
+      }
+      if (url === '/api/mix-pending') {
+        return new Promise((_, reject) => {
+          opts.signal.addEventListener('abort', () => {
+            reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }))
+          })
+        })
+      }
+      if (url === '/api/mix-successor') {
+        return new Promise((resolve) => {
+          resolveSuccessor = resolve
+        })
+      }
+      throw new Error(`unexpected url ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result, rerender } = renderHook(({ urls }) => useMultiFetch(urls), {
+      initialProps: { urls: ['/api/mix-good', '/api/mix-bad', '/api/mix-pending'] },
+    })
+
+    expect(result.current.loading).toBe(true)
+
+    // Switch URL groups before the first group settles — mirrors RouteDetail's
+    // trendUrls group changing mid-flight when the user toggles dayType/period.
+    // This aborts the in-flight first-group fetches (cleanup calls
+    // controller.abort()) and starts a fresh cold-load effect run for the
+    // successor group.
+    rerender({ urls: ['/api/mix-successor'] })
+
+    expect(result.current.loading).toBe(true)
+    expect(result.current.error).toBeNull()
+
+    // Let the aborted first group's Promise.allSettled(...).then() handler
+    // run. '/api/mix-good' fulfills, '/api/mix-bad' rejects for a real
+    // (non-abort) reason, and '/api/mix-pending' rejects with AbortError
+    // from the abort() call above. `settled.find` picks by array index,
+    // landing on '/api/mix-bad' first — which is NOT an AbortError — so
+    // without an `if (signal.aborted) return` guard the aborted handler
+    // proceeds to stomp the successor group's freshly-reset state, and to
+    // cache '/api/mix-good' even though this run was aborted.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // The successor's own fetch is still pending (never resolved), so any
+    // state change here can only be contamination from the aborted first
+    // group.
+    expect(result.current.loading).toBe(true)
+    expect(result.current.error).toBeNull()
+    expect(result.current.revalidateError).toBeNull()
+
+    // The aborted run must not repopulate the cache either — this is the
+    // path that defeats handleRefresh's clearFetchCache() invalidation.
+    expect(getCacheEntry('/api/mix-good')).toBeUndefined()
+
+    // Clean up the still-pending successor fetch so it doesn't leak into
+    // other tests.
+    await act(async () => {
+      resolveSuccessor({ ok: true, json: () => Promise.resolve({ v: 1 }) })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
   })
 })

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
@@ -29,6 +29,12 @@ const OVERVIEW_TREND_URLS = [
   '/api/system/trend?metric=bunching&days=30',
 ]
 
+// Stable module-level array (PR #218 finding 4) — this URL never depends
+// on props/state, so it's hoisted alongside OVERVIEW_TREND_URLS to honor
+// useMultiFetch's documented "memoize `urls`" contract instead of passing
+// a fresh `['/api/routes']` literal every render.
+const SCORECARD_URLS = ['/api/routes']
+
 /**
  * Overview landing page, rebuilt as an editorial stack (NOTES-84):
  *
@@ -52,9 +58,8 @@ function Overview() {
   const navigate = useNavigate()
   const [contribMetric, setContribMetric] = useState('otp')
 
-  const { data: scorecardResults, revalidateError: scorecardRevalidateError } = useMultiFetch([
-    '/api/routes',
-  ])
+  const { data: scorecardResults, revalidateError: scorecardRevalidateError } =
+    useMultiFetch(SCORECARD_URLS)
   // Hero and movers degrade gracefully while this is null (loading, or a
   // fetch failure — the raw-fetch predecessor of this effect silently
   // ignored errors the same way).
@@ -73,12 +78,22 @@ function Overview() {
   }))
   const systemTrendData = rawSystemTrendData ?? null
 
+  // Memoized (PR #218 finding 4) so the array reference is stable across
+  // renders that don't change `contribMetric` — a fresh literal here would
+  // still work (useMultiFetch keys its effect on a JSON.stringify of the
+  // URLs, not reference identity), but the hook's docstring documents
+  // memoization as the caller contract, and this is the one call site
+  // whose URL genuinely depends on state.
+  const contribUrls = useMemo(
+    () => [`/api/routes/contributors?metric=${contribMetric}&days=30`],
+    [contribMetric],
+  )
   const {
     data: contribResults,
     loading: contribLoading,
     error: contribError,
     revalidateError: contribRevalidateError,
-  } = useMultiFetch([`/api/routes/contributors?metric=${contribMetric}&days=30`])
+  } = useMultiFetch(contribUrls)
   const contribData = contribResults ? contribResults[0] : null
 
   // Background-revalidate failure on any of the page's cached fetches
