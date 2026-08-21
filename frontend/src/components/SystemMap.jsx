@@ -5,6 +5,12 @@ import 'leaflet/dist/leaflet.css'
 import { routeLineColor } from '../utils/mapColors'
 import useMultiFetch from '../hooks/useMultiFetch'
 
+// Stable module-level array (PR #TBD finding 4) — useMultiFetch's
+// documented contract asks callers to memoize the `urls` array rather than
+// pass a fresh literal every render; this URL never depends on props, so
+// hoisting it out of the component is the simplest way to honor that.
+const SHAPES_URLS = ['/api/shapes']
+
 /**
  * Fit the map viewport to the full network extent once bounds are known —
  * but only once per mount (PR #217 review finding 2). A `useMultiFetch`
@@ -62,7 +68,7 @@ function SystemMap({ scorecardRoutes }) {
   const {
     data: shapes,
     error,
-  } = useMultiFetch(['/api/shapes'], ([json]) => json?.routes ?? [])
+  } = useMultiFetch(SHAPES_URLS, ([json]) => json?.routes ?? [])
 
   const byRouteId = useMemo(
     () => new Map((scorecardRoutes || []).map((r) => [r.route_id, r])),
