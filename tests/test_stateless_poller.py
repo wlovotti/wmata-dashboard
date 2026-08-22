@@ -17,11 +17,12 @@ class RecordingUploader:
     def upload_closed_files(self, archive_dir, key_prefix, skip):
         """Report every ``*.jsonl.zst`` file under ``archive_dir`` not in ``skip`` as shipped.
 
-        Records the ``(archive_dir, key_prefix)`` pair it was called with so
-        tests can assert on call shape; performs no actual upload.
+        Records the ``(archive_dir, key_prefix, skip)`` triple it was called
+        with so tests can assert on call shape, including exactly which
+        paths the caller told us to skip; performs no actual upload.
         """
         shipped = [p.name for p in sorted(Path(archive_dir).glob("*.jsonl.zst")) if p not in skip]
-        self.calls.append((archive_dir, key_prefix))
+        self.calls.append((archive_dir, key_prefix, skip))
         return shipped
 
     def prune_uploaded(self, archive_dir, max_age_sec=48 * 3600):
@@ -30,7 +31,15 @@ class RecordingUploader:
 
 
 def test_ping_gate_requires_both_feeds_fresh(monkeypatch):
-    """maybe_ping only fires once both "tu" and "vp" have shipped recently, rate-limited."""
+    """maybe_ping only fires once both "tu" and "vp" have shipped recently, rate-limited.
+
+    Also covers the one-feed-wedge case: once "vp" stops shipping while
+    "tu" keeps going, the gate must fall silent even though "tu" is fresh
+    and the min-gap window has long since passed — this is the behavior
+    the module docstring cites as subsuming the VP-path dead-man coverage
+    item (NOTES-94): a single gate, not a per-feed one, is what actually
+    detects a wedge on either feed.
+    """
     pings = []
     monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: pings.append(url))
     gate = PingGate("http://hc/x", freshness_sec=1200, min_gap_sec=300)
@@ -43,6 +52,13 @@ def test_ping_gate_requires_both_feeds_fresh(monkeypatch):
     assert gate.maybe_ping(now=1100.0) is False  # inside min_gap_sec
     assert gate.maybe_ping(now=1400.0) is True  # gap passed, both still fresh
     assert gate.maybe_ping(now=9999.0) is False  # both feeds stale now
+
+    # One-feed wedge after a healthy period: vp goes quiet (e.g. wedged)
+    # while tu keeps shipping right up to `now`. Even though tu is fresh
+    # and min_gap_sec has elapsed since the last ping, the gate must stay
+    # silent because vp alone is stale.
+    gate.record_ship("tu", now=2400.0)
+    assert gate.maybe_ping(now=2401.0) is False
 
 
 def test_archive_vp_rows_round_trip(tmp_path):
@@ -82,21 +98,35 @@ def test_archive_vp_rows_round_trip(tmp_path):
 
 
 def test_run_upload_cycle_records_ships_per_feed(tmp_path, monkeypatch):
-    """run_upload_cycle records a ship only for feeds that actually shipped a file."""
+    """run_upload_cycle records a ship only for feeds that actually shipped a file.
+
+    Also covers the open-file skip arm: the tu writer has an open (not yet
+    rotated) file at call time, and that open file must (a) never appear in
+    the returned ``shipped`` list and (b) be present in the ``skip`` set
+    that ``run_upload_cycle`` passes to the uploader — proving the
+    open-path exclusion is actually wired through, not just true by
+    accident because no open file existed.
+    """
     monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: True)
     tu_dir, vp_dir = tmp_path / "tu", tmp_path / "vp"
     tu_dir.mkdir()
     vp_dir.mkdir()
     (tu_dir / "2026-08-22.1.100.jsonl.zst").write_bytes(b"x")
     tu_w, vp_w = JsonlArchiveWriter(tu_dir), JsonlArchiveWriter(vp_dir)
+    tu_w.append({"trip_id": "t1"}, snapshot_ts=datetime(2026, 8, 22, 12, 0, 0))
+    assert tu_w.open_path is not None  # arm the skip case: tu has an open file
     gate = PingGate("http://hc/x")
+    uploader = RecordingUploader()
     streams = [
         ("tu", tu_dir, "raw-jsonl-archive/", tu_w),
         ("vp", vp_dir, "raw-jsonl-archive/vp/", vp_w),
     ]
 
-    shipped = run_upload_cycle(RecordingUploader(), streams, gate, now=1000.0)
+    shipped = run_upload_cycle(uploader, streams, gate, now=1000.0)
 
     assert shipped == ["2026-08-22.1.100.jsonl.zst"]
     assert gate._last_ship["tu"] == 1000.0
     assert "vp" not in gate._last_ship  # nothing shipped for vp
+    assert tu_w.open_path.name not in shipped  # the open file was never shipped
+    tu_call = next(c for c in uploader.calls if c[1] == "raw-jsonl-archive/")
+    assert tu_w.open_path in tu_call[2]  # ...because it was passed in `skip`
