@@ -1420,3 +1420,51 @@ class RouteDiagnosisNarrative(Base):
     profile_snapshot_hash = Column(String, nullable=False)  # SHA-256 hex
 
     __table_args__ = (Index("idx_route_diagnosis_narrative_route", "route_id"),)
+
+
+# ---------------------------------------------------------------------------
+# LLM-generated system-level weekly narrative (system weekly narrative,
+# PR #219). Sibling to route_diagnosis_narrative above: same offline-CLI /
+# cache-table / read-only-endpoint pattern (PR #141), applied to the whole
+# network's week-over-week performance instead of one route.
+# ---------------------------------------------------------------------------
+
+
+class SystemWeeklyNarrative(Base):
+    """
+    Cached LLM-generated narrative summarizing one week of system-wide
+    performance (system weekly narrative, PR #219).
+
+    Written by ``scripts/generate_system_weekly_narrative.py`` (offline;
+    uses the ``claude`` CLI, same as the route diagnosis narrative). Read by
+    ``GET /api/system/weekly-narrative``. The API never calls Claude — it
+    only serves the row already here.
+
+    ``as_of_date`` is the last Eastern service_date in the narrative's
+    trailing 7-day window (``YYYY-MM-DD``) and is the primary key — one
+    narrative per as_of_date; regenerating for the same date overwrites in
+    place. The API always serves the row with the highest ``as_of_date``.
+
+    Staleness detection mirrors the route narrative: ``metrics_snapshot_hash``
+    is a SHA-256 hex digest of the canonicalized ``system_metrics_daily``
+    rows for the current AND prior 7-day windows (the window-mean +
+    week-over-week delta inputs) at generation time. The endpoint recomputes
+    the current hash for the same as_of_date and sets ``is_stale=True`` when
+    they differ (e.g. a late backfill revised a day's numbers) — it also
+    treats a newer as_of_date being available as stale, since that means a
+    new week's data has landed since generation.
+
+    ``prompt_version`` is a short string (e.g. ``"v1"``) baked into the CLI
+    so cache invalidation can be forced by bumping the version even when the
+    underlying metrics haven't changed.
+    """
+
+    __tablename__ = "system_weekly_narrative"
+
+    as_of_date = Column(String, primary_key=True)  # YYYY-MM-DD, Eastern
+
+    narrative = Column(String, nullable=False)
+    generated_at = Column(DateTime, nullable=False)  # naive UTC
+    model_id = Column(String, nullable=False)
+    prompt_version = Column(String, nullable=False)
+    metrics_snapshot_hash = Column(String, nullable=False)  # SHA-256 hex

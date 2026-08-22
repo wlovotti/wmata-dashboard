@@ -8,6 +8,7 @@ import OverviewHero from './OverviewHero'
 import MoversPanel from './MoversPanel'
 import SystemMap from './SystemMap'
 import SystemTrend from './SystemTrend'
+import SystemWeeklyNarrativeLede from './SystemWeeklyNarrativeLede'
 
 // Metric options for the "Biggest drags" table. Same 4-entry list as
 // RouteList — kept inline per the existing convention.
@@ -38,6 +39,10 @@ const SCORECARD_URLS = ['/api/routes']
 /**
  * Overview landing page, rebuilt as an editorial stack (NOTES-84):
  *
+ *   0. SystemWeeklyNarrativeLede — cached LLM weekly recap (PR #219),
+ *                      translating the metrics below into rider
+ *                      consequences. Renders nothing until a narrative has
+ *                      been generated offline, so it's invisible today.
  *   1. OverviewHero  — big-number verdict + compare teaser (absorbs the
  *                      retired HealthPulse banner)
  *   2. Fold          — SystemMap + MoversPanel side by side ("getting
@@ -164,6 +169,7 @@ function Overview() {
 
   return (
     <main>
+      <SystemWeeklyNarrativeLede />
       {staleData && (
         <p
           className="stale-data-note"

@@ -29,7 +29,7 @@ from src.bunching import (
     compute_bunching_headline_for_route,
     compute_bunching_headline_for_routes,
 )
-from src.diagnosis_hash import compute_profile_hash
+from src.diagnosis_hash import compute_profile_hash, compute_system_snapshot_hash
 from src.ewt import (
     _day_type_for,
     _hour_in_zone,
@@ -62,6 +62,7 @@ from src.models import (
     StopEvent,
     StopTime,
     SystemMetricsDaily,
+    SystemWeeklyNarrative,
     Trip,
 )
 from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
@@ -2996,7 +2997,9 @@ def _scheduled_trips_in_window_by_route(
     return out
 
 
-def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
+def _contributors_uncached(
+    db: Session, metric: str, days: int, as_of_date: date_type | None = None
+) -> dict:
     """Compute the contributors payload for one metric / window.
 
     `route_value` is a genuine `days`-window figure for every metric: OTP
@@ -3004,11 +3007,16 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     EWT, and bunching pool sufficient statistics across the window
     (`get_live_metrics_for_window`) the same way the scorecard does. Every
     window figure here — `baseline_value`, `days_included`, and both
-    `route_value` paths — anchors on the same date,
-    `_latest_service_date_with_stop_events` (falling back to
+    `route_value` paths — anchors on the same date: `as_of_date` when given,
+    otherwise `_latest_service_date_with_stop_events` (falling back to
     `eastern_today()` only when no stop_events exist anywhere yet, in
     which case the pooled SD/EWT/bunching call is skipped entirely rather
-    than paying for a live compute over nothing). NOTES-123 review finding
+    than paying for a live compute over nothing). `as_of_date` (PR #219
+    review finding 1) lets a caller anchor on a specific date instead of
+    always "the latest week" — the system weekly narrative script uses it
+    so its contributors sections describe the same window as the
+    narrative's `--as-of` summary rather than silently drifting to
+    whatever `stop_events` extends to. NOTES-123 review finding
     4: before this, `baseline_value`/`days_included`/OTP anchored on
     `eastern_today()` while the pooled path anchored on the latest
     service_date with stop_events — two 30-day windows that could share as
@@ -3041,7 +3049,10 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     from src.timezones import eastern_today
 
     anchor_date = _latest_service_date_with_stop_events(db)
-    end_date = anchor_date or eastern_today()
+    if as_of_date is not None:
+        end_date = as_of_date
+    else:
+        end_date = anchor_date or eastern_today()
 
     # System window-mean baseline. Per-row reference comes from either
     # the route's configured target (PR #99) or this baseline as fallback.
@@ -3153,17 +3164,34 @@ def _contributors_uncached(db: Session, metric: str, days: int) -> dict:
     }
 
 
-def get_route_contributors(db: Session, metric: str = "otp", days: int = 30) -> dict:
-    """Cached-by-(metric, days, today) wrapper for the contributors view.
+def get_route_contributors(
+    db: Session, metric: str = "otp", days: int = 30, as_of_date: date_type | None = None
+) -> dict:
+    """Cached-by-(metric, days, anchor) wrapper for the contributors view.
 
     See module comment above for the contribution formula and baseline
-    semantics. Cache key includes today's Eastern date so the cache rolls
-    naturally at the service-day boundary.
+    semantics. Cache key includes the window's anchor so the cache rolls
+    naturally at the service-day boundary for the default (`None`) anchor.
+    The default and explicit-`as_of_date` branches are keyed with distinct
+    prefixes (`"latest:..."` vs the bare date string) even though both hold
+    an ISO date — a bare `eastern_today().isoformat()` key would otherwise
+    collide with an explicit `as_of_date` equal to today, even though the
+    two compute different `end_date`s (`_latest_service_date_with_stop_events`
+    vs `today`) whenever stop_events lags today, which is the normal case
+    (PR #219 review finding 1). Every entry, default or explicit, still
+    expires after `_CONTRIBUTORS_TTL_SEC`.
 
     Args:
         db: Database session.
         metric: One of `otp`, `service_delivered`, `ewt`, `bunching`.
         days: Length of the window in days (default: 30).
+        as_of_date: Optional explicit window end date. When omitted
+            (default), anchors on `_latest_service_date_with_stop_events` —
+            existing callers see no behavior change. Pass this to anchor
+            the window on a specific date instead (PR #219 review finding
+            1 — the system weekly narrative script needs contributors
+            anchored on its own `--as-of` window, not always "the latest
+            week").
 
     Returns:
         Dict with `metric`, `days`, `baseline_value`, `higher_is_better`,
@@ -3171,7 +3199,11 @@ def get_route_contributors(db: Session, metric: str = "otp", days: int = 30) -> 
     """
     from src.timezones import eastern_today
 
-    cache_key = (metric, days, eastern_today().isoformat())
+    if as_of_date is not None:
+        anchor_key = as_of_date.isoformat()
+    else:
+        anchor_key = f"latest:{eastern_today().isoformat()}"
+    cache_key = (metric, days, anchor_key)
     with _contributors_lock:
         cached = _contributors_cache.get(cache_key)
         if cached is not None:
@@ -3179,7 +3211,7 @@ def get_route_contributors(db: Session, metric: str = "otp", days: int = 30) -> 
             if (time.monotonic() - ts) < _CONTRIBUTORS_TTL_SEC:
                 return value
 
-    result = _contributors_uncached(db, metric, days)
+    result = _contributors_uncached(db, metric, days, as_of_date=as_of_date)
 
     with _contributors_lock:
         _contributors_cache[cache_key] = (time.monotonic(), result)
@@ -4988,6 +5020,120 @@ def get_route_diagnosis(
     is_stale = current_hash != row.profile_snapshot_hash
 
     return {
+        "narrative": row.narrative,
+        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "model_id": row.model_id,
+        "prompt_version": row.prompt_version,
+        "is_stale": is_stale,
+    }
+
+
+# ---------------------------------------------------------------------------
+# LLM-generated system-level weekly narrative (system weekly narrative,
+# PR #219). Sibling to the route diagnosis narrative above (PR #141).
+# ---------------------------------------------------------------------------
+
+_SYSTEM_NARRATIVE_WEEK_DAYS = 7
+
+
+def _system_metrics_week_dicts(db: Session, end_date: date_type, days: int) -> list[dict]:
+    """Canonicalized ``system_metrics_daily`` rows for the `days`-day window
+    ending at (and including) ``end_date``, for staleness-hash recomputation.
+
+    Field set matches ``src.diagnosis_hash._canonical_system_metrics_row``.
+    Mirrors ``scripts/generate_system_weekly_narrative.py:_fetch_week_rows``
+    so writer and reader compute the identical hash from the same DB state —
+    the same writer/reader duplication convention as the route diagnosis
+    narrative's seg_dicts/tp_dicts construction above.
+    """
+    start_iso = (end_date - timedelta(days=days - 1)).isoformat()
+    end_iso = end_date.isoformat()
+    rows = (
+        db.query(SystemMetricsDaily)
+        .filter(
+            SystemMetricsDaily.service_date >= start_iso,
+            SystemMetricsDaily.service_date <= end_iso,
+        )
+        .order_by(SystemMetricsDaily.service_date)
+        .all()
+    )
+    return [
+        {
+            "service_date": r.service_date,
+            "otp_percentage": r.otp_percentage,
+            "service_delivered_ratio": r.service_delivered_ratio,
+            "ewt_seconds": r.ewt_seconds,
+            "swt_seconds": r.swt_seconds,
+            "bunching_rate": r.bunching_rate,
+            "data_quality": r.data_quality,
+        }
+        for r in rows
+    ]
+
+
+def get_system_weekly_narrative(db: Session) -> dict | None:
+    """Return the cached LLM weekly narrative for the most recently generated week.
+
+    Reads from ``system_weekly_narrative`` (written offline by
+    ``scripts/generate_system_weekly_narrative.py``; Claude is NEVER called
+    here) and serves the row with the highest ``as_of_date`` — there is no
+    period selector on this endpoint, unlike the per-route diagnosis.
+
+    Staleness (``is_stale=True``) is set in either of two cases:
+
+    - A genuinely newer *week* of data is available: ``system_metrics_daily``
+      now extends at least ``_SYSTEM_NARRATIVE_WEEK_DAYS`` days past the
+      cached row's ``as_of_date``, i.e. regenerating today would summarize
+      an entirely different window — the hash isn't even recomputed in this
+      case. This is deliberately not "any newer row at all": the nightly
+      batch inserts a ``system_metrics_daily`` row every day while
+      generation is manual, so a same-window comparison (``!=`` /
+      day-granularity ``>``) would flag stale every single day regardless
+      of whether a new week has actually landed. It also must not compare
+      in the wrong direction: a scratch/dev DB that simply lags the
+      narrative's own generation environment (``latest_available <
+      row.as_of_date``) is not "a newer week has landed" and falls through
+      to the hash check below instead of being forced stale outright.
+    - The cached row's own window hasn't been superseded by a newer week,
+      but the current + prior 7-day ``system_metrics_daily`` snapshot for
+      that window no longer matches the hash stored at generation time
+      (e.g. a late backfill revised a day's numbers, or — per the point
+      above — a lagging DB is simply missing rows the narrative was
+      generated from).
+
+    Args:
+        db: Active SQLAlchemy session.
+
+    Returns:
+        Dict with ``as_of_date``, ``narrative``, ``generated_at`` (ISO-8601
+        UTC), ``model_id``, ``prompt_version``, and ``is_stale`` (bool).
+        Returns ``None`` when no narrative has been generated yet.
+    """
+    row = db.query(SystemWeeklyNarrative).order_by(SystemWeeklyNarrative.as_of_date.desc()).first()
+    if row is None:
+        return None
+
+    latest_available = db.query(func.max(SystemMetricsDaily.service_date)).scalar()
+    as_of_date = date_type.fromisoformat(row.as_of_date)
+
+    is_stale = False
+    if latest_available is not None:
+        latest_available_date = date_type.fromisoformat(latest_available)
+        if latest_available_date >= as_of_date + timedelta(days=_SYSTEM_NARRATIVE_WEEK_DAYS):
+            is_stale = True
+
+    if not is_stale:
+        current_week_rows = _system_metrics_week_dicts(db, as_of_date, _SYSTEM_NARRATIVE_WEEK_DAYS)
+        prior_week_rows = _system_metrics_week_dicts(
+            db,
+            as_of_date - timedelta(days=_SYSTEM_NARRATIVE_WEEK_DAYS),
+            _SYSTEM_NARRATIVE_WEEK_DAYS,
+        )
+        current_hash = compute_system_snapshot_hash(current_week_rows, prior_week_rows)
+        is_stale = current_hash != row.metrics_snapshot_hash
+
+    return {
+        "as_of_date": row.as_of_date,
         "narrative": row.narrative,
         "generated_at": row.generated_at.isoformat() if row.generated_at else None,
         "model_id": row.model_id,

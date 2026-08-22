@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from api.aggregations import (
     _latest_service_date_with_stop_events,
@@ -38,6 +39,7 @@ from api.aggregations import (
     get_schedule_audit,
     get_system_shapes,
     get_system_trend_data,
+    get_system_weekly_narrative,
 )
 from api.config import settings
 from src.database import get_session
@@ -515,6 +517,78 @@ async def get_system_trend(metric: str = "otp", days: int = 30):
     db = get_session()
     try:
         return get_system_trend_data(db, metric=metric, days=days)
+    finally:
+        db.close()
+
+
+@app.get("/api/system/weekly-narrative")
+async def get_system_weekly_narrative_endpoint():
+    """
+    Cached LLM narrative summarizing the most recent week of system-wide
+    performance (system weekly narrative, PR #219).
+
+    Reads from ``system_weekly_narrative`` — a cache table written offline
+    by ``scripts/generate_system_weekly_narrative.py``. This endpoint NEVER
+    calls Claude; it only serves the row already in the cache, mirroring
+    ``GET /api/routes/{route_id}/diagnosis`` (PR #141). Unlike that
+    endpoint there is no period selector — this always serves the most
+    recently generated week. The ``is_stale`` field signals either that a
+    newer week's data has landed since generation, or that the underlying
+    system_metrics_daily numbers for the cached week were revised, so the
+    frontend can show a regeneration prompt.
+
+    Returns 404 when no narrative has been generated yet, or when the
+    ``system_weekly_narrative`` table doesn't exist yet at all — nothing
+    creates it at API startup, so between a merge that adds this endpoint
+    and the one-time run of
+    ``scripts/migrate_create_system_weekly_narrative.py`` (which the
+    generation script also runs idempotently) a bare Overview load would
+    otherwise 500 with UndefinedTable instead of the 404 this docstring
+    documents.
+
+    Returns:
+        Dict with ``as_of_date`` (the last day of the summarized week),
+        ``narrative`` (string), ``generated_at`` (ISO-8601 UTC), ``model_id``
+        (string), ``prompt_version`` (string), and ``is_stale`` (bool).
+    """
+    missing_table_detail = (
+        "system_weekly_narrative table does not exist yet. "
+        "Run: scripts/migrate_create_system_weekly_narrative.py "
+        "then scripts/generate_system_weekly_narrative.py"
+    )
+
+    db = get_session()
+    try:
+        try:
+            result = get_system_weekly_narrative(db)
+        except ProgrammingError:
+            # system_weekly_narrative doesn't exist yet (PR #219 review
+            # finding 4) -- Postgres raises UndefinedTable wrapped as
+            # ProgrammingError. This means "nothing generated yet," just
+            # one step earlier than the no-rows case below.
+            raise HTTPException(status_code=404, detail=missing_table_detail) from None
+        except OperationalError as exc:
+            # SQLite has no distinct "missing table" exception class the
+            # way Postgres does -- it also raises OperationalError for
+            # "no such table". But OperationalError is also what a genuine
+            # connection failure (refused / pool exhausted) surfaces as on
+            # Postgres, so catching it unconditionally would misreport a
+            # downed DB as "table doesn't exist yet" (PR #219 review
+            # finding 2). Narrow to the message so only the actual
+            # missing-table case is caught; anything else re-raises to the
+            # default 500.
+            if "no such table" not in str(exc).lower():
+                raise
+            raise HTTPException(status_code=404, detail=missing_table_detail) from None
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No system weekly narrative cached yet. "
+                    "Run: scripts/generate_system_weekly_narrative.py"
+                ),
+            )
+        return result
     finally:
         db.close()
 
