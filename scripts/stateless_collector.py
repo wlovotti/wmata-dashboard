@@ -91,7 +91,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Override the TU archive directory (default: config-derived). "
             "Required for local testing — see module docstring warning; "
-            "must be paired with --vp-archive-root."
+            "required together with --vp-archive-root (a half-override is rejected)."
         ),
     )
     parser.add_argument(
@@ -101,10 +101,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Override the VP archive directory (default: config-derived). "
             "Required for local testing — see module docstring warning; "
-            "must be paired with --archive-root."
+            "required together with --archive-root (a half-override is rejected)."
         ),
     )
     return parser
+
+
+def validate_archive_root_pairing(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    """Reject a half-override of the archive-root pair.
+
+    ``--archive-root`` and ``--vp-archive-root`` must be passed together
+    or not at all: setting only one would leave the other real archive
+    tree exposed to the upload-and-prune cycle. Calls ``parser.error``
+    (which prints usage and raises ``SystemExit(2)``) on a half-override;
+    a separate function so tests can exercise the check without going
+    through ``main``'s full argv-to-loop path.
+    """
+    if (args.archive_root is None) != (args.vp_archive_root is None):
+        parser.error(
+            "--archive-root and --vp-archive-root must be passed together — "
+            "a half-override leaves the other real archive tree exposed to "
+            "the upload-and-prune cycle"
+        )
 
 
 def main(argv=None) -> None:
@@ -123,6 +143,7 @@ def main(argv=None) -> None:
     """
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    validate_archive_root_pairing(args, parser)
 
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
