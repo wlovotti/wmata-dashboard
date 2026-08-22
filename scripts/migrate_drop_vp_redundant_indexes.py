@@ -38,8 +38,8 @@ Two batches of indexes, added by two separate investigations:
    already covers them. ``idx_route_timestamp`` is explicitly NOT part of
    this batch — do not add it here or to ``TARGET_INDEXES`` below; derive
    pipelines are bound to scan it (see NOTES-82's original incident note,
-   reconfirmed by both PR #220 and this investigation). See NOTES-129's
-   closing PR body for the full investigation writeup.
+   reconfirmed by both PR #220 and this investigation). See PR #221's
+   body for the full investigation writeup.
 
 Per ``docs/MIGRATIONS.md``: back up first (and test against a restored copy)
 before running with ``--yes`` against a system-of-record database.

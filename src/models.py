@@ -379,7 +379,7 @@ class VehiclePosition(Base):
     # ~34-day window, and negligible scan count on the third vs. its
     # composite counterpart). vehicle_id and trip_id no longer have a
     # composite counterpart at all — see the note on __table_args__ below
-    # (vehicle_positions composite-index investigation, NOTES-129, PR TBD).
+    # (vehicle_positions composite-index investigation, NOTES-129, PR #221).
     vehicle_id = Column(String, nullable=False)
     route_id = Column(String)  # References routes.route_id (not FK due to versioning)
     trip_id = Column(String)  # References trips.trip_id (not FK due to versioning)
@@ -406,7 +406,7 @@ class VehiclePosition(Base):
     # Query using explicit filters on route_id/trip_id with is_current=True
 
     # Composite index for efficient queries. idx_vehicle_timestamp and
-    # idx_trip_timestamp were dropped here (NOTES-129, PR TBD): a fresh
+    # idx_trip_timestamp were dropped here (NOTES-129, PR #221): a fresh
     # pg_stat_user_indexes read confirmed both still at idx_scan = 0 on both
     # the primary and SFMTA sidecar over the same ~34-day accumulation
     # window PR #220 measured (postmaster start unchanged, stats_reset
@@ -416,7 +416,7 @@ class VehiclePosition(Base):
     # diagnostic scripts, and every one of those also filters on route_id,
     # so idx_route_timestamp (kept; actively scanned) already covers them.
     # Do NOT re-add either without a concrete read path that needs it — see
-    # PR TBD's body for the full investigation.
+    # PR #221's body for the full investigation.
     __table_args__ = (Index("idx_route_timestamp", "route_id", "timestamp"),)
 
 
