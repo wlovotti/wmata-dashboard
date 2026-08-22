@@ -29,7 +29,7 @@ from src.bunching import (
     compute_bunching_headline_for_route,
     compute_bunching_headline_for_routes,
 )
-from src.diagnosis_hash import compute_profile_hash
+from src.diagnosis_hash import compute_profile_hash, compute_system_snapshot_hash
 from src.ewt import (
     _day_type_for,
     _hour_in_zone,
@@ -62,6 +62,7 @@ from src.models import (
     StopEvent,
     StopTime,
     SystemMetricsDaily,
+    SystemWeeklyNarrative,
     Trip,
 )
 from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
@@ -4988,6 +4989,105 @@ def get_route_diagnosis(
     is_stale = current_hash != row.profile_snapshot_hash
 
     return {
+        "narrative": row.narrative,
+        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "model_id": row.model_id,
+        "prompt_version": row.prompt_version,
+        "is_stale": is_stale,
+    }
+
+
+# ---------------------------------------------------------------------------
+# LLM-generated system-level weekly narrative (system weekly narrative,
+# NOTES-86). Sibling to the route diagnosis narrative above (PR #141).
+# ---------------------------------------------------------------------------
+
+_SYSTEM_NARRATIVE_WEEK_DAYS = 7
+
+
+def _system_metrics_week_dicts(db: Session, end_date: date_type, days: int) -> list[dict]:
+    """Canonicalized ``system_metrics_daily`` rows for the `days`-day window
+    ending at (and including) ``end_date``, for staleness-hash recomputation.
+
+    Field set matches ``src.diagnosis_hash._canonical_system_metrics_row``.
+    Mirrors ``scripts/generate_system_weekly_narrative.py:_fetch_week_rows``
+    so writer and reader compute the identical hash from the same DB state —
+    the same writer/reader duplication convention as the route diagnosis
+    narrative's seg_dicts/tp_dicts construction above.
+    """
+    start_iso = (end_date - timedelta(days=days - 1)).isoformat()
+    end_iso = end_date.isoformat()
+    rows = (
+        db.query(SystemMetricsDaily)
+        .filter(
+            SystemMetricsDaily.service_date >= start_iso,
+            SystemMetricsDaily.service_date <= end_iso,
+        )
+        .order_by(SystemMetricsDaily.service_date)
+        .all()
+    )
+    return [
+        {
+            "service_date": r.service_date,
+            "otp_percentage": r.otp_percentage,
+            "service_delivered_ratio": r.service_delivered_ratio,
+            "ewt_seconds": r.ewt_seconds,
+            "swt_seconds": r.swt_seconds,
+            "bunching_rate": r.bunching_rate,
+            "data_quality": r.data_quality,
+        }
+        for r in rows
+    ]
+
+
+def get_system_weekly_narrative(db: Session) -> dict | None:
+    """Return the cached LLM weekly narrative for the most recently generated week.
+
+    Reads from ``system_weekly_narrative`` (written offline by
+    ``scripts/generate_system_weekly_narrative.py``; Claude is NEVER called
+    here) and serves the row with the highest ``as_of_date`` — there is no
+    period selector on this endpoint, unlike the per-route diagnosis.
+
+    Staleness (``is_stale=True``) is set in either of two cases:
+
+    - A newer ``as_of_date`` than the cached row's is now available in
+      ``system_metrics_daily`` (a new week's data has landed since the
+      narrative was generated) — the hash isn't even recomputed in this
+      case since it's for a different window entirely.
+    - The cached row's own as_of_date is still the latest available, but the
+      current + prior 7-day ``system_metrics_daily`` snapshot for that
+      window no longer matches the hash stored at generation time (e.g. a
+      late backfill revised a day's numbers).
+
+    Args:
+        db: Active SQLAlchemy session.
+
+    Returns:
+        Dict with ``as_of_date``, ``narrative``, ``generated_at`` (ISO-8601
+        UTC), ``model_id``, ``prompt_version``, and ``is_stale`` (bool).
+        Returns ``None`` when no narrative has been generated yet.
+    """
+    row = db.query(SystemWeeklyNarrative).order_by(SystemWeeklyNarrative.as_of_date.desc()).first()
+    if row is None:
+        return None
+
+    latest_available = db.query(func.max(SystemMetricsDaily.service_date)).scalar()
+
+    if latest_available is not None and latest_available != row.as_of_date:
+        is_stale = True
+    else:
+        as_of_date = date_type.fromisoformat(row.as_of_date)
+        current_week_rows = _system_metrics_week_dicts(db, as_of_date, _SYSTEM_NARRATIVE_WEEK_DAYS)
+        prior_week_rows = _system_metrics_week_dicts(
+            db,
+            as_of_date - timedelta(days=_SYSTEM_NARRATIVE_WEEK_DAYS),
+            _SYSTEM_NARRATIVE_WEEK_DAYS,
+        )
+        current_hash = compute_system_snapshot_hash(current_week_rows, prior_week_rows)
+        is_stale = current_hash != row.metrics_snapshot_hash
+
+    return {
+        "as_of_date": row.as_of_date,
         "narrative": row.narrative,
         "generated_at": row.generated_at.isoformat() if row.generated_at else None,
         "model_id": row.model_id,

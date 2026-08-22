@@ -38,6 +38,7 @@ from api.aggregations import (
     get_schedule_audit,
     get_system_shapes,
     get_system_trend_data,
+    get_system_weekly_narrative,
 )
 from api.config import settings
 from src.database import get_session
@@ -515,6 +516,45 @@ async def get_system_trend(metric: str = "otp", days: int = 30):
     db = get_session()
     try:
         return get_system_trend_data(db, metric=metric, days=days)
+    finally:
+        db.close()
+
+
+@app.get("/api/system/weekly-narrative")
+async def get_system_weekly_narrative_endpoint():
+    """
+    Cached LLM narrative summarizing the most recent week of system-wide
+    performance (system weekly narrative, NOTES-86).
+
+    Reads from ``system_weekly_narrative`` — a cache table written offline
+    by ``scripts/generate_system_weekly_narrative.py``. This endpoint NEVER
+    calls Claude; it only serves the row already in the cache, mirroring
+    ``GET /api/routes/{route_id}/diagnosis`` (PR #141). Unlike that
+    endpoint there is no period selector — this always serves the most
+    recently generated week. The ``is_stale`` field signals either that a
+    newer week's data has landed since generation, or that the underlying
+    system_metrics_daily numbers for the cached week were revised, so the
+    frontend can show a regeneration prompt.
+
+    Returns 404 when no narrative has been generated yet.
+
+    Returns:
+        Dict with ``as_of_date`` (the last day of the summarized week),
+        ``narrative`` (string), ``generated_at`` (ISO-8601 UTC), ``model_id``
+        (string), ``prompt_version`` (string), and ``is_stale`` (bool).
+    """
+    db = get_session()
+    try:
+        result = get_system_weekly_narrative(db)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No system weekly narrative cached yet. "
+                    "Run: scripts/generate_system_weekly_narrative.py"
+                ),
+            )
+        return result
     finally:
         db.close()
 

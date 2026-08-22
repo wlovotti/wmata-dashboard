@@ -1419,6 +1419,49 @@ main {
   color: #64748b;
 }
 
+/* System weekly narrative lede (NOTES-86). SystemWeeklyNarrativeLede.jsx
+   renders nothing until a narrative row exists in system_weekly_narrative,
+   so this adds no layout shift to the default baseline (no narrative has
+   been generated in dev/CI). */
+.system-weekly-lede {
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.5rem;
+  background: #ffffff;
+  border-left: 6px solid var(--color-brand);
+}
+
+.system-weekly-lede-text {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.65;
+  color: #0f172a;
+  font-style: italic;
+}
+
+.system-weekly-lede-meta {
+  margin: 0.6rem 0 0;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+}
+
+.system-weekly-lede-stale {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.4rem;
+  background: #fefce8;
+  border: 1px solid #facc15;
+  color: #713f12;
+  font-size: 0.8rem;
+}
+
+.system-weekly-lede-stale code {
+  background: #fef9c3;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+}
+
 /* Overview hero (NOTES-84 editorial redesign) */
 .overview-hero {
   border-radius: 0.75rem;
