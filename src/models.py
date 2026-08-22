@@ -426,6 +426,23 @@ class VehiclePosition(Base):
     __table_args__ = (Index("idx_route_timestamp", "route_id", "timestamp"),)
 
 
+class VpArchiveLoadedFile(Base):
+    """One row per raw VP archive file already loaded into vehicle_positions.
+
+    The loader's idempotency key: each immutable S3-synced file loads
+    exactly once (spec §3); re-runs and overlapping syncs skip rows here.
+    """
+
+    __tablename__ = "vp_archive_loaded_files"
+
+    filename = Column(
+        String, primary_key=True
+    )  # basename, e.g. 2026-08-22.612.1787740800.jsonl.zst
+    row_count = Column(Integer, nullable=False)
+    dropped_count = Column(Integer, nullable=False, default=0)
+    loaded_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+
 class TripUpdateState(Base):
     """Final-state-only mirror of WMATA TripUpdate predictions per (trip, stop).
 
