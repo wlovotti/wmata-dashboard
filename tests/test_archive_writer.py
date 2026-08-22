@@ -40,19 +40,27 @@ def test_writer_creates_per_process_file(tmp_path: Path):
 
 
 def test_writer_filename_format(tmp_path: Path):
-    """The filename produced by _filename_for matches YYYY-MM-DD.<pid>.<ts>.jsonl.zst."""
+    """The filename produced by _filename_for matches YYYY-MM-DD.<pid>.<open_ts>.jsonl.zst.
+
+    The third token is now captured at call time (per-open), not at
+    writer-construction time — so we bracket it with a before/after
+    wall-clock read instead of comparing to a stored startup timestamp.
+    """
+    import time
     from datetime import date
 
     from src.archive_writer import JsonlArchiveWriter
 
     writer = JsonlArchiveWriter(archive_dir=tmp_path)
+    before = int(time.time())
     fname = writer._filename_for(date(2026, 5, 17))
+    after = int(time.time())
     parts = fname.split(".")
-    # Expected: ['2026-05-17', '<pid>', '<startup_ts>', 'jsonl', 'zst']
+    # Expected: ['2026-05-17', '<pid>', '<open_unix_ts>', 'jsonl', 'zst']
     assert len(parts) == 5
     assert parts[0] == "2026-05-17"
     assert parts[1] == str(writer._pid)
-    assert parts[2] == str(writer._startup_ts)
+    assert before <= int(parts[2]) <= after
     assert parts[3] == "jsonl"
     assert parts[4] == "zst"
 
@@ -122,28 +130,29 @@ def test_writer_rotates_at_utc_midnight(tmp_path: Path):
 
 
 def test_two_distinct_writers_produce_separate_files(tmp_path: Path):
-    """Two JsonlArchiveWriter instances with different startup_ts produce separate files.
+    """Two JsonlArchiveWriter instances with different pid/open-ts produce separate files.
 
     Simulates two sequential collector runs on the same date — confirms
-    that per-process filenames never collide and each run's data is
-    independently readable.
+    that per-open filenames never collide and each run's data is
+    independently readable. Timestamps are now captured at open time
+    (inside append()), so the patch must span the append call, not just
+    construction.
     """
     from unittest.mock import patch
 
     from src.archive_writer import JsonlArchiveWriter
 
     # Simulate two different processes by patching os.getpid and time.time
-    # during construction.
-    with patch("os.getpid", return_value=1001), patch("time.time", return_value=1_000_000):
+    # across construction and the first append (which opens the file).
+    with patch("os.getpid", return_value=1001), patch("time.time", return_value=1_000_000.0):
         writer_a = JsonlArchiveWriter(archive_dir=tmp_path)
-    with patch("os.getpid", return_value=1002), patch("time.time", return_value=1_000_060):
+        writer_a.append({"trip_id": "A1"}, snapshot_ts=datetime(2026, 5, 17, 12, 0, 0))
+        writer_a.close()
+
+    with patch("os.getpid", return_value=1002), patch("time.time", return_value=1_000_060.0):
         writer_b = JsonlArchiveWriter(archive_dir=tmp_path)
-
-    writer_a.append({"trip_id": "A1"}, snapshot_ts=datetime(2026, 5, 17, 12, 0, 0))
-    writer_a.close()
-
-    writer_b.append({"trip_id": "B1"}, snapshot_ts=datetime(2026, 5, 17, 12, 1, 0))
-    writer_b.close()
+        writer_b.append({"trip_id": "B1"}, snapshot_ts=datetime(2026, 5, 17, 12, 1, 0))
+        writer_b.close()
 
     files = _list_jsonl_files(tmp_path)
     assert len(files) == 2, f"Expected 2 files, got: {[f.name for f in files]}"
@@ -158,3 +167,65 @@ def test_two_distinct_writers_produce_separate_files(tmp_path: Path):
     combined = "".join(contents)
     assert "A1" in combined
     assert "B1" in combined
+
+
+def _read_rows(path):
+    """Decode every JSON line from a .jsonl.zst file (tolerates no footer)."""
+    import io
+    import json
+
+    import zstandard as zstd
+
+    with open(path, "rb") as fh:
+        reader = zstd.ZstdDecompressor().stream_reader(fh)
+        text = io.TextIOWrapper(reader, encoding="utf-8")
+        return [json.loads(line) for line in text]
+
+
+def test_interval_rotation_opens_new_file(tmp_path):
+    """Crossing rotate_interval_sec closes the open file and starts a new one."""
+    from datetime import datetime
+
+    from src.archive_writer import JsonlArchiveWriter
+
+    w = JsonlArchiveWriter(tmp_path, rotate_interval_sec=900)
+    ts = datetime(2026, 8, 22, 12, 0, 0)
+    w.append({"a": 1}, snapshot_ts=ts)
+    # Simulate 15 minutes of wall clock passing.
+    w._open_wall_ts -= 901
+    w.append({"a": 2}, snapshot_ts=ts)
+    w.close()
+
+    files = sorted(tmp_path.glob("2026-08-22.*.jsonl.zst"))
+    assert len(files) == 2
+    assert [_read_rows(f)[0]["a"] for f in files] == [1, 2]
+
+
+def test_no_interval_keeps_single_file(tmp_path):
+    """Default rotate_interval_sec=None preserves the current one-file behavior."""
+    from datetime import datetime
+
+    from src.archive_writer import JsonlArchiveWriter
+
+    w = JsonlArchiveWriter(tmp_path)
+    ts = datetime(2026, 8, 22, 12, 0, 0)
+    w.append({"a": 1}, snapshot_ts=ts)
+    w._open_wall_ts -= 10_000
+    w.append({"a": 2}, snapshot_ts=ts)
+    w.close()
+    assert len(list(tmp_path.glob("*.jsonl.zst"))) == 1
+
+
+def test_close_returns_closed_path(tmp_path):
+    """close() reports which file it closed so the uploader can ship it."""
+    from datetime import datetime
+
+    from src.archive_writer import JsonlArchiveWriter
+
+    w = JsonlArchiveWriter(tmp_path, rotate_interval_sec=900)
+    assert w.close() is None  # nothing open yet
+    w.append({"a": 1}, snapshot_ts=datetime(2026, 8, 22, 12, 0, 0))
+    open_path = w.open_path
+    assert open_path is not None and open_path.exists()
+    assert w.close() == open_path
+    assert w.open_path is None
