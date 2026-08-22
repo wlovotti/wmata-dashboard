@@ -9,6 +9,7 @@ User=wmata
 Group=wmata
 WorkingDirectory=/home/wmata/wmata-dashboard
 Environment="PATH=/home/wmata/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
 # Per-agency secrets: API key, healthcheck URL, AWS credentials for the
 # S3 upload (Lightsail has no instance roles — keys live here).
 EnvironmentFile=/home/wmata/wmata-dashboard/.env.%i
@@ -23,8 +24,13 @@ StandardError=append:/var/log/wmata/collector-%i-error.log
 SyslogIdentifier=collector-%i
 
 # nano_3_0 is a 512 MB box running two instances; the loop's baseline is
-# tens of MB (no DB session, no SQLAlchemy engine).
-MemoryMax=180M
+# tens of MB (no DB session, no SQLAlchemy engine). The legacy collector
+# measured ~210-290 MB RSS in practice, so a 180M hard cap would
+# crash-loop under Restart=always; these limits throttle first
+# (MemoryHigh) and only kill as a last resort well above observed RSS
+# (MemoryMax).
+MemoryHigh=300M
+MemoryMax=450M
 
 NoNewPrivileges=true
 PrivateTmp=true

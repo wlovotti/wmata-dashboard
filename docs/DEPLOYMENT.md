@@ -830,7 +830,8 @@ Same high-level checklist as §2, sized down:
 1. Create a fresh Lightsail `nano_3_0` instance ($5/mo, 512 MB RAM,
    20 GB SSD, us-east-1, Ubuntu LTS) — **do not** reuse or resize the
    existing `wmata-data` VM; Lightsail cannot downsize an instance in
-   place, and the parallel-run verification (§13.4 onward) depends on
+   place, and the parallel-run verification (tracked in the cutover
+   plan, landing in PR C — not documented in this section) depends on
    the old VM staying untouched.
 2. Restrict the Lightsail firewall to SSH (22) only.
 3. Follow §2.1–§2.4 for SSH key setup, the `wmata` service account
@@ -915,6 +916,21 @@ journalctl -u collector@wmata -f
 journalctl -u collector@sfmta -f
 ```
 
+During the ≥1-week parallel-run overlap with the old VM (see the status
+note at the top of this section and the cutover plan for
+cross-verification), also periodically record both instances' memory
+RSS on this box — the nano's 512 MB is shared between them:
+
+```bash
+systemctl status collector@wmata collector@sfmta   # ActiveState + Memory
+# or, for a fuller per-process breakdown:
+smem -tk -P collector
+```
+
+If the two instances' combined RSS crowds the nano's 512 MB budget,
+swap to a `micro_3_0` instance ($7/mo) before decommissioning the old
+VM — don't let a resource squeeze force an early cutover.
+
 ### 13.5 healthchecks.io checks
 
 Create **two new checks** (one per agency — independent of any existing
@@ -943,6 +959,12 @@ WMATA collector check tied to the old VM in §1–§12), each configured with
   and either underlying cause needs the same first response (SSH in,
   `journalctl -u collector@<agency>`, then check S3
   reachability/credentials/bucket).
+- **An empty-but-healthy feed window can page** — e.g. an owl-hours
+  window with zero active vehicles produces no new rows, so the writer
+  never rotates a file and the upload cycle has nothing to ship, which
+  means no ping and, once the grace elapses, a page even though the
+  collector is working correctly. Accepted for now; tracked as a
+  punch-list item to revisit at cutover.
 
 Set each check's ping URL into `COLLECTOR_HEALTHCHECK_URL` /
 `SFMTA_COLLECTOR_HEALTHCHECK_URL` in the matching `.env.<agency>` file,

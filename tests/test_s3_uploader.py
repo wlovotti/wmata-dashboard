@@ -78,6 +78,35 @@ def test_upload_order_is_by_mtime_not_lexicographic_pid(tmp_path):
     assert shipped == [older.name, newer.name]
 
 
+def test_upload_resets_mtime_so_buffer_counts_from_upload_time(tmp_path):
+    """A file that sat pending for a while (old content mtime, e.g. after a
+    crash) must still get the full 48-hour local retention window once it
+    ships — ``upload_closed_files`` resets mtime to upload time, not
+    content time, so an immediate prune must not delete it.
+    """
+    import os
+    import time
+
+    fake = FakeS3()
+    up = S3Uploader("bkt", s3_client=fake)
+    pending = _mk(tmp_path, "2026-08-22.1.100.jsonl.zst")
+    old_ts = time.time() - 172_801  # more than 48h old, before upload
+    os.utime(pending, (old_ts, old_ts))
+
+    test_start = time.time()
+    shipped = up.upload_closed_files(tmp_path, "p/", skip=set())
+
+    assert shipped == [pending.name]
+    uploaded_path = tmp_path / "uploaded" / pending.name
+    assert uploaded_path.exists()
+    assert uploaded_path.stat().st_mtime >= test_start
+
+    # Immediate prune must delete nothing: the file just shipped, so its
+    # (reset) mtime is nowhere near the 48-hour cutoff.
+    assert up.prune_uploaded(tmp_path) == 0
+    assert uploaded_path.exists()
+
+
 def test_prune_uploaded_deletes_only_old_files(tmp_path):
     import os
     import time

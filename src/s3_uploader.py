@@ -7,9 +7,14 @@ subdirectory that is pruned after 48 hours. Idempotency is filesystem
 state: pending files sit next to the writer's open file; a crash between
 upload and the rename re-uploads identical bytes to the same key (a
 harmless overwrite); a leftover file from a crashed process is shipped on
-the next scan because it is closed and therefore not in ``skip``.
+the next scan because it is closed and therefore not in ``skip``. The
+48-hour buffer is measured from upload time, not content age: the mtime
+is reset to "now" at the moment of the rename into ``uploaded/``, so a
+file that sat pending for a while (e.g. after a crash) still gets the
+full 48-hour local retention window after it ships.
 """
 
+import os
 import time
 from pathlib import Path
 
@@ -35,9 +40,11 @@ class S3Uploader:
         """Upload every closed archive file directly under ``archive_dir``.
 
         ``skip`` holds the writer's currently-open path(s). Each verified
-        file moves to ``archive_dir/uploaded/``; a verification mismatch
-        raises and leaves the file pending so the next cycle retries it.
-        Returns the uploaded filenames, oldest first by mtime. Filenames
+        file moves to ``archive_dir/uploaded/`` and has its mtime reset to
+        the current time (so ``prune_uploaded``'s 48-hour buffer counts
+        from upload time, not content age); a verification mismatch raises
+        and leaves the file pending so the next cycle retries it. Returns
+        the uploaded filenames, oldest first by mtime. Filenames
         embed an unpadded pid token (``YYYY-MM-DD.<pid>.<open_ts>.jsonl.zst``)
         that a lexicographic sort would order incorrectly across pids
         (e.g. "10" before "9") — sorting by mtime instead keeps upload
@@ -61,12 +68,19 @@ class S3Uploader:
                     f"{key}: S3 has {head['ContentLength']} bytes, local file has {size}"
                 )
             uploaded_dir.mkdir(exist_ok=True)
-            path.rename(uploaded_dir / path.name)
+            dest = uploaded_dir / path.name
+            path.rename(dest)
+            os.utime(dest, None)
             shipped.append(path.name)
         return shipped
 
     def prune_uploaded(self, archive_dir: Path, max_age_sec: int = 48 * 3600) -> int:
-        """Delete verified-uploaded files older than ``max_age_sec`` (mtime)."""
+        """Delete verified-uploaded files older than ``max_age_sec``.
+
+        Age is measured from mtime, which ``upload_closed_files`` resets to
+        upload time — so this is 48 hours since the file shipped, not since
+        it was collected.
+        """
         uploaded_dir = archive_dir / "uploaded"
         if not uploaded_dir.exists():
             return 0
