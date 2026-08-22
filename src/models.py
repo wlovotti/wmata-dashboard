@@ -375,7 +375,7 @@ class VehiclePosition(Base):
     # leading column of a composite below (idx_vehicle_timestamp,
     # idx_route_timestamp, idx_trip_timestamp), which already serves lookups
     # on the column alone. A separate single-column index would be redundant
-    # (redundant vehicle_positions index drop, PR #TODO; laptop measurement
+    # (redundant vehicle_positions index drop, PR #220; laptop measurement
     # showed 0 idx_scan on two of the three over a ~34-day window, and
     # negligible scan count on the third vs. its composite counterpart).
     vehicle_id = Column(String, nullable=False)
