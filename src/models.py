@@ -406,17 +406,23 @@ class VehiclePosition(Base):
     # Query using explicit filters on route_id/trip_id with is_current=True
 
     # Composite index for efficient queries. idx_vehicle_timestamp and
-    # idx_trip_timestamp were dropped here (NOTES-129, PR #221): a fresh
-    # pg_stat_user_indexes read confirmed both still at idx_scan = 0 on both
-    # the primary and SFMTA sidecar over the same ~34-day accumulation
-    # window PR #220 measured (postmaster start unchanged, stats_reset
-    # unset), and a repo-wide grep found no production/API/pipeline read
-    # path that filters vehicle_positions on vehicle_id or trip_id combined
-    # with timestamp — the only such patterns are in debug/*.py ad-hoc
-    # diagnostic scripts, and every one of those also filters on route_id,
-    # so idx_route_timestamp (kept; actively scanned) already covers them.
-    # Do NOT re-add either without a concrete read path that needs it — see
-    # PR #221's body for the full investigation.
+    # idx_trip_timestamp were removed from the model here (NOTES-129, PR
+    # #221) — the live DROP against a real database is a separate,
+    # manually-run step: scripts/migrate_drop_vp_redundant_indexes.py. A
+    # fresh pg_stat_user_indexes read confirmed both still at idx_scan = 0
+    # on both the primary and SFMTA sidecar over the same ~34-day
+    # accumulation window PR #220 measured (postmaster start unchanged,
+    # stats_reset unset), and a repo-wide grep found no production/API/
+    # pipeline read path that filters vehicle_positions on vehicle_id or
+    # trip_id combined with timestamp. Two manually-run analysis/debug
+    # scripts do touch these columns (analysis/run_quality.py reads the
+    # whole table unfiltered; debug/trace_vehicle_journey.py filters
+    # vehicle_id/trip_id with no timestamp predicate) but neither is a
+    # production path and neither is served by (nor meaningfully hurt by
+    # dropping) these specific composites — see PR #221's body for the
+    # full investigation, including why those two don't change the
+    # verdict. Do NOT re-add either without a concrete read path that
+    # needs it.
     __table_args__ = (Index("idx_route_timestamp", "route_id", "timestamp"),)
 
 

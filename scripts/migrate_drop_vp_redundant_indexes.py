@@ -29,20 +29,34 @@ Two batches of indexes, added by two separate investigations:
    surfaced as dead during PR #220's review (NOTES-129). A re-measurement
    (2026-08-22, same ~34-day window, postmaster start / stats_reset
    unchanged since PR #220's) confirmed both still at ``idx_scan = 0`` on
-   both the primary and SFMTA sidecar, and a repo-wide grep for a read path
+   both the primary and SFMTA sidecar. A repo-wide grep for a read path
    that filters ``vehicle_positions`` on ``vehicle_id`` or ``trip_id``
-   combined with ``timestamp`` found none in production/API/pipeline code —
-   only in ``debug/*.py`` ad-hoc diagnostic scripts, and every one of those
-   also filters on ``route_id``, so the surviving ``idx_route_timestamp``
-   (kept — actively scanned, 14,853 / 3,732 scans on primary / sidecar)
-   already covers them. ``idx_route_timestamp`` is explicitly NOT part of
-   this batch — do not add it here or to ``TARGET_INDEXES`` below; derive
-   pipelines are bound to scan it (see NOTES-82's original incident note,
-   reconfirmed by both PR #220 and this investigation). See PR #221's
-   body for the full investigation writeup.
+   combined with ``timestamp`` found none in production/API/pipeline
+   code. Two manually-run analysis/debug scripts do touch these columns
+   — ``analysis/run_quality.py`` reads the whole table unfiltered (an
+   unbounded read that would plan as a seq scan + external sort
+   regardless of any 2-column index here), and ``debug/
+   trace_vehicle_journey.py`` filters ``vehicle_id``/``trip_id`` with no
+   ``timestamp`` predicate at all (so a composite keyed on ``timestamp``
+   contributes nothing to it either way) — but neither is a
+   production/API/pipeline path, and neither is served by (nor
+   meaningfully hurt by dropping) these specific composites. The
+   surviving ``idx_route_timestamp`` (kept — actively scanned, 14,853 /
+   3,732 scans on primary / sidecar) covers the debug scripts that do
+   filter on ``route_id``. ``idx_route_timestamp`` is explicitly NOT
+   part of this batch — do not add it here or to ``TARGET_INDEXES``
+   below; derive pipelines are bound to scan it (see NOTES-82's original
+   incident note, reconfirmed by both PR #220 and this investigation).
+   See PR #221's body for the full investigation writeup.
 
 Per ``docs/MIGRATIONS.md``: back up first (and test against a restored copy)
-before running with ``--yes`` against a system-of-record database.
+before running with ``--yes`` against a system-of-record database. Also
+note checklist item 5 (pause writers before an ACCESS-EXCLUSIVE-holding
+operation): this script's DROP INDEX batch runs inside a single
+``engine.begin()`` transaction and takes ACCESS EXCLUSIVE locks on
+``vehicle_positions`` (the largest table) — a derive run in progress will
+block on it (and it will block a derive run started after it), so pause
+the collector/derive before running with ``--yes``.
 
 This script is idempotent — safe to re-run, including after
 ``bin/refresh-dev-db.sh`` restores an older dump that re-introduces the
@@ -129,7 +143,7 @@ def run_migration(engine, confirm: bool = False) -> dict[str, bool]:
     """
     found = precheck(engine)
 
-    print(f"Precheck — {TABLE_NAME} redundant single-column indexes:")
+    print(f"Precheck — {TABLE_NAME} redundant single-column + dead composite indexes:")
     for name, exists in found.items():
         print(f"  {'EXISTS' if exists else 'absent'}: {name}")
 
@@ -140,15 +154,16 @@ def run_migration(engine, confirm: bool = False) -> dict[str, bool]:
         )
         return found
 
-    if not any(found.values()):
+    to_drop = [name for name, exists in found.items() if exists]
+    if not to_drop:
         print("\nNothing to do — none of the target indexes exist.")
         return found
 
     print("\nExecuting drops (IRREVERSIBLE)...")
     with engine.begin() as conn:
-        for name in TARGET_INDEXES:
+        for name in to_drop:
             conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
-            print(f"  Dropped (or already absent): {name}")
+            print(f"  Dropped: {name}")
 
     print("Done.")
     return found
@@ -172,7 +187,7 @@ def main() -> int:
             "indexes (ix_vehicle_positions_vehicle_id, _route_id, "
             "_trip_id) made obsolete by NOTES-82 / PR #220, plus the two "
             "dead composite indexes (idx_vehicle_timestamp, "
-            "idx_trip_timestamp) confirmed by NOTES-129. "
+            "idx_trip_timestamp) confirmed by NOTES-129 / PR #221. "
             "IRREVERSIBLE — requires --yes."
         )
     )
