@@ -371,9 +371,16 @@ class VehiclePosition(Base):
     __tablename__ = "vehicle_positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    vehicle_id = Column(String, nullable=False, index=True)
-    route_id = Column(String, index=True)  # References routes.route_id (not FK due to versioning)
-    trip_id = Column(String, index=True)  # References trips.trip_id (not FK due to versioning)
+    # vehicle_id/route_id/trip_id are intentionally NOT index=True: each is the
+    # leading column of a composite below (idx_vehicle_timestamp,
+    # idx_route_timestamp, idx_trip_timestamp), which already serves lookups
+    # on the column alone. A separate single-column index would be redundant
+    # (redundant vehicle_positions index drop, PR #TODO; laptop measurement
+    # showed 0 idx_scan on two of the three over a ~34-day window, and
+    # negligible scan count on the third vs. its composite counterpart).
+    vehicle_id = Column(String, nullable=False)
+    route_id = Column(String)  # References routes.route_id (not FK due to versioning)
+    trip_id = Column(String)  # References trips.trip_id (not FK due to versioning)
 
     # Position data
     latitude = Column(Float, nullable=False)
