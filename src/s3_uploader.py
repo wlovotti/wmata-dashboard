@@ -37,11 +37,17 @@ class S3Uploader:
         ``skip`` holds the writer's currently-open path(s). Each verified
         file moves to ``archive_dir/uploaded/``; a verification mismatch
         raises and leaves the file pending so the next cycle retries it.
-        Returns the uploaded filenames (sorted, oldest first).
+        Returns the uploaded filenames, oldest first by mtime. Filenames
+        embed an unpadded pid token (``YYYY-MM-DD.<pid>.<open_ts>.jsonl.zst``)
+        that a lexicographic sort would order incorrectly across pids
+        (e.g. "10" before "9") — sorting by mtime instead keeps upload
+        order correct when files from more than one crashed process are
+        pending at once.
         """
         uploaded_dir = archive_dir / "uploaded"
         shipped: list[str] = []
-        for path in sorted(archive_dir.glob("*.jsonl.zst")):
+        candidates = sorted(archive_dir.glob("*.jsonl.zst"), key=lambda p: p.stat().st_mtime)
+        for path in candidates:
             if path in skip:
                 continue
             size = path.stat().st_size

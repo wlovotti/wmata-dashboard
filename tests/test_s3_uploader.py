@@ -54,6 +54,30 @@ def test_verification_failure_leaves_file_in_place(tmp_path):
     assert f.exists()  # still pending — retried next cycle
 
 
+def test_upload_order_is_by_mtime_not_lexicographic_pid(tmp_path):
+    """Filenames are ``YYYY-MM-DD.<pid>.<open_ts>.jsonl.zst`` with an
+    unpadded pid token, so a lexicographic path sort orders pid "10"
+    before pid "9" even when pid 9's file is older. Regression for the
+    two-crashed-processes case: upload order must follow mtime, oldest
+    first, not string order.
+    """
+    import os
+    import time
+
+    fake = FakeS3()
+    up = S3Uploader("bkt", s3_client=fake)
+    older = _mk(tmp_path, "2026-08-22.9.100.jsonl.zst")
+    newer = _mk(tmp_path, "2026-08-22.10.200.jsonl.zst")
+
+    now = time.time()
+    os.utime(older, (now - 100, now - 100))
+    os.utime(newer, (now, now))
+
+    shipped = up.upload_closed_files(tmp_path, "p/", skip=set())
+
+    assert shipped == [older.name, newer.name]
+
+
 def test_prune_uploaded_deletes_only_old_files(tmp_path):
     import os
     import time
