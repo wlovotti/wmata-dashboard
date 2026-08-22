@@ -1,4 +1,4 @@
-"""Drop the three redundant single-column ``vehicle_positions`` indexes (NOTES-82).
+"""Drop redundant/dead ``vehicle_positions`` indexes (NOTES-82, NOTES-129).
 
 IMPORTANT — THIS IS A DESTRUCTIVE MANUAL ACTION
 ================================================
@@ -8,18 +8,38 @@ invokes every ``migrate_*.py`` sibling's ``main()``, which for this script
 means the **dry-run** path (see below) unless the operator has set
 ``--yes`` via direct invocation. There is no automatic execution path.
 
-``ix_vehicle_positions_vehicle_id``, ``ix_vehicle_positions_route_id``, and
-``ix_vehicle_positions_trip_id`` were single-column btree indexes created via
-``index=True`` on the SQLAlchemy model. PR #220 (NOTES-82) removed
-``index=True`` from the model; this script performs the corresponding
-``DROP INDEX`` on a live database. Each is shadowed by a composite index
-sharing the same leading column (``idx_vehicle_timestamp``,
-``idx_route_timestamp``, ``idx_trip_timestamp`` respectively), so the
-composite already serves any query that filters on the single column alone.
-Measurement on the primary DB (2026-08-22, ~34-day accumulation window)
-showed all three at ``idx_scan = 0`` (route_id showed 3, still negligible
-next to its composite's 14,853); the same pattern held on the SFMTA sidecar.
-See PR #220's body for the full measurement evidence.
+Two batches of indexes, added by two separate investigations:
+
+1. ``ix_vehicle_positions_vehicle_id``, ``ix_vehicle_positions_route_id``,
+   and ``ix_vehicle_positions_trip_id`` were single-column btree indexes
+   created via ``index=True`` on the SQLAlchemy model. PR #220 (NOTES-82)
+   removed ``index=True`` from the model; this script performs the
+   corresponding ``DROP INDEX`` on a live database. Each was shadowed by a
+   composite index sharing the same leading column (``idx_vehicle_timestamp``,
+   ``idx_route_timestamp``, ``idx_trip_timestamp`` respectively at the time),
+   so the composite already served any query that filtered on the single
+   column alone. Measurement on the primary DB (2026-08-22, ~34-day
+   accumulation window) showed all three at ``idx_scan = 0`` (route_id
+   showed 3, still negligible next to its composite's 14,853); the same
+   pattern held on the SFMTA sidecar. See PR #220's body for the full
+   measurement evidence.
+
+2. ``idx_vehicle_timestamp`` (``vehicle_id, timestamp``) and
+   ``idx_trip_timestamp`` (``trip_id, timestamp``) were composite indexes
+   surfaced as dead during PR #220's review (NOTES-129). A re-measurement
+   (2026-08-22, same ~34-day window, postmaster start / stats_reset
+   unchanged since PR #220's) confirmed both still at ``idx_scan = 0`` on
+   both the primary and SFMTA sidecar, and a repo-wide grep for a read path
+   that filters ``vehicle_positions`` on ``vehicle_id`` or ``trip_id``
+   combined with ``timestamp`` found none in production/API/pipeline code —
+   only in ``debug/*.py`` ad-hoc diagnostic scripts, and every one of those
+   also filters on ``route_id``, so the surviving ``idx_route_timestamp``
+   (kept — actively scanned, 14,853 / 3,732 scans on primary / sidecar)
+   already covers them. ``idx_route_timestamp`` is explicitly NOT part of
+   this batch — do not add it here or to ``TARGET_INDEXES`` below; derive
+   pipelines are bound to scan it (see NOTES-82's original incident note,
+   reconfirmed by both PR #220 and this investigation). See NOTES-129's
+   closing PR body for the full investigation writeup.
 
 Per ``docs/MIGRATIONS.md``: back up first (and test against a restored copy)
 before running with ``--yes`` against a system-of-record database.
@@ -53,13 +73,17 @@ from sqlalchemy import inspect, text
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_engine
 
-# Exactly the three single-column indexes made redundant by their
-# same-leading-column composite counterpart (NOTES-82). Nothing else is
-# touched by this script.
+# The three single-column indexes made redundant by their same-leading-column
+# composite counterpart (NOTES-82), plus the two dead composite indexes
+# surfaced during that PR's review (NOTES-129). idx_route_timestamp is
+# deliberately NOT here — see the module docstring. Nothing else is touched
+# by this script.
 TARGET_INDEXES = (
     "ix_vehicle_positions_vehicle_id",
     "ix_vehicle_positions_route_id",
     "ix_vehicle_positions_trip_id",
+    "idx_vehicle_timestamp",
+    "idx_trip_timestamp",
 )
 
 TABLE_NAME = "vehicle_positions"
@@ -146,7 +170,9 @@ def main() -> int:
         description=(
             "Drop the three redundant vehicle_positions single-column "
             "indexes (ix_vehicle_positions_vehicle_id, _route_id, "
-            "_trip_id) made obsolete by NOTES-82 / PR #220. "
+            "_trip_id) made obsolete by NOTES-82 / PR #220, plus the two "
+            "dead composite indexes (idx_vehicle_timestamp, "
+            "idx_trip_timestamp) confirmed by NOTES-129. "
             "IRREVERSIBLE — requires --yes."
         )
     )

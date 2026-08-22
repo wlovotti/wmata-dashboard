@@ -37,7 +37,6 @@ serves this or is explicitly parked.
 - [NOTES-113](notes/NOTES-113.md) Top-up SFMTA 8/9–8/10 (partial derive wrote `runs` rows, blocking auto-revisit) — sev low / eff low — unblocked; 8/9–8/10 archives landed locally 2026-08-12
 - [NOTES-116](notes/NOTES-116.md) SFMTA route_service_profile lacks weekday rows (calendar_dates-only weekday service) — sev low-medium / eff low-medium — unblocked; check whether PR #194 fix + profile re-run suffices
 - [NOTES-118](notes/NOTES-118.md) Investigate scheduled-span data quality in runs (A90 67% zero-span, EXP/LCL junk route_ids) — sev low-medium / eff medium — unblocked; investigation first, guard is one possible outcome
-- [NOTES-129](notes/NOTES-129.md) Investigate dead composite indexes on vehicle_positions (idx_trip_timestamp + idx_vehicle_timestamp, 3.4 GB, 0 idx_scan) — sev low / eff low — unblocked; surfaced during review of PR #220
 
 ## WMATA depth & UX
 
