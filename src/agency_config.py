@@ -34,10 +34,14 @@ class AgencyConfig:
     trip_updates_every_ticks: int
     vehicle_positions_every_ticks: int
     archive_dir: str
+    vp_archive_dir: str
     pid_file: str
     heartbeat_name: str
     database_url_env: str
     healthcheck_url_env: str
+    s3_bucket: str
+    s3_tu_prefix: str
+    s3_vp_prefix: str
 
 
 def load_agency_config(name: str) -> AgencyConfig:
@@ -71,10 +75,14 @@ def load_agency_config(name: str) -> AgencyConfig:
         trip_updates_every_ticks=raw["collector"]["trip_updates_every_ticks"],
         vehicle_positions_every_ticks=raw["collector"]["vehicle_positions_every_ticks"],
         archive_dir=raw["collector"]["archive_dir"],
+        vp_archive_dir=raw["collector"]["vp_archive_dir"],
         pid_file=raw["collector"]["pid_file"],
         heartbeat_name=raw["collector"]["heartbeat_name"],
         database_url_env=raw["database"]["url_env"],
         healthcheck_url_env=raw["healthcheck"]["url_env"],
+        s3_bucket=raw["s3"]["bucket"],
+        s3_tu_prefix=raw["s3"]["tu_prefix"],
+        s3_vp_prefix=raw["s3"]["vp_prefix"],
     )
 
 

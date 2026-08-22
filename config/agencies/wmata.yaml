@@ -1,7 +1,6 @@
-# Documents the WMATA collector's current implicit settings. NOT yet
-# consumed by scripts/continuous_combined_collector.py (that migration is
-# the NOTES-95 multi-agency rewrite); exists so every implicit assumption
-# is written down and tested loadable.
+# Documents the WMATA collector's current implicit settings. Consumed by
+# scripts/stateless_collector.py (the NOTES-95 multi-agency rewrite); the
+# legacy scripts/continuous_combined_collector.py still doesn't read it.
 name: wmata
 display_name: WMATA Metrobus
 timezone: America/New_York
@@ -18,9 +17,14 @@ collector:
   trip_updates_every_ticks: 1
   vehicle_positions_every_ticks: 2
   archive_dir: archive/raw_snapshots
+  vp_archive_dir: archive/vp_snapshots
   pid_file: logs/collector.pid
   heartbeat_name: combined
 database:
   url_env: DATABASE_URL
 healthcheck:
   url_env: COLLECTOR_HEALTHCHECK_URL
+s3:
+  bucket: wmata-dashboard-backups
+  tu_prefix: raw-jsonl-archive/
+  vp_prefix: raw-jsonl-archive/vp/
