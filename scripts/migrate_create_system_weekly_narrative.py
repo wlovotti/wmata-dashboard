@@ -1,5 +1,5 @@
 """
-Create the ``system_weekly_narrative`` table (system weekly narrative, NOTES-86).
+Create the ``system_weekly_narrative`` table (system weekly narrative, PR #219).
 
 Sibling migration to ``scripts/migrate_create_route_diagnosis_narrative.py``
 (PR #141). The table caches LLM-generated narrative text produced offline by

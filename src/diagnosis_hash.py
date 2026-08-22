@@ -11,7 +11,7 @@ Two hashes live here, one per cached-narrative table:
   current + prior 7-day windows behind one system-level weekly narrative.
   Used by ``scripts/generate_system_weekly_narrative.py`` (writer) and
   ``api/aggregations.py`` (staleness checker) for
-  ``system_weekly_narrative`` (NOTES-86).
+  ``system_weekly_narrative`` (PR #219).
 
 Both hashes are order-independent: rows are sorted by a stable key before
 serialization, so inserting or re-computing rows in a different order does

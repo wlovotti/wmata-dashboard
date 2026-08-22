@@ -1,6 +1,6 @@
 """
 Offline CLI: generate an LLM narrative summarizing one week of system-wide
-bus performance (system weekly narrative, NOTES-86).
+bus performance (system weekly narrative, PR #219).
 
 Sibling to ``scripts/generate_route_diagnosis.py`` (PR #141) — same offline
 generation / cache-table / read-only-serve pattern, applied to the whole

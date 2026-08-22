@@ -1424,7 +1424,7 @@ class RouteDiagnosisNarrative(Base):
 
 # ---------------------------------------------------------------------------
 # LLM-generated system-level weekly narrative (system weekly narrative,
-# NOTES-86). Sibling to route_diagnosis_narrative above: same offline-CLI /
+# PR #219). Sibling to route_diagnosis_narrative above: same offline-CLI /
 # cache-table / read-only-endpoint pattern (PR #141), applied to the whole
 # network's week-over-week performance instead of one route.
 # ---------------------------------------------------------------------------
@@ -1433,7 +1433,7 @@ class RouteDiagnosisNarrative(Base):
 class SystemWeeklyNarrative(Base):
     """
     Cached LLM-generated narrative summarizing one week of system-wide
-    performance (system weekly narrative, NOTES-86).
+    performance (system weekly narrative, PR #219).
 
     Written by ``scripts/generate_system_weekly_narrative.py`` (offline;
     uses the ``claude`` CLI, same as the route diagnosis narrative). Read by

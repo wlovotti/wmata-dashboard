@@ -1,5 +1,5 @@
 """
-Tests for the system-level weekly narrative feature (NOTES-86).
+Tests for the system-level weekly narrative feature (PR #219).
 
 Sibling to tests/test_diagnosis_narrative.py (PR #141), covering the same
 three layers for the system-wide weekly narrative instead of the per-route

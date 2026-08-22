@@ -524,7 +524,7 @@ async def get_system_trend(metric: str = "otp", days: int = 30):
 async def get_system_weekly_narrative_endpoint():
     """
     Cached LLM narrative summarizing the most recent week of system-wide
-    performance (system weekly narrative, NOTES-86).
+    performance (system weekly narrative, PR #219).
 
     Reads from ``system_weekly_narrative`` — a cache table written offline
     by ``scripts/generate_system_weekly_narrative.py``. This endpoint NEVER

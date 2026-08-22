@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 /**
  * Overview lede — cached LLM narrative summarizing the most recent week of
- * system-wide performance (system weekly narrative, NOTES-86).
+ * system-wide performance (system weekly narrative, PR #219).
  *
  * Mirrors the read-only-serve half of the route diagnosis narrative pattern
  * (PR #141; see RouteDiagnosisPanel.jsx's NarrativeSection): fetches

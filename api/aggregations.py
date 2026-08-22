@@ -4999,7 +4999,7 @@ def get_route_diagnosis(
 
 # ---------------------------------------------------------------------------
 # LLM-generated system-level weekly narrative (system weekly narrative,
-# NOTES-86). Sibling to the route diagnosis narrative above (PR #141).
+# PR #219). Sibling to the route diagnosis narrative above (PR #141).
 # ---------------------------------------------------------------------------
 
 _SYSTEM_NARRATIVE_WEEK_DAYS = 7

@@ -39,7 +39,7 @@ const SCORECARD_URLS = ['/api/routes']
 /**
  * Overview landing page, rebuilt as an editorial stack (NOTES-84):
  *
- *   0. SystemWeeklyNarrativeLede — cached LLM weekly recap (NOTES-86),
+ *   0. SystemWeeklyNarrativeLede — cached LLM weekly recap (PR #219),
  *                      translating the metrics below into rider
  *                      consequences. Renders nothing until a narrative has
  *                      been generated offline, so it's invisible today.
