@@ -81,8 +81,10 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     Rows + the manifest row commit in a single transaction, so a crash
     mid-file rolls back cleanly and the file re-loads next run. The zstd
     stream_reader tolerates a missing frame footer (crash-cut files). A
-    line that fails to decode as JSON (or as UTF-8) is dropped and counted
-    rather than raised — one corrupt line must not poison the whole file.
+    line that fails to decode (JSON or UTF-8) OR that fails to *parse*
+    into a row (e.g. ``parse_vp_line`` raising on an absurd epoch or a
+    missing ``collected_at`` key) is dropped and counted rather than
+    raised — one bad line must not poison the whole file.
 
     The stream is read as raw bytes (``io.BufferedReader`` over the zstd
     stream_reader), split into lines, and decoded by hand per line —
@@ -92,6 +94,15 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     corruption (review round 2 caught this: the wrapper decodes eagerly
     before ``json.loads`` ever runs, so a try/except around only
     ``json.loads`` never actually saw a ``UnicodeDecodeError``).
+
+    ``parse_vp_line(obj)`` runs INSIDE the same try as the decode (review
+    round 3): well-formed JSON can still raise there —
+    ``from_epoch_naive_utc`` on an out-of-range epoch raises ``ValueError``
+    / ``OverflowError`` / ``OSError`` (exactly the NOTES-81 phantom
+    pattern, just extreme enough to overflow ``datetime`` instead of only
+    tripping ``GUARD_SEC``), and ``datetime.fromisoformat`` or a missing
+    ``collected_at`` key can raise ``ValueError`` / ``TypeError`` /
+    ``KeyError``. Any of those must drop the one bad line, not the file.
     """
     already = session.get(VpArchiveLoadedFile, path.name)
     if already is not None:
@@ -105,10 +116,18 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
         for raw in buffered:
             try:
                 obj = json.loads(raw.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                row = parse_vp_line(obj)
+            except (
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                ValueError,
+                TypeError,
+                KeyError,
+                OverflowError,
+                OSError,
+            ):
                 dropped += 1
                 continue
-            row = parse_vp_line(obj)
             if row is None:
                 dropped += 1
                 continue
@@ -153,6 +172,10 @@ def main(argv=None) -> int:
 
     cfg = load_agency_config(args.agency)
     archive_root = args.archive_root or REPO_ROOT / cfg.vp_archive_dir
+    if not archive_root.is_dir():
+        print(f"Error: --archive-root {archive_root} is not a directory.")
+        return 1
+
     session = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         total_ins = total_drop = 0
@@ -160,7 +183,7 @@ def main(argv=None) -> int:
         for path in sorted(archive_root.glob("*.jsonl.zst")):
             try:
                 ins, drop = load_vp_file(session, path)
-            except Exception as exc:  # noqa: BLE001 - isolate one bad file, keep going
+            except Exception as exc:  # isolate one bad file, keep going
                 print(f"  {path.name}: FAILED to load ({exc!r}), continuing")
                 session.rollback()
                 failed_files.append(path.name)

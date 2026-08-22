@@ -220,6 +220,29 @@ def test_invalid_utf8_line_dropped_and_good_rows_still_load(db_session, tmp_path
     assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
 
 
+def test_absurd_epoch_dropped_and_good_rows_still_load(db_session, tmp_path):
+    """A well-formed but absurd epoch (out of datetime range) is dropped, not fatal.
+
+    Regression test for review round 3: the per-line try only wrapped
+    ``json.loads(raw.decode())`` — ``parse_vp_line(obj)`` ran OUTSIDE that
+    try, so a syntactically valid JSON line with a garbage ``timestamp``
+    value (e.g. exactly the NOTES-81 phantom pattern, just more extreme)
+    raised straight out of ``from_epoch_naive_utc`` (``ValueError``:
+    "year ... is out of range") and poisoned the whole file at file
+    granularity — no manifest row written, re-failing identically forever.
+    """
+    from pipelines.load_vp_archive import load_vp_file
+    from src.models import VehiclePosition, VpArchiveLoadedFile
+
+    absurd = dict(VEHICLE, vehicle_id="66", timestamp=9999999999999)
+    path = _write_vp_file(tmp_path, [VEHICLE, absurd], COLLECTED)
+    inserted, dropped = load_vp_file(db_session, path)
+
+    assert (inserted, dropped) == (1, 1)
+    assert db_session.query(VehiclePosition).one().vehicle_id == "42"
+    assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
+
+
 def test_main_continues_past_a_failing_file(db_session, tmp_path, monkeypatch):
     """main() isolates a per-file failure: it logs, continues, and reports nonzero exit.
 
@@ -239,6 +262,13 @@ def test_main_continues_past_a_failing_file(db_session, tmp_path, monkeypatch):
     real_load_vp_file = mod.load_vp_file
 
     def _flaky_load_vp_file(session, path):
+        """Delegate to the real loader, except raise for ``bad_path``.
+
+        Stands in for an error class the line-level guards inside
+        ``load_vp_file`` don't cover (e.g. a DB-level failure), so this
+        test can exercise ``main()``'s per-file isolation in isolation
+        from the loader's own internals.
+        """
         if path == bad_path:
             raise RuntimeError("simulated DB failure")
         return real_load_vp_file(session, path)

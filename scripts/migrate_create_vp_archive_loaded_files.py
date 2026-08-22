@@ -43,7 +43,15 @@ def main(argv=None) -> int:
     load_dotenv()
     cfg = load_agency_config(args.agency)
     engine = get_engine(resolve_agency_db_url(cfg))
-    print(f"Creating vp_archive_loaded_files in the {args.agency} database...")
+    # Print the resolved host/dbname (never the password, via the URL
+    # object's own .host/.database attrs rather than stringifying the
+    # whole URL) so a per-agency invocation is self-verifying — the reader
+    # can confirm this is really about to hit the database they intended
+    # before it runs.
+    print(
+        f"Creating vp_archive_loaded_files in the {args.agency} database "
+        f"({engine.url.host or 'local'}/{engine.url.database})..."
+    )
     run_migration(engine)
     print("Done.")
     return 0
