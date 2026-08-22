@@ -91,3 +91,19 @@ def test_resolve_agency_db_url_wmata_unset_is_not_an_error(monkeypatch):
     cfg = load_agency_config("wmata")
 
     assert resolve_agency_db_url(cfg) is None
+
+
+def test_vp_and_s3_fields_load_for_both_agencies():
+    """The stateless collector's VP-archive dirs and S3 prefixes come from yaml."""
+    from src.agency_config import load_agency_config
+
+    wmata = load_agency_config("wmata")
+    assert wmata.vp_archive_dir == "archive/vp_snapshots"
+    assert wmata.s3_bucket == "wmata-dashboard-backups"
+    assert wmata.s3_tu_prefix == "raw-jsonl-archive/"
+    assert wmata.s3_vp_prefix == "raw-jsonl-archive/vp/"
+
+    sfmta = load_agency_config("sfmta")
+    assert sfmta.vp_archive_dir == "archive/sfmta_vp_snapshots"
+    assert sfmta.s3_tu_prefix == "raw-jsonl-archive/sfmta/"
+    assert sfmta.s3_vp_prefix == "raw-jsonl-archive/sfmta_vp/"

@@ -216,9 +216,13 @@ def test_agency_coverage_threshold_keeps_relative_safety_margin():
         trip_updates_every_ticks=4,
         vehicle_positions_every_ticks=4,
         archive_dir="",
+        vp_archive_dir="",
         pid_file="",
         heartbeat_name="",
         database_url_env="X_DATABASE_URL",
         healthcheck_url_env="X_HEALTHCHECK_URL",
+        s3_bucket="",
+        s3_tu_prefix="",
+        s3_vp_prefix="",
     )
     assert agency_coverage_threshold(cfg) == pytest.approx(MIN_COVERAGE_FOR_MATERIALIZATION * 0.25)
