@@ -805,5 +805,152 @@ locally) or `psql -d wmata_dashboard -Atc "SELECT max(created_at) FROM gtfs_snap
 
 ---
 
-**Last Updated:** 2026-08-11
+## 13. Stateless collector (nano) — NOTES-95
+
+**Status:** this section documents PR A of a three-PR sequence closing
+NOTES-95 (`docs/superpowers/specs/2026-08-22-stateless-collector-design.md`
+is the authoritative design). It covers provisioning a **new, separate**
+`nano_3_0` instance and installing the templated unit on it — it does
+**not** retire the `wmata-data` VM described in §1–§12 above, and the
+2026-07-18 interim banner at the top of this document is unchanged. Per
+the spec's decision 3, the new box runs in parallel with the existing VM
+for ≥1 week before cutover; the cutover itself, and the accompanying
+NOTES.md punch-list edit, land in PR C.
+
+`scripts/stateless_collector.py --agency {wmata,sfmta}` (Tasks 1–4) is a
+DB-free poll → zstd JSONL → S3 loop — no Postgres, no timers beyond the
+loop itself. One process per agency, run under the templated unit
+`deployment/systemd/collector@.service` as `collector@wmata.service` /
+`collector@sfmta.service`.
+
+### 13.1 Provision the instance
+
+Same high-level checklist as §2, sized down:
+
+1. Create a fresh Lightsail `nano_3_0` instance ($5/mo, 512 MB RAM,
+   20 GB SSD, us-east-1, Ubuntu LTS) — **do not** reuse or resize the
+   existing `wmata-data` VM; Lightsail cannot downsize an instance in
+   place, and the parallel-run verification (§13.4 onward) depends on
+   the old VM staying untouched.
+2. Restrict the Lightsail firewall to SSH (22) only.
+3. Follow §2.1–§2.4 for SSH key setup, the `wmata` service account
+   (no interactive login, no sudo), system packages, and `uv`.
+4. No PostgreSQL install — this box never runs a database.
+
+### 13.2 Deploy the repo
+
+```bash
+su - wmata
+git clone <repo-url> /home/wmata/wmata-dashboard
+cd /home/wmata/wmata-dashboard
+uv sync   # boto3 + zstandard are core deps — no --extra needed here
+mkdir -p archive logs
+exit
+```
+
+### 13.3 Per-agency environment files: `.env.wmata` / `.env.sfmta`
+
+Unlike the legacy collector's single shared `.env` (§9's "restart both
+units" lesson), the templated unit reads
+`EnvironmentFile=/home/wmata/wmata-dashboard/.env.%i` — a **separate**
+file per agency instance, so rotating one agency's credentials can't
+silently leave the other running on stale ones.
+
+`.env.wmata`:
+```bash
+WMATA_API_KEY=<key>
+COLLECTOR_HEALTHCHECK_URL=<healthchecks.io ping URL — see 13.5>
+AWS_ACCESS_KEY_ID=<AKIA...>
+AWS_SECRET_ACCESS_KEY=<secret>
+AWS_DEFAULT_REGION=us-east-1
+```
+
+`.env.sfmta`:
+```bash
+SFMTA_API_KEY=<511.org token>
+SFMTA_COLLECTOR_HEALTHCHECK_URL=<healthchecks.io ping URL — see 13.5>
+AWS_ACCESS_KEY_ID=<AKIA...>
+AWS_SECRET_ACCESS_KEY=<secret>
+AWS_DEFAULT_REGION=us-east-1
+```
+
+Both files can share the same AWS key. Create a dedicated, least-privilege
+IAM user for this box (don't reuse `wmata-vm-backup` — this key lives on a
+less-hardened, internet-facing collector box) scoped to `PutObject` on the
+`raw-jsonl-archive/*` prefixes, extending
+`deployment/aws/s3-backup-policy.json`'s pattern (that file currently
+grants `wmata-vm-backup` `PutObject`/`GetObject` on `wmata-db-backups/*`
+and `wmata-vp-archive/*` — add an analogous statement scoped to
+`raw-jsonl-archive/*`, which covers the existing WMATA-root and `sfmta/`
+TU prefixes plus the new `vp/` and `sfmta_vp/` VP prefixes from the
+spec's §2 S3 layout).
+
+```bash
+chmod 600 /home/wmata/wmata-dashboard/.env.wmata /home/wmata/wmata-dashboard/.env.sfmta
+```
+
+### 13.4 Install the unit
+
+Follow **`docs/DEPLOY.md` §2** ("Deploy with systemd unit changes") for
+the canonical copy-to-`/etc/systemd/system/` + `daemon-reload` +
+enable/start sequence — units are user-installed; `git pull` on the box
+does **not** update an installed unit, so skipping this step silently
+no-ops (the same NOTES-77 lesson as §11.3's SFMTA note).
+
+```bash
+REPO=/home/wmata/wmata-dashboard
+sudo cp ${REPO}/deployment/systemd/collector@.service /etc/systemd/system/
+
+sudo mkdir -p /var/log/wmata
+sudo chown wmata:wmata /var/log/wmata
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now collector@wmata collector@sfmta
+```
+
+Verify:
+```bash
+systemctl status collector@wmata collector@sfmta
+journalctl -u collector@wmata -f
+journalctl -u collector@sfmta -f
+```
+
+### 13.5 healthchecks.io checks
+
+Create **two new checks** (one per agency — independent of any existing
+WMATA collector check tied to the old VM in §1–§12), each configured with
+**period 5 min / grace 45 min**:
+
+- **Period 5 min** because `PingGate` (`src/stateless_poller.py`)
+  rate-limits pings to once per 300 s once both of that agency's feeds
+  are shipping fresh data (`min_gap_sec=300`) — matching the check's
+  period to the actual ping cadence avoids a check that reads as
+  chronically "just barely" green.
+- **Grace 45 min** bounds worst-case detection at ≈50 min for a total
+  collector outage (a ping was due right when the outage started, plus
+  the 45-min grace) and ≈80 min for a single-feed wedge (`PingGate`'s
+  20-minute freshness window — `freshness_sec=1200` — must also elapse
+  before the still-healthy feed stops counting as "both fresh" and pings
+  actually stop, on top of the same grace).
+- The 45-min grace also exists so **deploys don't page**: after a
+  `collector@` start or restart, the first ping only arrives once the
+  first 15-minute rotation completes and its file finishes uploading —
+  in practice ~15–20 min, not immediately. A shorter grace would
+  false-page on every routine restart.
+- **The dead-man cannot distinguish "collector wedged" from "S3
+  unreachable for >5 min"** — both silence the ping identically. This is
+  intended, not a gap: the alert means "raw data is not reaching S3,"
+  and either underlying cause needs the same first response (SSH in,
+  `journalctl -u collector@<agency>`, then check S3
+  reachability/credentials/bucket).
+
+Set each check's ping URL into `COLLECTOR_HEALTHCHECK_URL` /
+`SFMTA_COLLECTOR_HEALTHCHECK_URL` in the matching `.env.<agency>` file,
+then `sudo systemctl restart collector@wmata collector@sfmta` to pick it
+up — env files are read once at process start, the same restart-required
+caveat as §9.
+
+---
+
+**Last Updated:** 2026-08-22
 **Deployment Cost:** ~$17/mo ($12 instance + ~$5 block disk; S3 negligible at this scale)
