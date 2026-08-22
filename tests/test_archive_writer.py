@@ -207,17 +207,30 @@ def test_interval_rotation_opens_new_file(tmp_path):
     assert [_read_rows(f)[0]["a"] for f in files] == [1, 2]
 
 
-def test_interval_rotation_at_exact_boundary(tmp_path):
-    """elapsed == rotate_interval_sec rotates too — the check is >=, not >."""
+def test_interval_rotation_at_exact_boundary(tmp_path, monkeypatch):
+    """elapsed == rotate_interval_sec rotates too — the check is >=, not >.
+
+    ``time.time()`` is frozen so the two ``append()`` calls are exactly
+    ``rotate_interval_sec`` apart. Adjusting ``_open_wall_ts`` by exactly
+    -900 against a real (unfrozen) clock, as an earlier version of this
+    test did, leaves a few microseconds of scheduling jitter between the
+    two ``time.time()`` reads — so elapsed ends up strictly greater than
+    900 and the test would pass even if the implementation used ``>``
+    instead of ``>=``, leaving the exact boundary uncovered. Freezing the
+    clock removes that jitter so this test actually exercises the ``==``
+    case.
+    """
     from datetime import datetime
 
     from src.archive_writer import JsonlArchiveWriter
 
+    fake_now = [1_000_000.0]
+    monkeypatch.setattr("time.time", lambda: fake_now[0])
+
     w = JsonlArchiveWriter(tmp_path, rotate_interval_sec=900)
     ts = datetime(2026, 8, 22, 12, 0, 0)
-    w.append({"a": 1}, snapshot_ts=ts)
-    # Simulate exactly 900 seconds of wall clock passing — the boundary.
-    w._open_wall_ts -= 900
+    w.append({"a": 1}, snapshot_ts=ts)  # opens at frozen time fake_now[0]
+    fake_now[0] += 900  # exactly the boundary
     w.append({"a": 2}, snapshot_ts=ts)
     w.close()
 
