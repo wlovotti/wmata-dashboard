@@ -371,13 +371,15 @@ class VehiclePosition(Base):
     __tablename__ = "vehicle_positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    # vehicle_id/route_id/trip_id are intentionally NOT index=True: each is the
-    # leading column of a composite below (idx_vehicle_timestamp,
-    # idx_route_timestamp, idx_trip_timestamp), which already serves lookups
-    # on the column alone. A separate single-column index would be redundant
-    # (redundant vehicle_positions index drop, PR #220; laptop measurement
-    # showed 0 idx_scan on two of the three over a ~34-day window, and
-    # negligible scan count on the third vs. its composite counterpart).
+    # vehicle_id/route_id/trip_id are intentionally NOT index=True: route_id is
+    # the leading column of the composite below (idx_route_timestamp), which
+    # already serves lookups on the column alone. A separate single-column
+    # index would be redundant (redundant vehicle_positions index drop, PR
+    # #220; laptop measurement showed 0 idx_scan on two of the three over a
+    # ~34-day window, and negligible scan count on the third vs. its
+    # composite counterpart). vehicle_id and trip_id no longer have a
+    # composite counterpart at all — see the note on __table_args__ below
+    # (vehicle_positions composite-index investigation, NOTES-129, PR #221).
     vehicle_id = Column(String, nullable=False)
     route_id = Column(String)  # References routes.route_id (not FK due to versioning)
     trip_id = Column(String)  # References trips.trip_id (not FK due to versioning)
@@ -403,12 +405,25 @@ class VehiclePosition(Base):
     # Note: Relationships removed due to versioning complexity
     # Query using explicit filters on route_id/trip_id with is_current=True
 
-    # Composite indexes for efficient queries
-    __table_args__ = (
-        Index("idx_vehicle_timestamp", "vehicle_id", "timestamp"),
-        Index("idx_route_timestamp", "route_id", "timestamp"),
-        Index("idx_trip_timestamp", "trip_id", "timestamp"),
-    )
+    # Composite index for efficient queries. idx_vehicle_timestamp and
+    # idx_trip_timestamp were removed from the model here (NOTES-129, PR
+    # #221) — the live DROP against a real database is a separate,
+    # manually-run step: scripts/migrate_drop_vp_redundant_indexes.py. A
+    # fresh pg_stat_user_indexes read confirmed both still at idx_scan = 0
+    # on both the primary and SFMTA sidecar over the same ~34-day
+    # accumulation window PR #220 measured (postmaster start unchanged,
+    # stats_reset unset), and a repo-wide grep found no production/API/
+    # pipeline read path that filters vehicle_positions on vehicle_id or
+    # trip_id combined with timestamp. Two manually-run analysis/debug
+    # scripts do touch these columns (analysis/run_quality.py reads the
+    # whole table unfiltered; debug/trace_vehicle_journey.py filters
+    # vehicle_id/trip_id with no timestamp predicate) but neither is a
+    # production path and neither is served by (nor meaningfully hurt by
+    # dropping) these specific composites — see PR #221's body for the
+    # full investigation, including why those two don't change the
+    # verdict. Do NOT re-add either without a concrete read path that
+    # needs it.
+    __table_args__ = (Index("idx_route_timestamp", "route_id", "timestamp"),)
 
 
 class TripUpdateState(Base):
