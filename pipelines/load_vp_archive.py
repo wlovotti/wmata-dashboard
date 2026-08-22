@@ -38,13 +38,16 @@ def parse_vp_line(obj: dict) -> dict | None:
     """Map one archived VP JSON line to VehiclePosition insert kwargs.
 
     Returns None when the row should be dropped: either the NOTES-81
-    phantom-timestamp guard fires, or the vehicle has no reported position
-    (``latitude``/``longitude`` null — ``VehiclePosition`` requires both
-    NOT NULL, but the feed can emit vehicles mid-assignment with no fix
-    yet). A missing/null ``timestamp`` falls back to ``collected_at``
-    (legacy collector behavior for un-timestamped vehicles).
+    phantom-timestamp guard fires, or the row is missing a value one of
+    ``VehiclePosition``'s NOT NULL columns requires (``vehicle_id``,
+    ``latitude``, ``longitude`` — the feed can emit vehicles mid-assignment
+    with no ID or fix yet). Passing a null through to the insert would
+    raise an IntegrityError at chunk-flush time and abort the whole file,
+    so these are filtered here instead. A missing/null ``timestamp`` falls
+    back to ``collected_at`` (legacy collector behavior for
+    un-timestamped vehicles).
     """
-    if obj.get("latitude") is None or obj.get("longitude") is None:
+    if obj.get("vehicle_id") is None or obj.get("latitude") is None or obj.get("longitude") is None:
         return None
 
     collected_at = datetime.fromisoformat(obj["collected_at"])
@@ -77,7 +80,9 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
 
     Rows + the manifest row commit in a single transaction, so a crash
     mid-file rolls back cleanly and the file re-loads next run. The zstd
-    stream_reader tolerates a missing frame footer (crash-cut files).
+    stream_reader tolerates a missing frame footer (crash-cut files). A
+    line that fails to decode as JSON (or as UTF-8) is dropped and counted
+    rather than raised — one corrupt line must not poison the whole file.
     """
     already = session.get(VpArchiveLoadedFile, path.name)
     if already is not None:
@@ -89,7 +94,12 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     with open(path, "rb") as fh:
         text_stream = io.TextIOWrapper(zstd.ZstdDecompressor().stream_reader(fh), encoding="utf-8")
         for line in text_stream:
-            row = parse_vp_line(json.loads(line))
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                dropped += 1
+                continue
+            row = parse_vp_line(obj)
             if row is None:
                 dropped += 1
                 continue
@@ -116,7 +126,16 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
 
 
 def main(argv=None) -> int:
-    """Load every not-yet-loaded VP archive file for one agency."""
+    """Load every not-yet-loaded VP archive file for one agency.
+
+    Each file is loaded in isolation: an exception from ``load_vp_file``
+    (any DB- or file-level failure a line-level guard didn't already
+    catch) is logged and the run continues to the next file rather than
+    aborting the whole batch — one bad file must not block every other
+    file behind it. Returns 1 if any file failed to load, so callers
+    (cron, CI) can detect a partial run; the manifest table is the source
+    of truth for exactly which files still need attention.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agency", default="wmata", choices=("wmata", "sfmta"))
     parser.add_argument("--archive-root", type=Path, default=None)
@@ -128,14 +147,23 @@ def main(argv=None) -> int:
     session = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         total_ins = total_drop = 0
+        failed_files: list[str] = []
         for path in sorted(archive_root.glob("*.jsonl.zst")):
-            ins, drop = load_vp_file(session, path)
+            try:
+                ins, drop = load_vp_file(session, path)
+            except Exception as exc:  # noqa: BLE001 - isolate one bad file, keep going
+                print(f"  {path.name}: FAILED to load ({exc!r}), continuing")
+                session.rollback()
+                failed_files.append(path.name)
+                continue
             total_ins += ins
             total_drop += drop
-        print(f"Done: {total_ins} rows inserted, {total_drop} dropped (NOTES-81 guard).")
+        print(f"Done: {total_ins} rows inserted, {total_drop} dropped (guard + unusable rows).")
+        if failed_files:
+            print(f"  {len(failed_files)} file(s) failed to load: {', '.join(failed_files)}")
     finally:
         session.close()
-    return 0
+    return 1 if failed_files else 0
 
 
 if __name__ == "__main__":

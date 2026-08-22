@@ -6,6 +6,8 @@ loader function that consumes this manifest for idempotency.
 
 from datetime import datetime
 
+import zstandard as zstd
+
 from src.models import VpArchiveLoadedFile
 
 
@@ -132,3 +134,100 @@ def test_null_lat_lon_dropped_and_counted(db_session, tmp_path):
     assert (inserted, dropped) == (0, 1)
     assert db_session.query(VehiclePosition).count() == 0
     assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
+
+
+def test_null_vehicle_id_dropped_and_counted(db_session, tmp_path):
+    """A vehicle_id-less row is dropped rather than violating the NOT NULL column.
+
+    ``VehiclePosition.vehicle_id`` is NOT NULL; passing a null value through
+    to the insert would raise an IntegrityError at chunk-flush time and
+    abort the whole file (the same poison-file failure mode as null
+    lat/lon). ``parse_vp_line`` must filter it out up front instead.
+    """
+    from pipelines.load_vp_archive import load_vp_file
+    from src.models import VehiclePosition, VpArchiveLoadedFile
+
+    no_vehicle_id = dict(VEHICLE, vehicle_id=None)
+    path = _write_vp_file(tmp_path, [no_vehicle_id], COLLECTED)
+    inserted, dropped = load_vp_file(db_session, path)
+
+    assert (inserted, dropped) == (0, 1)
+    assert db_session.query(VehiclePosition).count() == 0
+    assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
+
+
+def _append_garbage_line(path):
+    """Decompress a closed archive file, append one non-JSON line, recompress.
+
+    Simulates a single corrupt/truncated line landing mid-file (a partial
+    write racing a crash, or bit rot in transit) without needing to
+    hand-roll a second zstd frame: read the whole stream back via
+    ``stream_reader`` (tolerant of a missing frame footer, same as the
+    loader), append garbage bytes, and recompress as one fresh frame.
+    """
+    decompressor = zstd.ZstdDecompressor()
+    with open(path, "rb") as fh:
+        raw = decompressor.stream_reader(fh).read()
+    raw += b"this is not json\n"
+    path.write_bytes(zstd.ZstdCompressor(level=3).compress(raw))
+
+
+def test_corrupt_line_dropped_and_good_rows_still_load(db_session, tmp_path):
+    """A malformed JSON line is dropped and counted, not fatal to the file.
+
+    Before this fix, ``json.loads`` had no try/except around the per-line
+    decode, so one bad line raised out of ``load_vp_file`` entirely — no
+    manifest row was ever written, and the whole file (including its good
+    rows) re-failed identically on every re-run.
+    """
+    from pipelines.load_vp_archive import load_vp_file
+    from src.models import VehiclePosition, VpArchiveLoadedFile
+
+    path = _write_vp_file(tmp_path, [VEHICLE], COLLECTED)
+    _append_garbage_line(path)
+    inserted, dropped = load_vp_file(db_session, path)
+
+    assert (inserted, dropped) == (1, 1)
+    assert db_session.query(VehiclePosition).one().vehicle_id == "42"
+    assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
+
+
+def test_main_continues_past_a_failing_file(db_session, tmp_path, monkeypatch):
+    """main() isolates a per-file failure: it logs, continues, and reports nonzero exit.
+
+    Regression guard for the fix to finding 1(b): previously a single
+    exception from ``load_vp_file`` (e.g. an IntegrityError that slips
+    past the line-level guards) would abort the entire run, leaving every
+    later file — good ones included — unloaded.
+    """
+    import pipelines.load_vp_archive as mod
+
+    good_path = _write_vp_file(tmp_path, [VEHICLE], COLLECTED)
+    bad_vehicle = dict(VEHICLE, vehicle_id="bad")
+    bad_path = _write_vp_file(tmp_path, [bad_vehicle], COLLECTED)
+    # Force the "bad" file to blow up inside load_vp_file despite passing
+    # the line-level guards, simulating an error class those guards don't
+    # cover (e.g. a DB-level constraint the guards don't fully anticipate).
+    real_load_vp_file = mod.load_vp_file
+
+    def _flaky_load_vp_file(session, path):
+        if path == bad_path:
+            raise RuntimeError("simulated DB failure")
+        return real_load_vp_file(session, path)
+
+    monkeypatch.setattr(mod, "load_vp_file", _flaky_load_vp_file)
+    monkeypatch.setattr(mod, "get_session", lambda db_url=None: db_session)
+    monkeypatch.setattr(
+        mod,
+        "load_agency_config",
+        lambda name: type("Cfg", (), {"vp_archive_dir": ""})(),
+    )
+    monkeypatch.setattr(mod, "resolve_agency_db_url", lambda cfg: None)
+
+    exit_code = mod.main(["--agency", "wmata", "--archive-root", str(tmp_path)])
+
+    assert exit_code == 1
+    from src.models import VehiclePosition
+
+    assert db_session.query(VehiclePosition).count() == 1
+    assert good_path.exists() and bad_path.exists()
