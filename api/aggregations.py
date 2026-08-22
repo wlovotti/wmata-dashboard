@@ -3170,10 +3170,16 @@ def get_route_contributors(
     """Cached-by-(metric, days, anchor) wrapper for the contributors view.
 
     See module comment above for the contribution formula and baseline
-    semantics. Cache key includes the window's anchor date so the cache
-    rolls naturally at the service-day boundary for the default (`None`)
-    anchor, and is stable indefinitely for an explicit `as_of_date` (a past
-    date's data doesn't change).
+    semantics. Cache key includes the window's anchor so the cache rolls
+    naturally at the service-day boundary for the default (`None`) anchor.
+    The default and explicit-`as_of_date` branches are keyed with distinct
+    prefixes (`"latest:..."` vs the bare date string) even though both hold
+    an ISO date — a bare `eastern_today().isoformat()` key would otherwise
+    collide with an explicit `as_of_date` equal to today, even though the
+    two compute different `end_date`s (`_latest_service_date_with_stop_events`
+    vs `today`) whenever stop_events lags today, which is the normal case
+    (PR #219 review finding 1). Every entry, default or explicit, still
+    expires after `_CONTRIBUTORS_TTL_SEC`.
 
     Args:
         db: Database session.
@@ -3193,7 +3199,11 @@ def get_route_contributors(
     """
     from src.timezones import eastern_today
 
-    cache_key = (metric, days, (as_of_date or eastern_today()).isoformat())
+    if as_of_date is not None:
+        anchor_key = as_of_date.isoformat()
+    else:
+        anchor_key = f"latest:{eastern_today().isoformat()}"
+    cache_key = (metric, days, anchor_key)
     with _contributors_lock:
         cached = _contributors_cache.get(cache_key)
         if cached is not None:

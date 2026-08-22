@@ -551,24 +551,35 @@ async def get_system_weekly_narrative_endpoint():
         ``narrative`` (string), ``generated_at`` (ISO-8601 UTC), ``model_id``
         (string), ``prompt_version`` (string), and ``is_stale`` (bool).
     """
+    missing_table_detail = (
+        "system_weekly_narrative table does not exist yet. "
+        "Run: scripts/migrate_create_system_weekly_narrative.py "
+        "then scripts/generate_system_weekly_narrative.py"
+    )
+
     db = get_session()
     try:
         try:
             result = get_system_weekly_narrative(db)
-        except (ProgrammingError, OperationalError):
+        except ProgrammingError:
             # system_weekly_narrative doesn't exist yet (PR #219 review
             # finding 4) -- Postgres raises UndefinedTable wrapped as
-            # ProgrammingError, SQLite raises "no such table" wrapped as
-            # OperationalError. Either way this means "nothing generated
-            # yet," just one step earlier than the no-rows case below.
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "system_weekly_narrative table does not exist yet. "
-                    "Run: scripts/migrate_create_system_weekly_narrative.py "
-                    "then scripts/generate_system_weekly_narrative.py"
-                ),
-            ) from None
+            # ProgrammingError. This means "nothing generated yet," just
+            # one step earlier than the no-rows case below.
+            raise HTTPException(status_code=404, detail=missing_table_detail) from None
+        except OperationalError as exc:
+            # SQLite has no distinct "missing table" exception class the
+            # way Postgres does -- it also raises OperationalError for
+            # "no such table". But OperationalError is also what a genuine
+            # connection failure (refused / pool exhausted) surfaces as on
+            # Postgres, so catching it unconditionally would misreport a
+            # downed DB as "table doesn't exist yet" (PR #219 review
+            # finding 2). Narrow to the message so only the actual
+            # missing-table case is caught; anything else re-raises to the
+            # default 500.
+            if "no such table" not in str(exc).lower():
+                raise
+            raise HTTPException(status_code=404, detail=missing_table_detail) from None
         if result is None:
             raise HTTPException(
                 status_code=404,

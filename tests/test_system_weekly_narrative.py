@@ -21,6 +21,7 @@ from datetime import date, timedelta
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from src.diagnosis_hash import compute_system_snapshot_hash
 from src.models import SystemMetricsDaily, SystemWeeklyNarrative
@@ -304,6 +305,27 @@ def test_weekly_narrative_404_when_table_missing(client, db_session):
         SystemWeeklyNarrative.__table__.create(bind=db_session.get_bind())
 
 
+def test_weekly_narrative_connection_failure_is_not_treated_as_missing_table(client, monkeypatch):
+    """A connection-failure OperationalError (DB unreachable / pool
+    exhausted) must not be misreported as "table doesn't exist yet" (PR
+    #219 review finding 2). SQLite's missing-table error and a genuine
+    connection failure are both `OperationalError` -- distinguishing them
+    only by message means the endpoint only swallows the "no such table"
+    case and re-raises anything else, so a real outage still surfaces
+    instead of a misleading 404."""
+    import api.main
+
+    def _boom(db):
+        raise OperationalError(
+            "SELECT 1", {}, Exception("could not connect to server: Connection refused")
+        )
+
+    monkeypatch.setattr(api.main, "get_system_weekly_narrative", _boom)
+
+    with pytest.raises(OperationalError):
+        client.get("/api/system/weekly-narrative")
+
+
 @pytest.mark.api
 def test_weekly_narrative_200_not_stale(client, db_session):
     """200 with is_stale=False when the stored hash matches the current snapshot
@@ -473,14 +495,27 @@ def test_weekly_narrative_not_stale_when_single_day_lands(client, db_session):
 
 
 @pytest.mark.api
-def test_weekly_narrative_not_forced_stale_when_db_lags_narrative(client, db_session):
-    """200 with is_stale=False when the local DB lags the narrative's own
-    as_of_date but the (partial) data it does have still matches the stored
-    hash (PR #219 review finding 2, part b) -- e.g. a scratch DB restored
-    from a snapshot older than the narrative it was seeded alongside. The
-    old `latest_available != row.as_of_date` comparison forced is_stale=True
-    here regardless of the hash; it must fall through to the hash check
-    instead."""
+def test_weekly_narrative_latest_available_below_as_of_falls_through_to_hash_check(
+    client, db_session
+):
+    """When `latest_available < row.as_of_date` (e.g. a scratch/dev DB that
+    lags the narrative's own generation environment), the endpoint must
+    fall through to the hash check instead of the old
+    `latest_available != row.as_of_date` comparison forcing
+    `is_stale=True` outright regardless of the hash (PR #219 review
+    finding 2, part b).
+
+    This test does NOT assert that a genuinely lagging DB reads as fresh
+    -- in that real scenario the stored hash was written from the *full*
+    window at generation time, so a local DB missing rows from that
+    window would legitimately hash-mismatch and correctly read as stale.
+    Here the stored hash is deliberately set to match the (partial) rows
+    this test seeds, purely to isolate and pin the fall-through mechanism
+    itself: given a matching hash, `latest_available < as_of_date` alone
+    must not force staleness the way the old `!=` comparison did (PR
+    #219 review finding 5 -- reworded from a prior version of this test
+    that mischaracterized the scenario as "a lagging DB reads as fresh").
+    """
     as_of = date(2026, 8, 16)
 
     # Only a partial window (8/10-8/12) is present locally -- the DB lags
@@ -511,8 +546,9 @@ def test_weekly_narrative_not_forced_stale_when_db_lags_narrative(client, db_ses
         )
     db_session.commit()
 
-    # Stored hash matches exactly what the reader will recompute from this
-    # (partial) local snapshot.
+    # Deliberately contrived to match what the reader will recompute from
+    # this (partial) local snapshot -- not realistic (see docstring), but
+    # isolates the fall-through mechanism from hash-mismatch staleness.
     matching_hash = compute_system_snapshot_hash(partial_rows, [])
 
     db_session.add(

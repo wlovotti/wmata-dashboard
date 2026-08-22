@@ -1985,6 +1985,107 @@ routes:
         assert historical_ours is not None
         assert historical_ours["route_value"] == 60.0
 
+    def test_explicit_as_of_date_equal_to_today_does_not_share_cache_with_default(
+        self, db_session, sample_routes
+    ):
+        """An explicit `as_of_date` equal to today must not share a cache
+        entry with the default (`None`) anchor (PR #219 review finding 1,
+        follow-up).
+
+        The default anchor computes `end_date =
+        _latest_service_date_with_stop_events(db)`, not `eastern_today()` —
+        they only coincide once stop_events has caught up to today. Before
+        the fix, both branches keyed the cache on the bare ISO date, so an
+        explicit `as_of_date=eastern_today()` call landing within the TTL
+        of a default call would silently return the *default* call's
+        result (anchored on yesterday, the latest stop_events date) instead
+        of its own (anchored on today, which has no stop_events yet).
+
+        TEST1 has a 60%-OTP single day at yesterday and nothing at all
+        today. days=1 makes the two windows disjoint single days, so the
+        two calls must disagree if -- and only if -- they're computed
+        (not cache-collided) independently.
+        """
+        self._clear_cache()
+        from datetime import datetime as _dt
+
+        from api.aggregations import get_route_contributors
+        from src.models import StopEvent, SystemMetricsDaily
+
+        yesterday = eastern_today() - timedelta(days=1)
+
+        # days=1 windows need only a single system_metrics_daily row each
+        # (avoids the service_date PK collision _seed_system_baseline's
+        # 7-row seed would hit across two overlapping 7-day calls).
+        db_session.add_all(
+            [
+                SystemMetricsDaily(service_date=eastern_today().isoformat(), otp_percentage=80.0),
+                SystemMetricsDaily(service_date=yesterday.isoformat(), otp_percentage=80.0),
+            ]
+        )
+        db_session.commit()
+
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        events_per_day = 100
+        on_time_count = 60
+        late_count = events_per_day - on_time_count
+        base_ts = _dt.combine(yesterday, _dt.min.time()).replace(hour=14)
+        rows = []
+        for j in range(on_time_count):
+            rows.append(
+                StopEvent(
+                    service_date=yesterday.isoformat(),
+                    trip_id=f"TRIP_YDAY_OT_{j}",
+                    route_id="TEST1",
+                    direction_id=0,
+                    stop_id="STOP_OTP_TEST1",
+                    stop_sequence=1,
+                    observed_arrival_ts=base_ts + timedelta(seconds=j),
+                    deviation_sec=0,
+                    source="proximity",
+                    schedule_relationship="SCHEDULED",
+                )
+            )
+        for j in range(late_count):
+            rows.append(
+                StopEvent(
+                    service_date=yesterday.isoformat(),
+                    trip_id=f"TRIP_YDAY_LATE_{j}",
+                    route_id="TEST1",
+                    direction_id=0,
+                    stop_id="STOP_OTP_TEST1",
+                    stop_sequence=1,
+                    observed_arrival_ts=base_ts + timedelta(seconds=on_time_count + j),
+                    deviation_sec=600,
+                    source="proximity",
+                    schedule_relationship="SCHEDULED",
+                )
+            )
+        db_session.add_all(rows)
+        db_session.commit()
+
+        # Default: anchors on _latest_service_date_with_stop_events
+        # (yesterday, the only date with stop_events). TEST1 scores.
+        default_result = get_route_contributors(db_session, metric="otp", days=1)
+        default_ours = next(
+            (c for c in default_result["contributors"] if c["route_id"] == "TEST1"), None
+        )
+        assert default_ours is not None
+        assert default_ours["route_value"] == 60.0
+
+        # Explicit as_of_date=today, landing well within the cache TTL of
+        # the call above. Must NOT return the cached default-anchor result
+        # -- today has no stop_events, so TEST1 has no route_value and is
+        # dropped.
+        explicit_result = get_route_contributors(
+            db_session, metric="otp", days=1, as_of_date=eastern_today()
+        )
+        explicit_ours = next(
+            (c for c in explicit_result["contributors"] if c["route_id"] == "TEST1"), None
+        )
+        assert explicit_ours is None
+
 
 class TestComputeRouteDeltas:
     """Tests for `compute_route_deltas` (NOTES-38).

@@ -52,8 +52,8 @@ function SystemWeeklyNarrativeLede() {
     <section className="system-weekly-lede" aria-label="Weekly system recap">
       {data.is_stale && (
         <p className="system-weekly-lede-stale">
-          This week's recap may be out of date — newer data has landed since
-          this summary was generated. Regenerate with{' '}
+          This week's recap may be out of date — the data behind this
+          summary has changed. Regenerate with{' '}
           <code>scripts/generate_system_weekly_narrative.py</code>.
         </p>
       )}
