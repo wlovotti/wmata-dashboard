@@ -83,6 +83,15 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     stream_reader tolerates a missing frame footer (crash-cut files). A
     line that fails to decode as JSON (or as UTF-8) is dropped and counted
     rather than raised — one corrupt line must not poison the whole file.
+
+    The stream is read as raw bytes (``io.BufferedReader`` over the zstd
+    stream_reader), split into lines, and decoded by hand per line —
+    NOT via ``io.TextIOWrapper``, whose ``for line in text_stream:``
+    would raise ``UnicodeDecodeError`` from the iteration itself, outside
+    any per-line try/except, escaping this function on real byte
+    corruption (review round 2 caught this: the wrapper decodes eagerly
+    before ``json.loads`` ever runs, so a try/except around only
+    ``json.loads`` never actually saw a ``UnicodeDecodeError``).
     """
     already = session.get(VpArchiveLoadedFile, path.name)
     if already is not None:
@@ -92,10 +101,10 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     inserted = dropped = 0
     batch: list[dict] = []
     with open(path, "rb") as fh:
-        text_stream = io.TextIOWrapper(zstd.ZstdDecompressor().stream_reader(fh), encoding="utf-8")
-        for line in text_stream:
+        buffered = io.BufferedReader(zstd.ZstdDecompressor().stream_reader(fh))
+        for raw in buffered:
             try:
-                obj = json.loads(line)
+                obj = json.loads(raw.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 dropped += 1
                 continue

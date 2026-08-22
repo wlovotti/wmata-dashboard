@@ -156,19 +156,21 @@ def test_null_vehicle_id_dropped_and_counted(db_session, tmp_path):
     assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
 
 
-def _append_garbage_line(path):
-    """Decompress a closed archive file, append one non-JSON line, recompress.
+def _append_garbage_line(path, garbage=b"this is not json\n"):
+    """Decompress a closed archive file, append one bad raw line, recompress.
 
     Simulates a single corrupt/truncated line landing mid-file (a partial
     write racing a crash, or bit rot in transit) without needing to
     hand-roll a second zstd frame: read the whole stream back via
     ``stream_reader`` (tolerant of a missing frame footer, same as the
-    loader), append garbage bytes, and recompress as one fresh frame.
+    loader), append the raw ``garbage`` bytes, and recompress as one fresh
+    frame. ``garbage`` defaults to valid-UTF-8-but-invalid-JSON bytes;
+    pass invalid UTF-8 bytes to exercise the decode-error path instead.
     """
     decompressor = zstd.ZstdDecompressor()
     with open(path, "rb") as fh:
         raw = decompressor.stream_reader(fh).read()
-    raw += b"this is not json\n"
+    raw += garbage
     path.write_bytes(zstd.ZstdCompressor(level=3).compress(raw))
 
 
@@ -185,6 +187,32 @@ def test_corrupt_line_dropped_and_good_rows_still_load(db_session, tmp_path):
 
     path = _write_vp_file(tmp_path, [VEHICLE], COLLECTED)
     _append_garbage_line(path)
+    inserted, dropped = load_vp_file(db_session, path)
+
+    assert (inserted, dropped) == (1, 1)
+    assert db_session.query(VehiclePosition).one().vehicle_id == "42"
+    assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
+
+
+def test_invalid_utf8_line_dropped_and_good_rows_still_load(db_session, tmp_path):
+    """A line with genuinely invalid UTF-8 bytes is dropped, not fatal to the file.
+
+    Regression test for review round 2: the original fix caught
+    ``UnicodeDecodeError`` around ``json.loads(line)``, but ``line`` came
+    from an ``io.TextIOWrapper`` that had *already* decoded bytes to
+    ``str`` before ``json.loads`` ever ran — the real bytes-to-str decode
+    raised from the ``for line in text_stream:`` statement itself,
+    outside that try block, so actual byte corruption escaped
+    ``load_vp_file`` entirely (no manifest row written, poison file at
+    file granularity). This appends a line with an invalid UTF-8 byte
+    sequence (``\\xff\\xfe``, not any valid encoding) directly into the
+    archive to prove that path is now caught too.
+    """
+    from pipelines.load_vp_archive import load_vp_file
+    from src.models import VehiclePosition, VpArchiveLoadedFile
+
+    path = _write_vp_file(tmp_path, [VEHICLE], COLLECTED)
+    _append_garbage_line(path, garbage=b"\xff\xfe not utf8\n")
     inserted, dropped = load_vp_file(db_session, path)
 
     assert (inserted, dropped) == (1, 1)
