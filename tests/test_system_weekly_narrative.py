@@ -169,6 +169,31 @@ class TestGenerateNarrative:
             )
         assert narrative == "Some narrative."
 
+    def test_empty_stdout_raises_system_exit(self):
+        """An exit-0-but-empty `claude` run raises SystemExit rather than
+        returning an empty narrative for the caller to upsert (PR #219
+        review finding 3)."""
+        from scripts.generate_system_weekly_narrative import _generate_narrative
+
+        mock_result = _make_subprocess_result(stdout="", stderr="", returncode=0)
+        with patch("subprocess.run", return_value=mock_result):
+            with pytest.raises(SystemExit) as exc_info:
+                _generate_narrative(
+                    date(2026, 8, 16), [], [], {"contributors": []}, {"contributors": []}
+                )
+        assert exc_info.value.code != 0
+
+    def test_whitespace_only_stdout_raises_system_exit(self):
+        """Whitespace-only output is treated the same as empty output."""
+        from scripts.generate_system_weekly_narrative import _generate_narrative
+
+        mock_result = _make_subprocess_result(stdout="   \n\n  ", stderr="", returncode=0)
+        with patch("subprocess.run", return_value=mock_result):
+            with pytest.raises(SystemExit):
+                _generate_narrative(
+                    date(2026, 8, 16), [], [], {"contributors": []}, {"contributors": []}
+                )
+
 
 class TestMainClaudePathCheck:
     """Unit tests for the ``claude`` PATH check in ``main()``."""
@@ -251,6 +276,32 @@ def test_weekly_narrative_404_when_no_narrative(client):
     response = client.get("/api/system/weekly-narrative")
     assert response.status_code == 404
     assert "weekly narrative" in response.json()["detail"].lower()
+
+
+@pytest.mark.api
+def test_weekly_narrative_404_when_table_missing(client, db_session):
+    """GET /api/system/weekly-narrative returns 404, not 500, when
+    ``system_weekly_narrative`` doesn't exist yet (PR #219 review finding
+    4) -- e.g. between a merge that adds this endpoint and the one-time
+    migration script that creates the table. Simulated here by dropping
+    the table the test schema created.
+
+    ``test_engine`` is session-scoped (an in-memory SQLite DB shared, via
+    StaticPool, by every test in the process), so the DROP must be undone
+    before this test returns -- otherwise every later test in the module
+    that needs the table would fail with the same "no such table" error.
+    """
+    from sqlalchemy import text
+
+    from src.models import SystemWeeklyNarrative
+
+    db_session.execute(text("DROP TABLE system_weekly_narrative"))
+    try:
+        response = client.get("/api/system/weekly-narrative")
+        assert response.status_code == 404
+        assert "does not exist" in response.json()["detail"].lower()
+    finally:
+        SystemWeeklyNarrative.__table__.create(bind=db_session.get_bind())
 
 
 @pytest.mark.api
@@ -363,3 +414,119 @@ def test_weekly_narrative_stale_when_newer_week_available(client, db_session):
     data = response.json()
     assert data["as_of_date"] == "2026-08-09"
     assert data["is_stale"] is True
+
+
+@pytest.mark.api
+def test_weekly_narrative_not_stale_when_single_day_lands(client, db_session):
+    """200 with is_stale=False when only a few extra daily rows have landed
+    since generation -- not a whole newer week (PR #219 review finding 2,
+    part a). The nightly batch inserts a system_metrics_daily row every day
+    while narrative generation is manual, so day-granularity churn must not
+    flag stale on its own."""
+    as_of = date(2026, 8, 9)
+    _insert_week(db_session, date(2026, 8, 3), otp=85.0)  # ends 2026-08-09
+
+    current_rows = [
+        {
+            "service_date": (date(2026, 8, 3) + timedelta(days=i)).isoformat(),
+            "otp_percentage": 85.0,
+            "service_delivered_ratio": 0.95,
+            "ewt_seconds": 60.0,
+            "swt_seconds": None,
+            "bunching_rate": 0.05,
+            "data_quality": "complete",
+        }
+        for i in range(7)
+    ]
+    current_hash = compute_system_snapshot_hash(current_rows, [])
+
+    db_session.add(
+        SystemWeeklyNarrative(
+            as_of_date=as_of.isoformat(),
+            narrative="Narrative for the week ending 8/9.",
+            generated_at=utcnow_naive(),
+            model_id="claude-sonnet-4-6",
+            prompt_version="v1",
+            metrics_snapshot_hash=current_hash,
+        )
+    )
+    db_session.commit()
+
+    # One extra day's row lands (the nightly batch), well short of a full
+    # newer 7-day week.
+    db_session.add(
+        SystemMetricsDaily(
+            service_date=date(2026, 8, 10).isoformat(),
+            otp_percentage=85.0,
+            service_delivered_ratio=0.95,
+            ewt_seconds=60.0,
+            bunching_rate=0.05,
+            data_quality="complete",
+            computed_at=utcnow_naive(),
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/api/system/weekly-narrative")
+    assert response.status_code == 200
+    assert response.json()["is_stale"] is False
+
+
+@pytest.mark.api
+def test_weekly_narrative_not_forced_stale_when_db_lags_narrative(client, db_session):
+    """200 with is_stale=False when the local DB lags the narrative's own
+    as_of_date but the (partial) data it does have still matches the stored
+    hash (PR #219 review finding 2, part b) -- e.g. a scratch DB restored
+    from a snapshot older than the narrative it was seeded alongside. The
+    old `latest_available != row.as_of_date` comparison forced is_stale=True
+    here regardless of the hash; it must fall through to the hash check
+    instead."""
+    as_of = date(2026, 8, 16)
+
+    # Only a partial window (8/10-8/12) is present locally -- the DB lags
+    # the narrative's own as_of_date of 8/16.
+    partial_rows = []
+    for d in (date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12)):
+        db_session.add(
+            SystemMetricsDaily(
+                service_date=d.isoformat(),
+                otp_percentage=85.0,
+                service_delivered_ratio=0.95,
+                ewt_seconds=60.0,
+                bunching_rate=0.05,
+                data_quality="complete",
+                computed_at=utcnow_naive(),
+            )
+        )
+        partial_rows.append(
+            {
+                "service_date": d.isoformat(),
+                "otp_percentage": 85.0,
+                "service_delivered_ratio": 0.95,
+                "ewt_seconds": 60.0,
+                "swt_seconds": None,
+                "bunching_rate": 0.05,
+                "data_quality": "complete",
+            }
+        )
+    db_session.commit()
+
+    # Stored hash matches exactly what the reader will recompute from this
+    # (partial) local snapshot.
+    matching_hash = compute_system_snapshot_hash(partial_rows, [])
+
+    db_session.add(
+        SystemWeeklyNarrative(
+            as_of_date=as_of.isoformat(),
+            narrative="Narrative for the week ending 8/16.",
+            generated_at=utcnow_naive(),
+            model_id="claude-sonnet-4-6",
+            prompt_version="v1",
+            metrics_snapshot_hash=matching_hash,
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/api/system/weekly-narrative")
+    assert response.status_code == 200
+    assert response.json()["is_stale"] is False

@@ -41,14 +41,19 @@ function SystemWeeklyNarrativeLede() {
     }
   }, [])
 
-  if (!data) return null
+  // Guard on the narrative text itself, not just the presence of a `data`
+  // object -- a cached row with an empty/whitespace-only `narrative` (e.g.
+  // an exit-0-but-empty `claude` run that slipped past the writer's guard)
+  // must render nothing rather than an empty bordered paragraph with just
+  // the meta line (PR #219 review finding 3).
+  if (!data || !data.narrative || !data.narrative.trim()) return null
 
   return (
     <section className="system-weekly-lede" aria-label="Weekly system recap">
       {data.is_stale && (
         <p className="system-weekly-lede-stale">
-          This week's recap may be out of date — the underlying metrics have
-          changed since it was written. Regenerate with{' '}
+          This week's recap may be out of date — newer data has landed since
+          this summary was generated. Regenerate with{' '}
           <code>scripts/generate_system_weekly_narrative.py</code>.
         </p>
       )}

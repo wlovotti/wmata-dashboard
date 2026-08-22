@@ -1419,7 +1419,7 @@ main {
   color: #64748b;
 }
 
-/* System weekly narrative lede (NOTES-86). SystemWeeklyNarrativeLede.jsx
+/* System weekly narrative lede (PR #219). SystemWeeklyNarrativeLede.jsx
    renders nothing until a narrative row exists in system_weekly_narrative,
    so this adds no layout shift to the default baseline (no narrative has
    been generated in dev/CI). */

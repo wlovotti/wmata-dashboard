@@ -1877,6 +1877,114 @@ routes:
         # The envelope still carries the system_target_value from the YAML.
         assert result["system_target_value"] == 78.0
 
+    def test_as_of_date_anchors_window_instead_of_latest_service_date(
+        self, db_session, sample_routes
+    ):
+        """`as_of_date`, when given, anchors the window on that date instead of
+        `_latest_service_date_with_stop_events` (PR #219 review finding 1).
+
+        Without a fix, `get_route_contributors` always anchors on the latest
+        stop_events date regardless of what's passed, so the system weekly
+        narrative's "biggest OTP-dragging routes" sections silently describe
+        the latest week of stop_events rather than the `--as-of` week being
+        summarized. TEST1 has a 60%-OTP week ending 60 days ago; a stray
+        recent stop_event on a different route makes the *latest* service
+        date land elsewhere. The default (no `as_of_date`) call must not see
+        TEST1's historical week at all; passing `as_of_date` for that
+        historical date must.
+        """
+        self._clear_cache()
+        from datetime import datetime as _dt
+
+        from api.aggregations import get_route_contributors
+        from src.models import StopEvent
+
+        historical_anchor = eastern_today() - timedelta(days=60)
+
+        # Baseline window ending at the historical anchor (80% OTP).
+        self._seed_system_baseline(db_session, otp=80.0, days_back=60)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        # TEST1's OTP events, all dated within the 7-day window ending at
+        # historical_anchor -- a 60% OTP week.
+        events_per_day = 100
+        on_time_count = int(round(0.60 * events_per_day))
+        late_count = events_per_day - on_time_count
+        rows = []
+        for i in range(5):
+            d = historical_anchor - timedelta(days=i)
+            base_ts = _dt.combine(d, _dt.min.time()).replace(hour=14)
+            for j in range(on_time_count):
+                rows.append(
+                    StopEvent(
+                        service_date=d.isoformat(),
+                        trip_id=f"TRIP_HIST_{i}_OT_{j}",
+                        route_id="TEST1",
+                        direction_id=0,
+                        stop_id="STOP_OTP_TEST1",
+                        stop_sequence=1,
+                        observed_arrival_ts=base_ts + timedelta(seconds=j),
+                        deviation_sec=0,
+                        source="proximity",
+                        schedule_relationship="SCHEDULED",
+                    )
+                )
+            for j in range(late_count):
+                rows.append(
+                    StopEvent(
+                        service_date=d.isoformat(),
+                        trip_id=f"TRIP_HIST_{i}_LATE_{j}",
+                        route_id="TEST1",
+                        direction_id=0,
+                        stop_id="STOP_OTP_TEST1",
+                        stop_sequence=1,
+                        observed_arrival_ts=base_ts + timedelta(seconds=on_time_count + j),
+                        deviation_sec=600,
+                        source="proximity",
+                        schedule_relationship="SCHEDULED",
+                    )
+                )
+        db_session.add_all(rows)
+        # A stray recent stop_event on a different route -- moves
+        # `_latest_service_date_with_stop_events` well past the historical
+        # window without giving TEST1 any recent data of its own.
+        recent_date = eastern_today() - timedelta(days=1)
+        db_session.add(
+            StopEvent(
+                service_date=recent_date.isoformat(),
+                trip_id="TRIP_RECENT_STRAY",
+                route_id="TEST2",
+                direction_id=0,
+                stop_id="STOP_OTP_TEST2",
+                stop_sequence=1,
+                observed_arrival_ts=_dt.combine(recent_date, _dt.min.time()).replace(hour=14),
+                deviation_sec=0,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+        db_session.commit()
+
+        # Default: anchors on the latest stop_events date (recent_date).
+        # TEST1 has no data there, so it's absent from the contributors list.
+        default_result = get_route_contributors(db_session, metric="otp", days=7)
+        default_ours = next(
+            (c for c in default_result["contributors"] if c["route_id"] == "TEST1"), None
+        )
+        assert default_ours is None
+
+        self._clear_cache()
+
+        # Explicit as_of_date: anchors on the historical window instead.
+        historical_result = get_route_contributors(
+            db_session, metric="otp", days=7, as_of_date=historical_anchor
+        )
+        historical_ours = next(
+            (c for c in historical_result["contributors"] if c["route_id"] == "TEST1"), None
+        )
+        assert historical_ours is not None
+        assert historical_ours["route_value"] == 60.0
+
 
 class TestComputeRouteDeltas:
     """Tests for `compute_route_deltas` (NOTES-38).

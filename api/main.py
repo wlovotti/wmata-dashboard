@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from api.aggregations import (
     _latest_service_date_with_stop_events,
@@ -536,7 +537,14 @@ async def get_system_weekly_narrative_endpoint():
     system_metrics_daily numbers for the cached week were revised, so the
     frontend can show a regeneration prompt.
 
-    Returns 404 when no narrative has been generated yet.
+    Returns 404 when no narrative has been generated yet, or when the
+    ``system_weekly_narrative`` table doesn't exist yet at all — nothing
+    creates it at API startup, so between a merge that adds this endpoint
+    and the one-time run of
+    ``scripts/migrate_create_system_weekly_narrative.py`` (which the
+    generation script also runs idempotently) a bare Overview load would
+    otherwise 500 with UndefinedTable instead of the 404 this docstring
+    documents.
 
     Returns:
         Dict with ``as_of_date`` (the last day of the summarized week),
@@ -545,7 +553,22 @@ async def get_system_weekly_narrative_endpoint():
     """
     db = get_session()
     try:
-        result = get_system_weekly_narrative(db)
+        try:
+            result = get_system_weekly_narrative(db)
+        except (ProgrammingError, OperationalError):
+            # system_weekly_narrative doesn't exist yet (PR #219 review
+            # finding 4) -- Postgres raises UndefinedTable wrapped as
+            # ProgrammingError, SQLite raises "no such table" wrapped as
+            # OperationalError. Either way this means "nothing generated
+            # yet," just one step earlier than the no-rows case below.
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "system_weekly_narrative table does not exist yet. "
+                    "Run: scripts/migrate_create_system_weekly_narrative.py "
+                    "then scripts/generate_system_weekly_narrative.py"
+                ),
+            ) from None
         if result is None:
             raise HTTPException(
                 status_code=404,

@@ -236,8 +236,10 @@ def _build_user_prompt(
             current week.
         prior_week_rows: Canonicalized system_metrics_daily rows for the
             week immediately before.
-        otp_contributors: ``get_route_contributors(db, metric="otp", days=7)`` result.
-        ewt_contributors: ``get_route_contributors(db, metric="ewt", days=7)`` result.
+        otp_contributors: ``get_route_contributors(db, metric="otp", days=7,
+            as_of_date=as_of_date)`` result.
+        ewt_contributors: ``get_route_contributors(db, metric="ewt", days=7,
+            as_of_date=as_of_date)`` result.
 
     Returns:
         User-turn text string ready for the API call.
@@ -320,7 +322,10 @@ def _generate_narrative(
         Tuple of ``(narrative_text, model_id_used)``.
 
     Raises:
-        SystemExit: If the ``claude`` subprocess exits with a non-zero status.
+        SystemExit: If the ``claude`` subprocess exits with a non-zero
+            status, or if it exits 0 but produces empty/whitespace-only
+            output (PR #219 review finding 3) -- either way, the caller
+            must not upsert a blank narrative.
     """
     user_text = _build_user_prompt(
         as_of_date, current_week_rows, prior_week_rows, otp_contributors, ewt_contributors
@@ -355,6 +360,16 @@ def _generate_narrative(
         sys.exit(result.returncode)
 
     narrative = result.stdout.strip()
+    if not narrative:
+        # An exit-0-but-empty `claude` run must not upsert an empty
+        # narrative -- the lede would otherwise render an empty bordered
+        # paragraph with just the meta line (PR #219 review finding 3).
+        error_detail = result.stderr.strip() if result.stderr.strip() else "(no stderr output)"
+        print(
+            f"\nERROR: `claude -p` exited 0 but produced empty output.\n{error_detail}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     return narrative, MODEL_ID
 
 
@@ -438,8 +453,19 @@ def _process_week(
             print(f"  {as_of_date.isoformat()}: hash matches — already up-to-date, skipping.")
             return
 
-    otp_contributors = get_route_contributors(db, metric="otp", days=WEEK_DAYS)
-    ewt_contributors = get_route_contributors(db, metric="ewt", days=WEEK_DAYS)
+    # Anchor contributors on the same window as the metrics summary
+    # (`as_of_date`), not `get_route_contributors`' own default anchor
+    # (`_latest_service_date_with_stop_events`) — otherwise the prompt's
+    # "biggest OTP/EWT-dragging routes this week" sections would silently
+    # describe the latest week of stop_events instead of the week actually
+    # being summarized whenever `--as-of` is used or stop_events extends
+    # past system_metrics_daily (PR #219 review finding 1).
+    otp_contributors = get_route_contributors(
+        db, metric="otp", days=WEEK_DAYS, as_of_date=as_of_date
+    )
+    ewt_contributors = get_route_contributors(
+        db, metric="ewt", days=WEEK_DAYS, as_of_date=as_of_date
+    )
 
     if dry_run:
         print(f"\n=== DRY RUN prompt for week ending {as_of_date.isoformat()} ===")
