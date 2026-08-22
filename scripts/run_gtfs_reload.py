@@ -34,6 +34,11 @@ pattern).
 Usage:
   uv run python scripts/run_gtfs_reload.py
   uv run python scripts/run_gtfs_reload.py --dry-run    # log the plan, skip the reload
+  uv run python scripts/run_gtfs_reload.py --max-age-days 7
+      # skip the reload (exit 0) if the newest gtfs_snapshots row is
+      # <= 7 days old; used by the pull-and-derive flow (spec
+      # 2026-08-22 stateless-collector, Task 9) so a reload happens at
+      # most weekly instead of on every pull.
 """
 
 import argparse
@@ -116,6 +121,24 @@ def clear_failure_marker() -> None:
         print(f"run_gtfs_reload: failed to clear failure marker: {exc}", file=sys.stderr)
 
 
+def reload_due(session, max_age_days: int) -> bool:
+    """True when the newest gtfs_snapshots row is older than ``max_age_days``.
+
+    The pull-and-derive flow (spec 2026-08-22 §3 step 1) calls the wrapper
+    with --max-age-days 7 so a reload happens at most weekly instead of on
+    every pull; no snapshot at all always means due.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import func
+
+    from src.models import GTFSSnapshot
+    from src.timezones import utcnow_naive
+
+    newest = session.query(func.max(GTFSSnapshot.snapshot_date)).scalar()
+    return newest is None or newest < utcnow_naive() - timedelta(days=max_age_days)
+
+
 def run_reload(log_handle, dry_run: bool) -> tuple[int, float]:
     """Spawn reload_gtfs_complete.py and stream its output into log_handle.
 
@@ -158,7 +181,28 @@ def main() -> int:
         action="store_true",
         help="Log the plan and exit 0 without invoking the reload subprocess.",
     )
+    parser.add_argument(
+        "--max-age-days",
+        type=int,
+        default=None,
+        help=(
+            "Skip the reload (exit 0) if the newest gtfs_snapshots row is "
+            "no older than this many days. Default (absent) always reloads, "
+            "preserving prior behavior."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.max_age_days is not None:
+        from src.database import get_session
+
+        session = get_session()
+        try:
+            if not reload_due(session, max_age_days=args.max_age_days):
+                print(f"GTFS snapshot is fresh (<= {args.max_age_days} days); skipping reload.")
+                return 0
+        finally:
+            session.close()
 
     LOGS_DIR.mkdir(exist_ok=True)
     # Eastern is the project's service-date timezone, but the wrapper

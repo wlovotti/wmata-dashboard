@@ -11,8 +11,9 @@ class RecordingUploader:
     """Stands in for S3Uploader; reports the pending files as shipped."""
 
     def __init__(self):
-        """Initialize with an empty call log."""
+        """Initialize with empty upload and prune call logs."""
         self.calls = []
+        self.prune_calls = []
 
     def upload_closed_files(self, archive_dir, key_prefix, skip):
         """Report every ``*.jsonl.zst`` file under ``archive_dir`` not in ``skip`` as shipped.
@@ -26,7 +27,8 @@ class RecordingUploader:
         return shipped
 
     def prune_uploaded(self, archive_dir, max_age_sec=48 * 3600):
-        """No-op stand-in for S3Uploader.prune_uploaded; always reports 0 pruned."""
+        """No-op stand-in for S3Uploader.prune_uploaded; records the call and reports 0 pruned."""
+        self.prune_calls.append(archive_dir)
         return 0
 
 
@@ -106,8 +108,15 @@ def test_run_upload_cycle_records_ships_per_feed(tmp_path, monkeypatch):
     that ``run_upload_cycle`` passes to the uploader — proving the
     open-path exclusion is actually wired through, not just true by
     accident because no open file existed.
+
+    Also asserts prune_uploaded is called once per stream dir (not just
+    upload_closed_files), and that the healthcheck ping fires only when
+    BOTH feeds shipped — here only "tu" shipped, so the ping must not
+    fire, and we record real calls to the monkeypatched
+    ping_healthcheck instead of trusting a bare ``lambda url: True``.
     """
-    monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: True)
+    pings = []
+    monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: pings.append(url))
     tu_dir, vp_dir = tmp_path / "tu", tmp_path / "vp"
     tu_dir.mkdir()
     vp_dir.mkdir()
@@ -130,3 +139,9 @@ def test_run_upload_cycle_records_ships_per_feed(tmp_path, monkeypatch):
     assert tu_w.open_path.name not in shipped  # the open file was never shipped
     tu_call = next(c for c in uploader.calls if c[1] == "raw-jsonl-archive/")
     assert tu_w.open_path in tu_call[2]  # ...because it was passed in `skip`
+
+    # prune_uploaded runs for every stream dir, regardless of whether it shipped.
+    assert uploader.prune_calls == [Path(tu_dir), Path(vp_dir)]
+
+    # Only "tu" shipped, so the ping must not fire even though it's fresh.
+    assert pings == []
