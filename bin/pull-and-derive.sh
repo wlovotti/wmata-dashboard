@@ -5,6 +5,10 @@
 #   bin/pull-and-derive.sh          # replay+derive lookback of 14 days
 #   bin/pull-and-derive.sh 35       # wider catch-up
 #
+# Requires: AWS credentials with read access to the four
+# raw-jsonl-archive S3 prefixes (root, sfmta/, vp/, sfmta_vp/), and a
+# local DATABASE_URL (.env) for the loader/replay/derive steps below.
+#
 # LOOKBACK_DAYS note: widening past 2026-06-13 is unsafe — June dates need
 # snapshot 12 and must go through scripts/local_recovery_2026_07.sh.
 set -euo pipefail
@@ -18,7 +22,12 @@ LOOKBACK_DAYS="${1:-14}"
 mkdir -p "$LOCAL_ARCHIVE" "$LOCAL_ARCHIVE_SFMTA" "$LOCAL_ARCHIVE_VP" "$LOCAL_ARCHIVE_SFMTA_VP"
 
 echo "== GTFS reload if stale (>7 days) =="
-PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --max-age-days 7
+# A transient WMATA API failure here must not block an otherwise-healthy
+# freshness run — stale-but-valid GTFS is the status quo, not a reason to
+# skip syncing/replaying/deriving fresh GTFS-RT data. Capture the exit
+# code and keep going, same treatment as the VP loaders below.
+gtfs_rc=0
+PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --max-age-days 7 || gtfs_rc=$?
 
 echo "== s3 sync raw archives =="
 # Root prefix holds WMATA TU directly; exclude the sibling sub-prefixes.
@@ -50,15 +59,21 @@ for i in $(seq "$LOOKBACK_DAYS" -1 0); do
 done
 if [ "${#failed[@]}" -gt 0 ]; then
   echo "Replay failed for: ${failed[*]} — aborting before derive." >&2
+  echo "Upstream status at abort: gtfs_reload rc=$gtfs_rc, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
   exit 1
 fi
 
 echo "== derive (self-targets zero-run dates) =="
 PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --lookback-days "$LOOKBACK_DAYS"
 
-if [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
-  echo "== summary: VP loader reported errors (wmata rc=$vp_wmata_rc, sfmta rc=$vp_sfmta_rc) — see loader output above for the failed file(s); rerun this script to retry them (manifest table skips whatever already loaded cleanly). Replay + derive completed anyway. ==" >&2
-  echo "Done (with VP loader errors — see summary above)."
+if [ "$gtfs_rc" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
+  echo "== summary: upstream step(s) reported errors — replay + derive completed anyway ==" >&2
+  echo "  gtfs_reload rc=$gtfs_rc (a transient WMATA API failure just leaves GTFS stale; rerun to retry)" >&2
+  echo "  vp_wmata   rc=$vp_wmata_rc" >&2
+  echo "  vp_sfmta   rc=$vp_sfmta_rc" >&2
+  echo "  (VP loader rc!=0: see loader output above for the failed file(s); rerun this" >&2
+  echo "  script to retry — the manifest table skips whatever already loaded cleanly)" >&2
+  echo "Done (with errors — see summary above)."
   exit 1
 fi
 echo "Done."

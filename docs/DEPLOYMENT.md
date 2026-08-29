@@ -26,15 +26,17 @@ are in the spec §5 runbook.
 > permanent raw store, written directly by the collector rather than
 > synced up after the fact.
 >
-> §1–§12 below document the outgoing `wmata-data` Lightsail VM (Phase 1)
+> §1–§11 below document the outgoing `wmata-data` Lightsail VM (Phase 1)
 > that the nano box replaces. That VM is scheduled for decommission (O3,
 > tracked alongside PR C) but isn't gone yet as of this writing — its
 > systemd units keep running unattended until the decommission actually
 > happens, so those sections stay as an accurate historical/operational
-> reference for as long as the box exists. Once O3 completes, §1–§12 (and
+> reference for as long as the box exists. Once O3 completes, §1–§11 (and
 > the `deployment/systemd/wmata-*` unit files they reference, several of
 > which this PR already removed from the repo since they have no future
-> redeploy) can be deleted outright.
+> redeploy) can be deleted outright. §12 is laptop-side `launchd` jobs —
+> orthogonal to the VM and to O3 — and is updated in place below to
+> reflect this PR's retirement of the `gtfs-reload` job.
 
 ---
 
@@ -50,7 +52,7 @@ are in the spec §5 runbook.
 | PGDATA | Attached Lightsail block-storage disk, starts ~50 GB, ~$5/mo |
 | Object storage | AWS S3 private bucket (weekly `pg_dump` + parquet archives) |
 | Firewall | SSH (22) only — ideally restricted to your IP; Postgres never publicly reachable |
-| DB access from laptop | Dev uses a local PostgreSQL 16 copy via `bin/refresh-dev-db.sh` (see "Local development data" below). `bin/db-tunnel.sh` (local **5433** → VM 5432) is ops-only — ad-hoc prod `psql` + `--from-vm` refresh |
+| DB access from laptop | Dev uses a local PostgreSQL 16 copy via `bin/refresh-dev-db.sh` (see "Local development data" below). Ad-hoc prod `psql` + `--from-vm` refresh against the still-running old VM use a manual SSH tunnel (local **5433** → VM 5432) — the `bin/db-tunnel.sh` wrapper was retired with the tunnel-based ingest path |
 
 See spec §3 for the full rationale. See spec §3.5 for the three-tier retention
 model that bounds the DB to a ~105 GB plateau.
@@ -244,10 +246,12 @@ ssh ubuntu@<INSTANCE_IP> 'journalctl -u wmata-collector -f'
 # 6. From laptop — open the SSH tunnel and point local API at VM
 #    Use local port 5433, NOT 5432: the laptop's dev Postgres@14 keeps 5432
 #    bound (CLAUDE.md keeps local on 14 for fast iteration), so forwarding
-#    5432 would collide. bin/db-tunnel.sh wraps this (5433 -> VM 5432) and
-#    re-adds the SSH key from the keychain after a reboot.
-bin/db-tunnel.sh              # or, manually:
-# ssh -N -L 5433:localhost:5432 ubuntu@<INSTANCE_IP> &
+#    5432 would collide. (Historical note: `bin/db-tunnel.sh` used to wrap
+#    this tunnel + re-add the SSH key from the keychain after a reboot; it
+#    was retired along with the tunnel-based ingest path by the
+#    stateless-collector cutover. Open the tunnel manually if you ever
+#    need one against the still-running old VM before its O3 decommission:)
+ssh -N -L 5433:localhost:5432 ubuntu@<INSTANCE_IP> &
 # In .env on laptop:
 #   DATABASE_URL=postgresql://wmata:<password>@localhost:5433/wmata_dashboard
 # Then restart the local API:
@@ -265,9 +269,11 @@ demand — never against the live VM DB.
 
 It pulls the latest weekly dump from
 `s3://wmata-dashboard-backups/wmata-db-backups/` (needs local AWS creds with
-`s3:GetObject`+`ListBucket` on that prefix). The SSH tunnel (`bin/db-tunnel.sh`)
-is now ops-only — ad-hoc prod `psql` and `bin/refresh-dev-db.sh --from-vm` — not
-the dev DB connection.
+`s3:GetObject`+`ListBucket` on that prefix). An SSH tunnel to the
+still-running old VM is ops-only — ad-hoc prod `psql` and
+`bin/refresh-dev-db.sh --from-vm` — never the dev DB connection; open one
+manually (`ssh -N -L 5433:localhost:5432 ubuntu@<INSTANCE_IP> &`), since the
+`bin/db-tunnel.sh` wrapper was retired with the tunnel-based ingest path.
 
 ---
 
@@ -767,8 +773,8 @@ jobs against the laptop DB. Full install/verify runbooks live in
 existence of these jobs is discoverable from the topology doc, not
 just the scripts directory.
 
-**Status column is load-bearing — check it, don't assume.** All three
-jobs below have a `.plist` in both `scripts/launchd/` and
+**Status column is load-bearing — check it, don't assume.** The two
+still-live jobs below have a `.plist` in both `scripts/launchd/` and
 `~/Library/LaunchAgents/`, but a plist sitting in `LaunchAgents/`
 proves nothing by itself; only `launchctl load -w` activates it.
 Verify live/actual state with:
@@ -777,12 +783,12 @@ Verify live/actual state with:
 launchctl list | grep wmata
 ```
 
-As of 2026-08-11, this returns **nothing** — all three jobs below are
+As of 2026-08-11, this returns **nothing** — both jobs below are
 installed-but-unloaded, not running on any schedule.
 
 | Job | Schedule (when loaded) | Status as of 2026-08-11 | Purpose |
 |---|---|---|---|
-| `com.wmata-dashboard.gtfs-reload` | weekly, Sun 04:00 local | **not loaded** — install runbook landed PR #196; not yet run (`scripts/launchd/README.md` §"First-run verification") | Reloads WMATA static GTFS (`scripts/reload_gtfs_complete.py`) into the laptop DB. Keeps `trips`/`routes`/`stops` current for derivation (`bin/pull-and-derive.sh` → `pipelines/run_daily_batch.py`), which reads GTFS from the laptop DB, not the VM's. `gtfs_snapshots.created_at` has been stuck at 2026-07-12 since before this job existed as a laptop job — see `scripts/launchd/README.md` for why this belongs here rather than on the VM. |
+| `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired** — this PR (stateless-collector cutover) deleted the plist and its `scripts/launchd/README.md` section. The weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. It was never loaded in production (`launchctl list | grep wmata` never showed it), so retiring it changed nothing live. | ~~Reloaded WMATA static GTFS into the laptop DB~~ — see `bin/pull-and-derive.sh` instead. |
 | `com.wmata-dashboard.daily-batch` | daily, 03:00 local | **not loaded** | Runs `pipelines/run_daily_batch.py` directly. Largely superseded day-to-day by the manual `bin/pull-and-derive.sh` flow (which also derives). |
 | `com.wmata-dashboard.retain-trip-update-state` | daily, 04:30 local | **not loaded** | Runs `pipelines/retain_trip_update_state.py` — prunes `trip_update_state` to a 14-day default retention window. |
 
