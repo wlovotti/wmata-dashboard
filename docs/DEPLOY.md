@@ -1,5 +1,9 @@
 # VM Deploy Runbook
 
+> This runbook covers the outgoing `wmata-data` VM; its unit files were
+> removed from the repo at the stateless-collector cutover — the live
+> collector runbook is `docs/DEPLOYMENT.md` §13.
+
 Code deployment to the production Lightsail VM (static IP `52.54.130.186`,
 AWS Lightsail us-east-1). SSH key: `~/.ssh/id_ed25519`. After a laptop reboot run
 `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` before connecting.
@@ -73,8 +77,17 @@ Then run the post-deploy smoke check (see §4).
 
 When a `.service` or `.timer` file under `deployment/systemd/` has changed,
 you must copy the updated unit file(s) to `/etc/systemd/system/` **and**
-reload systemd before restarting. See `docs/DEPLOYMENT.md` §2 for the
-canonical §2 copy + daemon-reload + restart sequence.
+reload systemd before restarting. This copy → `daemon-reload` → restart
+sequence is still the canonical procedure to cite for any systemd-unit
+PR — see `docs/DEPLOYMENT.md` §2.
+
+**Historical — this VM's units are gone from the repo.** The cp block and
+unit table below name specific `deployment/systemd/wmata-*` files that
+this repo no longer has (removed at the stateless-collector cutover,
+since this VM has no future redeploy). They're kept only as a record of
+what's still installed on the still-running old VM until its O3
+decommission; don't use them as a template for the live nano collector
+(`collector@.service` — see `docs/DEPLOYMENT.md` §13.4).
 
 ```bash
 ssh ubuntu@52.54.130.186
@@ -110,7 +123,7 @@ sudo systemctl restart wmata-collector.service
 sudo systemctl status wmata-collector.service
 ```
 
-**Unit names and their roles:**
+**Unit names and their roles (historical — this old VM only):**
 
 | Unit | Type | Schedule / behavior |
 |---|---|---|
@@ -127,6 +140,10 @@ sudo systemctl status wmata-collector.service
 ---
 
 ## 3. Roll back
+
+**Historical — this old VM only** (per the banner at the top): the unit
+file this section copies back, `wmata-collector.service`, is one of the
+files removed from the repo at the stateless-collector cutover.
 
 If the deploy breaks the collector, revert to the previous SHA immediately to
 minimise the data gap.

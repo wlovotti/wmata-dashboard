@@ -11,43 +11,32 @@ from anything here.
 This document covers the deployed topology; the cutover steps that produced it
 are in the spec §5 runbook.
 
-> **⚠️ Topology change 2026-07-18 (Path 2a, July-incident recovery):** the
-> **laptop's local PostgreSQL 16 (`wmata_dashboard`) is now the system of
-> record**; the VM no longer runs derivation. `wmata-metrics.timer` and
-> `wmata-window-derived.timer` are stopped AND disabled — do not re-enable
-> them. The VM's remaining jobs are the collector (with dead-man ping,
-> `COLLECTOR_HEALTHCHECK_URL` in its `.env`), `wmata-backup.timer`, and
-> `wmata-archive-positions.timer`. The raw JSONL archive on the VM is split
-> across `/home/wmata/wmata-dashboard/archive/raw_snapshots/` **and**
-> `/mnt/pgdata/archive-overflow/` (2026-07-17 disk-full remediation) —
-> rsync both. The SFMTA sidecar (2026-07-22) writes its own raw JSONL to
-> `/home/wmata/wmata-dashboard/archive/sfmta_raw_snapshots/`, which is a
-> **single copy** on the VM until synced — `bin/pull-and-derive.sh` pulls
-> it into a separate local `archive/sfmta_raw_snapshots/` dir alongside
-> the WMATA rsync (fixed 2026-08-08, PR #182). Interim freshness: run
-> `bin/pull-and-derive.sh` on the laptop (needs `bin/db-tunnel.sh` up).
-> The stateless-collector rewrite (VM → S3-only, no VM Postgres) is a
-> separate follow-up plan. See
-> `docs/superpowers/specs/2026-07-14-laptop-recovery-design.md`.
-> Recurring jobs that now belong on the laptop rather than the VM (GTFS
-> reload, daily batch, trip-update-state retention) are in §12 below —
-> as of 2026-08-11 all three are installed but **not loaded**
-> (`launchctl list | grep wmata` returns nothing).
+> **✅ Topology (current, since the stateless-collector cutover — PR C):**
+> a stateless nano box (`wmata-poller`) is the only running collector: two
+> processes, `collector@wmata` and `collector@sfmta`, each poll their
+> agency's GTFS-RT, write rotating zstd JSONL, and upload to S3 on a
+> 15-minute cadence — no database anywhere on that box. §13 below is the
+> live runbook for it. **The laptop's local PostgreSQL 16
+> (`wmata_dashboard`) is the system of record**; freshness is
+> `bin/pull-and-derive.sh`, which `aws s3 sync`s the four raw prefixes
+> under `s3://wmata-dashboard-backups/raw-jsonl-archive/` straight to the
+> laptop, loads VP archives (`pipelines/load_vp_archive.py`), replays TU
+> archives, and derives — no SSH tunnel, no VM access, no manual S3 sync
+> step required. `s3://wmata-dashboard-backups/raw-jsonl-archive/` is the
+> permanent raw store, written directly by the collector rather than
+> synced up after the fact.
 >
-> **Manual S3 sync (interim, until NOTES-95 lands):** the permanent raw
-> store is `s3://wmata-dashboard-backups/raw-jsonl-archive/`, with a
-> `sfmta/` prefix alongside the WMATA-feed objects (established
-> 2026-08-08; the IAM user's `PutObject` grant covers both prefixes —
-> the policy grants prefixes, not the bucket root). After
-> `bin/pull-and-derive.sh` pulls both archives laptop-side, sync each
-> local dir up separately, e.g.
-> `aws s3 sync archive/raw_snapshots/ s3://wmata-dashboard-backups/raw-jsonl-archive/` and
-> `aws s3 sync archive/sfmta_raw_snapshots/ s3://wmata-dashboard-backups/raw-jsonl-archive/sfmta/`,
-> then `export VM_HOST=ubuntu@<vm-ip>` (same convention as `bin/db-tunnel.sh`)
-> and run `bin/prune-vm-archive.sh` (dry-run first to review what it would
-> delete, then again with `--delete`) to verify each VM-side file against
-> its synced S3 object and drain the ones older than the safety window —
-> the sync step above only copies, it never deletes the VM-side originals.
+> §1–§11 below document the outgoing `wmata-data` Lightsail VM (Phase 1)
+> that the nano box replaces. That VM is scheduled for decommission (O3,
+> tracked alongside PR C) but isn't gone yet as of this writing — its
+> systemd units keep running unattended until the decommission actually
+> happens, so those sections stay as an accurate historical/operational
+> reference for as long as the box exists. Once O3 completes, §1–§11 (and
+> the `deployment/systemd/wmata-*` unit files they reference, several of
+> which this PR already removed from the repo since they have no future
+> redeploy) can be deleted outright. §12 is laptop-side `launchd` jobs —
+> orthogonal to the VM and to O3 — and is updated in place below to
+> reflect this PR's retirement of the `gtfs-reload` job.
 
 ---
 
@@ -63,7 +52,7 @@ are in the spec §5 runbook.
 | PGDATA | Attached Lightsail block-storage disk, starts ~50 GB, ~$5/mo |
 | Object storage | AWS S3 private bucket (weekly `pg_dump` + parquet archives) |
 | Firewall | SSH (22) only — ideally restricted to your IP; Postgres never publicly reachable |
-| DB access from laptop | Dev uses a local PostgreSQL 16 copy via `bin/refresh-dev-db.sh` (see "Local development data" below). `bin/db-tunnel.sh` (local **5433** → VM 5432) is ops-only — ad-hoc prod `psql` + `--from-vm` refresh |
+| DB access from laptop | Dev uses a local PostgreSQL 16 copy via `bin/refresh-dev-db.sh` (see "Local development data" below). Ad-hoc prod `psql` + `--from-vm` refresh against the still-running old VM use a manual SSH tunnel (local **5433** → VM 5432) — the `bin/db-tunnel.sh` wrapper was retired with the tunnel-based ingest path |
 
 See spec §3 for the full rationale. See spec §3.5 for the three-tier retention
 model that bounds the DB to a ~105 GB plateau.
@@ -257,10 +246,12 @@ ssh ubuntu@<INSTANCE_IP> 'journalctl -u wmata-collector -f'
 # 6. From laptop — open the SSH tunnel and point local API at VM
 #    Use local port 5433, NOT 5432: the laptop's dev Postgres@14 keeps 5432
 #    bound (CLAUDE.md keeps local on 14 for fast iteration), so forwarding
-#    5432 would collide. bin/db-tunnel.sh wraps this (5433 -> VM 5432) and
-#    re-adds the SSH key from the keychain after a reboot.
-bin/db-tunnel.sh              # or, manually:
-# ssh -N -L 5433:localhost:5432 ubuntu@<INSTANCE_IP> &
+#    5432 would collide. (Historical note: `bin/db-tunnel.sh` used to wrap
+#    this tunnel + re-add the SSH key from the keychain after a reboot; it
+#    was retired along with the tunnel-based ingest path by the
+#    stateless-collector cutover. Open the tunnel manually if you ever
+#    need one against the still-running old VM before its O3 decommission:)
+ssh -N -L 5433:localhost:5432 ubuntu@<INSTANCE_IP> &
 # In .env on laptop:
 #   DATABASE_URL=postgresql://wmata:<password>@localhost:5433/wmata_dashboard
 # Then restart the local API:
@@ -278,9 +269,11 @@ demand — never against the live VM DB.
 
 It pulls the latest weekly dump from
 `s3://wmata-dashboard-backups/wmata-db-backups/` (needs local AWS creds with
-`s3:GetObject`+`ListBucket` on that prefix). The SSH tunnel (`bin/db-tunnel.sh`)
-is now ops-only — ad-hoc prod `psql` and `bin/refresh-dev-db.sh --from-vm` — not
-the dev DB connection.
+`s3:GetObject`+`ListBucket` on that prefix). An SSH tunnel to the
+still-running old VM is ops-only — ad-hoc prod `psql` and
+`bin/refresh-dev-db.sh --from-vm` — never the dev DB connection; open one
+manually (`ssh -N -L 5433:localhost:5432 ubuntu@<INSTANCE_IP> &`), since the
+`bin/db-tunnel.sh` wrapper was retired with the tunnel-based ingest path.
 
 ---
 
@@ -780,8 +773,8 @@ jobs against the laptop DB. Full install/verify runbooks live in
 existence of these jobs is discoverable from the topology doc, not
 just the scripts directory.
 
-**Status column is load-bearing — check it, don't assume.** All three
-jobs below have a `.plist` in both `scripts/launchd/` and
+**Status column is load-bearing — check it, don't assume.** The two
+still-live jobs below have a `.plist` in both `scripts/launchd/` and
 `~/Library/LaunchAgents/`, but a plist sitting in `LaunchAgents/`
 proves nothing by itself; only `launchctl load -w` activates it.
 Verify live/actual state with:
@@ -790,12 +783,12 @@ Verify live/actual state with:
 launchctl list | grep wmata
 ```
 
-As of 2026-08-11, this returns **nothing** — all three jobs below are
+As of 2026-08-11, this returns **nothing** — both jobs below are
 installed-but-unloaded, not running on any schedule.
 
 | Job | Schedule (when loaded) | Status as of 2026-08-11 | Purpose |
 |---|---|---|---|
-| `com.wmata-dashboard.gtfs-reload` | weekly, Sun 04:00 local | **not loaded** — install runbook landed PR #196; not yet run (`scripts/launchd/README.md` §"First-run verification") | Reloads WMATA static GTFS (`scripts/reload_gtfs_complete.py`) into the laptop DB. Keeps `trips`/`routes`/`stops` current for derivation (`bin/pull-and-derive.sh` → `pipelines/run_daily_batch.py`), which reads GTFS from the laptop DB, not the VM's. `gtfs_snapshots.created_at` has been stuck at 2026-07-12 since before this job existed as a laptop job — see `scripts/launchd/README.md` for why this belongs here rather than on the VM. |
+| `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired** — this PR (stateless-collector cutover) deleted the plist and its `scripts/launchd/README.md` section. The weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. It was never loaded in production (`launchctl list | grep wmata` never showed it), so retiring it changed nothing live. | ~~Reloaded WMATA static GTFS into the laptop DB~~ — see `bin/pull-and-derive.sh` instead. |
 | `com.wmata-dashboard.daily-batch` | daily, 03:00 local | **not loaded** | Runs `pipelines/run_daily_batch.py` directly. Largely superseded day-to-day by the manual `bin/pull-and-derive.sh` flow (which also derives). |
 | `com.wmata-dashboard.retain-trip-update-state` | daily, 04:30 local | **not loaded** | Runs `pipelines/retain_trip_update_state.py` — prunes `trip_update_state` to a 14-day default retention window. |
 
@@ -805,17 +798,17 @@ locally) or `psql -d wmata_dashboard -Atc "SELECT max(created_at) FROM gtfs_snap
 
 ---
 
-## 13. Stateless collector (nano) — NOTES-95
+## 13. Stateless collector (nano) — live topology
 
-**Status:** this section documents PR A of a three-PR sequence closing
-NOTES-95 (`docs/superpowers/specs/2026-08-22-stateless-collector-design.md`
-is the authoritative design). It covers provisioning a **new, separate**
-`nano_3_0` instance and installing the templated unit on it — it does
-**not** retire the `wmata-data` VM described in §1–§12 above, and the
-2026-07-18 interim banner at the top of this document is unchanged. Per
-the spec's decision 3, the new box runs in parallel with the existing VM
-for ≥1 week before cutover; the cutover itself, and the accompanying
-NOTES.md punch-list edit, land in PR C.
+**Status:** this section documents the stateless-collector rewrite, shipped
+across three PRs (#222 VM side, #223 VP loader + manifest + reload gate,
+and the cutover PR that retired the tunnel path —
+`docs/superpowers/specs/2026-08-22-stateless-collector-design.md` is the
+authoritative design). The ≥1-week parallel-run verification against the
+old `wmata-data` VM (spec decision 3) ran 2026-08-22→28 and returned a GO
+verdict — see the cutover PR body for the full O1/O2 numbers. This is now
+the sole live collector path; §1–§11 above describe the outgoing VM,
+pending its O3 decommission.
 
 `scripts/stateless_collector.py --agency {wmata,sfmta}` (Tasks 1–4) is a
 DB-free poll → zstd JSONL → S3 loop — no Postgres, no timers beyond the
@@ -830,9 +823,9 @@ Same high-level checklist as §2, sized down:
 1. Create a fresh Lightsail `nano_3_0` instance ($5/mo, 512 MB RAM,
    20 GB SSD, us-east-1, Ubuntu LTS) — **do not** reuse or resize the
    existing `wmata-data` VM; Lightsail cannot downsize an instance in
-   place, and the parallel-run verification (tracked in the cutover
-   plan, landing in PR C — not documented in this section) depends on
-   the old VM staying untouched.
+   place, and the ≥1-week parallel-run verification (§13 status note
+   above — completed 2026-08-22→28, GO) depended on the old VM staying
+   untouched for its duration.
 2. Restrict the Lightsail firewall to SSH (22) only.
 3. Follow §2.1–§2.4 for SSH key setup, the `wmata` service account
    (no interactive login, no sudo), system packages, and `uv`.
@@ -916,10 +909,11 @@ journalctl -u collector@wmata -f
 journalctl -u collector@sfmta -f
 ```
 
-During the ≥1-week parallel-run overlap with the old VM (see the status
-note at the top of this section and the cutover plan for
-cross-verification), also periodically record both instances' memory
-RSS on this box — the nano's 512 MB is shared between them:
+During the ≥1-week parallel-run overlap with the old VM (2026-08-22→28,
+see the status note at the top of this section for the O1/O2 result),
+both instances' memory RSS on this box was recorded periodically — the
+nano's 512 MB is shared between them (observed steady-state: 74 MB
+`collector@wmata`, 68 MB `collector@sfmta`):
 
 ```bash
 systemctl status collector@wmata collector@sfmta   # ActiveState + Memory
@@ -934,7 +928,7 @@ VM — don't let a resource squeeze force an early cutover.
 ### 13.5 healthchecks.io checks
 
 Create **two new checks** (one per agency — independent of any existing
-WMATA collector check tied to the old VM in §1–§12), each configured with
+WMATA collector check tied to the old VM in §1–§11), each configured with
 **period 5 min / grace 45 min**:
 
 - **Period 5 min** because `PingGate` (`src/stateless_poller.py`)
@@ -963,8 +957,8 @@ WMATA collector check tied to the old VM in §1–§12), each configured with
   window with zero active vehicles produces no new rows, so the writer
   never rotates a file and the upload cycle has nothing to ship, which
   means no ping and, once the grace elapses, a page even though the
-  collector is working correctly. Accepted for now; tracked as a
-  punch-list item to revisit at cutover.
+  collector is working correctly. Accepted for now; tracked as
+  [NOTES-132](../notes/NOTES-132.md).
 
 Set each check's ping URL into `COLLECTOR_HEALTHCHECK_URL` /
 `SFMTA_COLLECTOR_HEALTHCHECK_URL` in the matching `.env.<agency>` file,
@@ -974,5 +968,8 @@ caveat as §9.
 
 ---
 
-**Last Updated:** 2026-08-22
-**Deployment Cost:** ~$17/mo ($12 instance + ~$5 block disk; S3 negligible at this scale)
+**Last Updated:** 2026-08-28
+**Deployment Cost:** ~$5/mo (the `nano_3_0` collector box; S3 negligible at
+this scale) once the old `wmata-data` VM (§1–§11, ~$17/mo — $12 instance +
+~$5 block disk) is decommissioned (O3); both run in parallel, ~$22/mo
+combined, until then.

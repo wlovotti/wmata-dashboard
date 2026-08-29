@@ -4,7 +4,8 @@ Regression coverage for the 2026-06/07 production incident: the
 vehicle_positions query must be bounded by timestamp (so Postgres can use
 idx_route_timestamp instead of seq-scanning the whole table) WITHOUT
 dropping legitimate past-midnight positions, while excluding rows whose
-timestamp is wildly outside the service day (the NOTES-81 phantom rows).
+timestamp is wildly outside the service day (documented phantom rows from
+stale AVL clocks).
 """
 
 from datetime import date, datetime
@@ -88,7 +89,7 @@ def test_derive_keeps_past_midnight_positions_and_drops_phantom_timestamps(pg_se
                 trip_start_date="20260702",
                 latitude=STOP_LAT,
                 longitude=STOP_LON,
-                timestamp=datetime(2025, 10, 15, 12, 0, 0),  # NOTES-81 phantom
+                timestamp=datetime(2025, 10, 15, 12, 0, 0),  # phantom timestamp
             ),
         ]
     )

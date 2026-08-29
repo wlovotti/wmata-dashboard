@@ -2,9 +2,9 @@
 
 Each yaml captures everything agency-specific about data collection: feed
 URLs, auth placement, polling cadences, archive/pid paths, and env-var
-names for secrets. The dataclass is the seed of the multi-agency engine
-(NOTES-95): anything that can't be expressed here is, by definition, a
-code change that engine needs.
+names for secrets. The dataclass is the seed of the multi-agency stateless
+collector: anything that can't be expressed here is, by definition, a
+code change that collector needs.
 """
 
 import os

@@ -1,6 +1,6 @@
 """Stateless GTFS-RT collector — poll → zstd JSONL → S3 every 15 min → hc ping.
 
-The Path 2a endpoint (NOTES-95): no database anywhere in this process.
+The Path 2a endpoint: no database anywhere in this process.
 Reuses WMATADataCollector purely as a fetch/parse client (its internal
 archive writer and DB methods are never used); archives TU and VP rows to
 per-feed JSONL streams rotating every 15 minutes; ships closed files to S3

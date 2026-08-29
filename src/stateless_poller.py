@@ -27,8 +27,9 @@ class PingGate:
     ``maybe_ping(now)`` pings when every recorded feed shipped within
     ``freshness_sec`` AND both "tu" and "vp" have shipped at least once,
     rate-limited to one ping per ``min_gap_sec``. A wedged feed therefore
-    silences the check within ~freshness_sec — this single signal subsumes
-    the VP-path dead-man coverage item (NOTES-94; see spec §2).
+    silences the check within ~freshness_sec — this single signal covers a
+    VP-only collector failure just as well as a whole-process death (see
+    spec §2), which a TU-only ping historically missed.
     """
 
     def __init__(self, url: str | None, freshness_sec: int = 1200, min_gap_sec: int = 300):
@@ -79,8 +80,9 @@ def archive_vp_rows(
     """Append one line per vehicle, adding the poll's ``collected_at`` (naive UTC).
 
     The raw GTFS-RT epoch ``timestamp`` is preserved untouched — the
-    NOTES-81 phantom-timestamp guard is applied by the laptop-side loader,
-    never at collection (raw stays raw; spec §1).
+    phantom-timestamp guard (stale AVL clocks reporting fixes hours or
+    months in the past) is applied by the laptop-side loader, never at
+    collection (raw stays raw; spec §1).
     """
     for vehicle in vehicles:
         row = dict(vehicle)

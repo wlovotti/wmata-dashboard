@@ -13,7 +13,7 @@ def test_position_window_edt_spans_48h_from_eastern_midnight():
     (stop_times hours can exceed 24), so positions for a service date can
     land on the next calendar day. Two full Eastern days is generous
     enough for any real service while still excluding phantom timestamps
-    months away (NOTES-81).
+    months away.
     """
     start, end = service_date_position_window_utc(date(2026, 7, 2))
     assert start == datetime(2026, 7, 2, 4, 0, 0)

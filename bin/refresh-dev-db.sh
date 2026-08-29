@@ -9,7 +9,9 @@
 #   bin/refresh-dev-db.sh --scratch --full  # include raw-feed tables so the pipeline can run (~31 GiB)
 #   bin/refresh-dev-db.sh --clobber-primary # drop+recreate wmata_dashboard, restore the latest S3 dump (~17 GiB slim)
 #   bin/refresh-dev-db.sh --prune-gtfs   # after restore, delete is_current=False stop_times history (~9 GiB; VACUUM FULL)
-#   bin/refresh-dev-db.sh --from-vm      # source a fresh pg_dump over the tunnel (bin/db-tunnel.sh) instead of S3
+#   bin/refresh-dev-db.sh --from-vm      # source a fresh pg_dump over a manual SSH tunnel instead of S3
+#                                         # (the bin/db-tunnel.sh wrapper was retired with the tunnel-based
+#                                         # ingest path; open the tunnel yourself first — see below)
 #
 # Slim (default) excludes the raw-feed tables at the pg_restore TOC level, so their
 # data is never written to disk (no transient spike). The read-only API never reads
@@ -20,7 +22,7 @@ set -euo pipefail
 BUCKET="${REFRESH_BUCKET:-wmata-dashboard-backups}"
 PREFIX="${REFRESH_PREFIX:-wmata-db-backups}"
 LOCAL_PORT="${REFRESH_PORT:-5432}"
-TUNNEL_PORT="${REFRESH_TUNNEL_PORT:-5433}"   # bin/db-tunnel.sh forwards 5433 -> VM 5432
+TUNNEL_PORT="${REFRESH_TUNNEL_PORT:-5433}"   # a manual `ssh -N -L 5433:localhost:5432 ...` tunnel forwards this -> VM 5432
 VM_DB_USER="${REFRESH_VM_DB_USER:-wmata}"
 
 # Raw-feed tables the read-only API never queries (verified: no inbound FKs).
@@ -64,7 +66,9 @@ DUMP="$TMP/dump.fc"
 if [ "$MODE_FROM_VM" -eq 1 ]; then
   echo "Sourcing fresh pg_dump from the VM over the tunnel (localhost:${TUNNEL_PORT})..."
   if ! lsof -nP -iTCP:"${TUNNEL_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "Tunnel not up. Run bin/db-tunnel.sh in another terminal first." >&2; exit 1
+    echo "Tunnel not up. Open one in another terminal first:" >&2
+    echo "  ssh -N -L ${TUNNEL_PORT}:localhost:5432 ubuntu@<vm-ip> &" >&2
+    exit 1
   fi
   pg_dump -Fc -h localhost -p "${TUNNEL_PORT}" -U "${VM_DB_USER}" wmata_dashboard > "$DUMP"
 else

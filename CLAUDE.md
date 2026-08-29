@@ -2,12 +2,13 @@
 
 WMATA vs SFMTA (Muni) bus-performance dashboard. FastAPI + Postgres
 backend, React/Vite frontend. **The laptop's local PostgreSQL 16
-(`wmata_dashboard`) is the system of record**; the Lightsail VM only
-collects raw GTFS-RT (WMATA collector + SFMTA sidecar) and archives
-it. API + frontend run locally against the local DB. Freshness: run
-`bin/pull-and-derive.sh` (needs `bin/db-tunnel.sh` up; both need
-`VM_HOST` exported). Topology/ops detail: `docs/DEPLOYMENT.md`.
-Punch list: `NOTES.md` (index; item bodies in `notes/NOTES-N.md`).
+(`wmata_dashboard`) is the system of record**; a stateless nano
+collector polls WMATA + SFMTA GTFS-RT and uploads raw JSONL to S3 (no
+database on the collector box). API + frontend run locally against the
+local DB. Freshness: run `bin/pull-and-derive.sh` (syncs the S3
+archives, loads + replays, derives — no tunnel or VM access needed).
+Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: `NOTES.md`
+(index; item bodies in `notes/NOTES-N.md`).
 
 ## Commands
 
@@ -15,8 +16,7 @@ Punch list: `NOTES.md` (index; item bodies in `notes/NOTES-N.md`).
 uv sync --extra dev                          # install (--extra viz --extra postgres for matplotlib/psycopg2 scripts)
 uv run uvicorn api.main:app --reload         # API on :8000
 cd frontend && npm run dev                   # frontend on :5173
-bin/db-tunnel.sh                             # ops-only SSH tunnel, local 5433 -> VM 5432
-bin/pull-and-derive.sh                       # freshness: rsync VM raw archives + derive locally
+bin/pull-and-derive.sh                       # freshness: sync S3 raw archives + load + replay + derive locally
 uv run python pipelines/run_daily_batch.py   # derive + aggregate + rollup (--agency sfmta for Muni)
 psql -d wmata_dashboard                      # ad-hoc queries (Muni sidecar DB: sfmta_dashboard)
 uv run pytest -m smoke                       # fast tests

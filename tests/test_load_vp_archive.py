@@ -1,4 +1,4 @@
-"""Tests for the ``vp_archive_loaded_files`` manifest model (NOTES-95).
+"""Tests for the ``vp_archive_loaded_files`` manifest model.
 
 Started here (Task 6: model + migration); extended in Task 7 with the
 loader function that consumes this manifest for idempotency.
@@ -92,7 +92,7 @@ def test_double_load_is_idempotent(db_session, tmp_path):
 
 
 def test_phantom_timestamp_dropped_and_counted(db_session, tmp_path):
-    """NOTES-81: a +24h vehicle-reported timestamp never reaches the table."""
+    """A +24h phantom vehicle-reported timestamp never reaches the table."""
     from pipelines.load_vp_archive import load_vp_file
     from src.models import VehiclePosition, VpArchiveLoadedFile
 
@@ -226,7 +226,7 @@ def test_absurd_epoch_dropped_and_good_rows_still_load(db_session, tmp_path):
     Regression test for review round 3: the per-line try only wrapped
     ``json.loads(raw.decode())`` — ``parse_vp_line(obj)`` ran OUTSIDE that
     try, so a syntactically valid JSON line with a garbage ``timestamp``
-    value (e.g. exactly the NOTES-81 phantom pattern, just more extreme)
+    value (e.g. exactly the documented phantom-timestamp pattern, just more extreme)
     raised straight out of ``from_epoch_naive_utc`` (``ValueError``:
     "year ... is out of range") and poisoned the whole file at file
     granularity — no manifest row written, re-failing identically forever.

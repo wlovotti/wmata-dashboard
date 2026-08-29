@@ -25,11 +25,11 @@ identically per agency, shown side by side with honest comparability
 caveats. Audience for now: personal. Every open item below either
 serves this or is explicitly parked.
 
-## Ops & reliability (parked pending NOTES-95)
+## Ops & reliability
 
-- [NOTES-95](notes/NOTES-95.md) Stateless-collector rewrite (Path 2a, second half) — sev medium / eff high — needs its own spec/plan cycle
-- [NOTES-94](notes/NOTES-94.md) VP-path dead-man coverage — sev low / eff low — subsumed by NOTES-95 if it lands first
-- [NOTES-81](notes/NOTES-81.md) Phantom vehicle-reported timestamps — sev low / eff low — fold guard into NOTES-95 if it starts first
+- [NOTES-131](notes/NOTES-131.md) Full local test suite reads the production database — sev low / eff medium — unblocked
+- [NOTES-132](notes/NOTES-132.md) Dead-man ping can false-positive on an empty-but-healthy feed — sev low / eff low-medium — unblocked
+- [NOTES-133](notes/NOTES-133.md) Stateless-collector hardening follow-ups (deferred review minors) — sev low / eff low each — unblocked; good notes-batch candidate
 - [NOTES-102](notes/NOTES-102.md) Backfill June recovery-window trip_update truncation — sev low / eff low — unblocked; needs S3 pull for 6/14–16 + snapshot-12 GTFS pin
 - [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189); the agency comparison page (PR #198) now annotates this via its caveats list; 2026-08-11 addendum: laptop VP-only numerator caps ~33%, so ALL laptop SFMTA dates flag partial
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
