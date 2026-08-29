@@ -6,8 +6,11 @@ the failure mode wasn't a broken reload (PR #48 made the script
 transactional and FK-safe) but forgetting to run it. The schedule
 went 6 months stale before someone noticed.
 
-This wrapper is what `com.wmata-dashboard.gtfs-reload.plist` invokes
-weekly. Its job is small:
+This wrapper is invoked as step 1 of `bin/pull-and-derive.sh`
+(`--max-age-days 7`, gating on snapshot age rather than a fixed
+schedule) — previously it was what the now-retired
+`com.wmata-dashboard.gtfs-reload.plist` launchd job invoked weekly.
+Its job is small:
 
 1. Spawn `reload_gtfs_complete.py` as a subprocess and capture its
    stdout/stderr into a per-run log file at

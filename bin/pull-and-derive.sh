@@ -64,6 +64,10 @@ if [ "${#failed[@]}" -gt 0 ]; then
 fi
 
 echo "== derive (self-targets zero-run dates) =="
+# Echo upstream status before derive, not just in the summary below: a
+# derive failure trips `set -e` right here, which would otherwise skip
+# straight past the summary block and lose this information.
+echo "Upstream status going into derive: gtfs_reload rc=$gtfs_rc, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
 PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --lookback-days "$LOOKBACK_DAYS"
 
 if [ "$gtfs_rc" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
@@ -73,7 +77,15 @@ if [ "$gtfs_rc" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ];
   echo "  vp_sfmta   rc=$vp_sfmta_rc" >&2
   echo "  (VP loader rc!=0: see loader output above for the failed file(s); rerun this" >&2
   echo "  script to retry — the manifest table skips whatever already loaded cleanly)" >&2
-  echo "Done (with errors — see summary above)."
+  if [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
+    echo "  NOTE: derive already ran against the partial VP data — those dates now have" >&2
+    echo "  runs rows and will NOT be auto-revisited by a future run_daily_batch.py" >&2
+    echo "  (determine_target_dates only picks up zero-runs-row dates — NOTES-113's" >&2
+    echo "  failure shape). After fixing the loader, either delete the affected dates'" >&2
+    echo "  runs rows and rerun this script, or re-run the per-date derive pipelines" >&2
+    echo "  directly (pipelines/derive_stop_events_from_state.py --all-routes --date D)." >&2
+  fi
+  echo "Done (with errors — see summary above)." >&2
   exit 1
 fi
 echo "Done."

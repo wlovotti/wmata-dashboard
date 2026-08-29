@@ -807,7 +807,7 @@ and the cutover PR that retired the tunnel path —
 authoritative design). The ≥1-week parallel-run verification against the
 old `wmata-data` VM (spec decision 3) ran 2026-08-22→28 and returned a GO
 verdict — see the cutover PR body for the full O1/O2 numbers. This is now
-the sole live collector path; §1–§12 above describe the outgoing VM,
+the sole live collector path; §1–§11 above describe the outgoing VM,
 pending its O3 decommission.
 
 `scripts/stateless_collector.py --agency {wmata,sfmta}` (Tasks 1–4) is a
@@ -928,7 +928,7 @@ VM — don't let a resource squeeze force an early cutover.
 ### 13.5 healthchecks.io checks
 
 Create **two new checks** (one per agency — independent of any existing
-WMATA collector check tied to the old VM in §1–§12), each configured with
+WMATA collector check tied to the old VM in §1–§11), each configured with
 **period 5 min / grace 45 min**:
 
 - **Period 5 min** because `PingGate` (`src/stateless_poller.py`)
@@ -970,6 +970,6 @@ caveat as §9.
 
 **Last Updated:** 2026-08-28
 **Deployment Cost:** ~$5/mo (the `nano_3_0` collector box; S3 negligible at
-this scale) once the old `wmata-data` VM (§1–§12, ~$17/mo — $12 instance +
+this scale) once the old `wmata-data` VM (§1–§11, ~$17/mo — $12 instance +
 ~$5 block disk) is decommissioned (O3); both run in parallel, ~$22/mo
 combined, until then.

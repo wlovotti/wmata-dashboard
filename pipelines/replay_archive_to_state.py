@@ -61,7 +61,7 @@ class NoArchiveFilesFoundError(RuntimeError):
     """Raised when the archive glob for a date matches zero files.
 
     A replay with no input is almost always an operator error (the
-    JSONL archive hasn't been rsynced yet, a typo'd date, a wrong
+    JSONL archive hasn't been synced from S3 yet, a typo'd date, a wrong
     ``--archive-root``) rather than an intentional no-op. NOTES-93:
     this used to return 0 silently, which during the recovery driver's
     fold-in phase turned "the archive isn't here yet" into a
