@@ -1,6 +1,7 @@
 # Documents the WMATA collector's current implicit settings. Consumed by
-# scripts/stateless_collector.py (the NOTES-95 multi-agency rewrite); the
-# legacy scripts/continuous_combined_collector.py still doesn't read it.
+# scripts/stateless_collector.py (the multi-agency stateless-collector
+# rewrite); the legacy scripts/continuous_combined_collector.py still
+# doesn't read it.
 name: wmata
 display_name: WMATA Metrobus
 timezone: America/New_York

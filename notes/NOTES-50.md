@@ -20,8 +20,8 @@ Concrete steps:
    public deploy needs a hosted copy co-located with the API. (This
    absorbs the retired phase-2 managed-Postgres item, closed as
    superseded 2026-08-12 once the VM-hosted-DB premise it was written
-   against ended — laptop is the DB of record and the NOTES-95 target
-   removes Postgres from the VM entirely.) Candidate providers,
+   against ended — laptop is the DB of record and the stateless-collector
+   rewrite removes Postgres from the collector box entirely.) Candidate providers,
    cheapest → most robust: Neon (serverless, cold starts on idle),
    Supabase (~$25/mo), DigitalOcean Managed Postgres (~$15/mo, PITR),
    AWS RDS (most flexible, most expensive at this scale). Seed via

@@ -1,63 +1,46 @@
 #!/usr/bin/env bash
-# bin/pull-and-derive.sh — interim Path 2a ingest: pull fresh raw data from
-# the VM, replay locally, derive. Run on demand (manual cadence — spec
-# 2026-07-14 decision 4). Requires: bin/db-tunnel.sh up, VM_DB_URL set.
+# bin/pull-and-derive.sh — Path 2a ingest: sync fresh raw data from S3,
+# load + replay locally, derive. Run on demand (manual cadence).
 #
 #   bin/pull-and-derive.sh          # replay+derive lookback of 14 days
 #   bin/pull-and-derive.sh 35       # wider catch-up
 #
-# LOOKBACK_DAYS note: widening this past 2026-06-13 is unsafe — June dates
-# need snapshot 12 and must go through scripts/local_recovery_2026_07.sh,
-# not this script.
+# LOOKBACK_DAYS note: widening past 2026-06-13 is unsafe — June dates need
+# snapshot 12 and must go through scripts/local_recovery_2026_07.sh.
 set -euo pipefail
 
-# Archive layout duplicated in bin/prune-vm-archive.sh and
-# docs/DEPLOYMENT.md ("Manual S3 sync") — adding a new archive dir?
-# update all three.
-VM="ubuntu@52.54.130.186"
-REMOTE_ARCHIVE="/home/wmata/wmata-dashboard/archive/raw_snapshots"
-REMOTE_OVERFLOW="/mnt/pgdata/archive-overflow"
-REMOTE_ARCHIVE_SFMTA="/home/wmata/wmata-dashboard/archive/sfmta_raw_snapshots"
+S3_BASE="s3://wmata-dashboard-backups/raw-jsonl-archive"
 LOCAL_ARCHIVE="${LOCAL_ARCHIVE:-archive/raw_snapshots}"
 LOCAL_ARCHIVE_SFMTA="${LOCAL_ARCHIVE_SFMTA:-archive/sfmta_raw_snapshots}"
-TUNNEL_PORT="${TUNNEL_PORT:-5433}"
+LOCAL_ARCHIVE_VP="${LOCAL_ARCHIVE_VP:-archive/vp_snapshots}"
+LOCAL_ARCHIVE_SFMTA_VP="${LOCAL_ARCHIVE_SFMTA_VP:-archive/sfmta_vp_snapshots}"
 LOOKBACK_DAYS="${1:-14}"
-: "${VM_DB_URL:?Set VM_DB_URL (see the commented tunnel line in .env)}"
+mkdir -p "$LOCAL_ARCHIVE" "$LOCAL_ARCHIVE_SFMTA" "$LOCAL_ARCHIVE_VP" "$LOCAL_ARCHIVE_SFMTA_VP"
 
-if ! lsof -nP -iTCP:"${TUNNEL_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "Tunnel not up. Run bin/db-tunnel.sh first." >&2; exit 1
-fi
-mkdir -p "$LOCAL_ARCHIVE" "$LOCAL_ARCHIVE_SFMTA"
+echo "== GTFS reload if stale (>7 days) =="
+PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --max-age-days 7
 
-echo "== rsync raw TU archive (both dirs — rev 2b split) =="
-rsync -av --rsync-path="sudo rsync" "$VM:$REMOTE_ARCHIVE/" "$LOCAL_ARCHIVE/"
-rsync -av --rsync-path="sudo rsync" "$VM:$REMOTE_OVERFLOW/" "$LOCAL_ARCHIVE/"
+echo "== s3 sync raw archives =="
+# Root prefix holds WMATA TU directly; exclude the sibling sub-prefixes.
+aws s3 sync "$S3_BASE/" "$LOCAL_ARCHIVE/" \
+  --exclude "sfmta/*" --exclude "vp/*" --exclude "sfmta_vp/*"
+aws s3 sync "$S3_BASE/sfmta/" "$LOCAL_ARCHIVE_SFMTA/"
+aws s3 sync "$S3_BASE/vp/" "$LOCAL_ARCHIVE_VP/"
+aws s3 sync "$S3_BASE/sfmta_vp/" "$LOCAL_ARCHIVE_SFMTA_VP/"
 
-echo "== rsync raw SFMTA archive (single copy on the VM) =="
-rsync -av --rsync-path="sudo rsync" "$VM:$REMOTE_ARCHIVE_SFMTA/" "$LOCAL_ARCHIVE_SFMTA/"
-
-echo "== pull vehicle_positions delta over tunnel =="
-VP_COLS="id, vehicle_id, route_id, trip_id, latitude, longitude, speed, current_stop_sequence, stop_id, current_status, direction_id, trip_start_date, timestamp, collected_at"
-LOCAL_MAX_ID=$(psql -d wmata_dashboard -Atc "SELECT COALESCE(max(id), 0) FROM vehicle_positions")
-echo "local VP high-water mark: id $LOCAL_MAX_ID"
-# Strictly-greater window on the VM-assigned monotonic id (not the GTFS-RT
-# vehicle-reported timestamp, which is non-monotonic and lags collection
-# per-vehicle — NOTES-81 documented phantom-timestamp rows that a
-# timestamp-based watermark would permanently skip). Single-writer
-# collector: allocation order = commit order, so a strictly-greater id
-# window cannot collide on the PK and cannot skip rows.
-psql "$VM_DB_URL" -c "\copy (SELECT $VP_COLS FROM vehicle_positions WHERE id > $LOCAL_MAX_ID) TO STDOUT" \
-  | psql -d wmata_dashboard -c "\copy vehicle_positions ($VP_COLS) FROM STDIN"
-psql -d wmata_dashboard -Atc "SELECT setval('vehicle_positions_id_seq', (SELECT COALESCE(MAX(id),1) FROM vehicle_positions))" >/dev/null
+echo "== load VP archives (manifest-idempotent; phantom-timestamp guard at load) =="
+# A loader failure must not take down replay+derive below — capture the
+# exit code and keep going; the manifest table means a rerun of this
+# script is exactly how a failed file gets retried, so surfacing the
+# status here (and again in the summary at the bottom) is enough.
+vp_wmata_rc=0
+PYTHONUNBUFFERED=1 uv run python pipelines/load_vp_archive.py --agency wmata --archive-root "$LOCAL_ARCHIVE_VP" || vp_wmata_rc=$?
+vp_sfmta_rc=0
+PYTHONUNBUFFERED=1 uv run python pipelines/load_vp_archive.py --agency sfmta --archive-root "$LOCAL_ARCHIVE_SFMTA_VP" || vp_sfmta_rc=$?
 
 echo "== replay TU archive for the lookback window (idempotent) =="
-# No pre-guard: replay_archive_to_state.py itself fails loudly (exit 1) on a
-# zero-file glob match (NOTES-93) — a missing rsync must not look like a
-# clean skip. Collect any failed dates and refuse to derive if the list is
-# non-empty; deriving zero-run dates against unreplayed state is exactly the
-# incident NOTES-93 records, so derivation must never run past a replay
-# failure. --archive-root is passed explicitly so this honors the same
-# LOCAL_ARCHIVE override the rsync step above and the ls guard used to.
+# replay_archive_to_state.py fails loudly on a zero-file match; derivation
+# must never run past a replay failure (the NOTES-93 incident).
 failed=()
 for i in $(seq "$LOOKBACK_DAYS" -1 0); do
   d=$(date -v -"${i}"d +%F)   # macOS date; this script is laptop-only
@@ -66,10 +49,16 @@ for i in $(seq "$LOOKBACK_DAYS" -1 0); do
   fi
 done
 if [ "${#failed[@]}" -gt 0 ]; then
-  echo "Replay failed for: ${failed[*]} — aborting before derive (NOTES-93)." >&2
+  echo "Replay failed for: ${failed[*]} — aborting before derive." >&2
   exit 1
 fi
 
 echo "== derive (self-targets zero-run dates) =="
 PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --lookback-days "$LOOKBACK_DAYS"
+
+if [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
+  echo "== summary: VP loader reported errors (wmata rc=$vp_wmata_rc, sfmta rc=$vp_sfmta_rc) — see loader output above for the failed file(s); rerun this script to retry them (manifest table skips whatever already loaded cleanly). Replay + derive completed anyway. ==" >&2
+  echo "Done (with VP loader errors — see summary above)."
+  exit 1
+fi
 echo "Done."

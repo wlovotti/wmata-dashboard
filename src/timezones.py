@@ -105,7 +105,8 @@ def service_date_position_window_utc(service_date):
     `trip_start_date`: trip_start_date has no index, and an unbounded
     filter forces a full-table seq scan (the 2026-06/07 nightly-batch
     outage). The bound also excludes rows whose timestamp is garbage
-    months outside the service day (NOTES-81 phantom rows).
+    months outside the service day (phantom vehicle-reported timestamps
+    from stale AVL clocks).
     """
     start = eastern_midnight_as_utc(service_date)
     end = eastern_midnight_as_utc(service_date + timedelta(days=2))

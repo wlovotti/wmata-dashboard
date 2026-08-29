@@ -1,4 +1,4 @@
-"""Create the ``vp_archive_loaded_files`` manifest table (NOTES-95 VP loader).
+"""Create the ``vp_archive_loaded_files`` manifest table (stateless-collector VP loader).
 
 Idempotent (CREATE TABLE IF NOT EXISTS). Run once per database:
 

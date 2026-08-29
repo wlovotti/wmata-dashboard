@@ -139,7 +139,7 @@ def test_derive_ignores_phantom_timestamp_positions_for_attribution(pg_session):
 
     Regression for the timestamp-window fix: service-date attribution reads
     vehicle_positions by (route_id, trip_start_date) and must bound the scan
-    by timestamp both for index use and to reject NOTES-81 phantom rows.
+    by timestamp both for index use and to reject documented phantom rows.
     """
     from pipelines.derive_stop_events_from_state import derive_for_route_date
 

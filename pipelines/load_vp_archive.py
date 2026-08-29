@@ -1,8 +1,8 @@
-"""Load raw VP JSONL archives into vehicle_positions (NOTES-95, spec §3).
+"""Load raw VP JSONL archives into vehicle_positions (spec 2026-08-22 §3).
 
 Replaces the retired \\copy-over-tunnel VP delta: the stateless collector
 archives VehiclePositions as jsonl.zst in S3; this loader parses each
-synced file once (manifest-table idempotency) and applies the NOTES-81
+synced file once (manifest-table idempotency) and applies the
 phantom-timestamp guard at load time — raw files stay raw.
 
     uv run python pipelines/load_vp_archive.py --agency wmata
@@ -29,7 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Drop rows whose vehicle-reported timestamp is >30 min from the row's own
 # poll time: the spec's "±15 min outside the 15-min rotation window" with
-# row-level precision. Catches NOTES-81's +20-24h phantoms; tolerates AVL lag.
+# row-level precision. Catches the documented +20-24h phantom-timestamp
+# rows (stale AVL clocks); tolerates ordinary AVL lag.
 GUARD_SEC = 1800
 INSERT_CHUNK = 5000
 
@@ -37,7 +38,7 @@ INSERT_CHUNK = 5000
 def parse_vp_line(obj: dict) -> dict | None:
     """Map one archived VP JSON line to VehiclePosition insert kwargs.
 
-    Returns None when the row should be dropped: either the NOTES-81
+    Returns None when the row should be dropped: either the
     phantom-timestamp guard fires, or the row is missing a value one of
     ``VehiclePosition``'s NOT NULL columns requires (``vehicle_id``,
     ``latitude``, ``longitude`` — the feed can emit vehicles mid-assignment
@@ -98,7 +99,7 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     ``parse_vp_line(obj)`` runs INSIDE the same try as the decode (review
     round 3): well-formed JSON can still raise there —
     ``from_epoch_naive_utc`` on an out-of-range epoch raises ``ValueError``
-    / ``OverflowError`` / ``OSError`` (exactly the NOTES-81 phantom
+    / ``OverflowError`` / ``OSError`` (exactly the documented phantom
     pattern, just extreme enough to overflow ``datetime`` instead of only
     tripping ``GUARD_SEC``), and ``datetime.fromisoformat`` or a missing
     ``collected_at`` key can raise ``ValueError`` / ``TypeError`` /

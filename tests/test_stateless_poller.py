@@ -38,9 +38,9 @@ def test_ping_gate_requires_both_feeds_fresh(monkeypatch):
     Also covers the one-feed-wedge case: once "vp" stops shipping while
     "tu" keeps going, the gate must fall silent even though "tu" is fresh
     and the min-gap window has long since passed — this is the behavior
-    the module docstring cites as subsuming the VP-path dead-man coverage
-    item (NOTES-94): a single gate, not a per-feed one, is what actually
-    detects a wedge on either feed.
+    the module docstring cites as covering a VP-only collector failure:
+    a single gate, not a per-feed one, is what actually detects a wedge
+    on either feed.
     """
     pings = []
     monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: pings.append(url))

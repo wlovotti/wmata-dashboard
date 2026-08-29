@@ -39,6 +39,14 @@ Usage:
       # <= 7 days old; used by the pull-and-derive flow (spec
       # 2026-08-22 stateless-collector, Task 9) so a reload happens at
       # most weekly instead of on every pull.
+
+Precedence when both flags are passed: --max-age-days is checked
+FIRST, before --dry-run has any effect. If the snapshot is fresh
+enough, the wrapper exits 0 immediately — --dry-run's "log the plan,
+skip the subprocess" behavior never runs in that case, because there
+is no reload planned to log. --dry-run only takes effect once the age
+gate decides (or --max-age-days is absent, which always decides) a
+reload is due.
 """
 
 import argparse
@@ -126,7 +134,10 @@ def reload_due(session, max_age_days: int) -> bool:
 
     The pull-and-derive flow (spec 2026-08-22 §3 step 1) calls the wrapper
     with --max-age-days 7 so a reload happens at most weekly instead of on
-    every pull; no snapshot at all always means due.
+    every pull; no snapshot at all always means due. This weekly age gate
+    is a proxy for the spec's actual step-1 check ("if the published GTFS
+    feed is newer than the loaded version, reload") — it doesn't compare
+    feed versions, it just bounds how stale the loaded snapshot can get.
     """
     from datetime import timedelta
 
