@@ -29,13 +29,34 @@ echo "== GTFS reload if stale (>7 days) =="
 gtfs_rc=0
 PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --max-age-days 7 || gtfs_rc=$?
 
-echo "== s3 sync raw archives =="
-# Root prefix holds WMATA TU directly; exclude the sibling sub-prefixes.
-aws s3 sync "$S3_BASE/" "$LOCAL_ARCHIVE/" \
-  --exclude "sfmta/*" --exclude "vp/*" --exclude "sfmta_vp/*"
-aws s3 sync "$S3_BASE/sfmta/" "$LOCAL_ARCHIVE_SFMTA/"
-aws s3 sync "$S3_BASE/vp/" "$LOCAL_ARCHIVE_VP/"
-aws s3 sync "$S3_BASE/sfmta_vp/" "$LOCAL_ARCHIVE_SFMTA_VP/"
+echo "== s3 sync raw archives (scoped to the lookback window's months) =="
+# The S3 prefixes hold the FULL history (they are the permanent raw
+# record); an unscoped sync mirrors all of it locally — 100GB+ and
+# growing — so restrict each sync to files whose YYYY-MM- name prefix
+# falls inside the lookback window. Everything is excluded by default
+# and only the window's months are re-included; a file deleted locally
+# to reclaim disk therefore stays deleted unless the window covers it.
+# Filenames start with the service date (YYYY-MM-DD.<pid>.<epoch>...),
+# and an include pattern can't match the sibling sub-prefixes' keys
+# (they start with "sfmta/", "vp/", "sfmta_vp/"), so the root sync
+# needs no extra sub-prefix excludes.
+# The loop walks the window oldest-to-newest, so months arrive in order
+# and deduping against the previous iteration's month is sufficient.
+month_includes=()
+last_month=""
+for i in $(seq "$LOOKBACK_DAYS" -1 0); do
+  m=$(date -v -"${i}"d +%Y-%m)   # macOS date; this script is laptop-only
+  if [ "$m" != "$last_month" ]; then
+    month_includes+=("${m}-*")
+    last_month="$m"
+  fi
+done
+sync_filters=(--exclude "*")
+for m in "${month_includes[@]}"; do sync_filters+=(--include "$m"); done
+aws s3 sync "$S3_BASE/" "$LOCAL_ARCHIVE/" "${sync_filters[@]}"
+aws s3 sync "$S3_BASE/sfmta/" "$LOCAL_ARCHIVE_SFMTA/" "${sync_filters[@]}"
+aws s3 sync "$S3_BASE/vp/" "$LOCAL_ARCHIVE_VP/" "${sync_filters[@]}"
+aws s3 sync "$S3_BASE/sfmta_vp/" "$LOCAL_ARCHIVE_SFMTA_VP/" "${sync_filters[@]}"
 
 echo "== load VP archives (manifest-idempotent; phantom-timestamp guard at load) =="
 # A loader failure must not take down replay+derive below — capture the
