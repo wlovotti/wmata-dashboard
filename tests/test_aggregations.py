@@ -2012,7 +2012,15 @@ routes:
         from api.aggregations import get_route_contributors
         from src.models import StopEvent, SystemMetricsDaily
 
+        # The seeded calendar (_seed_gtfs_trips day_type="weekday") has no
+        # weekend service, so anchor the seeded day on the most recent
+        # WEEKDAY before today — a bare `today - 1` lands on Sat/Sun when
+        # the suite runs on Sun/Mon and drops TEST1 for lack of scheduled
+        # trips. Any past date works for the default anchor, which follows
+        # _latest_service_date_with_stop_events, not the calendar date.
         yesterday = eastern_today() - timedelta(days=1)
+        while yesterday.weekday() >= 5:
+            yesterday -= timedelta(days=1)
 
         # days=1 windows need only a single system_metrics_daily row each
         # (avoids the service_date PK collision _seed_system_baseline's
