@@ -45,7 +45,7 @@ def _run_sibling(path: Path) -> int:
 
     A sibling can signal failure two ways, and both are normalized here to
     an integer exit status rather than being swallowed or left to escape
-    uncaught (the migrate_all exit-signal fix, PR #TODO): raising ``SystemExit`` (``sys.exit(...)`` from the
+    uncaught (the migrate_all exit-signal fix, PR #231): raising ``SystemExit`` (``sys.exit(...)`` from the
     sibling's own ``main()``, including its early-return convention of
     ``sys.exit(0)``) or simply returning a non-zero value from ``main()``.
     ``SystemExit`` is a ``BaseException``, not an ``Exception``, so without
@@ -99,7 +99,7 @@ def main() -> None:
     Stops before running any later-sorted sibling, and exits non-zero
     itself, the first time a sibling reports failure via ``_run_sibling``'s
     return value — either a non-zero ``sys.exit(...)`` or a non-zero
-    ``main()`` return (the migrate_all exit-signal fix, PR #TODO). A sibling's own ``sys.exit(0)`` (an
+    ``main()`` return (the migrate_all exit-signal fix, PR #231). A sibling's own ``sys.exit(0)`` (an
     early-return convention some migrations use for "nothing to do") is
     normalized to success by ``_run_sibling``, so it does not stop the run.
     """

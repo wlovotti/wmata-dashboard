@@ -1,6 +1,6 @@
 """Tests for scripts/migrate_all.py's per-sibling argv isolation and exit-signal
 propagation (the migrate_all argv-isolation fix, PR #230, and the
-migrate_all exit-signal fix, PR #TODO).
+migrate_all exit-signal fix, PR #231).
 
 ``migrate_all.py`` auto-discovers ``migrate_*.py`` siblings and invokes each
 module's ``main()``. Sibling ``main()``s call
@@ -12,7 +12,7 @@ name.
 
 This file also covers ``_run_sibling`` and ``main()`` normalizing and
 propagating a sibling's failure/exit signals (the migrate_all exit-signal
-fix, PR #TODO): a sibling's
+fix, PR #231): a sibling's
 ``sys.exit()`` is ``BaseException``, not ``Exception``, so without explicit
 handling it would escape ``main()``'s migration loop entirely and truncate
 the whole run; a sibling's non-zero ``main()`` return was previously
@@ -49,7 +49,7 @@ def _cleanup_fake_sibling_modules():
     For the throwaway fixtures these tests write, nothing else ever clears
     that entry, so repeated test runs leaked fake module objects into
     ``sys.modules`` for the rest of the test process (the migrate_all
-    exit-signal fix, PR #TODO).
+    exit-signal fix, PR #231).
     """
     before = set(sys.modules)
     yield
@@ -144,7 +144,7 @@ def test_run_sibling_raises_if_no_main_entry_point(tmp_path, monkeypatch):
 
 @pytest.mark.smoke
 def test_run_sibling_isolates_argv_before_exec_module(tmp_path, monkeypatch):
-    """A sibling that reads sys.argv at module scope sees isolated argv too (the migrate_all exit-signal fix, PR #TODO).
+    """A sibling that reads sys.argv at module scope sees isolated argv too (the migrate_all exit-signal fix, PR #231).
 
     ``_run_sibling`` used to reset ``sys.argv`` only around the
     ``module.main()`` call, after ``spec.loader.exec_module(module)`` had
@@ -241,7 +241,7 @@ def _write_and_patch_scripts_dir(tmp_path, monkeypatch):
 
 @pytest.mark.smoke
 def test_main_aborts_and_exits_nonzero_on_sibling_sys_exit(tmp_path, monkeypatch, capsys):
-    """migrate_all.main() stops running later siblings and exits non-zero on a sibling's sys.exit(N) (the migrate_all exit-signal fix, PR #TODO)."""
+    """migrate_all.main() stops running later siblings and exits non-zero on a sibling's sys.exit(N) (the migrate_all exit-signal fix, PR #231)."""
     _write_and_patch_scripts_dir(tmp_path, monkeypatch)
     _write_sibling(tmp_path, "migrate_a_fails.py", "import sys\ndef main():\n    sys.exit(2)\n")
     ran_marker = tmp_path / "ran_b"
@@ -262,7 +262,7 @@ def test_main_aborts_and_exits_nonzero_on_sibling_sys_exit(tmp_path, monkeypatch
 
 @pytest.mark.smoke
 def test_main_aborts_and_exits_nonzero_on_sibling_nonzero_return(tmp_path, monkeypatch, capsys):
-    """migrate_all.main() exits non-zero, without the success line, when a sibling's main() returns non-zero (the migrate_all exit-signal fix, PR #TODO)."""
+    """migrate_all.main() exits non-zero, without the success line, when a sibling's main() returns non-zero (the migrate_all exit-signal fix, PR #231)."""
     _write_and_patch_scripts_dir(tmp_path, monkeypatch)
     _write_sibling(tmp_path, "migrate_a_fails.py", "def main():\n    return 1\n")
     monkeypatch.setattr(sys, "argv", ["migrate_all.py"])
@@ -278,7 +278,7 @@ def test_main_aborts_and_exits_nonzero_on_sibling_nonzero_return(tmp_path, monke
 
 @pytest.mark.smoke
 def test_main_continues_past_sibling_sys_exit_zero(tmp_path, monkeypatch, capsys):
-    """A sibling's sys.exit(0) early-return no longer truncates the whole migrate_all run (the migrate_all exit-signal fix, PR #TODO)."""
+    """A sibling's sys.exit(0) early-return no longer truncates the whole migrate_all run (the migrate_all exit-signal fix, PR #231)."""
     _write_and_patch_scripts_dir(tmp_path, monkeypatch)
     _write_sibling(
         tmp_path, "migrate_a_early_returns.py", "import sys\ndef main():\n    sys.exit(0)\n"
