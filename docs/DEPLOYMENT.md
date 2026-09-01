@@ -850,7 +850,7 @@ date, and match rate are in the canary's error output):
    `determine_target_dates` picks the date back up automatically;
    without this, a near-zero derive still wrote `runs` rows, so the
    date would silently never be revisited (the failure shape the
-   SFMTA 8/9–8/10 runs top-up fix addressed, PR #TODO).
+   SFMTA 8/9–8/10 runs top-up fix addressed, PR #227).
 3. Re-derive: rerun `bin/pull-and-derive.sh` (WMATA), or
    `pipelines/run_daily_batch.py --agency sfmta --lookback-days N` /
    `pipelines/derive_stop_events_from_state.py --all-routes --date D

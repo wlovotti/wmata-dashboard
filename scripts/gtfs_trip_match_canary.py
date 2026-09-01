@@ -21,7 +21,7 @@ threshold. It does NOT auto-reload or auto-re-derive (deliberately): a
 human decides when the schedule data has genuinely changed enough to
 warrant a reload, and re-derive requires first deleting the affected
 date's `runs` rows (the failure shape the SFMTA 8/9–8/10 runs top-up
-fix addressed, PR #TODO — a near-zero derive still writes `runs`
+fix addressed, PR #227 — a near-zero derive still writes `runs`
 rows, which blocks `run_daily_batch.py`'s auto-revisit). See
 `docs/DEPLOYMENT.md` for the full recovery procedure and the
 reasoning behind fail-loud over auto-recovery.
