@@ -21,13 +21,24 @@ LOCAL_ARCHIVE_SFMTA_VP="${LOCAL_ARCHIVE_SFMTA_VP:-archive/sfmta_vp_snapshots}"
 LOOKBACK_DAYS="${1:-14}"
 mkdir -p "$LOCAL_ARCHIVE" "$LOCAL_ARCHIVE_SFMTA" "$LOCAL_ARCHIVE_VP" "$LOCAL_ARCHIVE_SFMTA_VP"
 
-echo "== GTFS reload if stale (>7 days) =="
-# A transient WMATA API failure here must not block an otherwise-healthy
-# freshness run — stale-but-valid GTFS is the status quo, not a reason to
-# skip syncing/replaying/deriving fresh GTFS-RT data. Capture the exit
-# code and keep going, same treatment as the VP loaders below.
-gtfs_rc=0
-PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --max-age-days 7 || gtfs_rc=$?
+echo "== GTFS reload if stale (>7 days), per agency =="
+# A transient WMATA (or SFMTA) API failure here must not block an
+# otherwise-healthy freshness run — stale-but-valid GTFS is the status quo,
+# not a reason to skip syncing/replaying/deriving fresh GTFS-RT data.
+# Capture each agency's exit code and keep going, same treatment as the VP
+# loaders below.
+#
+# NOTES-134: this gate used to run WMATA only — SFMTA's static GTFS had no
+# staleness gate at all, and was reloaded only when someone remembered to
+# run `reload_gtfs_complete.py --agency sfmta` by hand. Muni's 2026-08-30
+# fall service change landed while the SFMTA snapshot was still "fresh" by
+# this same 7-day age proxy, so the age gate alone doesn't fully close the
+# gap either agency — the post-replay match-rate canary below is the
+# second, stronger check for exactly that failure shape.
+gtfs_rc_wmata=0
+PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --agency wmata --max-age-days 7 || gtfs_rc_wmata=$?
+gtfs_rc_sfmta=0
+PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --agency sfmta --max-age-days 7 || gtfs_rc_sfmta=$?
 
 echo "== s3 sync raw archives (scoped to the lookback window's months) =="
 # The S3 prefixes hold the FULL history (they are the permanent raw
@@ -80,7 +91,34 @@ for i in $(seq "$LOOKBACK_DAYS" -1 0); do
 done
 if [ "${#failed[@]}" -gt 0 ]; then
   echo "Replay failed for: ${failed[*]} — aborting before derive." >&2
-  echo "Upstream status at abort: gtfs_reload rc=$gtfs_rc, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
+  echo "Upstream status at abort: gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
+  exit 1
+fi
+
+echo "== post-replay GTFS trip_id match-rate canary (NOTES-134) =="
+# The age-based reload gate above is a proxy — it bounds staleness but
+# can't see a service change land while the loaded snapshot is still
+# "fresh" by that clock (the 2026-08-30 Muni fall service change: SFMTA's
+# snapshot was < 7 days old, so the gate skipped a reload, but the feed's
+# trip_ids had moved to a brand-new space). This canary recomputes the
+# same feed-trip_id ∩ current-GTFS-trip_id intersection both derive paths
+# gate on, for the latest agency-local service date, and fails loudly
+# (nonzero exit) if it has collapsed — deliberately NOT auto-reloading or
+# auto-re-deriving; see the script's docstring and the PR description for
+# why fail-loud was chosen over auto-recovery. A collapsed match rate
+# means derive would silently write ~0 stop_events (while exiting 0) and
+# poison that date's `runs` rows (NOTES-113's failure shape), so this
+# aborts before derive runs — same treatment as a replay failure above.
+canary_failed=()
+for agency in wmata sfmta; do
+  if ! PYTHONUNBUFFERED=1 uv run python scripts/gtfs_trip_match_canary.py --agency "$agency"; then
+    canary_failed+=("$agency")
+  fi
+done
+if [ "${#canary_failed[@]}" -gt 0 ]; then
+  echo "GTFS trip_id match-rate canary failed for: ${canary_failed[*]} — aborting before derive." >&2
+  echo "See the canary output above for the agency/date/match-rate and the recovery steps." >&2
+  echo "Upstream status at abort: gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
   exit 1
 fi
 
@@ -88,12 +126,12 @@ echo "== derive (self-targets zero-run dates) =="
 # Echo upstream status before derive, not just in the summary below: a
 # derive failure trips `set -e` right here, which would otherwise skip
 # straight past the summary block and lose this information.
-echo "Upstream status going into derive: gtfs_reload rc=$gtfs_rc, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
+echo "Upstream status going into derive: gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
 PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --lookback-days "$LOOKBACK_DAYS"
 
-if [ "$gtfs_rc" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
+if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
   echo "== summary: upstream step(s) reported errors — replay + derive completed anyway ==" >&2
-  echo "  gtfs_reload rc=$gtfs_rc (a transient WMATA API failure just leaves GTFS stale; rerun to retry)" >&2
+  echo "  gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta (a transient WMATA/511.org API failure just leaves that agency's GTFS stale; rerun to retry)" >&2
   echo "  vp_wmata   rc=$vp_wmata_rc" >&2
   echo "  vp_sfmta   rc=$vp_sfmta_rc" >&2
   echo "  (VP loader rc!=0: see loader output above for the failed file(s); rerun this" >&2
