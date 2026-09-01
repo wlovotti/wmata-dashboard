@@ -17,10 +17,10 @@ and `load_vp_archive.py` steps already cover
 `trip_update_state`, `stop_events`, `runs`, and the aggregate chain
 for SFMTA only advance when someone runs
 `pipelines/replay_archive_to_state.py --agency sfmta` and
-`pipelines/run_daily_batch.py --agency sfmta` by hand (as documented
-in docs/DEPLOYMENT.md's recovery procedure, and as happened again manually on
-2026-08-30/31 while diagnosing the Muni service-change incident that
-the GTFS reload gate fix (PR #226) addressed).
+`pipelines/run_daily_batch.py --agency sfmta` by hand (these are
+the same two commands run manually on 2026-08-30/31 while
+diagnosing the Muni service-change incident that the GTFS reload
+gate fix (PR #226) addressed).
 
 Practical effect: SFMTA metrics silently go stale between manual
 runs, with no automated signal (no error, just an unadvanced dataset)

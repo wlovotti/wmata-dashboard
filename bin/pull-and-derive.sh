@@ -171,8 +171,9 @@ if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$vp_wmata_rc" 
   if [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
     echo "  NOTE: derive already ran against the partial VP data — those dates now have" >&2
     echo "  runs rows and will NOT be auto-revisited by a future run_daily_batch.py" >&2
-    echo "  (determine_target_dates only picks up zero-runs-row dates — NOTES-113's" >&2
-    echo "  failure shape). After fixing the loader, either delete the affected dates'" >&2
+    echo "  (determine_target_dates only picks up zero-runs-row dates — the standing" >&2
+    echo "  trap that required the manual SFMTA 8/9-8/10 top-up, PR #227). After" >&2
+    echo "  fixing the loader, either delete the affected dates'" >&2
     echo "  runs rows and rerun this script, or re-run the per-date derive pipelines" >&2
     echo "  directly (pipelines/derive_stop_events_from_state.py --all-routes --date D)." >&2
   fi
