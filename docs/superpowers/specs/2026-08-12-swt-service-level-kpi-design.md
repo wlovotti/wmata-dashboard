@@ -68,8 +68,9 @@ changes on GTFS reloads).
 - Source: **current** GTFS (`is_current`), weekday day_type via the
   shared NOTES-106 resolver (inherited by using
   `fetch_scheduled_cell_hours_for_routes`, which also makes SFMTA's
-  calendar_dates-only weekday service resolve correctly, independent of
-  the NOTES-116 route_service_profile gap), hours 7:00–19:00
+  calendar_dates-only weekday service resolve correctly — the same
+  fix that closed the `route_service_profile` weekday-rows gap,
+  PR #TODO), hours 7:00–19:00
   agency-local (GTFS clock time; hour key = earlier arrival's hour).
 - Pooling: filter cells to hours 7–18 first; then for each
   (route_id, direction_id), pick the **reference stop** with the most

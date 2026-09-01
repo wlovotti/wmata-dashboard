@@ -18,7 +18,7 @@ and `load_vp_archive.py` steps already cover
 for SFMTA only advance when someone runs
 `pipelines/replay_archive_to_state.py --agency sfmta` and
 `pipelines/run_daily_batch.py --agency sfmta` by hand (as documented
-in NOTES-113's recovery steps, and as happened again manually on
+in docs/DEPLOYMENT.md's recovery procedure, and as happened again manually on
 2026-08-30/31 while diagnosing the Muni service-change incident that
 the GTFS reload gate fix (PR #226) addressed).
 
