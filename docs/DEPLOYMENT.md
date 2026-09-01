@@ -827,16 +827,31 @@ before it derives:
 The canary exits 0 (ok, or a "nothing observed yet" skip), 1 (a real
 match-rate collapse), or 2 (an operational error — the check itself
 couldn't run: unset `<AGENCY>_DATABASE_URL`, an unknown `--agency`, a
-transient DB failure). `run_daily_batch.py` (no `--agency`, called by
-`bin/pull-and-derive.sh` with no flag) only derives WMATA — SFMTA
-replay/derive stays fully manual (see `notes/NOTES-135.md`) — so only a
-**WMATA** collapse (exit 1) aborts `bin/pull-and-derive.sh` before
-derive runs. A WMATA operational error (exit 2), or any SFMTA outcome,
-is captured as a nonzero return code and reported in the run's summary
-without blocking the WMATA derive. `GTFS_CANARY_SKIP=1
-bin/pull-and-derive.sh` skips the canary step entirely (loud "skipped
-by operator" line) — a manual escape hatch for a legitimately-0%
-backfill date; use deliberately, not routinely.
+transient DB failure). `bin/pull-and-derive.sh` replays and derives
+*both* agencies (SFMTA pull-and-derive automation) — the replay loop
+runs `pipelines/replay_archive_to_state.py` for WMATA and SFMTA every
+lookback date (SFMTA's replay passes `--allow-empty`, since its S3
+archive prefix only starts 2026-07-22 and a missing/empty day there is
+expected, not an error — WMATA keeps the strict, no-`--allow-empty`
+behavior), and derive calls `run_daily_batch.py` once with no
+`--agency` flag (WMATA) and again with `--agency sfmta`. Failure
+handling is per-agency throughout: a replay failure, a canary collapse
+(exit 1), or a derive failure for one agency skips only *that*
+agency's remaining steps (derive is skipped outright on a replay
+failure or a collapse; a derive failure is just captured) — it never
+blocks or aborts the other, healthy agency's replay/derive. An
+operational error (exit 2) from the canary for either agency is
+captured as a nonzero return code and reported in the run's summary,
+and does not skip that agency's derive. Any of these failure modes,
+for either agency, makes the overall script exit nonzero (with a
+summary of what happened) even though everything unaffected still ran
+— check the summary, don't assume a nonzero exit means nothing
+derived. `GTFS_CANARY_SKIP=1 bin/pull-and-derive.sh` skips the canary
+step entirely (loud "skipped by operator" line) — a manual escape
+hatch for a legitimately-0% backfill date; use deliberately, not
+routinely. (Single-agency canary collapses no longer need this flag to
+protect the other agency, since a collapse now only skips its own
+agency's derive.)
 
 **Recovery procedure**, once a real collapse is confirmed (agency,
 date, and match rate are in the canary's error output):
@@ -851,10 +866,11 @@ date, and match rate are in the canary's error output):
    without this, a near-zero derive still writes `runs` rows, which
    blocks `run_daily_batch.py`'s auto-revisit — the shape that
    required the manual SFMTA 8/9–8/10 top-up (PR #227).
-3. Re-derive: rerun `bin/pull-and-derive.sh` (WMATA), or
-   `pipelines/run_daily_batch.py --agency sfmta --lookback-days N` /
+3. Re-derive: rerun `bin/pull-and-derive.sh` (both agencies), or target
+   just one agency directly with
+   `pipelines/run_daily_batch.py [--agency sfmta] --lookback-days N` /
    `pipelines/derive_stop_events_from_state.py --all-routes --date D
-   --agency sfmta` (SFMTA, manual per NOTES-135).
+   [--agency sfmta]`.
 
 ---
 
