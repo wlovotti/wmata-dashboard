@@ -827,13 +827,15 @@ before it derives:
 The canary exits 0 (ok, or a "nothing observed yet" skip), 1 (a real
 match-rate collapse), or 2 (an operational error — the check itself
 couldn't run: unset `<AGENCY>_DATABASE_URL`, an unknown `--agency`, a
-transient DB failure). `run_daily_batch.py` (no `--agency`, called by
-`bin/pull-and-derive.sh` with no flag) only derives WMATA — SFMTA
-replay/derive stays fully manual (see `notes/NOTES-135.md`) — so only a
-**WMATA** collapse (exit 1) aborts `bin/pull-and-derive.sh` before
-derive runs. A WMATA operational error (exit 2), or any SFMTA outcome,
-is captured as a nonzero return code and reported in the run's summary
-without blocking the WMATA derive. `GTFS_CANARY_SKIP=1
+transient DB failure). `bin/pull-and-derive.sh` replays and derives
+*both* agencies (SFMTA pull-and-derive automation) — the replay loop
+runs `pipelines/replay_archive_to_state.py` for WMATA and SFMTA every
+lookback date, and derive calls `run_daily_batch.py` once with no
+`--agency` flag (WMATA) and again with `--agency sfmta`. So a
+collapse (exit 1) for **either** agency aborts `bin/pull-and-derive.sh`
+before derive runs. An operational error (exit 2) for either agency is
+captured as a nonzero return code and reported in the run's summary
+without blocking the other agency's derive. `GTFS_CANARY_SKIP=1
 bin/pull-and-derive.sh` skips the canary step entirely (loud "skipped
 by operator" line) — a manual escape hatch for a legitimately-0%
 backfill date; use deliberately, not routinely.
@@ -851,10 +853,11 @@ date, and match rate are in the canary's error output):
    without this, a near-zero derive still writes `runs` rows, which
    blocks `run_daily_batch.py`'s auto-revisit — the shape that
    required the manual SFMTA 8/9–8/10 top-up (PR #227).
-3. Re-derive: rerun `bin/pull-and-derive.sh` (WMATA), or
-   `pipelines/run_daily_batch.py --agency sfmta --lookback-days N` /
+3. Re-derive: rerun `bin/pull-and-derive.sh` (both agencies), or target
+   just one agency directly with
+   `pipelines/run_daily_batch.py [--agency sfmta] --lookback-days N` /
    `pipelines/derive_stop_events_from_state.py --all-routes --date D
-   --agency sfmta` (SFMTA, manual per NOTES-135).
+   [--agency sfmta]`.
 
 ---
 

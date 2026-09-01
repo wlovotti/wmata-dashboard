@@ -87,14 +87,21 @@ PYTHONUNBUFFERED=1 uv run python pipelines/load_vp_archive.py --agency wmata --a
 vp_sfmta_rc=0
 PYTHONUNBUFFERED=1 uv run python pipelines/load_vp_archive.py --agency sfmta --archive-root "$LOCAL_ARCHIVE_SFMTA_VP" || vp_sfmta_rc=$?
 
-echo "== replay TU archive for the lookback window (idempotent) =="
+echo "== replay TU archive for the lookback window (idempotent), per agency =="
 # replay_archive_to_state.py fails loudly on a zero-file match; derivation
-# must never run past a replay failure (the NOTES-93 incident).
+# must never run past a replay failure (the NOTES-93 incident). Both
+# agencies' archives are replayed here (TODO(PR): SFMTA pull-and-derive
+# automation) — SFMTA's VP archive was already synced/loaded above, but
+# trip_update_state previously only ever advanced for WMATA, leaving
+# stop_events/runs/the aggregate chain for SFMTA fully manual.
 failed=()
 for i in $(seq "$LOOKBACK_DAYS" -1 0); do
   d=$(date -v -"${i}"d +%F)   # macOS date; this script is laptop-only
   if ! PYTHONUNBUFFERED=1 uv run python pipelines/replay_archive_to_state.py --date "$d" --archive-root "$LOCAL_ARCHIVE"; then
-    failed+=("$d")
+    failed+=("wmata $d")
+  fi
+  if ! PYTHONUNBUFFERED=1 uv run python pipelines/replay_archive_to_state.py --date "$d" --agency sfmta --archive-root "$LOCAL_ARCHIVE_SFMTA"; then
+    failed+=("sfmta $d")
   fi
 done
 if [ "${#failed[@]}" -gt 0 ]; then
@@ -121,12 +128,12 @@ echo "== post-replay GTFS trip_id match-rate canary =="
 # Exit codes from gtfs_trip_match_canary.py: 0 ok/skip, 1 a real
 # match-rate collapse, 2 an operational error (the check itself couldn't
 # run — unset config, unknown agency, a transient DB failure). The derive
-# below (`run_daily_batch.py`, no `--agency`) is WMATA-only — SFMTA
-# replay/derive stays fully manual (see notes/NOTES-135.md) — so only a
-# WMATA *collapse* (rc=1) aborts before derive; a WMATA operational error
-# and any SFMTA outcome are captured as a nonzero rc and reported in the
-# summary at the end (same cross-agency rc convention as the GTFS
-# reload / VP loader steps above), never aborting a healthy WMATA derive.
+# below (`run_daily_batch.py`) now runs both agencies (TODO(PR): SFMTA
+# pull-and-derive automation), so a *collapse* (rc=1) for either agency
+# aborts before derive; an operational error (rc=2) for either agency is
+# captured as a nonzero rc and reported in the summary at the end (same
+# cross-agency rc convention as the GTFS reload / VP loader steps above),
+# never aborting a healthy derive.
 # GTFS_CANARY_SKIP=1 skips this whole check (see the header comment) —
 # for a legitimately-0% backfill date.
 canary_rc_wmata=0
@@ -137,26 +144,27 @@ else
   PYTHONUNBUFFERED=1 uv run python scripts/gtfs_trip_match_canary.py --agency wmata || canary_rc_wmata=$?
   PYTHONUNBUFFERED=1 uv run python scripts/gtfs_trip_match_canary.py --agency sfmta || canary_rc_sfmta=$?
 
-  if [ "$canary_rc_wmata" -eq 1 ]; then
-    echo "GTFS trip_id match-rate canary: WMATA COLLAPSED — aborting before derive." >&2
+  if [ "$canary_rc_wmata" -eq 1 ] || [ "$canary_rc_sfmta" -eq 1 ]; then
+    echo "GTFS trip_id match-rate canary: COLLAPSED (wmata rc=$canary_rc_wmata sfmta rc=$canary_rc_sfmta) — aborting before derive." >&2
     echo "See the canary output above for the date/match-rate, and docs/DEPLOYMENT.md for the recovery procedure." >&2
-    echo "Upstream status at abort: gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc, canary_sfmta rc=$canary_rc_sfmta." >&2
+    echo "Upstream status at abort: gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc." >&2
     exit 1
   fi
   if [ "$canary_rc_wmata" -ne 0 ]; then
     echo "GTFS trip_id match-rate canary: WMATA reported rc=$canary_rc_wmata (an operational error, not a collapse) — continuing; see summary at the end." >&2
   fi
   if [ "$canary_rc_sfmta" -ne 0 ]; then
-    echo "GTFS trip_id match-rate canary: SFMTA reported rc=$canary_rc_sfmta (1=collapse, 2=operational error) — NOT aborting (the derive below is WMATA-only; SFMTA replay/derive is manual, see notes/NOTES-135.md) — continuing; see summary at the end." >&2
+    echo "GTFS trip_id match-rate canary: SFMTA reported rc=$canary_rc_sfmta (an operational error, not a collapse) — continuing; see summary at the end." >&2
   fi
 fi
 
-echo "== derive (self-targets zero-run dates) =="
+echo "== derive (self-targets zero-run dates), per agency =="
 # Echo upstream status before derive, not just in the summary below: a
 # derive failure trips `set -e` right here, which would otherwise skip
 # straight past the summary block and lose this information.
 echo "Upstream status going into derive: gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta, vp_wmata rc=$vp_wmata_rc, vp_sfmta rc=$vp_sfmta_rc, canary wmata rc=$canary_rc_wmata sfmta rc=$canary_rc_sfmta." >&2
 PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --lookback-days "$LOOKBACK_DAYS"
+PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --agency sfmta --lookback-days "$LOOKBACK_DAYS"
 
 if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ] || [ "$canary_rc_wmata" -ne 0 ] || [ "$canary_rc_sfmta" -ne 0 ]; then
   echo "== summary: upstream step(s) reported errors — replay + derive completed anyway ==" >&2
@@ -165,8 +173,8 @@ if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$vp_wmata_rc" 
   echo "  vp_sfmta   rc=$vp_sfmta_rc" >&2
   echo "  (VP loader rc!=0: see loader output above for the failed file(s); rerun this" >&2
   echo "  script to retry — the manifest table skips whatever already loaded cleanly)" >&2
-  echo "  canary_wmata rc=$canary_rc_wmata canary_sfmta rc=$canary_rc_sfmta (1=collapse, 2=operational error; WMATA rc=1 would have aborted above, so a" >&2
-  echo "  nonzero rc reaching here is always either a WMATA operational error or an SFMTA outcome — see the canary output above and" >&2
+  echo "  canary_wmata rc=$canary_rc_wmata canary_sfmta rc=$canary_rc_sfmta (1=collapse, 2=operational error; a collapse (rc=1) for either" >&2
+  echo "  agency would have aborted above, so a nonzero rc reaching here is always an operational error — see the canary output above and" >&2
   echo "  docs/DEPLOYMENT.md for the recovery procedure)" >&2
   if [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ]; then
     echo "  NOTE: derive already ran against the partial VP data — those dates now have" >&2
@@ -175,7 +183,8 @@ if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$vp_wmata_rc" 
     echo "  trap that required the manual SFMTA 8/9-8/10 top-up, PR #227). After" >&2
     echo "  fixing the loader, either delete the affected dates'" >&2
     echo "  runs rows and rerun this script, or re-run the per-date derive pipelines" >&2
-    echo "  directly (pipelines/derive_stop_events_from_state.py --all-routes --date D)." >&2
+    echo "  directly (pipelines/derive_stop_events_from_state.py --all-routes --date D" >&2
+    echo "  [--agency sfmta])." >&2
   fi
   echo "Done (with errors — see summary above)." >&2
   exit 1
