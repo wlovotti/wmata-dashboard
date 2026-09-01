@@ -14,6 +14,11 @@ adds a migration.
 
 Usage:
   uv run python scripts/migrate_all.py
+
+migrate_all.py accepts no passthrough arguments of its own. Any argv
+given to it (e.g. flags meant for one specific sibling) is not forwarded
+to the sibling scripts it runs — each sibling's main() sees only its own
+path as argv, isolated from migrate_all's.
 """
 
 from __future__ import annotations
@@ -30,11 +35,11 @@ def _run_sibling(path: Path) -> None:
     explicit argv, which defaults to reading ``sys.argv[1:]``. Without
     isolation, any flag passed to ``migrate_all.py`` itself (e.g. ``--yes``)
     would pass straight through to *every* sibling's own parser — including
-    destructive migrations that happen to define the same flag name
-    (NOTES-130). Reset ``sys.argv`` to just the sibling's own path for the
-    duration of its ``main()``, and always restore migrate_all's original
-    argv afterward (even if the sibling raises) so later siblings, and the
-    caller, are unaffected.
+    destructive migrations that happen to define the same flag name (the
+    migrate_all argv-isolation fix, PR #230). Reset ``sys.argv`` to just
+    the sibling's own path for the duration of its ``main()``, and always
+    restore migrate_all's original argv afterward (even if the sibling
+    raises) so later siblings, and the caller, are unaffected.
 
     Args:
         path: Filesystem path to the migrate_*.py sibling to load and run.

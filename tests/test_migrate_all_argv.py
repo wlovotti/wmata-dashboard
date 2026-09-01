@@ -1,4 +1,4 @@
-"""Tests for scripts/migrate_all.py's per-sibling argv isolation (NOTES-130).
+"""Tests for scripts/migrate_all.py's per-sibling argv isolation (the migrate_all argv-isolation fix, PR #230).
 
 ``migrate_all.py`` auto-discovers ``migrate_*.py`` siblings and invokes each
 module's ``main()``. Sibling ``main()``s call
