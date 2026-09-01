@@ -90,10 +90,10 @@ PYTHONUNBUFFERED=1 uv run python pipelines/load_vp_archive.py --agency sfmta --a
 echo "== replay TU archive for the lookback window (idempotent), per agency =="
 # replay_archive_to_state.py fails loudly on a zero-file match; derivation
 # must never run past a replay failure (the NOTES-93 incident). Both
-# agencies' archives are replayed here (TODO(PR): SFMTA pull-and-derive
-# automation) — SFMTA's VP archive was already synced/loaded above, but
-# trip_update_state previously only ever advanced for WMATA, leaving
-# stop_events/runs/the aggregate chain for SFMTA fully manual.
+# agencies' archives are replayed here (the SFMTA pull-and-derive
+# automation, PR #228) — SFMTA's VP archive was already synced/loaded
+# above, but trip_update_state previously only ever advanced for WMATA,
+# leaving stop_events/runs/the aggregate chain for SFMTA fully manual.
 failed=()
 for i in $(seq "$LOOKBACK_DAYS" -1 0); do
   d=$(date -v -"${i}"d +%F)   # macOS date; this script is laptop-only
@@ -128,12 +128,12 @@ echo "== post-replay GTFS trip_id match-rate canary =="
 # Exit codes from gtfs_trip_match_canary.py: 0 ok/skip, 1 a real
 # match-rate collapse, 2 an operational error (the check itself couldn't
 # run — unset config, unknown agency, a transient DB failure). The derive
-# below (`run_daily_batch.py`) now runs both agencies (TODO(PR): SFMTA
-# pull-and-derive automation), so a *collapse* (rc=1) for either agency
-# aborts before derive; an operational error (rc=2) for either agency is
-# captured as a nonzero rc and reported in the summary at the end (same
-# cross-agency rc convention as the GTFS reload / VP loader steps above),
-# never aborting a healthy derive.
+# below (`run_daily_batch.py`) now runs both agencies (the SFMTA
+# pull-and-derive automation, PR #228), so a *collapse* (rc=1) for either
+# agency aborts before derive; an operational error (rc=2) for either
+# agency is captured as a nonzero rc and reported in the summary at the
+# end (same cross-agency rc convention as the GTFS reload / VP loader
+# steps above), never aborting a healthy derive.
 # GTFS_CANARY_SKIP=1 skips this whole check (see the header comment) —
 # for a legitimately-0% backfill date.
 canary_rc_wmata=0
