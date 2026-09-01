@@ -26,9 +26,19 @@ null on that row, so it's a literal end-to-end measurement). The fallback
 contributes few trips in practice because the literal-coverage gap is wide,
 but it's correct when it does fire.
 
-`scheduled_duration = sched_last_arrival_ts - sched_first_arrival_ts` is
-identical across the trip's source rows, so we read it from whichever row is
-present.
+--- Scheduled duration uses the same endpoints as actual ---
+`sched_first/last_arrival_ts` on a Run row is the min/max over that row's
+*observed* stops, NOT the trip's full scheduled span — so the two source rows
+generally disagree, and neither alone is guaranteed to span the trip. On
+sparse-stop_times routes (WMATA publishes A90 with 2-3 stop_times rows per
+trip, EXP with 2) the origin-blind trip_update row can be left with a
+26-second span, which against an 18-minute actual rendered as "+4286% over
+schedule". The scheduled duration therefore mirrors the actual-duration
+stitch: proximity row's scheduled origin to trip_update row's scheduled
+destination in the joined case, the row's own span in the single-source
+fallback (whose guards already require both literal endpoints observed).
+Spans under MIN_SCHEDULED_DURATION_SEC are rejected — a sub-5-minute
+schedule is a degenerate denominator, and the trip drops out of the pool.
 """
 
 from __future__ import annotations
@@ -42,6 +52,7 @@ from sqlalchemy.orm import Session
 from src.models import Run
 
 EXCESS_RATIO_THRESHOLD = 1.10  # actual > 110% of scheduled = "excess"
+MIN_SCHEDULED_DURATION_SEC = 300  # shorter scheduled spans are degenerate denominators
 
 
 def _trip_actual_duration_sec(prox: Run | None, tu: Run | None) -> float | None:
@@ -86,17 +97,48 @@ def _trip_actual_duration_sec(prox: Run | None, tu: Run | None) -> float | None:
 
 
 def _trip_scheduled_duration_sec(prox: Run | None, tu: Run | None) -> float | None:
-    """Read scheduled duration from whichever source row has it; same value either way."""
-    for run in (prox, tu):
+    """Scheduled duration over the same endpoints the actual duration uses.
+
+    Joined case: proximity row's scheduled origin → TU row's scheduled
+    destination, gated on the same literal-endpoint observations as
+    `_trip_actual_duration_sec`. Single-source fallback: the row's own span,
+    gated on that row having observed both literal endpoints. Returns None
+    below MIN_SCHEDULED_DURATION_SEC — see module docstring.
+    """
+    prox_origin_ok = (
+        prox is not None
+        and prox.origin_dev_sec is not None
+        and prox.sched_first_arrival_ts is not None
+    )
+    tu_dest_ok = (
+        tu is not None
+        and tu.destination_dev_sec is not None
+        and tu.sched_last_arrival_ts is not None
+    )
+
+    delta: float | None = None
+    if prox_origin_ok and tu_dest_ok:
+        delta = (tu.sched_last_arrival_ts - prox.sched_first_arrival_ts).total_seconds()
+    elif prox is not None and tu is None:
         if (
-            run is not None
-            and run.sched_first_arrival_ts is not None
-            and run.sched_last_arrival_ts is not None
+            prox.origin_dev_sec is not None
+            and prox.destination_dev_sec is not None
+            and prox.sched_first_arrival_ts is not None
+            and prox.sched_last_arrival_ts is not None
         ):
-            delta = (run.sched_last_arrival_ts - run.sched_first_arrival_ts).total_seconds()
-            if delta > 0:
-                return delta
-    return None
+            delta = (prox.sched_last_arrival_ts - prox.sched_first_arrival_ts).total_seconds()
+    elif tu is not None and prox is None:
+        if (
+            tu.origin_dev_sec is not None
+            and tu.destination_dev_sec is not None
+            and tu.sched_first_arrival_ts is not None
+            and tu.sched_last_arrival_ts is not None
+        ):
+            delta = (tu.sched_last_arrival_ts - tu.sched_first_arrival_ts).total_seconds()
+
+    if delta is None or delta < MIN_SCHEDULED_DURATION_SEC:
+        return None
+    return delta
 
 
 def compute_excess_trip_time(

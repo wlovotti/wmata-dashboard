@@ -34,7 +34,6 @@ serves this or is explicitly parked.
 - [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189); the agency comparison page (PR #198) now annotates this via its caveats list; 2026-08-11 addendum: laptop VP-only numerator caps ~33%, so ALL laptop SFMTA dates flag partial
 - [NOTES-109](notes/NOTES-109.md) Full per-date scheduled-pool resolution for EWT/bunching (declined third option from NOTES-106) — sev low-medium / eff medium — unblocked; modal-per-day_type (PR #191) is the interim
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
-- [NOTES-118](notes/NOTES-118.md) Investigate scheduled-span data quality in runs (A90 67% zero-span, EXP/LCL junk route_ids) — sev low-medium / eff medium — unblocked; investigation first, guard is one possible outcome
 
 ## WMATA depth & UX
 
