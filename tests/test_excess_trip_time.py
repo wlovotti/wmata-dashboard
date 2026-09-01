@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 
 from src.excess_trip_time import (
     _trip_actual_duration_sec,
+    _trip_scheduled_duration_sec,
     compute_excess_trip_time,
     compute_excess_trip_time_for_routes,
 )
@@ -180,6 +181,112 @@ class TestTripActualDuration:
         assert _trip_actual_duration_sec(prox, tu) is None
 
 
+class TestTripScheduledDuration:
+    """Unit tests for the per-trip scheduled-duration helper (scheduled-span endpoint fix).
+
+    `sched_first/last_arrival_ts` on a Run row is the min/max over *observed*
+    stops, so a single row's span understates the trip on sparse-stop_times
+    routes (A90 publishes 2-3 stop_times per trip; trip_update is origin-blind
+    and can be left with a 26-second span). The scheduled duration must use the
+    same endpoints as the actual duration: proximity's origin, TU's destination.
+    """
+
+    def test_joined_uses_cross_source_endpoints(self):
+        # A90 signature: prox observed only the origin (zero own-span), TU only
+        # the last stops (26s own-span). Cross-source span is the full 3600s.
+        prox = _make_run(
+            "T1",
+            "proximity",
+            first_obs_ts=SCHED_FIRST,
+            last_obs_ts=SCHED_FIRST,
+            origin_dev_sec=0,
+            destination_dev_sec=None,
+            sched_first_arrival_ts=SCHED_FIRST,
+            sched_last_arrival_ts=SCHED_FIRST,  # observed 1 stop: zero own-span
+        )
+        tu = _make_run(
+            "T1",
+            "trip_update",
+            first_obs_ts=SCHED_LAST - timedelta(seconds=26),
+            last_obs_ts=SCHED_LAST,
+            origin_dev_sec=None,
+            destination_dev_sec=0,
+            sched_first_arrival_ts=SCHED_LAST - timedelta(seconds=26),
+            sched_last_arrival_ts=SCHED_LAST,  # 26s own-span
+        )
+        assert _trip_scheduled_duration_sec(prox, tu) == 3600
+
+    def test_joined_below_floor_rejected(self):
+        # Even cross-source, a sub-5-minute scheduled span is no denominator.
+        prox = _make_run(
+            "T1",
+            "proximity",
+            first_obs_ts=SCHED_FIRST,
+            last_obs_ts=SCHED_FIRST,
+            origin_dev_sec=0,
+            destination_dev_sec=None,
+            sched_first_arrival_ts=SCHED_FIRST,
+            sched_last_arrival_ts=SCHED_FIRST,
+        )
+        tu = _make_run(
+            "T1",
+            "trip_update",
+            first_obs_ts=SCHED_FIRST + timedelta(seconds=26),
+            last_obs_ts=SCHED_FIRST + timedelta(seconds=26),
+            origin_dev_sec=None,
+            destination_dev_sec=0,
+            sched_first_arrival_ts=SCHED_FIRST + timedelta(seconds=10),
+            sched_last_arrival_ts=SCHED_FIRST + timedelta(seconds=26),
+        )
+        assert _trip_scheduled_duration_sec(prox, tu) is None
+
+    def test_joined_requires_literal_endpoint_observations(self):
+        # Without prox origin + TU destination the cross-source span is not the
+        # literal trip span — return None (the trip is skipped anyway because
+        # the actual-duration helper enforces the same condition).
+        prox = _make_run(
+            "T1",
+            "proximity",
+            first_obs_ts=SCHED_FIRST + timedelta(minutes=5),
+            last_obs_ts=SCHED_FIRST + timedelta(minutes=10),
+            origin_dev_sec=None,  # origin not observed
+            destination_dev_sec=None,
+        )
+        tu = _make_run(
+            "T1",
+            "trip_update",
+            first_obs_ts=SCHED_FIRST + timedelta(minutes=2),
+            last_obs_ts=SCHED_LAST,
+            origin_dev_sec=None,
+            destination_dev_sec=0,
+        )
+        assert _trip_scheduled_duration_sec(prox, tu) is None
+
+    def test_single_source_uses_own_span(self):
+        prox = _make_run(
+            "T1",
+            "proximity",
+            first_obs_ts=SCHED_FIRST,
+            last_obs_ts=SCHED_LAST,
+            origin_dev_sec=0,
+            destination_dev_sec=0,
+        )
+        assert _trip_scheduled_duration_sec(prox, None) == 3600
+
+    def test_single_source_below_floor_rejected(self):
+        tu = _make_run(
+            "T1",
+            "trip_update",
+            first_obs_ts=SCHED_FIRST,
+            last_obs_ts=SCHED_FIRST + timedelta(seconds=26),
+            origin_dev_sec=0,
+            destination_dev_sec=0,
+            sched_first_arrival_ts=SCHED_FIRST,
+            sched_last_arrival_ts=SCHED_FIRST + timedelta(seconds=26),
+        )
+        assert _trip_scheduled_duration_sec(None, tu) is None
+
+
 class TestComputeExcessTripTime:
     """Integration tests against an in-memory DB with synthetic Run rows."""
 
@@ -266,6 +373,39 @@ class TestComputeExcessTripTime:
         db_session.commit()
         result = compute_excess_trip_time(db_session, ROUTE, SERVICE_DATE)
         assert result["n_trips"] == 1
+
+    def test_degenerate_scheduled_span_trip_excluded(self, db_session):
+        # A90 signature end-to-end: both rows carry tiny observed-subset spans
+        # AND the cross-source span is under the floor (short scheduled hop).
+        # The trip must drop out instead of rendering a +4000% percentage.
+        db_session.add_all(
+            [
+                _make_run(
+                    "T_DEGEN",
+                    "proximity",
+                    first_obs_ts=SCHED_FIRST,
+                    last_obs_ts=SCHED_FIRST,
+                    origin_dev_sec=0,
+                    destination_dev_sec=None,
+                    sched_first_arrival_ts=SCHED_FIRST,
+                    sched_last_arrival_ts=SCHED_FIRST,
+                ),
+                _make_run(
+                    "T_DEGEN",
+                    "trip_update",
+                    first_obs_ts=SCHED_FIRST + timedelta(minutes=18),
+                    last_obs_ts=SCHED_FIRST + timedelta(minutes=20),
+                    origin_dev_sec=None,
+                    destination_dev_sec=1174,
+                    sched_first_arrival_ts=SCHED_FIRST,
+                    sched_last_arrival_ts=SCHED_FIRST + timedelta(seconds=26),
+                ),
+            ]
+        )
+        db_session.commit()
+        result = compute_excess_trip_time(db_session, ROUTE, SERVICE_DATE)
+        assert result["n_trips"] == 0
+        assert result["pct_over_110"] is None
 
     def test_other_routes_and_dates_ignored(self, db_session):
         self._add_joined_trip(db_session, "T1", actual_minus_sched_sec=0)
