@@ -28,21 +28,37 @@ import sys
 from pathlib import Path
 
 
-def _run_sibling(path: Path) -> None:
-    """Load one migrate_*.py sibling and invoke its main(), isolated from our own argv.
+def _run_sibling(path: Path) -> int:
+    """Load one migrate_*.py sibling, invoke its main(), and report its exit status.
 
     Sibling scripts call ``argparse.ArgumentParser().parse_args()`` with no
     explicit argv, which defaults to reading ``sys.argv[1:]``. Without
     isolation, any flag passed to ``migrate_all.py`` itself (e.g. ``--yes``)
     would pass straight through to *every* sibling's own parser — including
     destructive migrations that happen to define the same flag name (the
-    migrate_all argv-isolation fix, PR #230). Reset ``sys.argv`` to just
-    the sibling's own path for the duration of its ``main()``, and always
-    restore migrate_all's original argv afterward (even if the sibling
-    raises) so later siblings, and the caller, are unaffected.
+    migrate_all argv-isolation fix, PR #230). Reset ``sys.argv`` to just the
+    sibling's own path *before* loading the module (module-scope code can
+    read ``sys.argv`` too, not just code inside ``main()``), keep it reset
+    for the duration of the sibling's ``main()``, and always restore
+    migrate_all's original argv afterward (even if the sibling raises or
+    exits) so later siblings, and the caller, are unaffected.
+
+    A sibling can signal failure two ways, and both are normalized here to
+    an integer exit status rather than being swallowed or left to escape
+    uncaught (the migrate_all exit-signal fix, PR #TODO): raising ``SystemExit`` (``sys.exit(...)`` from the
+    sibling's own ``main()``, including its early-return convention of
+    ``sys.exit(0)``) or simply returning a non-zero value from ``main()``.
+    ``SystemExit`` is a ``BaseException``, not an ``Exception``, so without
+    this it would propagate straight through ``migrate_all.main()``'s
+    migration loop and truncate the whole run. Any other exception a
+    sibling raises still propagates uncaught, as before.
 
     Args:
         path: Filesystem path to the migrate_*.py sibling to load and run.
+
+    Returns:
+        0 if the sibling completed successfully (including via its own
+        ``sys.exit(0)``/``sys.exit()``); a non-zero int otherwise.
 
     Raises:
         RuntimeError: If the module spec can't be loaded, or the module has
@@ -54,20 +70,39 @@ def _run_sibling(path: Path) -> None:
         raise RuntimeError(f"Could not load module spec for {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    if not hasattr(module, "main"):
-        raise RuntimeError(f"{path.name} has no main() entry point")
 
     original_argv = sys.argv
     try:
         sys.argv = [str(path)]
-        module.main()
+        spec.loader.exec_module(module)
+        if not hasattr(module, "main"):
+            raise RuntimeError(f"{path.name} has no main() entry point")
+        try:
+            result = module.main()
+        except SystemExit as exc:
+            code = exc.code
+            if code is None:
+                return 0
+            if isinstance(code, int):
+                return code
+            print(f"{path.name}: {code}", file=sys.stderr)
+            return 1
     finally:
         sys.argv = original_argv
 
+    return 0 if result is None else result
+
 
 def main() -> None:
-    """Discover migrate_*.py siblings and invoke each module's main()."""
+    """Discover migrate_*.py siblings and invoke each module's main().
+
+    Stops before running any later-sorted sibling, and exits non-zero
+    itself, the first time a sibling reports failure via ``_run_sibling``'s
+    return value — either a non-zero ``sys.exit(...)`` or a non-zero
+    ``main()`` return (the migrate_all exit-signal fix, PR #TODO). A sibling's own ``sys.exit(0)`` (an
+    early-return convention some migrations use for "nothing to do") is
+    normalized to success by ``_run_sibling``, so it does not stop the run.
+    """
     scripts_dir = Path(__file__).resolve().parent
     self_name = Path(__file__).name
     migrations = sorted(p for p in scripts_dir.glob("migrate_*.py") if p.name != self_name)
@@ -83,7 +118,12 @@ def main() -> None:
 
     for path in migrations:
         print(f"==> Running {path.name}")
-        _run_sibling(path)
+        exit_code = _run_sibling(path)
+        if exit_code:
+            print(
+                f"xxx {path.name} failed (exit status {exit_code!r}); aborting remaining migrations."
+            )
+            sys.exit(exit_code if isinstance(exit_code, int) else 1)
         print(f"<== Finished {path.name}\n")
 
     print(f"All {len(migrations)} migration(s) completed.")
