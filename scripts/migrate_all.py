@@ -23,6 +23,44 @@ import sys
 from pathlib import Path
 
 
+def _run_sibling(path: Path) -> None:
+    """Load one migrate_*.py sibling and invoke its main(), isolated from our own argv.
+
+    Sibling scripts call ``argparse.ArgumentParser().parse_args()`` with no
+    explicit argv, which defaults to reading ``sys.argv[1:]``. Without
+    isolation, any flag passed to ``migrate_all.py`` itself (e.g. ``--yes``)
+    would pass straight through to *every* sibling's own parser — including
+    destructive migrations that happen to define the same flag name
+    (NOTES-130). Reset ``sys.argv`` to just the sibling's own path for the
+    duration of its ``main()``, and always restore migrate_all's original
+    argv afterward (even if the sibling raises) so later siblings, and the
+    caller, are unaffected.
+
+    Args:
+        path: Filesystem path to the migrate_*.py sibling to load and run.
+
+    Raises:
+        RuntimeError: If the module spec can't be loaded, or the module has
+            no ``main()`` entry point.
+    """
+    module_name = f"_migrate_all__{path.stem}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load module spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    if not hasattr(module, "main"):
+        raise RuntimeError(f"{path.name} has no main() entry point")
+
+    original_argv = sys.argv
+    try:
+        sys.argv = [str(path)]
+        module.main()
+    finally:
+        sys.argv = original_argv
+
+
 def main() -> None:
     """Discover migrate_*.py siblings and invoke each module's main()."""
     scripts_dir = Path(__file__).resolve().parent
@@ -40,16 +78,7 @@ def main() -> None:
 
     for path in migrations:
         print(f"==> Running {path.name}")
-        module_name = f"_migrate_all__{path.stem}"
-        spec = importlib.util.spec_from_file_location(module_name, path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Could not load module spec for {path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-        if not hasattr(module, "main"):
-            raise RuntimeError(f"{path.name} has no main() entry point")
-        module.main()
+        _run_sibling(path)
         print(f"<== Finished {path.name}\n")
 
     print(f"All {len(migrations)} migration(s) completed.")

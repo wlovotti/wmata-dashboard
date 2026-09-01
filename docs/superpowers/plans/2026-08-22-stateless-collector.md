@@ -20,7 +20,7 @@
   - **PR B** (Tasks 6–8, branch `feature/notes-95-vp-loader`): laptop-side loader.
   - **PR C** (Task 9, branch `feature/notes-95-cutover`): pull-and-derive rework + docs + NOTES closure. Opens only after the user-run cutover ops (Tasks O1–O3) verify the overlap.
 - Any PR touching `deployment/systemd/` must cite `docs/DEPLOYMENT.md` §2 (cp to `/etc/systemd/system/` + `daemon-reload` + restart) in its deploy section — `git pull` does not update installed units.
-- New `main()` functions take `argv=None` and pass it to `parse_args(argv)` — never read `sys.argv` implicitly (the NOTES-130 lesson).
+- New `main()` functions take `argv=None` and pass it to `parse_args(argv)` — never read `sys.argv` implicitly (the migrate_all argv-isolation fix, PR #TODO).
 - Heavy ops (provisioning, unit installs, parity psql runs, decommission) are **user-run**; the plan supplies exact commands but subagents never SSH to the VM or run backfills.
 - S3 bucket: `s3://wmata-dashboard-backups`, permanent prefix `raw-jsonl-archive/`. Sub-prefixes: root = WMATA TU (existing), `sfmta/` = SFMTA TU (existing), `vp/` = WMATA VP (new), `sfmta_vp/` = SFMTA VP (new).
 
