@@ -229,7 +229,7 @@ echo "== SFMTA trip_update_state retention (WMATA's own is handled by run_daily_
 # a latent gap: SFMTA's trip_update_state only grew when someone ran the
 # SFMTA replay by hand. Automating that replay on every freshness run turned
 # the missing retention into standing, unbounded growth (the retention
-# hookup added here, PR #TODO) — so run it explicitly, once, right after the
+# hookup added here, PR #229) — so run it explicitly, once, right after the
 # SFMTA derive step above. Non-blocking: a cleanup failure must not fail an
 # otherwise-healthy freshness run, same treatment as the other steps above.
 cleanup_rc_sfmta=0
