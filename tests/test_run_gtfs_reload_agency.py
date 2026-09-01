@@ -1,4 +1,4 @@
-"""Per-agency GTFS reload gate coverage (NOTES-134).
+"""Per-agency GTFS reload gate coverage (PR #226).
 
 Before this, `run_gtfs_reload.py` only ever reloaded WMATA's static
 GTFS, gated on the WMATA `gtfs_snapshots` table — SFMTA's static GTFS

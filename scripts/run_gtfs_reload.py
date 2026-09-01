@@ -11,7 +11,7 @@ This wrapper is invoked as step 1 of `bin/pull-and-derive.sh`
 schedule) — previously it was what the now-retired
 `com.wmata-dashboard.gtfs-reload.plist` launchd job invoked weekly.
 
-Multi-agency (NOTES-134): pass `--agency` (matching a
+Multi-agency (PR #226): pass `--agency` (matching a
 `config/agencies/<agency>.yaml`) to gate and reload that agency's own
 static GTFS against its own database. Before this, the gate only ever
 covered WMATA — SFMTA's static GTFS had no staleness gate at all, and
@@ -111,7 +111,7 @@ def fire_failure_notification(agency: str, exit_code: int, elapsed: float, log_p
     non-zero so launchd records the failure.
 
     ``agency`` names the failing agency in the notification title so a
-    SFMTA reload failure can't be mistaken for a WMATA one (NOTES-134).
+    SFMTA reload failure can't be mistaken for a WMATA one (PR #226).
     """
     osascript = shutil.which("osascript") or "/usr/bin/osascript"
     title = f"WMATA dashboard ({agency})"
@@ -238,7 +238,7 @@ def main() -> int:
         help=(
             f"Agency name matching config/agencies/<agency>.yaml (default: {DEFAULT_AGENCY!r}). "
             "Gates and reloads that agency's own static GTFS against its own database "
-            "(NOTES-134 multi-agency reload gate)."
+            "(PR #226 multi-agency reload gate)."
         ),
     )
     parser.add_argument(

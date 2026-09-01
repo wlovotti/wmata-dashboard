@@ -1,6 +1,6 @@
 """Post-replay canary: feed-trip_id vs current-GTFS-trip_id match rate.
 
-NOTES-134: `bin/pull-and-derive.sh`'s GTFS reload gate (`run_gtfs_reload.py
+PR #226: `bin/pull-and-derive.sh`'s GTFS reload gate (`run_gtfs_reload.py
 --max-age-days N`) is a staleness *proxy* — it bounds how old the loaded
 snapshot can get, but it can't see a service change landing while the
 local copy is still "fresh" by the age gate. On 2026-08-30, Muni's fall
@@ -22,7 +22,9 @@ see the module's PR description): a human decides when the schedule
 data has genuinely changed enough to warrant a reload, and re-derive
 requires first deleting the affected date's `runs` rows (NOTES-113's
 failure shape — a near-zero derive still writes `runs` rows, which
-blocks `run_daily_batch.py`'s auto-revisit).
+blocks `run_daily_batch.py`'s auto-revisit). See PR #226's description
+for the full recovery procedure and the reasoning behind fail-loud
+over auto-recovery.
 
 Usage:
     uv run python scripts/gtfs_trip_match_canary.py --date 2026-08-30
@@ -44,7 +46,7 @@ from src.models import Trip, VehiclePosition
 from src.timezones import local_service_date_position_window_utc, local_today
 
 # Below this fraction, treat the match as a collapse rather than normal
-# day-to-day variation. The observed failure signature (NOTES-134, the
+# day-to-day variation. The observed failure signature (PR #226, the
 # 2026-08-30 Muni fall service change) was a drop from a healthy match
 # rate to exactly 0% — a low, conservative bar catches that collapse
 # without risking false positives on an ordinary reduced-service day.
@@ -132,8 +134,9 @@ def check_trip_match_rate(
             f"gtfs_trip_match_canary: COLLAPSED match rate for agency={agency} "
             f"date={service_date.isoformat()}: {result.matched_count}/{result.observed_count} "
             f"observed trip_ids matched a current GTFS trip ({pct:.1f}%, threshold "
-            f"{threshold * 100:.0f}%). This is the NOTES-134 signature — a service change "
-            "likely landed while the loaded GTFS snapshot was still 'fresh' by the age gate. "
+            f"{threshold * 100:.0f}%). This matches the 2026-08-30 Muni fall-service-change "
+            "signature (PR #226) — a service change likely landed while the loaded GTFS "
+            "snapshot was still 'fresh' by the age gate. "
             f"Reload this agency's GTFS (`uv run python scripts/reload_gtfs_complete.py "
             f"--agency {agency}`), delete {service_date.isoformat()}'s `runs` rows for "
             "this agency, then re-derive."

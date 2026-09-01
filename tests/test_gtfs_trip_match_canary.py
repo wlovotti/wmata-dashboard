@@ -1,6 +1,6 @@
 """Post-replay canary: feed-trip_id vs current-GTFS-trip_id match rate.
 
-NOTES-134: on 2026-08-30 Muni's fall service change landed a new
+PR #226: on 2026-08-30 Muni's fall service change landed a new
 trip_id space while the loaded GTFS snapshot was still the old one —
 feed trip_ids matched 0 of 3,657 current trips, so derivation silently
 produced near-zero stop_events while exiting 0. This canary computes
