@@ -17,14 +17,21 @@ derive.
 This script recomputes that same intersection, agency- and date-wide
 (not per-route — a single cheap check is enough to catch the collapse
 signature), and fails loudly when the match rate drops below a
-threshold. It does NOT auto-reload or auto-re-derive (deliberately —
-see the module's PR description): a human decides when the schedule
-data has genuinely changed enough to warrant a reload, and re-derive
-requires first deleting the affected date's `runs` rows (NOTES-113's
-failure shape — a near-zero derive still writes `runs` rows, which
-blocks `run_daily_batch.py`'s auto-revisit). See PR #226's description
-for the full recovery procedure and the reasoning behind fail-loud
-over auto-recovery.
+threshold. It does NOT auto-reload or auto-re-derive (deliberately): a
+human decides when the schedule data has genuinely changed enough to
+warrant a reload, and re-derive requires first deleting the affected
+date's `runs` rows (NOTES-113's failure shape — a near-zero derive
+still writes `runs` rows, which blocks `run_daily_batch.py`'s
+auto-revisit). See `docs/DEPLOYMENT.md` for the full recovery
+procedure and the reasoning behind fail-loud over auto-recovery.
+
+Exit codes (distinguish "the data really collapsed" from "the check
+itself couldn't run" — both are silent-collapse risks if conflated):
+    0  ok — healthy match rate, or a skip (nothing observed yet)
+    1  match-rate collapse — a real trip_id-space mismatch
+    2  operational error — the canary itself couldn't run (unset
+       config, unknown agency, a transient DB failure); one-line
+       message, no traceback
 
 Usage:
     uv run python scripts/gtfs_trip_match_canary.py --date 2026-08-30
@@ -45,11 +52,13 @@ from src.database import get_session
 from src.models import Trip, VehiclePosition
 from src.timezones import local_service_date_position_window_utc, local_today
 
+DEFAULT_AGENCY = "wmata"
+
 # Below this fraction, treat the match as a collapse rather than normal
-# day-to-day variation. The observed failure signature (PR #226, the
-# 2026-08-30 Muni fall service change) was a drop from a healthy match
-# rate to exactly 0% — a low, conservative bar catches that collapse
-# without risking false positives on an ordinary reduced-service day.
+# day-to-day variation. The observed failure signature (the 2026-08-30
+# Muni fall service change) was a drop from a healthy match rate to
+# exactly 0% — a low, conservative bar catches that collapse without
+# risking false positives on an ordinary reduced-service day.
 DEFAULT_THRESHOLD = 0.05
 
 
@@ -76,16 +85,24 @@ def compute_trip_match_rate(session, service_date: date_type, tz_name: str) -> T
     """Compute the feed-trip_id ∩ current-GTFS-trip_id match rate for one service date.
 
     Mirrors the gate both derive paths actually use
-    (`derive_stop_events_from_state.py`'s `vp_trip_ids` query, scoped
-    by the same agency-local service-date window) — feed-wide rather
-    than per-route, since one collapsed date collapses every route at
-    once and a single check is cheap.
+    (`derive_stop_events_from_state.py`'s `vp_trip_ids` query, and
+    `derive_stop_events.py`'s equivalent): the same agency-local
+    service-date window AND the same `trip_start_date` equality filter.
+    The timestamp window alone is ~48h wide (past-midnight service),
+    so without the `trip_start_date` filter a date's observed set
+    would also pick up the *next* service date's positions that happen
+    to fall inside this window — feed-wide rather than per-route,
+    since one collapsed date collapses every route at once and a
+    single check is cheap.
     """
     window_start, window_end = local_service_date_position_window_utc(service_date, tz_name)
+    trip_start_date_str = service_date.strftime("%Y%m%d")
     observed = {
         row[0]
         for row in session.query(VehiclePosition.trip_id)
         .filter(
+            VehiclePosition.trip_id.isnot(None),
+            VehiclePosition.trip_start_date == trip_start_date_str,
             VehiclePosition.timestamp >= window_start,
             VehiclePosition.timestamp < window_end,
         )
@@ -135,11 +152,11 @@ def check_trip_match_rate(
             f"date={service_date.isoformat()}: {result.matched_count}/{result.observed_count} "
             f"observed trip_ids matched a current GTFS trip ({pct:.1f}%, threshold "
             f"{threshold * 100:.0f}%). This matches the 2026-08-30 Muni fall-service-change "
-            "signature (PR #226) — a service change likely landed while the loaded GTFS "
-            "snapshot was still 'fresh' by the age gate. "
-            f"Reload this agency's GTFS (`uv run python scripts/reload_gtfs_complete.py "
-            f"--agency {agency}`), delete {service_date.isoformat()}'s `runs` rows for "
-            "this agency, then re-derive."
+            "signature — a service change likely landed while the loaded GTFS snapshot was "
+            "still 'fresh' by the age gate. See docs/DEPLOYMENT.md for the recovery "
+            f"procedure: reload this agency's GTFS (`uv run python "
+            f"scripts/reload_gtfs_complete.py --agency {agency}`), then re-derive "
+            f"{service_date.isoformat()} for this agency."
         )
 
     print(
@@ -150,12 +167,22 @@ def check_trip_match_rate(
 
 
 def main() -> int:
-    """CLI entry point — run the canary for one agency/date and exit non-zero on collapse."""
+    """CLI entry point — run the canary for one agency/date.
+
+    Exit codes (see the module docstring): 0 ok/skip, 1 match-rate
+    collapse, 2 the canary itself couldn't run (operational error —
+    unset config, unknown agency, a transient DB failure). Config/DB
+    errors are deliberately kept distinguishable from a real collapse:
+    a caller (`bin/pull-and-derive.sh`) treats them differently — a
+    collapse means abort before derive, an operational error means the
+    check just didn't run and should be surfaced without masquerading
+    as "the data collapsed."
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--agency",
-        default="wmata",
-        help="Agency name matching config/agencies/<agency>.yaml (default: 'wmata').",
+        default=DEFAULT_AGENCY,
+        help=f"Agency name matching config/agencies/<agency>.yaml (default: {DEFAULT_AGENCY!r}).",
     )
     parser.add_argument(
         "--date",
@@ -170,15 +197,22 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    load_dotenv()
-    cfg = load_agency_config(args.agency)
-    service_date = (
-        date_type.fromisoformat(args.date)
-        if args.date
-        else local_today(cfg.timezone) - timedelta(days=1)
-    )
+    try:
+        load_dotenv()
+        cfg = load_agency_config(args.agency)
+        service_date = (
+            date_type.fromisoformat(args.date)
+            if args.date
+            else local_today(cfg.timezone) - timedelta(days=1)
+        )
+        session = get_session(db_url=resolve_agency_db_url(cfg))
+    except Exception as exc:
+        print(
+            f"gtfs_trip_match_canary: could not run for agency={args.agency}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
-    session = get_session(db_url=resolve_agency_db_url(cfg))
     try:
         check_trip_match_rate(
             session, args.agency, service_date, cfg.timezone, threshold=args.threshold
@@ -186,6 +220,12 @@ def main() -> int:
     except MatchRateCollapseError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    except Exception as exc:
+        print(
+            f"gtfs_trip_match_canary: could not run for agency={args.agency}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     finally:
         session.close()
     return 0

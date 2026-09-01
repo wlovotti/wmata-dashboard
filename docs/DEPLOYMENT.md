@@ -24,7 +24,12 @@ are in the spec §5 runbook.
 > archives, and derives — no SSH tunnel, no VM access, no manual S3 sync
 > step required. `s3://wmata-dashboard-backups/raw-jsonl-archive/` is the
 > permanent raw store, written directly by the collector rather than
-> synced up after the fact.
+> synced up after the fact. Before deriving, the script also reloads
+> each agency's static GTFS if stale (`scripts/run_gtfs_reload.py
+> --max-age-days 7`) and runs a post-replay trip_id match-rate canary
+> (`scripts/gtfs_trip_match_canary.py`) that catches a service change
+> landing while the age gate still calls the snapshot "fresh" — see
+> §12.1 for the gate/canary detail and the recovery procedure.
 >
 > §1–§11 below document the outgoing `wmata-data` Lightsail VM (Phase 1)
 > that the nano box replaces. That VM is scheduled for decommission (O3,
@@ -795,6 +800,60 @@ installed-but-unloaded, not running on any schedule.
 Check GTFS freshness at any time without waiting for the weekly job:
 `curl -s localhost:8000/api/gtfs/freshness` (requires the API running
 locally) or `psql -d wmata_dashboard -Atc "SELECT max(created_at) FROM gtfs_snapshots;"`.
+
+### 12.1 GTFS reload gate + trip_id match-rate canary — how it works, and recovery
+
+`bin/pull-and-derive.sh` runs two checks per agency (WMATA and SFMTA)
+before it derives:
+
+1. **Age gate** (`scripts/run_gtfs_reload.py --max-age-days 7`) — reloads
+   an agency's static GTFS if the newest loaded snapshot is more than 7
+   days old. This is a staleness *proxy*: it bounds how old the loaded
+   snapshot can get, but it can't see a service change land while the
+   local copy is still "fresh" by that clock.
+2. **Post-replay trip_id match-rate canary**
+   (`scripts/gtfs_trip_match_canary.py`) — after replay, recomputes the
+   same feed-trip_id ∩ current-GTFS-trip_id intersection both derive
+   paths (`pipelines/derive_stop_events.py`,
+   `pipelines/derive_stop_events_from_state.py`) gate on, for each
+   agency's latest agency-local service date. This is the check that
+   actually catches a service change landing while the snapshot is still
+   "fresh" by the age gate — the 2026-08-30 Muni fall service change did
+   exactly that (SFMTA's snapshot was < 7 days old, so the age gate
+   skipped a reload, but the feed's trip_ids had moved to a brand-new
+   space; a collapsed intersection means derivation would otherwise
+   silently write ~0 `stop_events` while exiting 0).
+
+The canary exits 0 (ok, or a "nothing observed yet" skip), 1 (a real
+match-rate collapse), or 2 (an operational error — the check itself
+couldn't run: unset `<AGENCY>_DATABASE_URL`, an unknown `--agency`, a
+transient DB failure). `run_daily_batch.py` (no `--agency`, called by
+`bin/pull-and-derive.sh` with no flag) only derives WMATA — SFMTA
+replay/derive stays fully manual (see `notes/NOTES-135.md`) — so only a
+**WMATA** collapse (exit 1) aborts `bin/pull-and-derive.sh` before
+derive runs. A WMATA operational error (exit 2), or any SFMTA outcome,
+is captured as a nonzero return code and reported in the run's summary
+without blocking the WMATA derive. `GTFS_CANARY_SKIP=1
+bin/pull-and-derive.sh` skips the canary step entirely (loud "skipped
+by operator" line) — a manual escape hatch for a legitimately-0%
+backfill date; use deliberately, not routinely.
+
+**Recovery procedure**, once a real collapse is confirmed (agency,
+date, and match rate are in the canary's error output):
+
+1. Reload that agency's static GTFS:
+   `uv run python scripts/reload_gtfs_complete.py --agency <agency>`.
+2. An operator then deletes the affected date's `runs` rows for that
+   agency (`DELETE FROM runs WHERE service_date = '<date>' AND
+   agency = '<agency>'` — or the agency-scoped equivalent for a
+   single-agency DB) so `run_daily_batch.py`'s
+   `determine_target_dates` picks the date back up automatically;
+   without this, a near-zero derive still wrote `runs` rows, so the
+   date would silently never be revisited (NOTES-113's failure shape).
+3. Re-derive: rerun `bin/pull-and-derive.sh` (WMATA), or
+   `pipelines/run_daily_batch.py --agency sfmta --lookback-days N` /
+   `pipelines/derive_stop_events_from_state.py --all-routes --date D
+   --agency sfmta` (SFMTA, manual per NOTES-135).
 
 ---
 
