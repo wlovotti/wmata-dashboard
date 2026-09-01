@@ -830,15 +830,28 @@ couldn't run: unset `<AGENCY>_DATABASE_URL`, an unknown `--agency`, a
 transient DB failure). `bin/pull-and-derive.sh` replays and derives
 *both* agencies (SFMTA pull-and-derive automation) — the replay loop
 runs `pipelines/replay_archive_to_state.py` for WMATA and SFMTA every
-lookback date, and derive calls `run_daily_batch.py` once with no
-`--agency` flag (WMATA) and again with `--agency sfmta`. So a
-collapse (exit 1) for **either** agency aborts `bin/pull-and-derive.sh`
-before derive runs. An operational error (exit 2) for either agency is
-captured as a nonzero return code and reported in the run's summary
-without blocking the other agency's derive. `GTFS_CANARY_SKIP=1
-bin/pull-and-derive.sh` skips the canary step entirely (loud "skipped
-by operator" line) — a manual escape hatch for a legitimately-0%
-backfill date; use deliberately, not routinely.
+lookback date (SFMTA's replay passes `--allow-empty`, since its S3
+archive prefix only starts 2026-07-22 and a missing/empty day there is
+expected, not an error — WMATA keeps the strict, no-`--allow-empty`
+behavior), and derive calls `run_daily_batch.py` once with no
+`--agency` flag (WMATA) and again with `--agency sfmta`. Failure
+handling is per-agency throughout: a replay failure, a canary collapse
+(exit 1), or a derive failure for one agency skips only *that*
+agency's remaining steps (derive is skipped outright on a replay
+failure or a collapse; a derive failure is just captured) — it never
+blocks or aborts the other, healthy agency's replay/derive. An
+operational error (exit 2) from the canary for either agency is
+captured as a nonzero return code and reported in the run's summary,
+and does not skip that agency's derive. Any of these failure modes,
+for either agency, makes the overall script exit nonzero (with a
+summary of what happened) even though everything unaffected still ran
+— check the summary, don't assume a nonzero exit means nothing
+derived. `GTFS_CANARY_SKIP=1 bin/pull-and-derive.sh` skips the canary
+step entirely (loud "skipped by operator" line) — a manual escape
+hatch for a legitimately-0% backfill date; use deliberately, not
+routinely. (Single-agency canary collapses no longer need this flag to
+protect the other agency, since a collapse now only skips its own
+agency's derive.)
 
 **Recovery procedure**, once a real collapse is confirmed (agency,
 date, and match rate are in the canary's error output):
