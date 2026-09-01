@@ -6,7 +6,8 @@ backend, React/Vite frontend. **The laptop's local PostgreSQL 16
 collector polls WMATA + SFMTA GTFS-RT and uploads raw JSONL to S3 (no
 database on the collector box). API + frontend run locally against the
 local DB. Freshness: run `bin/pull-and-derive.sh` (syncs the S3
-archives, loads + replays, derives — no tunnel or VM access needed).
+archives, loads + replays, derives, then prunes SFMTA's
+trip_update_state retention window — no tunnel or VM access needed).
 Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: `NOTES.md`
 (index; item bodies in `notes/NOTES-N.md`).
 
@@ -16,7 +17,7 @@ Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: `NOTES.md`
 uv sync --extra dev                          # install (--extra viz --extra postgres for matplotlib/psycopg2 scripts)
 uv run uvicorn api.main:app --reload         # API on :8000
 cd frontend && npm run dev                   # frontend on :5173
-bin/pull-and-derive.sh                       # freshness: sync S3 raw archives + load + replay + derive locally
+bin/pull-and-derive.sh                       # freshness: sync S3 raw archives + load + replay + derive + prune SFMTA trip_update_state locally
 uv run python pipelines/run_daily_batch.py   # derive + aggregate + rollup (--agency sfmta for Muni)
 psql -d wmata_dashboard                      # ad-hoc queries (Muni sidecar DB: sfmta_dashboard)
 uv run pytest -m smoke                       # fast tests

@@ -47,11 +47,14 @@ any agency other than the default: three of the four
 (refresh_route_diagnostic_profile, refresh_cross_route_segments,
 refresh_corridor_slip) are NOT agency-aware and always target
 `DATABASE_URL` (WMATA); the fourth, `cleanup_trip_update_state.py`, IS
-agency-aware but needs its own separate invocation/schedule per agency
-(`cleanup_trip_update_state.py --agency sfmta`) rather than running
-here, so `run_batch` skips the whole group rather than a non-WMATA run
-silently touching the WMATA database. Omitting `--agency` keeps
-today's WMATA/Eastern behavior, including housekeeping, unchanged.
+agency-aware but runs separately from this loop rather than here --
+for sfmta, `bin/pull-and-derive.sh` invokes
+`cleanup_trip_update_state.py --agency sfmta` as its own step after a
+successful SFMTA derive (PR #229); any other non-default agency needs
+its own invocation. `run_batch` skips the whole HOUSEKEEPING_PIPELINES
+group rather than a non-WMATA run silently touching the WMATA
+database. Omitting `--agency` keeps today's WMATA/Eastern behavior,
+including housekeeping, unchanged.
 
 The six per-date pipelines above bucket `ewt_seconds` and `bunching_rate`
 by the agency's own local hour-of-day (the agency-local hour bucketing
@@ -547,18 +550,24 @@ def run_batch(
     # for the default agency it still runs below via
     # run_housekeeping_pipeline (which passes no --agency flag, so it
     # keeps defaulting to wmata, unchanged). For a non-default agency it's
-    # NOT invoked here at all: it needs its own schedule/invocation with
-    # `--agency <agency>` (never the default -- that would prune WMATA's
-    # table, not the agency's own) so that agency's trip_update_state
-    # table stays bounded.
+    # NOT invoked here at all: for sfmta, bin/pull-and-derive.sh now runs
+    # `cleanup_trip_update_state.py --agency sfmta` as its own step after
+    # a successful SFMTA derive (PR #229, gated so it does NOT run when
+    # that derive was skipped or failed); any other non-default agency
+    # still needs its own `--agency <agency>` invocation (never the
+    # default -- that would prune WMATA's table, not the agency's own) so
+    # that agency's trip_update_state table stays bounded.
     if agency != DEFAULT_AGENCY:
         log_handle.write(
             f"\nSKIP housekeeping for agency={agency!r} — refresh_route_diagnostic_profile / "
             "refresh_cross_route_segments / refresh_corridor_slip are not agency-aware yet "
             f"(would target DATABASE_URL/{DEFAULT_AGENCY} regardless of --agency). "
             "cleanup_trip_update_state.py IS agency-aware but is not invoked from here for a "
-            f"non-default agency -- run `cleanup_trip_update_state.py --agency {agency}` "
-            "on its own schedule to keep this agency's trip_update_state table bounded.\n"
+            f"non-default agency -- for agency={agency!r} == 'sfmta', "
+            "bin/pull-and-derive.sh now runs `cleanup_trip_update_state.py --agency sfmta` "
+            "as its own step after a successful SFMTA derive (PR #229); any other "
+            f"non-default agency still needs its own `cleanup_trip_update_state.py --agency "
+            f"{agency}` invocation to keep that agency's trip_update_state table bounded.\n"
         )
         log_handle.flush()
         return failure_count
