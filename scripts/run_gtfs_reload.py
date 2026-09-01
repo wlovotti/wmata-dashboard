@@ -10,6 +10,19 @@ This wrapper is invoked as step 1 of `bin/pull-and-derive.sh`
 (`--max-age-days 7`, gating on snapshot age rather than a fixed
 schedule) — previously it was what the now-retired
 `com.wmata-dashboard.gtfs-reload.plist` launchd job invoked weekly.
+
+Multi-agency (PR #226): pass `--agency` (matching a
+`config/agencies/<agency>.yaml`) to gate and reload that agency's own
+static GTFS against its own database. Before this, the gate only ever
+covered WMATA — SFMTA's static GTFS had no staleness gate at all, and
+was reloaded only when someone remembered to run
+`reload_gtfs_complete.py --agency sfmta` by hand. `bin/pull-and-derive.sh`
+now calls this wrapper once per agency. A non-default agency's log file
+and failure marker are suffixed (`gtfs_reload_sfmta_<date>.log`,
+`gtfs_reload_LAST_FAILURE_sfmta.json`) — see `agency_paths` — so a
+concurrent SFMTA run never collides with WMATA's, mirroring
+`run_daily_batch.py`'s `log_suffix` convention.
+
 Its job is small:
 
 1. Spawn `reload_gtfs_complete.py` as a subprocess and capture its
@@ -62,10 +75,31 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
 RELOAD_SCRIPT = REPO_ROOT / "scripts" / "reload_gtfs_complete.py"
-FAILURE_MARKER = LOGS_DIR / "gtfs_reload_LAST_FAILURE.json"
+DEFAULT_AGENCY = "wmata"
 
 
-def fire_failure_notification(exit_code: int, elapsed: float, log_path: Path) -> None:
+def agency_paths(agency: str, today) -> tuple[Path, Path]:
+    """Return (log_path, failure_marker_path) for one agency's reload run.
+
+    The default agency (wmata) keeps the original, unsuffixed filenames
+    for backward compatibility with existing logs/tooling. Any other
+    agency gets an `_<agency>` suffix on both files — mirrors
+    `run_daily_batch.py`'s `log_suffix` convention — so a concurrent
+    SFMTA reload can never overwrite WMATA's log or failure marker (or
+    vice versa).
+    """
+    suffix = "" if agency == DEFAULT_AGENCY else f"_{agency}"
+    log_path = LOGS_DIR / f"gtfs_reload{suffix}_{today.isoformat()}.log"
+    marker_path = LOGS_DIR / f"gtfs_reload_LAST_FAILURE{suffix}.json"
+    return log_path, marker_path
+
+
+def build_reload_cmd(agency: str) -> list[str]:
+    """Build the `reload_gtfs_complete.py` subprocess argv for one agency."""
+    return [sys.executable, str(RELOAD_SCRIPT), "--agency", agency]
+
+
+def fire_failure_notification(agency: str, exit_code: int, elapsed: float, log_path: Path) -> None:
     """Surface a GTFS reload failure as a macOS desktop notification.
 
     The whole reason this feature exists is that silent staleness
@@ -75,9 +109,12 @@ def fire_failure_notification(exit_code: int, elapsed: float, log_path: Path) ->
     `osascript` itself isn't on PATH (unlikely on macOS), we fall
     back to a stderr message; either way the wrapper still exits
     non-zero so launchd records the failure.
+
+    ``agency`` names the failing agency in the notification title so a
+    SFMTA reload failure can't be mistaken for a WMATA one (PR #226).
     """
     osascript = shutil.which("osascript") or "/usr/bin/osascript"
-    title = "WMATA dashboard"
+    title = f"WMATA dashboard ({agency})"
     message = f"GTFS reload failed (exit {exit_code}, {elapsed:.0f}s). See {log_path.name}."
     try:
         subprocess.run(
@@ -96,29 +133,34 @@ def fire_failure_notification(exit_code: int, elapsed: float, log_path: Path) ->
         print(f"run_gtfs_reload: failed to fire notification: {exc}", file=sys.stderr)
 
 
-def write_failure_marker(exit_code: int, elapsed: float, log_path: Path) -> None:
+def write_failure_marker(
+    marker_path: Path, agency: str, exit_code: int, elapsed: float, log_path: Path
+) -> None:
     """Drop a JSON marker file the dashboard could surface (NOTES-24).
 
     This is intentionally tiny and side-effect-free — the dashboard
     doesn't read it yet, but if NOTES-24 ever wants a "last reload
     failed" badge, the data is already on disk in a stable shape.
+    ``marker_path`` is agency-suffixed (see `agency_paths`) so a WMATA
+    and SFMTA failure never clobber each other's marker.
     """
     import json
     from datetime import UTC, datetime
 
     payload = {
+        "agency": agency,
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "exit_code": exit_code,
         "elapsed_seconds": round(elapsed, 1),
         "log_file": str(log_path),
     }
     try:
-        FAILURE_MARKER.write_text(json.dumps(payload, indent=2) + "\n")
+        marker_path.write_text(json.dumps(payload, indent=2) + "\n")
     except OSError as exc:
         print(f"run_gtfs_reload: failed to write failure marker: {exc}", file=sys.stderr)
 
 
-def clear_failure_marker() -> None:
+def clear_failure_marker(marker_path: Path) -> None:
     """Remove the failure marker on a successful run.
 
     Keeping a stale failure marker after a recovery would be
@@ -127,7 +169,7 @@ def clear_failure_marker() -> None:
     permissions error gets logged but doesn't fail the run.
     """
     try:
-        FAILURE_MARKER.unlink(missing_ok=True)
+        marker_path.unlink(missing_ok=True)
     except OSError as exc:
         print(f"run_gtfs_reload: failed to clear failure marker: {exc}", file=sys.stderr)
 
@@ -153,14 +195,14 @@ def reload_due(session, max_age_days: int) -> bool:
     return newest is None or newest < utcnow_naive() - timedelta(days=max_age_days)
 
 
-def run_reload(log_handle, dry_run: bool) -> tuple[int, float]:
-    """Spawn reload_gtfs_complete.py and stream its output into log_handle.
+def run_reload(log_handle, agency: str, dry_run: bool) -> tuple[int, float]:
+    """Spawn reload_gtfs_complete.py --agency <agency> and stream its output into log_handle.
 
     Returns (exit_code, elapsed_seconds). On dry-run, returns
     (0, 0.0) without spawning anything — used by the smoke test to
     validate wiring without hitting the WMATA API or the DB.
     """
-    cmd = [sys.executable, str(RELOAD_SCRIPT)]
+    cmd = build_reload_cmd(agency)
     log_handle.write(f"$ {' '.join(cmd)}\n")
     log_handle.flush()
     if dry_run:
@@ -191,6 +233,15 @@ def main() -> int:
         )
     )
     parser.add_argument(
+        "--agency",
+        default=DEFAULT_AGENCY,
+        help=(
+            f"Agency name matching config/agencies/<agency>.yaml (default: {DEFAULT_AGENCY!r}). "
+            "Gates and reloads that agency's own static GTFS against its own database "
+            "(PR #226 multi-agency reload gate)."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Log the plan and exit 0 without invoking the reload subprocess.",
@@ -207,13 +258,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.max_age_days is not None:
-        from src.database import get_session
+    from src.agency_config import load_agency_config, resolve_agency_db_url
+    from src.database import get_session
 
-        session = get_session()
+    cfg = load_agency_config(args.agency)
+
+    if args.max_age_days is not None:
+        session = get_session(db_url=resolve_agency_db_url(cfg))
         try:
             if not reload_due(session, max_age_days=args.max_age_days):
-                print(f"GTFS snapshot is fresh (<= {args.max_age_days} days); skipping reload.")
+                print(
+                    f"GTFS snapshot for agency={args.agency} is fresh "
+                    f"(<= {args.max_age_days} days); skipping reload."
+                )
                 return 0
         finally:
             session.close()
@@ -226,29 +283,31 @@ def main() -> int:
     from datetime import date
 
     today = date.today()
-    log_path = LOGS_DIR / f"gtfs_reload_{today.isoformat()}.log"
+    log_path, marker_path = agency_paths(args.agency, today)
 
     with log_path.open("a") as log_handle:
-        log_handle.write(f"\n========== run_gtfs_reload start {today.isoformat()} ==========\n")
+        log_handle.write(
+            f"\n========== run_gtfs_reload start {today.isoformat()} agency={args.agency} ==========\n"
+        )
         if args.dry_run:
             log_handle.write("(dry-run mode — subprocess will not be invoked)\n")
         log_handle.flush()
-        print(f"run_gtfs_reload: log={log_path}")
+        print(f"run_gtfs_reload: agency={args.agency} log={log_path}")
 
-        exit_code, elapsed = run_reload(log_handle, dry_run=args.dry_run)
+        exit_code, elapsed = run_reload(log_handle, agency=args.agency, dry_run=args.dry_run)
 
         if exit_code == 0:
             log_handle.write(f"========== run_gtfs_reload OK ({elapsed:.1f}s) ==========\n")
             if not args.dry_run:
-                clear_failure_marker()
+                clear_failure_marker(marker_path)
         else:
             log_handle.write(
                 f"========== run_gtfs_reload FAILED (exit {exit_code}, {elapsed:.1f}s) ==========\n"
             )
             log_handle.flush()
             if not args.dry_run:
-                fire_failure_notification(exit_code, elapsed, log_path)
-                write_failure_marker(exit_code, elapsed, log_path)
+                fire_failure_notification(args.agency, exit_code, elapsed, log_path)
+                write_failure_marker(marker_path, args.agency, exit_code, elapsed, log_path)
 
     print(f"run_gtfs_reload: exit={exit_code}")
     return exit_code
