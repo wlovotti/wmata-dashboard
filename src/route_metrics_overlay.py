@@ -25,7 +25,7 @@ from src.ewt import (
     _day_type_for,
     compute_ewt_headline_for_routes_multi_date,
     fetch_observed_stop_events_for_window,
-    fetch_scheduled_cell_hours_for_routes,
+    fetch_scheduled_cell_hours_for_date,
 )
 from src.models import RouteMetricsDailyOverlay
 from src.otp_metrics import compute_otp_split_for_routes
@@ -57,15 +57,19 @@ def compute_route_metrics_overlay_for_date(
     side, and the OTP period-filter hour (unused here — the OTP call below
     is always unfiltered), by the agency's own local hour; defaults to
     Eastern.
+
+    The EWT/bunching scheduled side resolves against the EXACT
+    `service_date` (NOTES-109, no day_type/modal layer); `day_type`
+    (below) is still computed for the output row's descriptive label.
     """
     day_type = _day_type_for(service_date)
     service_date_iso = service_date.isoformat()
 
-    # Fetch scheduled cell-hours once for this day_type (module-level cache
-    # hits on the second call). EWT and bunching share it.
-    sched_by_day_type = {
-        day_type: fetch_scheduled_cell_hours_for_routes(
-            db, day_type, gtfs_snapshot_id=gtfs_snapshot_id
+    # Fetch scheduled cell-hours once for this exact date (module-level
+    # cache hits on the second call). EWT and bunching share it.
+    sched_by_date = {
+        service_date_iso: fetch_scheduled_cell_hours_for_date(
+            db, service_date, gtfs_snapshot_id=gtfs_snapshot_id
         )
     }
 
@@ -75,14 +79,14 @@ def compute_route_metrics_overlay_for_date(
     ewt_by_date = compute_ewt_headline_for_routes_multi_date(
         db,
         [service_date],
-        sched_by_day_type=sched_by_day_type,
+        sched_by_date=sched_by_date,
         observed_rows=observed_rows,
         tz_name=tz_name,
     )
     bunching_by_date = compute_bunching_headline_for_routes_multi_date(
         db,
         [service_date],
-        sched_by_day_type=sched_by_day_type,
+        sched_by_date=sched_by_date,
         observed_rows=observed_rows,
         tz_name=tz_name,
     )

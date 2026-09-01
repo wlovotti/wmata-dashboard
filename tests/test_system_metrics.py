@@ -363,11 +363,11 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
     db_session.add(Route(route_id="64", route_short_name="64", route_type=3, is_current=True))
     db_session.commit()
 
-    def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
+    def _fake_sched(db, service_date, route_ids=None, gtfs_snapshot_id=None):
         # One frequent cell: two 600s headways -> SWT = (600²+600²)/(2·1200) = 300.
         return {"64": {(0, "S1", 8): [600.0, 600.0]}}
 
-    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_routes", _fake_sched)
+    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_date", _fake_sched)
     monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
 
     ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(
@@ -403,7 +403,7 @@ def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monke
     )
     db_session.commit()
 
-    def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
+    def _fake_sched(db, service_date, route_ids=None, gtfs_snapshot_id=None):
         return {
             "BUS1": {(0, "S1", 8): [600.0, 600.0]},
             # Much shorter headway -- if pooled in, it would pull SWT well
@@ -411,7 +411,7 @@ def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monke
             "RAIL1": {(0, "S2", 8): [60.0, 60.0]},
         }
 
-    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_routes", _fake_sched)
+    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_date", _fake_sched)
     monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
 
     ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(

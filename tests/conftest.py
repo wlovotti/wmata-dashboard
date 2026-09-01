@@ -457,14 +457,25 @@ def _reset_ewt_schedule_caches():
     process silently reads its stale, rolled-back-DB result instead of
     resolving fresh (NOTES-106 review round 3 caught this while adding
     memoization to `_resolve_service_ids_for_day_type`).
+
+    `_schedule_cache_by_date` and `_service_id_resolution_cache_by_date`
+    (NOTES-109's per-exact-date siblings) have the exact same bleed for
+    the exact same reason — `SERVICE_DATE` (or another fixed test date)
+    is reused across many tests, so they collide on the same
+    `(db_identity, service_date_iso, 0)` key just as badly as the
+    day_type-keyed caches do without this reset.
     """
     import src.ewt as ewt_module
 
     ewt_module._schedule_cache.clear()
     ewt_module._service_id_resolution_cache.clear()
+    ewt_module._schedule_cache_by_date.clear()
+    ewt_module._service_id_resolution_cache_by_date.clear()
     yield
     ewt_module._schedule_cache.clear()
     ewt_module._service_id_resolution_cache.clear()
+    ewt_module._schedule_cache_by_date.clear()
+    ewt_module._service_id_resolution_cache_by_date.clear()
 
 
 @pytest.fixture(autouse=True)
