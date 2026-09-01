@@ -27,7 +27,6 @@ serves this or is explicitly parked.
 
 ## Ops & reliability
 
-- [NOTES-137](notes/NOTES-137.md) migrate_all.py doesn't propagate sibling failure/exit signals — sev low / eff low — unblocked
 - [NOTES-131](notes/NOTES-131.md) Full local test suite reads the production database — sev low / eff medium — unblocked
 - [NOTES-132](notes/NOTES-132.md) Dead-man ping can false-positive on an empty-but-healthy feed — sev low / eff low-medium — unblocked
 - [NOTES-133](notes/NOTES-133.md) Stateless-collector hardening follow-ups (deferred review minors) — sev low / eff low each — unblocked; good notes-batch candidate
