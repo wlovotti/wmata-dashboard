@@ -221,10 +221,24 @@ else
   PYTHONUNBUFFERED=1 uv run python pipelines/run_daily_batch.py --agency sfmta --lookback-days "$LOOKBACK_DAYS" || batch_rc_sfmta=$?
 fi
 
+echo "== SFMTA trip_update_state retention (WMATA's own is handled by run_daily_batch.py's housekeeping loop above) =="
+# run_daily_batch.py's housekeeping loop (pipelines/run_daily_batch.py) skips
+# wholesale for any non-default agency, including cleanup_trip_update_state.py
+# even though that one script IS agency-aware (--agency) — see its module
+# docstring. Before the SFMTA replay+derive automation (PR #227/#228) this was
+# a latent gap: SFMTA's trip_update_state only grew when someone ran the
+# SFMTA replay by hand. Automating that replay on every freshness run turned
+# the missing retention into standing, unbounded growth (the retention
+# hookup added here, PR #TODO) — so run it explicitly, once, right after the
+# SFMTA derive step above. Non-blocking: a cleanup failure must not fail an
+# otherwise-healthy freshness run, same treatment as the other steps above.
+cleanup_rc_sfmta=0
+PYTHONUNBUFFERED=1 uv run python pipelines/cleanup_trip_update_state.py --agency sfmta || cleanup_rc_sfmta=$?
+
 overall_failure=0
 if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ] \
   || [ "$canary_rc_wmata" -ne 0 ] || [ "$canary_rc_sfmta" -ne 0 ] || [ "$skip_wmata" -eq 1 ] || [ "$skip_sfmta" -eq 1 ] \
-  || [ "$batch_rc_wmata" -ne 0 ] || [ "$batch_rc_sfmta" -ne 0 ]; then
+  || [ "$batch_rc_wmata" -ne 0 ] || [ "$batch_rc_sfmta" -ne 0 ] || [ "$cleanup_rc_sfmta" -ne 0 ]; then
   overall_failure=1
 fi
 
@@ -239,6 +253,9 @@ if [ "$overall_failure" -eq 1 ]; then
   echo "  canary_wmata rc=$canary_rc_wmata canary_sfmta rc=$canary_rc_sfmta (1=collapse — that agency's derive below was skipped, not" >&2
   echo "  the other's; 2=operational error — reported here but does not skip that agency's derive)" >&2
   echo "  derive: wmata rc=$batch_rc_wmata skipped=$skip_wmata; sfmta rc=$batch_rc_sfmta skipped=$skip_sfmta" >&2
+  echo "  cleanup_trip_update_state sfmta rc=$cleanup_rc_sfmta (WMATA's own runs inside run_daily_batch.py's" >&2
+  echo "  housekeeping loop above, folded into its derive rc; non-blocking either way — see cleanup output" >&2
+  echo "  above for the failure if rc!=0)" >&2
   echo "  (a nonzero derive rc with skipped=0 can be a non-blocking housekeeping soft-failure" >&2
   echo "  inside run_daily_batch.py — see the derive output above for which step failed)" >&2
   if { [ "$vp_wmata_rc" -ne 0 ] && [ "$skip_wmata" -eq 0 ]; } || { [ "$vp_sfmta_rc" -ne 0 ] && [ "$skip_sfmta" -eq 0 ]; }; then

@@ -36,7 +36,6 @@ serves this or is explicitly parked.
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
 - [NOTES-118](notes/NOTES-118.md) Investigate scheduled-span data quality in runs (A90 67% zero-span, EXP/LCL junk route_ids) — sev low-medium / eff medium — unblocked; investigation first, guard is one possible outcome
 - [NOTES-130](notes/NOTES-130.md) migrate_all.py doesn't strip its own argv before invoking sibling migration scripts — sev low / eff low — unblocked; two destructive scripts now share the `--yes` flag name
-- [NOTES-136](notes/NOTES-136.md) SFMTA trip_update_state has no retention schedule — automating the SFMTA replay (PR #228) makes it a standing gap — sev low-medium / eff low — unblocked
 
 ## WMATA depth & UX
 

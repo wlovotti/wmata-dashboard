@@ -18,7 +18,10 @@ sfmta` (it isn't wired into the per-date orchestration), so it must be
 run separately with the matching `--agency` — running it bare
 (default `wmata`) would prune `DATABASE_URL` (the WMATA table), not
 the SFMTA one, leaving `sfmta_dashboard.trip_update_state` to grow
-unbounded.
+unbounded. ``bin/pull-and-derive.sh`` covers this by invoking
+``--agency sfmta`` directly as its own step after the SFMTA derive
+call (the SFMTA trip_update_state retention hookup, PR #TODO); an ad
+hoc non-default agency added later still needs its own invocation.
 
 Usage:
     uv run python pipelines/cleanup_trip_update_state.py
