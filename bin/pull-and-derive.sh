@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bin/pull-and-derive.sh — Path 2a ingest: sync fresh raw data from S3,
-# load + replay locally, derive. Run on demand (manual cadence).
+# load + replay locally, derive, then prune SFMTA's trip_update_state
+# retention window. Run on demand (manual cadence).
 #
 #   bin/pull-and-derive.sh          # replay+derive lookback of 14 days
 #   bin/pull-and-derive.sh 35       # wider catch-up
@@ -225,15 +226,31 @@ echo "== SFMTA trip_update_state retention (WMATA's own is handled by run_daily_
 # run_daily_batch.py's housekeeping loop (pipelines/run_daily_batch.py) skips
 # wholesale for any non-default agency, including cleanup_trip_update_state.py
 # even though that one script IS agency-aware (--agency) — see its module
-# docstring. Before the SFMTA replay+derive automation (PR #227/#228) this was
-# a latent gap: SFMTA's trip_update_state only grew when someone ran the
-# SFMTA replay by hand. Automating that replay on every freshness run turned
-# the missing retention into standing, unbounded growth (the retention
-# hookup added here, PR #229) — so run it explicitly, once, right after the
-# SFMTA derive step above. Non-blocking: a cleanup failure must not fail an
-# otherwise-healthy freshness run, same treatment as the other steps above.
+# docstring. Before the SFMTA replay+derive automation (PR #228) this was a
+# latent gap: SFMTA's trip_update_state only grew when someone ran the SFMTA
+# replay by hand. Automating that replay on every freshness run turned the
+# missing retention into standing, unbounded growth (the retention hookup
+# added here, PR #229).
+#
+# Gated on the SFMTA derive above having actually run AND succeeded this
+# invocation (skip_sfmta==0 and batch_rc_sfmta==0) — the same guard every
+# other SFMTA-downstream step in this script uses. This is not optional
+# caution: cleanup_trip_update_state.py treats un-derived rows past the
+# retention window as noise and deletes them with no archive
+# (docs/POSTMORTEM_2026-07.md's amplifier #3 — the first batch after the
+# July fix deleted 16M recoverable rows this exact way). When the SFMTA
+# derive was skipped (replay failure above, or a canary collapse), the
+# un-derived backlog sitting in trip_update_state is precisely the data a
+# skipped derive still needs — deleting it here would be that amplifier
+# again, just for SFMTA. Non-blocking otherwise: a cleanup failure must not
+# fail an otherwise-healthy freshness run, same treatment as the other
+# steps above.
 cleanup_rc_sfmta=0
-PYTHONUNBUFFERED=1 uv run python pipelines/cleanup_trip_update_state.py --agency sfmta || cleanup_rc_sfmta=$?
+if [ "$skip_sfmta" -eq 1 ] || [ "$batch_rc_sfmta" -ne 0 ]; then
+  echo "Skipping SFMTA trip_update_state cleanup (SFMTA derive was skipped or failed above) — leaving trip_update_state untouched rather than risk deleting an un-derived backlog." >&2
+else
+  PYTHONUNBUFFERED=1 uv run python pipelines/cleanup_trip_update_state.py --agency sfmta || cleanup_rc_sfmta=$?
+fi
 
 overall_failure=0
 if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$vp_wmata_rc" -ne 0 ] || [ "$vp_sfmta_rc" -ne 0 ] \
@@ -267,7 +284,13 @@ if [ "$overall_failure" -eq 1 ]; then
     echo "  delete the affected dates' runs rows and rerun this script, or re-run" >&2
     echo "  the per-date derive pipelines directly" >&2
     echo "  (pipelines/derive_stop_events_from_state.py --all-routes --date D" >&2
-    echo "  [--agency sfmta])." >&2
+    echo "  [--agency sfmta]) — but only if trip_update_state for that agency" >&2
+    echo "  still has state for date D. The SFMTA trip_update_state retention" >&2
+    echo "  step above prunes anything older than its retention window (default" >&2
+    echo "  7 days), so a re-derive of an SFMTA date older than that window will" >&2
+    echo "  find no state left and produce nothing — recover from the raw" >&2
+    echo "  archive replay instead (pipelines/replay_archive_to_state.py) for" >&2
+    echo "  dates past the window." >&2
   fi
   echo "Done (with errors — see summary above)." >&2
   exit 1

@@ -21,8 +21,11 @@ are in the spec §5 runbook.
 > `bin/pull-and-derive.sh`, which `aws s3 sync`s the four raw prefixes
 > under `s3://wmata-dashboard-backups/raw-jsonl-archive/` straight to the
 > laptop, loads VP archives (`pipelines/load_vp_archive.py`), replays TU
-> archives, and derives — no SSH tunnel, no VM access, no manual S3 sync
-> step required. `s3://wmata-dashboard-backups/raw-jsonl-archive/` is the
+> archives, derives, and — the script's only destructive step — prunes
+> SFMTA's `trip_update_state` retention window
+> (`pipelines/cleanup_trip_update_state.py --agency sfmta`, gated to run
+> only after a successful SFMTA derive) — no SSH tunnel, no VM access,
+> no manual S3 sync step required. `s3://wmata-dashboard-backups/raw-jsonl-archive/` is the
 > permanent raw store, written directly by the collector rather than
 > synced up after the fact. Before deriving, the script also reloads
 > each agency's static GTFS if stale (`scripts/run_gtfs_reload.py

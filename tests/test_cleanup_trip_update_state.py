@@ -212,6 +212,74 @@ def test_cleanup_tz_name_changes_cutoff(pg_session, monkeypatch):
     assert remaining == {"T_tz_boundary"}
 
 
+@pytest.mark.integration
+def test_cleanup_batches_deletes_committing_per_batch(pg_session, monkeypatch):
+    """PR #229 review: a single unbatched DELETE is sized for a daily WMATA
+    increment, not SFMTA's first run (~10.7M of ~13M rows on a 2.7GB
+    table). run_cleanup must delete in batches of ``batch_size``,
+    committing after each batch, rather than one statement/transaction.
+
+    Verified two ways: all eligible rows are still gone by the end
+    (correctness unchanged), and with batch_size=3 against 7 eligible
+    rows, at least 3 commits happen from inside run_cleanup itself (a
+    single unbatched DELETE would commit exactly once).
+    """
+    from pipelines.cleanup_trip_update_state import run_cleanup
+
+    today = eastern_today()
+    old_date = today - timedelta(days=10)
+    pg_session.add_all(
+        [_make_state_row(f"T_batch_{i}", 1, service_date=old_date) for i in range(7)]
+    )
+    pg_session.commit()
+
+    commit_count = 0
+    original_commit = pg_session.commit
+
+    def _counting_commit():
+        nonlocal commit_count
+        commit_count += 1
+        return original_commit()
+
+    monkeypatch.setattr(pg_session, "commit", _counting_commit)
+
+    counts = run_cleanup(pg_session, batch_size=3)
+
+    remaining = {
+        r.trip_id
+        for r in pg_session.execute(
+            select(TripUpdateState).where(TripUpdateState.trip_id.like("T_batch_%"))
+        ).scalars()
+    }
+    assert remaining == set()
+    assert counts["deleted"] >= 7
+    assert commit_count >= 3
+
+
+@pytest.mark.integration
+def test_cleanup_dry_run_reports_total_without_deleting(pg_session):
+    """dry_run must still report the full eligible count, and must not
+    delete or commit anything -- batching must not change this contract.
+    """
+    from pipelines.cleanup_trip_update_state import run_cleanup
+
+    today = eastern_today()
+    old_date = today - timedelta(days=10)
+    pg_session.add_all([_make_state_row(f"T_dry_{i}", 1, service_date=old_date) for i in range(5)])
+    pg_session.commit()
+
+    counts = run_cleanup(pg_session, dry_run=True, batch_size=2)
+
+    assert counts["deleted"] >= 5
+    remaining = {
+        r.trip_id
+        for r in pg_session.execute(
+            select(TripUpdateState).where(TripUpdateState.trip_id.like("T_dry_%"))
+        ).scalars()
+    }
+    assert remaining == {f"T_dry_{i}" for i in range(5)}
+
+
 def test_main_targets_agency_database(db_session, monkeypatch):
     """--agency threads through to the DB session resolution, matching
     every other NOTES-100 pipeline entry point -- this closes the gap
