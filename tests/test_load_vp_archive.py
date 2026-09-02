@@ -265,8 +265,8 @@ def test_crash_truncated_file_loads_readable_prefix_and_logs_warning(db_session,
     behind) still loads its readable prefix and is still marked loaded in
     the manifest (files are immutable once uploaded, per the module
     docstring), but now logs a visible warning instead of completing
-    silently (PR #235, closing the "theoretical gap" formerly tracked as
-    NOTES-133 item 5).
+    silently (PR #235, closing a previously-theoretical crash-truncation
+    visibility gap in the manifest loader).
     """
     import logging
 

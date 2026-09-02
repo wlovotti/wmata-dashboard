@@ -23,6 +23,13 @@ from src.deadman import ping_healthcheck
 
 logger = logging.getLogger(__name__)
 
+# Module-level indirection so tests can monkeypatch this specific reference
+# (PR #235 review) instead of `src.stateless_poller.time.monotonic`,
+# which is the SAME object as the process-wide `time` stdlib module — patching
+# it there would mutate `time.monotonic` for every other consumer in the test
+# process, not just this module.
+_monotonic_clock = time.monotonic
+
 
 class PingGate:
     """Dead-man gate: ping only while BOTH feeds are shipping fresh data.
@@ -127,15 +134,25 @@ def run_upload_cycle(uploader, streams, gate: PingGate, now: float | None = None
     Each stream's upload+prune is isolated in its own try/except
     (PR #235 — per-stream upload error isolation): a failure on one feed (e.g. an
     ``UploadVerificationError`` on "tu") is logged and does not skip the
-    other, otherwise-independent feed's upload or prune. ``PingGate``
-    still only pings when every feed shipped fresh data, so a failed
-    stream correctly withholds the ping without any special-casing here.
-    The first exception encountered is re-raised after every stream has
-    had a chance to run, so it remains visible to the caller (the
-    collector loop's per-cycle try/except already logs and continues).
+    other, otherwise-independent feed's upload or prune.
+
+    ``gate.maybe_ping`` is only called when NO stream raised this cycle
+    (PR #235 review): ``PingGate``'s freshness check alone is
+    not enough to withhold the ping on a total outage, because
+    ``_last_ship`` still holds each feed's last *successful* ship from a
+    prior, healthy cycle — a revoked IAM key (or any other error on
+    every stream) would otherwise still read as "fresh" for up to
+    ``freshness_sec`` and keep the dead-man pinged, silently regressing
+    docs/DEPLOYMENT.md §13.5's outage-detection math. Withholding the
+    ping on ANY stream error (not just a total one) also matches
+    pre-per-stream-isolation behavior, where a single try/except around
+    the whole cycle skipped ``maybe_ping`` on any exception. The first
+    exception encountered is re-raised after every stream has had a
+    chance to run, so it remains visible to the caller (the collector
+    loop's per-cycle try/except already logs and continues).
     """
     if now is None:
-        now = time.monotonic()
+        now = _monotonic_clock()
     shipped_all: list[str] = []
     first_error: Exception | None = None
     for feed, archive_dir, key_prefix, writer in streams:
@@ -150,7 +167,8 @@ def run_upload_cycle(uploader, streams, gate: PingGate, now: float | None = None
             logger.error("upload cycle: %s stream failed: %r", feed, exc)
             if first_error is None:
                 first_error = exc
-    gate.maybe_ping(now)
-    if first_error is not None:
+    if first_error is None:
+        gate.maybe_ping(now)
+    else:
         raise first_error
     return shipped_all

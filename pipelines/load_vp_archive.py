@@ -95,6 +95,14 @@ def _zstd_frame_is_complete(path: Path) -> bool:
     error while probing (corrupt bytes, not just a missing footer) also
     reports incomplete rather than propagating — this is a best-effort
     diagnostic, not a correctness gate.
+
+    This only validates the FIRST zstd frame: ``decompressobj().eof``
+    goes true as soon as one complete frame has been consumed, even if
+    more (possibly truncated) frames follow in ``unused_data``. That is
+    fine for the VP corpus specifically — every archive file is opened
+    once with ``"wb"`` by ``JsonlArchiveWriter`` and written as a single
+    zstd frame, so "first frame" and "whole file" coincide here. This
+    helper is not safe to reuse as-is on a multi-frame stream.
     """
     try:
         obj = zstd.ZstdDecompressor().decompressobj()
@@ -105,7 +113,7 @@ def _zstd_frame_is_complete(path: Path) -> bool:
                     break
                 obj.decompress(chunk)
         return obj.eof
-    except zstd.ZstdError:
+    except (zstd.ZstdError, OSError):
         return False
 
 
