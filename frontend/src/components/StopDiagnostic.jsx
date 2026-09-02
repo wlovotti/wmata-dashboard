@@ -102,7 +102,17 @@ function StopDiagnostic({ routeId, dayType, period }) {
   // props from RouteDetail, which already owns those as URL state itself.
   const [metric, setMetric] = useUrlState('metric', 'median_deviation_sec')
   const [directionParam, setDirectionParam] = useUrlState('direction_id', 'all')
-  const directionId = directionParam === 'all' ? null : Number(directionParam)
+  // Validate against the API's accepted values (PR #239 review finding F):
+  // anything other than the literal strings '0'/'1' — a stale/hand-edited
+  // `direction_id=2`, `direction_id=banana`, etc. — falls back to "all"
+  // rather than reaching the endpoint with a bad value (`Number('banana')`
+  // is NaN, which the API would reject) or leaving the <select> on an
+  // option that doesn't exist. `effectiveDirectionParam` re-derives the
+  // <select>'s displayed value from the validated result so an invalid URL
+  // value shows "Both directions" instead of a blank/mismatched control.
+  const directionId =
+    directionParam === '0' || directionParam === '1' ? Number(directionParam) : null
+  const effectiveDirectionParam = directionId == null ? 'all' : directionParam
   // Time-window picker (NOTES-140): the `/stops` endpoint accepts `days`.
   const [days] = useWindowDays()
   const [hoveredStop, setHoveredStop] = useState(null)
@@ -215,7 +225,7 @@ function StopDiagnostic({ routeId, dayType, period }) {
         <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
           <span style={{ opacity: 0.8 }}>Direction:</span>
           <select
-            value={directionParam}
+            value={effectiveDirectionParam}
             onChange={(e) => setDirectionParam(e.target.value)}
             aria-label="Stop diagnostic direction filter"
           >

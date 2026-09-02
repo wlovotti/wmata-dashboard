@@ -31,6 +31,13 @@ function renderUseUrlState(key, defaultValue, initialEntries = ['/']) {
   return { result, locationRef }
 }
 
+// setValue reads `window.location.search` (PR #239 review finding G) —
+// reset the real jsdom URL between tests so one test's `pushState` can't
+// leak into the next.
+afterEach(() => {
+  window.history.pushState({}, '', '/')
+})
+
 describe('useUrlState', () => {
   test('returns defaultValue when the param is absent from the URL', () => {
     const { result } = renderUseUrlState('days', 30)
@@ -78,5 +85,24 @@ describe('useUrlState', () => {
     const { result, locationRef } = renderUseUrlState('q', '', ['/?q=D72'])
     act(() => result.current[1](null))
     expect(locationRef.current.search).toBe('')
+  })
+
+  // PR #239 review finding G: a sibling writer (e.g. WindowPicker, in a
+  // different component) can commit a key to the real URL — under
+  // `BrowserRouter`, synchronously via the History API — before this
+  // hook's own render has caught up with it. Simulated here by pushing
+  // `days=7` onto the real jsdom `window.location` directly (standing in
+  // for that sibling's already-committed write) while this hook's own
+  // `MemoryRouter`-derived `searchParams` still reflects the pre-write
+  // `/` with no `days` at all.
+  test('a key another writer already committed to window.location survives this hook writing a different key', () => {
+    const { result, locationRef } = renderUseUrlState('day_type', 'all', ['/'])
+    window.history.pushState({}, '', '/route/D72?days=7')
+
+    act(() => result.current[1]('weekday'))
+
+    const params = new URLSearchParams(locationRef.current.search)
+    expect(params.get('days')).toBe('7')
+    expect(params.get('day_type')).toBe('weekday')
   })
 })

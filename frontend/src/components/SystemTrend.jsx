@@ -40,8 +40,7 @@ const BUN_LINE_COLOR = '#7C3AED'
  *   length, used only to label the N-vs-prior-N deltas below; defaults to
  *   30 for any caller that hasn't been updated to pass it. Below
  *   `computeSystemDelta`'s `SYSTEM_DELTA_MIN_DAYS` (10) the delta itself
- *   goes null and disappears rather than mislabeling — see the NOTES-140
- *   PR body.
+ *   goes null and disappears rather than mislabeling — see PR #239.
  * @returns {JSX.Element}
  */
 function SystemTrend({ trendData, loading, error, days = 30 }) {

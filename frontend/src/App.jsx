@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useRef, useState } from 'react'
 import Overview from './components/Overview'
 import RouteList from './components/RouteList'
@@ -113,6 +113,16 @@ function AppShell({ refreshKey, gtfsFreshness, handleRefresh }) {
   // selection forward, and it survives a plain click into another tab.
   const [days] = useWindowDays()
 
+  // Only Overview (`/`), RouteList (`/routes`), and RouteDetail
+  // (`/route/:id`) actually read `?days=` (PR #239 review finding H) — show
+  // the picker only there so it doesn't imply pages like Compare or
+  // Diagnostics respond to it when they don't.
+  const location = useLocation()
+  const showWindowPicker =
+    location.pathname === '/' ||
+    location.pathname === '/routes' ||
+    location.pathname.startsWith('/route/')
+
   return (
     <div className="app">
       <header>
@@ -123,7 +133,7 @@ function AppShell({ refreshKey, gtfsFreshness, handleRefresh }) {
           </div>
           <div className="header-actions">
             <div className="header-actions-row">
-              <WindowPicker />
+              {showWindowPicker && <WindowPicker />}
               <RefreshButton onRefresh={handleRefresh} />
             </div>
           </div>

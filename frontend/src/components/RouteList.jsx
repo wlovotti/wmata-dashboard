@@ -241,8 +241,17 @@ function RouteList() {
     setShowAllContributors(false)
   }, [contribMetric])
 
-  const fetchRoutes = () => {
-    return fetch(`/api/routes?days=${days}`)
+  // `guard` is a per-run `{ ignored: false }` box (PR #239 review finding
+  // E). Without it, a slow response from an earlier `days` value can land
+  // after a newer request already committed the currently-selected
+  // window's rows, silently overwriting `routes` (and the module cache
+  // below) with a stale/mismatched window — e.g. a slow 30-day fetch
+  // resolving after the user has already switched to 7 and seen its
+  // (faster) response land first. Passing `null` opts a caller (manual
+  // refresh) out of the guard entirely, since a lone in-flight request has
+  // nothing else in the same window to be superseded by.
+  const fetchRoutes = (requestedDays, guard) => {
+    return fetch(`/api/routes?days=${requestedDays}`)
       .then(res => {
         if (!res.ok) {
           throw new Error(`HTTP error! status: ${res.status}`)
@@ -250,6 +259,7 @@ function RouteList() {
         return res.json()
       })
       .then(data => {
+        if (guard && guard.ignored) return
         // Response shape: `{window: {start, end, days}, routes: [...]}`. The
         // window block lets us label the pooled date range under the heading.
         const routesList = data.routes ?? []
@@ -258,25 +268,41 @@ function RouteList() {
         setScorecardWindow(window)
         _cachedRoutes = routesList
         _cachedWindow = window
-        _cachedDays = days
+        _cachedDays = requestedDays
         setError(null)
       })
       .catch(err => {
+        if (guard && guard.ignored) return
         setError(err.message)
       })
   }
 
   useEffect(() => {
-    setLoading(_cachedDays !== days)
-    fetchRoutes().finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const guard = { ignored: false }
+    // Set synchronously (not derived from a state update that only lands
+    // after this effect's fetch resolves) so the *first* render after
+    // `days` changes already shows the loading state — see
+    // `showLoadingState` below, which also consults the module cache
+    // directly at render time for the same reason (PR #239 review finding
+    // E: without it, the previous window's rows could paint for one frame
+    // before this effect even runs).
+    setLoading(true)
+    fetchRoutes(days, guard).finally(() => {
+      if (!guard.ignored) setLoading(false)
+    })
+    return () => {
+      guard.ignored = true
+    }
   }, [days])
 
   // Fetch contributors only while the contributors mode is selected, and
   // refetch when the metric or window changes. Pure additive — never blocks
-  // the default view.
+  // the default view. Same out-of-order guard as the routes fetch above: a
+  // slow response for a superseded (metric, days) pair must not overwrite
+  // `contribData` for the pair the user is now looking at.
   useEffect(() => {
     if (viewMode !== 'contributors') return
+    const guard = { ignored: false }
     setContribLoading(true)
     setContribError(null)
     fetch(`/api/routes/contributors?metric=${contribMetric}&days=${days}`)
@@ -287,17 +313,38 @@ function RouteList() {
         return res.json()
       })
       .then(data => {
+        if (guard.ignored) return
         setContribData(data)
       })
       .catch(err => {
+        if (guard.ignored) return
         setContribError(err.message)
       })
-      .finally(() => setContribLoading(false))
+      .finally(() => {
+        if (!guard.ignored) setContribLoading(false)
+      })
+    return () => {
+      guard.ignored = true
+    }
   }, [viewMode, contribMetric, days])
 
+  // Manual refresh (the error banner's "Try Again" button) intentionally
+  // does not go through the out-of-order guard above — it's a single
+  // request against the currently-settled window, not a competitor with a
+  // superseded one — and, matching the pre-existing behavior, does not
+  // toggle `loading` (a silent background refetch, not a full reload).
   const handleRefresh = () => {
-    fetchRoutes()
+    fetchRoutes(days, null)
   }
+
+  // Render-time (not state-lagged) staleness check (PR #239 review finding
+  // E): `_cachedDays` only updates once a fetch for the *current* `days`
+  // actually resolves, so comparing it against `days` directly in the
+  // render body catches "the URL just changed to a window we haven't
+  // fetched yet" on the very next render — before the effect above even
+  // runs — and keeps the old window's `routes` out of the table for that
+  // frame by falling into the loading branch below instead.
+  const showLoadingState = loading || _cachedDays !== days
 
   // Filter and sort routes
   const filteredAndSortedRoutes = routes
@@ -359,7 +406,7 @@ function RouteList() {
     ? filteredContributors
     : filteredContributors.slice(0, CONTRIB_TOP_N)
 
-  if (loading) {
+  if (showLoadingState) {
     return (
       <main>
         <div className="table-container">
@@ -481,7 +528,7 @@ function RouteList() {
                       </strong>
                       {contribData.baseline_value != null && (
                         <>
-                          {' '}· baseline (30d):{' '}
+                          {' '}· baseline ({days}d):{' '}
                           <strong>
                             {formatContribMetricValue(
                               contribMetric,
@@ -493,7 +540,7 @@ function RouteList() {
                     </>
                   ) : contribData.baseline_value != null ? (
                     <>
-                      System baseline (30d):{' '}
+                      System baseline ({days}d):{' '}
                       <strong>
                         {formatContribMetricValue(
                           contribMetric,
@@ -521,7 +568,7 @@ function RouteList() {
               </div>
             ) : contribData == null ? null : contribData.baseline_value == null ? (
               <p>
-                System baseline unavailable for this metric in the last 30 days — cannot rank
+                System baseline unavailable for this metric in the last {days} days — cannot rank
                 contributors yet. Once the daily metrics pipeline writes a row to{' '}
                 <code>system_metrics_daily</code> the table will populate.
               </p>
@@ -540,10 +587,10 @@ function RouteList() {
                       <th>Route</th>
                       <th>Name</th>
                       <th>Route value</th>
-                      <th title="Per-route target if configured, otherwise system 30-day baseline">
+                      <th title={`Per-route target if configured, otherwise system ${days}-day baseline`}>
                         Reference
                       </th>
-                      <th>Scheduled trips (30d)</th>
+                      <th>Scheduled trips ({days}d)</th>
                       <th>Contribution score</th>
                     </tr>
                   </thead>
@@ -640,7 +687,7 @@ function RouteList() {
             <p style={{ marginTop: '1rem', fontSize: '0.85em', color: '#666' }}>
               Contribution = (reference − route value) × scheduled trips, sign-flipped for
               lower-is-better metrics. Reference is the route&apos;s configured target when set
-              (config/route_targets.yaml), otherwise the system 30-day window mean.
+              (config/route_targets.yaml), otherwise the system {days}-day window mean.
             </p>
           </div>
         )}

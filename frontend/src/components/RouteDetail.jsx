@@ -78,10 +78,14 @@ function RouteDetail() {
     const params = new URLSearchParams()
     if (dayType !== 'all') params.set('day_type', dayType)
     if (period !== 'all') params.set('period', period)
-    // `days` is sent explicitly even at the default (30) — previously this
-    // fetch never sent `days` at all, silently taking the API's own 7-day
-    // default for the excess-trip-time freshest-day lookup (NOTES-140).
-    params.set('days', String(days))
+    // Deliberately NOT wired to the time-window picker's `days` (PR #239
+    // review finding B). This endpoint's `days` scopes the
+    // excess-trip-time freshest-day lookup (`_excess_trip_time_fields` in
+    // api/aggregations.py, one query per day over `range(days+1)`) — it's
+    // a metric-freshness knob, not a display window, and can present a
+    // value up to N days stale. Sending the picker's value here would
+    // silently change what "current" excess-trip-time means whenever the
+    // user picks a wider window. Left at the endpoint's own default (7).
     const qs = params.toString()
     const url = `/api/routes/${routeId}${qs ? `?${qs}` : ''}`
     fetch(url)
@@ -94,7 +98,7 @@ function RouteDetail() {
         setError(err.message || err)
         setLoading(false)
       })
-  }, [routeId, dayType, period, days])
+  }, [routeId, dayType, period])
 
   // Trend data is fetched here (rather than inside RouteTrend) so the same
   // `days`-window series (NOTES-140 — previously a hardcoded 30) can drive

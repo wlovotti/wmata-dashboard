@@ -23,6 +23,17 @@ const CONTRIB_METRICS = [
 
 const CONTRIB_TOP_N = 5
 
+// Fixed independent of the time-window picker (PR #239 review finding C).
+// The hero's week-over-week "up/down/steady" verdict needs a stable 30-day
+// OTP series to compute a real 7-vs-prior-7 delta (`computeWindowDelta`
+// needs ~14 valid days across both halves) — if the hero read the
+// picker-driven trend fetch instead, picking the 7-day window would starve
+// it down to 7 rows and the verdict would fall back to "System verdict
+// unavailable — not enough history yet this week," which is false: 30 days
+// of system OTP history exists, it just wasn't fetched at that setting.
+// Module-level (not memoized) since it never depends on props/state.
+const HERO_OTP_TREND_URLS = ['/api/system/trend?metric=otp&days=30']
+
 /**
  * Overview landing page, rebuilt as an editorial stack (NOTES-84):
  *
@@ -52,9 +63,9 @@ function Overview() {
   // Time-window picker (NOTES-140): `?days=` drives every fetch below that
   // its endpoint accepts. `/api/routes/contributors` and `/api/system/trend`
   // both take `days`; `/api/routes` does too (previously called with none
-  // at all here, silently taking the API's own 7-day default) — see the
-  // NOTES-140 PR body for the resulting delta-suppression interaction with
-  // computeSystemDelta at the 7-day setting.
+  // at all here, silently taking the API's own 7-day default) — see PR #239
+  // for the resulting delta-suppression interaction with computeSystemDelta
+  // at the 7-day setting.
   const [days] = useWindowDays()
 
   // Memoized (PR #218 finding 4) so the array reference is stable across
@@ -112,6 +123,13 @@ function Overview() {
   } = useMultiFetch(contribUrls)
   const contribData = contribResults ? contribResults[0] : null
 
+  // Hero's own fixed-30-day OTP fetch (PR #239 review finding C) — see
+  // HERO_OTP_TREND_URLS above for why this can't just reuse
+  // `systemTrendData.otp` from the picker-driven fan-out.
+  const { data: heroOtpResults, revalidateError: heroOtpRevalidateError } =
+    useMultiFetch(HERO_OTP_TREND_URLS)
+  const heroOtpTrend = heroOtpResults ? heroOtpResults[0] : null
+
   // Background-revalidate failure on any of the page's cached fetches
   // (NOTES-122 review finding 1): none of these ever blank the page — the
   // stale cached data keeps rendering — but a downed API otherwise leaves
@@ -119,7 +137,8 @@ function Overview() {
   // signal anywhere that it stopped refreshing. This can only be non-null
   // after at least one successful cache hit + failed revalidate, so it
   // never renders on a cold load.
-  const staleData = scorecardRevalidateError || trendRevalidateError || contribRevalidateError
+  const staleData =
+    scorecardRevalidateError || trendRevalidateError || contribRevalidateError || heroOtpRevalidateError
 
   // The 4-entry worst-of-four input for the hero — same construction the
   // retired HealthPulse used (percent-scaled fractions, trend targets).
@@ -169,8 +188,11 @@ function Overview() {
     },
   ]
 
-  // Daily OTP series for the hero's week-over-week math.
-  const otpSeries = (systemTrendData?.otp?.trend_data || []).map((row) => ({
+  // Daily OTP series for the hero's week-over-week math — from the fixed
+  // 30-day fetch above, not the picker-driven `systemTrendData`, so the
+  // verdict is stable regardless of the selected window (PR #239 review
+  // finding C).
+  const otpSeries = (heroOtpTrend?.trend_data || []).map((row) => ({
     date: row.date,
     value: row.otp_percentage,
     data_quality: row.data_quality,
@@ -263,7 +285,7 @@ function Overview() {
                 <th>Route</th>
                 <th>Name</th>
                 <th>Route value</th>
-                <th title="Per-route target if configured, otherwise system 30-day baseline">
+                <th title={`Per-route target if configured, otherwise system ${days}-day baseline`}>
                   Reference
                 </th>
               </tr>
