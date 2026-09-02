@@ -458,23 +458,34 @@ def _reset_ewt_schedule_caches():
     resolving fresh (NOTES-106 review round 3 caught this while adding
     memoization to `_resolve_service_ids_for_day_type`).
 
-    `_schedule_cache_by_date` and `_service_id_resolution_cache_by_date`
-    (NOTES-109's per-exact-date siblings) have the exact same bleed for
-    the exact same reason — `SERVICE_DATE` (or another fixed test date)
-    is reused across many tests, so they collide on the same
+    `_service_id_resolution_cache_by_date` (NOTES-109's per-exact-date
+    sibling of `_service_id_resolution_cache`) has the exact same bleed
+    for the exact same reason — `SERVICE_DATE` (or another fixed test
+    date) is reused across many tests, so it collides on the same
     `(db_identity, service_date_iso, 0)` key just as badly as the
-    day_type-keyed caches do without this reset.
+    day_type-keyed cache does without this reset.
+
+    `_schedule_cache_by_service_ids` (PR #233 review findings 3/4 —
+    rekeyed from the original per-date `_schedule_cache_by_date` to key
+    the expensive headway payload by the RESOLVED service_id pool
+    instead of the literal date, so dates sharing a pool share one
+    fetch) has the same bleed too: an implicit `gtfs_snapshot_id=None`
+    always resolves to snapshot_id 0 in every SQLite test DB, so two
+    tests whose fixtures happen to resolve to the same service_id pool
+    (trivially true for tests that seed no `calendar` data at all, where
+    the pool is always the empty frozenset) would otherwise share a
+    stale, rolled-back-DB payload.
     """
     import src.ewt as ewt_module
 
     ewt_module._schedule_cache.clear()
     ewt_module._service_id_resolution_cache.clear()
-    ewt_module._schedule_cache_by_date.clear()
+    ewt_module._schedule_cache_by_service_ids.clear()
     ewt_module._service_id_resolution_cache_by_date.clear()
     yield
     ewt_module._schedule_cache.clear()
     ewt_module._service_id_resolution_cache.clear()
-    ewt_module._schedule_cache_by_date.clear()
+    ewt_module._schedule_cache_by_service_ids.clear()
     ewt_module._service_id_resolution_cache_by_date.clear()
 
 

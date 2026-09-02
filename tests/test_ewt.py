@@ -1141,6 +1141,71 @@ class TestResolveServiceIdsForDate:
         assert _resolve_service_ids_for_date(db_session, self.FRIDAY, gtfs_snapshot_id=1) == {"S1"}
 
 
+class TestResolveServiceIdsForDateOutOfWindowFallback:
+    """PR #233 review finding 1: exact-date resolution silently returns an
+    EMPTY pool for any `service_date` outside the current feed's validity
+    window (`_feed_validity_window`) -- e.g. a `stop_events` backfill date
+    that predates the live GTFS snapshot's `calendar`/`calendar_dates`
+    coverage entirely. `_resolve_service_ids_for_date` must fall back to
+    `_resolve_service_ids_for_day_type`'s modal resolution in that case
+    (and log a warning), so `compute_ewt_headline_for_routes_multi_date`
+    doesn't silently drop the route from its result map (it seeds
+    `all_routes` from schedule keys -- an empty pool means the route
+    vanishes rather than resolving to `awt_seconds=None`).
+
+    A genuinely empty in-window resolution (a real no-service day, e.g.
+    a `calendar_dates` suspension with no substitute -- the July 4th
+    case validated in the PR body) must NOT fall back: that exactness is
+    the entire point of NOTES-109.
+    """
+
+    def test_out_of_window_date_falls_back_to_modal_pool(self, db_session, caplog):
+        """A backfill date older than the feed's validity window resolves
+        to `set()` via the exact-date rule alone, but the feed's own
+        modal weekday pool is well-defined -- fall back to it."""
+        # Feed validity window is `[start_date, end_date]` of this one
+        # calendar row, so it's `(2026-06-21, 2026-09-12)` -- consistent
+        # with the live WMATA snapshot shape described in the PR body.
+        _seed_calendar_flag(db_session, "WK", tuesday=1, start_date="20260621", end_date="20260912")
+        # `stop_events` predates the feed by weeks -- outside the window,
+        # and the exact-date rule alone resolves it to nothing.
+        out_of_window_date = date(2026, 6, 2)
+        assert out_of_window_date.weekday() == 1  # Tuesday, same as "WK"'s flag
+
+        with caplog.at_level("WARNING"):
+            result = _resolve_service_ids_for_date(db_session, out_of_window_date)
+
+        assert result == {"WK"}
+        assert any(
+            "outside" in rec.message.lower() or "predate" in rec.message.lower()
+            for rec in caplog.records
+        ), "expected a warning explaining the modal fallback"
+
+    def test_in_window_no_service_date_stays_empty(self, db_session, caplog):
+        """A real no-service day INSIDE the feed's validity window (a
+        `calendar_dates` suspension with no substitute service_id) must
+        resolve to an empty set -- falling back here would silently
+        resurrect a schedule the agency actually suspended (the EXP
+        holiday-suspension case from the PR body)."""
+        _seed_calendar_flag(
+            db_session, "SAT", saturday=1, start_date="20260301", end_date="20260901"
+        )
+        # Independence Day: the Saturday service is suspended and nothing
+        # substitutes for it -- a genuine no-service day, well inside the
+        # feed's validity window (2026-03-01..2026-09-01).
+        _seed_calendar_date(db_session, "SAT", "20260704", exception_type=2)
+        holiday = date(2026, 7, 4)
+
+        with caplog.at_level("WARNING"):
+            result = _resolve_service_ids_for_date(db_session, holiday)
+
+        assert result == set()
+        assert not any(
+            "fall" in rec.message.lower() or "modal" in rec.message.lower()
+            for rec in caplog.records
+        ), "an in-window no-service date must not trigger the modal fallback"
+
+
 class TestScheduledHeadwaysByCellHourForDate:
     """`_scheduled_headways_by_cell_hour_for_date` (NOTES-109) -- the
     per-route scheduled-headway fetch resolved against the exact
@@ -1232,10 +1297,16 @@ class TestScheduledHeadwaysByCellHourForDate:
 
 class TestFetchScheduledCellHoursForDateCache:
     """`fetch_scheduled_cell_hours_for_date` (NOTES-109) -- the vectorized
-    per-route schedule fetch, cached by `(db_identity, service_date,
-    resolved snapshot_id)` instead of `(db_identity, day_type,
-    snapshot_id)`. Mirrors `TestScheduleCacheAgencyIsolation`'s pattern for
-    the day_type-keyed cache."""
+    per-route schedule fetch. The expensive headway-payload cache is keyed
+    by the RESOLVED service_id pool `(db_identity, frozenset(service_ids),
+    resolved snapshot_id)` (PR #233 review findings 3/4), not by the
+    literal `service_date` -- most dates in a window resolve to the same
+    pool, so this collapses a multi-date backfill down to a handful of
+    distinct payload entries instead of one per date. The cheap per-date
+    memo of WHICH pool a date resolves to lives in
+    `_service_id_resolution_cache_by_date` (`_resolve_service_ids_for_date`)
+    and is unaffected by this. Mirrors `TestScheduleCacheAgencyIsolation`'s
+    pattern for the day_type-keyed cache."""
 
     def test_cache_hit_avoids_requery(self, db_session, monkeypatch):
         import src.ewt as ewt_module
@@ -1471,6 +1542,49 @@ class TestFetchScheduledCellHoursForDateCache:
 
         sched_a_again = fetch_scheduled_cell_hours_for_date(db_session, date(2026, 4, 14))
         assert sched_a_again["RTE"][(0, "S1", 7)] == [600.0]
+
+    def test_two_dates_sharing_a_resolved_pool_share_one_payload_fetch(
+        self, db_session, monkeypatch
+    ):
+        """PR #233 review findings 3/4: the expensive headway-payload fetch
+        must be keyed by the resolved service_id pool, not the literal
+        date -- two distinct dates ("2026-04-14" and "2026-04-21", both
+        plain Tuesdays under the same "WK" service_id) resolve to the
+        SAME pool and must pay the underlying SQL pass + bucketing
+        (`_fetch_and_bucket_scheduled_cells`) only ONCE, not once per
+        date. A day_type-keyed cache got this for free; a naive
+        date-keyed cache (the shape shipped in NOTES-109 before this
+        review) would re-pay it on every distinct date even when the
+        resolved pool is identical."""
+        import src.ewt as ewt_module
+
+        _seed_route(db_session, "RTE")
+        _seed_calendar_flag(db_session, "WK", tuesday=1, start_date="20260301", end_date="20260601")
+        _seed_stop(db_session, "S1")
+        _seed_trip_with_service(db_session, "T1", "RTE", "WK")
+        _seed_trip_with_service(db_session, "T2", "RTE", "WK")
+        _seed_stop_time(db_session, "T1", "S1", "7:00:00")
+        _seed_stop_time(db_session, "T2", "S1", "7:10:00")
+
+        calls = {"n": 0}
+        original = ewt_module._fetch_and_bucket_scheduled_cells
+
+        def _counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(ewt_module, "_fetch_and_bucket_scheduled_cells", _counting)
+
+        first = fetch_scheduled_cell_hours_for_date(db_session, date(2026, 4, 14))
+        assert calls["n"] == 1
+        assert first["RTE"][(0, "S1", 7)] == [600.0]
+
+        second = fetch_scheduled_cell_hours_for_date(db_session, date(2026, 4, 21))
+        assert calls["n"] == 1, (
+            "a different date resolving to the SAME service_id pool must reuse "
+            "the first date's payload fetch, not re-run the SQL pass"
+        )
+        assert second["RTE"][(0, "S1", 7)] == [600.0]
 
 
 class TestCoverageRatio:

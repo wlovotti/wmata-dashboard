@@ -140,6 +140,7 @@ Known limitations (deferred)
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import date as date_type
 from datetime import datetime, timedelta
@@ -154,6 +155,8 @@ from src.gtfs_calendar import scheduled_service_ids_for_date
 from src.gtfs_versioning import gtfs_version_filter
 from src.models import Calendar, CalendarDate, GTFSSnapshot, Route, StopEvent, StopTime, Trip
 from src.time_periods import is_hour_in_period
+
+logger = logging.getLogger(__name__)
 
 # GTFS route_type for bus service. Used to restrict cross-route schedule
 # pools to bus-only when a feed is mode-mixed -- SFMTA's carries 7 Muni
@@ -527,6 +530,31 @@ def _resolve_service_ids_for_date(
     for the invalidation rationale, NOTES-108). Needed for the same
     reason: the per-route path (`_scheduled_headways_by_cell_hour_for_date`)
     calls this fresh once per route per pass.
+
+    Out-of-window fallback (PR #233 review finding 1): an exact
+    `service_date` that falls entirely outside the CURRENT feed's
+    validity window (`_feed_validity_window` — the union of every
+    `calendar` row's `[start_date, end_date]` range and every
+    `calendar_dates.date`) has no calendar coverage at all, so the exact
+    rule above always resolves it to an empty set — silently, with no
+    signal to the caller. This bites real production dates: WMATA's
+    `stop_events` history starts 2026-05-02 while a live feed's validity
+    window commonly starts weeks later (e.g. 2026-06-21), so an unpinned
+    historical re-derive over that gap would NULL out EWT/bunching for
+    every pre-window date. When the exact rule resolves EMPTY *and*
+    `service_date` is outside the feed's validity window, fall back to
+    `_resolve_service_ids_for_day_type`'s modal resolution for that
+    date's `day_type` and log a warning — better a representative-day
+    approximation (the same one EWT/bunching used before NOTES-109) than
+    a silently empty pool for a date the current feed simply doesn't
+    cover.
+
+    An in-window date that genuinely resolves empty (a real no-service
+    day — e.g. a holiday `calendar_dates` suspension with no substitute
+    service_id, validated against EXP's Independence Day suspension in
+    the PR body) must NOT fall back: staying empty in that case is
+    NOTES-109's entire point, so the fallback is gated strictly on
+    "outside the window," never on "empty."
     """
     if gtfs_snapshot_id is not None:
         snapshot_id = gtfs_snapshot_id
@@ -541,6 +569,27 @@ def _resolve_service_ids_for_date(
         return set(cached)
 
     result = frozenset(scheduled_service_ids_for_date(db, service_date, gtfs_snapshot_id))
+
+    if not result:
+        window = _feed_validity_window(db, gtfs_snapshot_id)
+        if window is not None:
+            window_start, window_end = window
+            if service_date < window_start or service_date > window_end:
+                day_type = _day_type_for(service_date)
+                fallback = _resolve_service_ids_for_day_type(db, day_type, gtfs_snapshot_id)
+                if fallback:
+                    logger.warning(
+                        "service_date %s falls outside the current feed's validity "
+                        "window (%s..%s) -- the date predates or postdates this "
+                        "feed's calendar coverage. Falling back to modal day_type "
+                        "resolution for %r (%s) instead of an empty scheduled pool.",
+                        service_date_iso,
+                        window_start.isoformat(),
+                        window_end.isoformat(),
+                        day_type,
+                        sorted(fallback),
+                    )
+                    result = frozenset(fallback)
 
     with _service_id_resolution_cache_by_date_lock:
         _service_id_resolution_cache_by_date[cache_key] = result
@@ -1153,23 +1202,44 @@ def _fetch_and_bucket_scheduled_cells(
     return sched_by_route_cell_hour
 
 
-# Module-level cache for the per-EXACT-DATE scheduled-cell-hour fetch
+# Module-level cache for the per-EXACT-DATE scheduled-cell-hour PAYLOAD
 # (NOTES-109) — the per-date replacement for `_schedule_cache` used by
-# EWT/bunching specifically. Keyed `(db_identity, service_date_iso,
-# resolved snapshot_id)` with the SAME resolve-then-evict semantics as
-# `_schedule_cache` (mirrored, not reinvented — see that cache's comment
-# and `_db_identity` for the full rationale, NOTES-108).
+# EWT/bunching specifically. Keyed `(db_identity, frozenset(service_ids),
+# resolved snapshot_id)` — the RESOLVED service_id pool, not the literal
+# `service_date` (PR #233 review findings 3/4).
+#
+# Why pool-keyed, not date-keyed: the naive shape (keyed by service_date,
+# shipped in the first NOTES-109 cut) paid its own ~4.29s SQL pass +
+# bucketing for every distinct date on a cold cache — a 30-date backfill
+# cost ~130s serially and retained ~53-55MB per date (~1.6GB for 30
+# dates), because each entry holds a full `{route_id: {cell_hour:
+# [headways]}}` payload for every bus route. But most dates in a rolling
+# window resolve to the SAME service_id pool (an ordinary run of
+# weekdays under one `calendar` row, say) — keying by the resolved pool
+# instead collapses those dates onto ONE payload entry, restoring
+# near-day_type cold cost (~13s) and bounding memory to
+# distinct-pools-per-snapshot, comparable to the old day_type cache's
+# ≤3-entries rationale.
+#
+# This is a two-level cache, not one: `_resolve_service_ids_for_date`
+# above already memoizes the CHEAP part (date -> resolved
+# frozenset(service_ids)) in `_service_id_resolution_cache_by_date`.
+# Callers here resolve service_ids for the date FIRST (a cheap in-memory
+# lookup after the first hit), then look up the EXPENSIVE payload by the
+# resolved pool — so two dates landing on the same pool share the
+# expensive fetch even though each keeps its own cheap date->pool memo
+# entry. Same resolve-then-evict semantics as `_schedule_cache`
+# (mirrored, not reinvented — see that cache's comment and `_db_identity`
+# for the full invalidation rationale, NOTES-108).
 #
 # A SEPARATE cache from `_schedule_cache`, not a replacement: the
 # day_type-keyed fetch (`fetch_scheduled_cell_hours_for_routes`) stays in
 # place for `service_level.py`'s day_type-shaped comparison-page stat —
-# out of NOTES-109's "EWT/bunching" scope. Trade-off this cache accepts
-# (flagged in NOTES-109 itself): because the key is now the literal date
-# instead of a 3-valued day_type, a multi-week windowed query no longer
-# gets to share ONE schedule fetch across every date of the same
-# day_type — each distinct date pays its own SQL pass on a cache miss.
-_schedule_cache_by_date: dict[tuple[str, str, int], dict[str, dict[CellHour, list[float]]]] = {}
-_schedule_cache_by_date_lock = Lock()
+# out of NOTES-109's "EWT/bunching" scope.
+_schedule_cache_by_service_ids: dict[
+    tuple[str, frozenset[str], int], dict[str, dict[CellHour, list[float]]]
+] = {}
+_schedule_cache_by_service_ids_lock = Lock()
 
 
 def fetch_scheduled_cell_hours_for_date(
@@ -1192,38 +1262,51 @@ def fetch_scheduled_cell_hours_for_date(
     `fetch_scheduled_cell_hours_for_routes`:
     `{route_id: {(direction_id, stop_id, hour): [scheduled_headway_sec, ...]}}`.
 
-    Cached at module level by `(db_identity, service_date, gtfs_snapshot_id)`
-    when called with `route_ids=None` — see `_schedule_cache_by_date`
-    above for the exact keying/eviction semantics and the multi-date
-    cache-sharing trade-off this accepts.
+    Cached at module level by `(db_identity, frozenset(service_ids),
+    gtfs_snapshot_id)` when called with `route_ids=None` — see
+    `_schedule_cache_by_service_ids` above for the exact keying/eviction
+    semantics and why the expensive payload is keyed by the RESOLVED
+    pool rather than the literal date (PR #233 review findings 3/4):
+    most dates in a window share a pool, so this collapses a multi-date
+    backfill down to a handful of distinct payload fetches.
 
     Pass `gtfs_snapshot_id` to pin the schedule to a historical snapshot
     (backfill); the default reads the live `is_current` snapshot.
     """
+    if gtfs_snapshot_id is not None:
+        snapshot_id = gtfs_snapshot_id
+    else:
+        snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
+
+    # Cheap: hits `_service_id_resolution_cache_by_date` after the first
+    # call for this exact date (see that cache's comment). Resolving
+    # service_ids BEFORE the expensive-payload cache check is what lets
+    # two different dates share one payload fetch below.
+    service_ids = _resolve_service_ids_for_date(db, service_date, gtfs_snapshot_id)
+
     if route_ids is None:
-        if gtfs_snapshot_id is not None:
-            snapshot_id = gtfs_snapshot_id
-        else:
-            snapshot_id = db.query(func.max(GTFSSnapshot.snapshot_id)).scalar() or 0
         db_identity = _db_identity(db)
-        service_date_iso = service_date.isoformat()
-        cache_key = (db_identity, service_date_iso, snapshot_id)
-        with _schedule_cache_by_date_lock:
-            cached = _schedule_cache_by_date.get(cache_key)
+        pool_key = (db_identity, frozenset(service_ids), snapshot_id)
+        with _schedule_cache_by_service_ids_lock:
+            cached = _schedule_cache_by_service_ids.get(pool_key)
         if cached is not None:
             return cached
 
-    service_ids = _resolve_service_ids_for_date(db, service_date, gtfs_snapshot_id)
     sched_by_route_cell_hour = _fetch_and_bucket_scheduled_cells(
         db, service_ids, route_ids, gtfs_snapshot_id
     )
 
     if route_ids is None:
-        with _schedule_cache_by_date_lock:
-            _schedule_cache_by_date[cache_key] = sched_by_route_cell_hour
-            for k in list(_schedule_cache_by_date.keys()):
+        with _schedule_cache_by_service_ids_lock:
+            _schedule_cache_by_service_ids[pool_key] = sched_by_route_cell_hour
+            # Evict this SAME database's entries from older/other GTFS
+            # snapshots so the cache doesn't accumulate every historical
+            # version — same eviction rule `_schedule_cache` uses.
+            # Scoped to `db_identity` so storing a fresh entry never
+            # evicts another database's cached entries (NOTES-108).
+            for k in list(_schedule_cache_by_service_ids.keys()):
                 if k[0] == db_identity and k[2] != snapshot_id:
-                    del _schedule_cache_by_date[k]
+                    del _schedule_cache_by_service_ids[k]
     return sched_by_route_cell_hour
 
 
@@ -1392,10 +1475,13 @@ def compute_ewt_headline_for_routes_multi_date(
     Each distinct date resolves its own EXACT scheduled pool via
     `fetch_scheduled_cell_hours_for_date` (NOTES-109) — no day_type/modal
     layer, so a window spanning a Friday or a holiday sees that date's
-    real schedule. This means a window with N distinct dates pays up to N
-    schedule fetches on a cache miss, not up to 3 (one per day_type) the
-    way the superseded day_type-keyed version did — see
-    `_schedule_cache_by_date`'s docstring for the trade-off.
+    real schedule. The expensive payload fetch itself is cached by the
+    RESOLVED service_id pool rather than the literal date (PR #233
+    review findings 3/4 — see `_schedule_cache_by_service_ids`'s
+    docstring), so a window with N distinct dates pays a schedule fetch
+    per distinct POOL on a cache miss, not per date — most windows
+    collapse onto a handful of pools even though every date still
+    resolves its own exact schedule.
 
     `tz_name` (NOTES-103 multi-agency) buckets the observed side by the
     agency's own local hour; defaults to Eastern.

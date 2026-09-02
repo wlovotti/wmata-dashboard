@@ -2199,8 +2199,8 @@ def _system_ewt_and_bunching_for_date(
     branch below), any dict passed in here must either be empty/fresh or
     already bus-filtered by a prior call to this same function -- do not
     share this dict with `_compute_live_metrics_for_window_uncached`'s
-    identically-named local (~line 719), which fills it unfiltered for
-    the per-route headline path and does not need bus filtering.
+    identically-named `sched_by_date` local, which fills it unfiltered
+    for the per-route headline path and does not need bus filtering.
     `tz_name` (NOTES-103 multi-agency) buckets the observed side by the
     agency's own local hour so it agrees with the scheduled side's
     (always agency-local, GTFS clock-time) hour key; defaults to Eastern.
