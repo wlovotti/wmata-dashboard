@@ -27,3 +27,10 @@ tokens are agreed could be subagent work, but not the design itself.
 After the Overview editorial redesign (PR #209/#210) — restyling
 panels the redesign is about to rearrange is wasted work, and the two
 would conflict on the same files (no stacked PRs).
+
+## Carried-over polish
+
+SegmentDiagnostic still lacks the Diagnostics breadcrumb the other
+diagnostics pages got in PR #237 — it was skipped there because
+/segments is baselined; add it during this pass, which regenerates
+baselines anyway.

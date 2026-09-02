@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
+
+import ErrorState from './ErrorState.jsx'
 
 /**
  * Format signed seconds as `±M:SS` (minutes:seconds). Used for the per-row
@@ -61,29 +63,77 @@ const DIRECTION_OPTIONS = [
  *
  * Default sort is absolute `minutes_per_day` (slip × daily trips,
  * "biggest leverage first"), enforced server-side. Route, direction,
- * period, and sign filters are all server-side query parameters; the
- * route filter is a free-text input (typed against the route_id) so an
- * operator can drill into one route without an extra route-picker
- * round-trip.
+ * period, and sign filters are all server-side query parameters. The
+ * route filter is a `/api/routes`-backed select (NOTES-142) rather than
+ * a free-text route_id input, so an operator picks from the routes that
+ * actually exist instead of guessing at an id. All filters round-trip
+ * through the URL (`useSearchParams`, mirroring `SegmentDiagnostic.jsx`)
+ * so a filtered view is shareable/bookmarkable; keys equal to their
+ * default are omitted from the URL to keep it clean.
  */
 function ScheduleAudit() {
-  const [routeIdInput, setRouteIdInput] = useState('')
-  const [routeId, setRouteId] = useState('')
-  const [direction, setDirection] = useState('all')
-  const [period, setPeriod] = useState('all')
-  const [sign, setSign] = useState('all')
-  const [limit, setLimit] = useState(100)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const routeId = searchParams.get('route_id') || ''
+  const direction = searchParams.get('direction_id') || 'all'
+  const period = searchParams.get('period') || 'all'
+  const sign = searchParams.get('sign') || 'all'
+  const limitParam = Number(searchParams.get('limit'))
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 100
+
+  const updateParam = (key, value) => {
+    const next = new URLSearchParams(searchParams)
+    if (value == null || value === '') {
+      next.delete(key)
+    } else {
+      next.set(key, String(value))
+    }
+    setSearchParams(next, { replace: false })
+  }
+
+  const setRouteId = (newRouteId) => updateParam('route_id', newRouteId === '' ? null : newRouteId)
+  const setDirection = (newDirection) =>
+    updateParam('direction_id', newDirection === 'all' ? null : newDirection)
+  const setPeriod = (newPeriod) => updateParam('period', newPeriod === 'all' ? null : newPeriod)
+  const setSign = (newSign) => updateParam('sign', newSign === 'all' ? null : newSign)
+  const setLimit = (newLimit) => updateParam('limit', newLimit === 100 ? null : newLimit)
+
+  const [routes, setRoutes] = useState([])
+  const [routesLoading, setRoutesLoading] = useState(true)
+  const [routesError, setRoutesError] = useState(null)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [retryTick, setRetryTick] = useState(0)
 
-  // Debounced route_id push from the text input to the query. Keeps the
-  // fetch from firing on every keystroke — only on a 300ms pause.
+  // Route picker options. `/api/routes` is the known-slow N+1 scorecard
+  // endpoint (NOTES-88), so this can be cold or fail outright — the picker
+  // must still correctly reflect an active `route_id` filter from the URL
+  // in that case (handled via the synthetic-option fallback below), rather
+  // than silently showing "All routes" while the table is actually
+  // filtered. Shares `retryTick` with the main fetch so a single Retry
+  // click retries both.
   useEffect(() => {
-    const trimmed = routeIdInput.trim().toUpperCase()
-    const t = setTimeout(() => setRouteId(trimmed), 300)
-    return () => clearTimeout(t)
-  }, [routeIdInput])
+    let cancelled = false
+    setRoutesLoading(true)
+    setRoutesError(null)
+    fetch('/api/routes')
+      .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
+      .then((json) => {
+        if (!cancelled) {
+          setRoutes(json.routes || [])
+          setRoutesLoading(false)
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setRoutesError(err.message || String(err))
+          setRoutesLoading(false)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [retryTick])
 
   useEffect(() => {
     let cancelled = false
@@ -112,7 +162,20 @@ function ScheduleAudit() {
     return () => {
       cancelled = true
     }
-  }, [routeId, direction, period, sign, limit])
+  }, [routeId, direction, period, sign, limit, retryTick])
+
+  const routeOptions = useMemo(() => {
+    return [...routes].sort((a, b) =>
+      a.route_id.localeCompare(b.route_id, undefined, { numeric: true }),
+    )
+  }, [routes])
+
+  // The active route_id filter (from the URL) might not be in the fetched
+  // route list — cold-loading, a failed fetch, or a stale bookmark against
+  // a route that's since dropped out of GTFS. Without a synthetic option
+  // the controlled <select> silently falls back to "All routes" while the
+  // table is still filtered, which misrepresents the active filter.
+  const routeIdKnown = routeId === '' || routeOptions.some((r) => r.route_id === routeId)
 
   const segments = useMemo(() => data?.segments || [], [data])
   const lookbackDays = data?.lookback_days ?? 30
@@ -126,6 +189,11 @@ function ScheduleAudit() {
   return (
     <main>
       <div className="chart-container">
+        <p style={{ margin: '0 0 0.5rem' }}>
+          <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+            ← Diagnostics
+          </Link>
+        </p>
         <h2>Schedule audit</h2>
         <p className="drilldown-anchor">
           Per-segment slip ranked by leverage — the biggest leverage on
@@ -152,14 +220,33 @@ function ScheduleAudit() {
         >
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
             <span style={{ opacity: 0.8 }}>Route:</span>
-            <input
-              type="text"
-              value={routeIdInput}
-              onChange={(e) => setRouteIdInput(e.target.value)}
-              placeholder="e.g. D80"
-              aria-label="Route id filter"
-              style={{ width: '6rem' }}
-            />
+            <select
+              value={routeId}
+              onChange={(e) => setRouteId(e.target.value)}
+              aria-label="Route filter"
+              disabled={routesLoading}
+            >
+              <option value="">All routes</option>
+              {!routeIdKnown && <option value={routeId}>{routeId}</option>}
+              {routeOptions.map((r) => (
+                <option key={r.route_id} value={r.route_id}>
+                  {r.route_name && r.route_name !== r.route_id
+                    ? `${r.route_name} (${r.route_id})`
+                    : r.route_id}
+                </option>
+              ))}
+            </select>
+            {routesLoading && (
+              <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>Loading routes…</span>
+            )}
+            {!routesLoading && routesError && (
+              <span
+                style={{ color: '#94a3b8', fontSize: '0.8rem' }}
+                title={routesError}
+              >
+                Route list unavailable — showing active filter only
+              </span>
+            )}
           </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
             <span style={{ opacity: 0.8 }}>Direction:</span>
@@ -220,7 +307,13 @@ function ScheduleAudit() {
         </div>
 
         {loading && <p style={{ color: '#64748b' }}>Loading schedule audit…</p>}
-        {error && <p style={{ color: '#64748b' }}>Unable to load schedule audit: {error}</p>}
+        {error && (
+          <ErrorState
+            title="Unable to load schedule audit"
+            message={error}
+            onRetry={() => setRetryTick((t) => t + 1)}
+          />
+        )}
 
         {!loading && !error && segments.length === 0 && (
           <p style={{ color: '#64748b' }}>

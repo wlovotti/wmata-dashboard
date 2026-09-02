@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { formatDeviationMmSs, todayEasternIso } from '../utils/formatters'
+import ErrorState from './ErrorState.jsx'
+
+const LIMIT_OPTIONS = [25, 50, 100, 200, 500]
 
 /**
  * System-level `/blocks` index page (PR #105). Lists the active blocks
@@ -13,19 +16,46 @@ import { formatDeviationMmSs, todayEasternIso } from '../utils/formatters'
  * `RouteDetail` Blocks tab — operators had to know the route to find
  * the block. The system-level rank surfaces the chains worth
  * investigating first regardless of route.
+ *
+ * `service_date` and `limit` round-trip through the URL (same
+ * `useSearchParams` omit-default pattern as `ScheduleAudit.jsx` /
+ * `SegmentDiagnostic.jsx`) so navigating to a block's timeline and back
+ * restores the filtered view instead of resetting to today.
  */
 function ActiveBlocks() {
   const navigate = useNavigate()
-  const [serviceDate, setServiceDate] = useState(todayEasternIso())
+  const [searchParams, setSearchParams] = useSearchParams()
+  const defaultServiceDate = todayEasternIso()
+  const serviceDate = searchParams.get('service_date') || defaultServiceDate
+  const limitParam = Number(searchParams.get('limit'))
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 100
+
+  const updateParam = (key, value) => {
+    const next = new URLSearchParams(searchParams)
+    if (value == null || value === '') {
+      next.delete(key)
+    } else {
+      next.set(key, String(value))
+    }
+    setSearchParams(next, { replace: false })
+  }
+
+  const setServiceDate = (newDate) =>
+    updateParam('service_date', newDate === defaultServiceDate ? null : newDate)
+  const setLimit = (newLimit) => updateParam('limit', newLimit === 100 ? null : newLimit)
+
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [retryTick, setRetryTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/blocks/active?service_date=${encodeURIComponent(serviceDate)}`)
+    fetch(
+      `/api/blocks/active?service_date=${encodeURIComponent(serviceDate)}&limit=${limit}`,
+    )
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -42,13 +72,18 @@ function ActiveBlocks() {
     return () => {
       cancelled = true
     }
-  }, [serviceDate])
+  }, [serviceDate, limit, retryTick])
 
   const blocks = data?.blocks || []
 
   return (
     <main>
       <div className="chart-container">
+        <p style={{ margin: '0 0 0.5rem' }}>
+          <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+            ← Diagnostics
+          </Link>
+        </p>
         <h2>Active blocks</h2>
         <p className="drilldown-anchor">
           A block chains a vehicle's consecutive trips through the day.
@@ -76,10 +111,30 @@ function ActiveBlocks() {
               aria-label="Service date for active blocks"
             />
           </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <span style={{ opacity: 0.8 }}>Limit:</span>
+            <select
+              value={limit}
+              onChange={(e) => setLimit(Number(e.target.value))}
+              aria-label="Row limit"
+            >
+              {LIMIT_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         {loading && <p style={{ color: '#64748b' }}>Loading blocks…</p>}
-        {error && <p style={{ color: '#64748b' }}>Unable to load blocks: {error}</p>}
+        {error && (
+          <ErrorState
+            title="Unable to load blocks"
+            message={error}
+            onRetry={() => setRetryTick((t) => t + 1)}
+          />
+        )}
 
         {!loading && !error && blocks.length === 0 && (
           <p style={{ color: '#64748b' }}>
@@ -113,7 +168,14 @@ function ActiveBlocks() {
                     }
                     style={{ cursor: 'pointer' }}
                   >
-                    <td>{b.block_id}</td>
+                    <td>
+                      <Link
+                        to={`/blocks/${encodeURIComponent(b.block_id)}?service_date=${encodeURIComponent(serviceDate)}`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {b.block_id}
+                      </Link>
+                    </td>
                     <td>
                       {b.scheduled_start ? b.scheduled_start.slice(11, 16) : '—'}
                     </td>

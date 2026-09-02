@@ -98,9 +98,9 @@ cd frontend && npm run lint && npm test && npm run build         # frontend gate
   unit tests run in CI too).
 - Playwright visual regression is a blocking CI gate with
   platform-specific baselines: changing a baselined page (Overview /
-  RouteList / RouteDetail-D72) requires regenerating BOTH the darwin
-  and linux sets (commands in `frontend/README.md`); regen is
-  user-run.
+  RouteList / RouteDetail-D72 / Segments) requires regenerating BOTH
+  the darwin and linux sets (commands in `frontend/README.md`); regen
+  is user-run.
 - Project Claude tooling: auto-triggering skills in
   `.claude/skills/<name>/SKILL.md`, explicit slash commands in
   `.claude/commands/<name>.md` — both checked in.

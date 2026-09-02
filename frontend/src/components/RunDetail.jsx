@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import ErrorState from './ErrorState.jsx'
 import {
   LineChart,
   Line,
@@ -58,6 +59,7 @@ function RunDetail() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [retryTick, setRetryTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -80,7 +82,7 @@ function RunDetail() {
     return () => {
       cancelled = true
     }
-  }, [runId])
+  }, [runId, retryTick])
 
   const backToRoute = () => {
     if (data?.route_id) {
@@ -114,12 +116,11 @@ function RunDetail() {
             ← Back
           </button>
         </div>
-        <div className="error-banner">
-          <div className="error-icon">⚠️</div>
-          <div className="error-content">
-            <strong>Error loading run data:</strong> {error || 'Run not found'}
-          </div>
-        </div>
+        <ErrorState
+          title="Error loading run data"
+          message={error || 'Run not found'}
+          onRetry={() => setRetryTick((t) => t + 1)}
+        />
       </main>
     )
   }
