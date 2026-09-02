@@ -21,23 +21,24 @@
 
 .error-state-message {
   margin: 0;
-  color: #991b1b;
+  /* --color-bad is defined on :root in App.css's shared token block. */
+  color: var(--color-bad, #991b1b);
   font-size: 0.9rem;
 }
 
 .error-state-retry {
   margin-top: 0.6rem;
   padding: 0.4rem 0.9rem;
-  background-color: #dc2626;
+  background-color: var(--color-bad, #dc2626);
   color: white;
   border: none;
   border-radius: 0.375rem;
   font-size: 0.8rem;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: filter 0.2s;
 }
 
 .error-state-retry:hover {
-  background-color: #b91c1c;
+  filter: brightness(0.85);
 }

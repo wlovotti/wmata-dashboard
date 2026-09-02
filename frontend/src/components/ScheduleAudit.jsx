@@ -98,26 +98,42 @@ function ScheduleAudit() {
   const setLimit = (newLimit) => updateParam('limit', newLimit === 100 ? null : newLimit)
 
   const [routes, setRoutes] = useState([])
+  const [routesLoading, setRoutesLoading] = useState(true)
+  const [routesError, setRoutesError] = useState(null)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [retryTick, setRetryTick] = useState(0)
 
-  // Route picker options, fetched once. Degrades gracefully (picker just
-  // keeps the "All routes" option) if this fails — the page's core value
-  // is the ranked table, not the picker.
+  // Route picker options. `/api/routes` is the known-slow N+1 scorecard
+  // endpoint (NOTES-88), so this can be cold or fail outright — the picker
+  // must still correctly reflect an active `route_id` filter from the URL
+  // in that case (handled via the synthetic-option fallback below), rather
+  // than silently showing "All routes" while the table is actually
+  // filtered. Shares `retryTick` with the main fetch so a single Retry
+  // click retries both.
   useEffect(() => {
     let cancelled = false
+    setRoutesLoading(true)
+    setRoutesError(null)
     fetch('/api/routes')
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
-        if (!cancelled) setRoutes(json.routes || [])
+        if (!cancelled) {
+          setRoutes(json.routes || [])
+          setRoutesLoading(false)
+        }
       })
-      .catch(() => {})
+      .catch((err) => {
+        if (!cancelled) {
+          setRoutesError(err.message || String(err))
+          setRoutesLoading(false)
+        }
+      })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [retryTick])
 
   useEffect(() => {
     let cancelled = false
@@ -149,8 +165,17 @@ function ScheduleAudit() {
   }, [routeId, direction, period, sign, limit, retryTick])
 
   const routeOptions = useMemo(() => {
-    return [...routes].sort((a, b) => a.route_id.localeCompare(b.route_id))
+    return [...routes].sort((a, b) =>
+      a.route_id.localeCompare(b.route_id, undefined, { numeric: true }),
+    )
   }, [routes])
+
+  // The active route_id filter (from the URL) might not be in the fetched
+  // route list — cold-loading, a failed fetch, or a stale bookmark against
+  // a route that's since dropped out of GTFS. Without a synthetic option
+  // the controlled <select> silently falls back to "All routes" while the
+  // table is still filtered, which misrepresents the active filter.
+  const routeIdKnown = routeId === '' || routeOptions.some((r) => r.route_id === routeId)
 
   const segments = useMemo(() => data?.segments || [], [data])
   const lookbackDays = data?.lookback_days ?? 30
@@ -199,8 +224,10 @@ function ScheduleAudit() {
               value={routeId}
               onChange={(e) => setRouteId(e.target.value)}
               aria-label="Route filter"
+              disabled={routesLoading}
             >
               <option value="">All routes</option>
+              {!routeIdKnown && <option value={routeId}>{routeId}</option>}
               {routeOptions.map((r) => (
                 <option key={r.route_id} value={r.route_id}>
                   {r.route_name && r.route_name !== r.route_id
@@ -209,6 +236,17 @@ function ScheduleAudit() {
                 </option>
               ))}
             </select>
+            {routesLoading && (
+              <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>Loading routes…</span>
+            )}
+            {!routesLoading && routesError && (
+              <span
+                style={{ color: '#94a3b8', fontSize: '0.8rem' }}
+                title={routesError}
+              >
+                Route list unavailable — showing active filter only
+              </span>
+            )}
           </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
             <span style={{ opacity: 0.8 }}>Direction:</span>

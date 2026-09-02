@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { formatDeviationMmSs, todayEasternIso } from '../utils/formatters'
 import ErrorState from './ErrorState.jsx'
 
@@ -16,11 +16,34 @@ const LIMIT_OPTIONS = [25, 50, 100, 200, 500]
  * `RouteDetail` Blocks tab — operators had to know the route to find
  * the block. The system-level rank surfaces the chains worth
  * investigating first regardless of route.
+ *
+ * `service_date` and `limit` round-trip through the URL (same
+ * `useSearchParams` omit-default pattern as `ScheduleAudit.jsx` /
+ * `SegmentDiagnostic.jsx`) so navigating to a block's timeline and back
+ * restores the filtered view instead of resetting to today.
  */
 function ActiveBlocks() {
   const navigate = useNavigate()
-  const [serviceDate, setServiceDate] = useState(todayEasternIso())
-  const [limit, setLimit] = useState(100)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const defaultServiceDate = todayEasternIso()
+  const serviceDate = searchParams.get('service_date') || defaultServiceDate
+  const limitParam = Number(searchParams.get('limit'))
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 100
+
+  const updateParam = (key, value) => {
+    const next = new URLSearchParams(searchParams)
+    if (value == null || value === '') {
+      next.delete(key)
+    } else {
+      next.set(key, String(value))
+    }
+    setSearchParams(next, { replace: false })
+  }
+
+  const setServiceDate = (newDate) =>
+    updateParam('service_date', newDate === defaultServiceDate ? null : newDate)
+  const setLimit = (newLimit) => updateParam('limit', newLimit === 100 ? null : newLimit)
+
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
