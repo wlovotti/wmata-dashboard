@@ -92,19 +92,26 @@ def test_upload_resets_mtime_so_buffer_counts_from_upload_time(tmp_path):
     import os
     import time
 
+    # Captured before the pending file even exists, so every reset below is
+    # strictly downstream of it in wall-clock terms — the mtime comparison
+    # isn't racing test_start at microsecond granularity (os.utime and
+    # time.time() can read from clocks that skew by a few microseconds when
+    # called back-to-back; a small epsilon below absorbs that residual skew
+    # without weakening the intent of the assertion).
+    test_start = time.time()
+
     fake = FakeS3()
     up = S3Uploader("bkt", s3_client=fake)
     pending = _mk(tmp_path, "2026-08-22.1.100.jsonl.zst")
     old_ts = time.time() - 172_801  # more than 48h old, before upload
     os.utime(pending, (old_ts, old_ts))
 
-    test_start = time.time()
     shipped = up.upload_closed_files(tmp_path, "p/", skip=set())
 
     assert shipped == [pending.name]
     uploaded_path = tmp_path / "uploaded" / pending.name
     assert uploaded_path.exists()
-    assert uploaded_path.stat().st_mtime >= test_start
+    assert uploaded_path.stat().st_mtime >= test_start - 0.01
 
     # Immediate prune must delete nothing: the file just shipped, so its
     # (reset) mtime is nowhere near the 48-hour cutoff.
