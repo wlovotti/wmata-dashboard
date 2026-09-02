@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import ErrorState from './ErrorState.jsx'
 
 // WMATA on-time band: -2 min early to +7 min late. Mirrors `src/otp_constants.py`
 // and the per-run chart in RunDetail. Same thresholds drive the card color
@@ -76,6 +77,7 @@ function BlockTimeline() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [retryTick, setRetryTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -101,7 +103,7 @@ function BlockTimeline() {
     return () => {
       cancelled = true
     }
-  }, [blockId, serviceDateParam])
+  }, [blockId, serviceDateParam, retryTick])
 
   if (loading) {
     return (
@@ -127,13 +129,11 @@ function BlockTimeline() {
             ← Back
           </button>
         </div>
-        <div className="error-banner">
-          <div className="error-icon">⚠️</div>
-          <div className="error-content">
-            <strong>Error loading block timeline:</strong>{' '}
-            {error || 'Block not found'}
-          </div>
-        </div>
+        <ErrorState
+          title="Error loading block timeline"
+          message={error || 'Block not found'}
+          onRetry={() => setRetryTick((t) => t + 1)}
+        />
       </main>
     )
   }

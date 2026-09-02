@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
+import ErrorState from './ErrorState.jsx'
 
 /**
  * Format a target value for display, given the canonical metric key. Mirrors
@@ -183,9 +184,12 @@ function Targets() {
   // scorecard so the panel can compute each override's gap.
   const [scorecard, setScorecard] = useState(null)
   const [offTargetMetric, setOffTargetMetric] = useState('otp')
+  const [retryTick, setRetryTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
+    setError(null)
     fetch('/api/targets')
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
@@ -203,7 +207,7 @@ function Targets() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [retryTick])
 
   // Fetch scorecard once for the off-target panel's current-value column.
   // The /api/routes endpoint is cached server-side (60s TTL) so the cost is
@@ -228,6 +232,11 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
+          <p style={{ margin: '0 0 0.5rem' }}>
+            <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+              ← Diagnostics
+            </Link>
+          </p>
           <h2>Performance targets</h2>
           <div className="loading-spinner">
             <div className="spinner"></div>
@@ -242,8 +251,17 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
+          <p style={{ margin: '0 0 0.5rem' }}>
+            <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+              ← Diagnostics
+            </Link>
+          </p>
           <h2>Performance targets</h2>
-          <p style={{ color: '#64748b' }}>Unable to load targets: {error}</p>
+          <ErrorState
+            title="Unable to load targets"
+            message={error}
+            onRetry={() => setRetryTick((t) => t + 1)}
+          />
         </div>
       </main>
     )
@@ -315,6 +333,11 @@ function Targets() {
   return (
     <main>
       <div className="chart-container">
+        <p style={{ margin: '0 0 0.5rem' }}>
+          <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+            ← Diagnostics
+          </Link>
+        </p>
         <h2>Performance targets</h2>
         <p className="drilldown-anchor">
           Read-only view of <code>config/route_targets.yaml</code>. Edits land

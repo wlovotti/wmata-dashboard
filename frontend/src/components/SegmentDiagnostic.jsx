@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import CorridorMap from './CorridorMap.jsx'
+import ErrorState from './ErrorState.jsx'
 
 /**
  * Format a signed seconds value as `±M:SS` for slip display.
@@ -99,9 +100,13 @@ function ContributingRoutesPanel({ routes }) {
           {routes.map((r, idx) => (
             <tr key={`${r.route_id}-${r.direction_id}-${idx}`}>
               <td>
-                <span className="segment-route-pill">
+                <Link
+                  to={`/route/${r.route_id}`}
+                  className="segment-route-pill"
+                  style={{ textDecoration: 'none' }}
+                >
                   {r.route_short_name || r.route_id}
-                </span>
+                </Link>
               </td>
               <td className="num" style={{ color: '#64748b' }}>
                 {r.direction_id}
@@ -161,7 +166,13 @@ function CorridorMembershipPanel({ routes }) {
           {routes.map((r) => (
             <tr key={`${r.route_id}-${r.direction_id}`}>
               <td>
-                <span className="segment-route-pill">{r.route_id}</span>
+                <Link
+                  to={`/route/${r.route_id}`}
+                  className="segment-route-pill"
+                  style={{ textDecoration: 'none' }}
+                >
+                  {r.route_id}
+                </Link>
               </td>
               <td className="num" style={{ color: '#64748b' }}>
                 {r.direction_id}
@@ -282,7 +293,13 @@ function CorridorConstituentSegments({ segments, error }) {
                 key={`${s.route_id}-${s.direction_id}-${s.from_seq}-${s.to_seq}`}
               >
                 <td>
-                  <span className="segment-route-pill">{s.route_id}</span>
+                  <Link
+                    to={`/route/${s.route_id}`}
+                    className="segment-route-pill"
+                    style={{ textDecoration: 'none' }}
+                  >
+                    {s.route_id}
+                  </Link>
                 </td>
                 <td className="num" style={{ color: '#64748b' }}>
                   {s.direction_id}
@@ -349,6 +366,7 @@ function SegmentDiagnostic() {
   const [error, setError] = useState(null)
   const [expandedIdx, setExpandedIdx] = useState(null)
   const [minLengthM, setMinLengthM] = useState(0)
+  const [retryTick, setRetryTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -376,7 +394,7 @@ function SegmentDiagnostic() {
     return () => {
       cancelled = true
     }
-  }, [level, period, limit])
+  }, [level, period, limit, retryTick])
 
   const segments = useMemo(() => data?.segments || [], [data])
   const corridors = useMemo(() => {
@@ -511,7 +529,13 @@ function SegmentDiagnostic() {
         </div>
 
         {loading && <p style={{ color: '#64748b' }}>Loading segment diagnostic…</p>}
-        {error && <p style={{ color: '#991b1b' }}>Unable to load segments: {error}</p>}
+        {error && (
+          <ErrorState
+            title="Unable to load segments"
+            message={error}
+            onRetry={() => setRetryTick((t) => t + 1)}
+          />
+        )}
 
         {!loading && !error && level === 'segment' && segments.length === 0 && (
           <p style={{ color: '#64748b' }}>
