@@ -53,8 +53,10 @@ Pairs with gap > 120 min are dropped (service breaks, not headways) — the
 same threshold the positions-based CV calc in `src/analytics.py` uses.
 
 Per-cell scheduled headway is the cell-hour mean from
-`_scheduled_headways_by_cell_hour` in `src/ewt.py` — same source and
-bucketing as EWT, so the bunching-vs-EWT comparison stays apples-to-apples.
+`_scheduled_headways_by_cell_hour_for_date` in `src/ewt.py` — resolved
+against the EXACT `service_date` (NOTES-109, no day_type/modal layer) —
+same source and bucketing as EWT, so the bunching-vs-EWT comparison
+stays apples-to-apples.
 
 Bucketing
 ---------
@@ -83,8 +85,8 @@ from src.ewt import (
     _day_type_for,
     _hour_in_zone,
     _period_for_hour,
-    _scheduled_headways_by_cell_hour,
-    fetch_scheduled_cell_hours_for_routes,
+    _scheduled_headways_by_cell_hour_for_date,
+    fetch_scheduled_cell_hours_for_date,
 )
 from src.models import StopEvent
 from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
@@ -198,12 +200,13 @@ def compute_bunching_for_route_date(
 
     `tz_name` (NOTES-103 multi-agency) buckets the observed side by the
     agency's own local hour; defaults to Eastern. The scheduled side is
-    always agency-local by construction (GTFS clock time).
+    always agency-local by construction (GTFS clock time), and resolves
+    against the EXACT `service_date` (NOTES-109, no day_type/modal layer).
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
 
-    sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
+    sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(db, route_id, service_date)
     obs_by_cell_hour = _scheduled_observed_headways_by_cell_hour(
         db, route_id, service_date_str, tz_name
     )
@@ -319,12 +322,13 @@ def compute_bunching_headline_for_route(
     agency's own local hour; defaults to Eastern.
 
     Returns the same dict shape as one period row from `compute_bunching_for_route_date`,
-    minus the `time_period` key.
+    minus the `time_period` key. The scheduled side resolves against the
+    EXACT `service_date` (NOTES-109, no day_type/modal layer).
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
 
-    sched_by_cell_hour = _scheduled_headways_by_cell_hour(db, route_id, day_type)
+    sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(db, route_id, service_date)
     obs_by_cell_hour = _scheduled_observed_headways_by_cell_hour(
         db, route_id, service_date_str, tz_name
     )
@@ -374,7 +378,7 @@ def compute_bunching_headline_for_routes(
     day_type = _day_type_for(service_date)
 
     if sched_by_route_cell_hour is None:
-        sched_by_route_cell_hour = fetch_scheduled_cell_hours_for_routes(db, day_type, route_ids)
+        sched_by_route_cell_hour = fetch_scheduled_cell_hours_for_date(db, service_date, route_ids)
 
     # All observed stop_events for the date, every route, one query.
     # Stricter filter than EWT: schedule_relationship='SCHEDULED' only.
@@ -448,7 +452,7 @@ def compute_bunching_headline_for_routes(
 def compute_bunching_headline_for_routes_multi_date(
     db: Session,
     service_dates: list[date_type],
-    sched_by_day_type: dict[str, dict[str, dict[CellHour, list[float]]]] | None = None,
+    sched_by_date: dict[str, dict[str, dict[CellHour, list[float]]]] | None = None,
     route_ids: list[str] | None = None,
     observed_rows: list[tuple] | None = None,
     tz_name: str = "America/New_York",
@@ -459,11 +463,17 @@ def compute_bunching_headline_for_routes_multi_date(
     in `service_dates`. Returns `{service_date_str: {route_id: headline_dict}}`.
 
     Pass `observed_rows` (from `fetch_observed_stop_events_for_window` — the
-    same rows EWT consumes) to skip the observed fetch. The bunching-vs-EWT
-    semantic difference is applied in Python here: non-SCHEDULED rows are
-    silently filtered before pairing, so an `ADDED` real-time-only trip
-    slotting between two scheduled buses doesn't generate a tight observed
-    pair. Pairing never crosses day boundaries.
+    same rows EWT consumes) to skip the observed fetch. Pass `sched_by_date`
+    (keyed by `service_date.isoformat()`) to share schedule fetches with EWT
+    the same way. The bunching-vs-EWT semantic difference is applied in
+    Python here: non-SCHEDULED rows are silently filtered before pairing, so
+    an `ADDED` real-time-only trip slotting between two scheduled buses
+    doesn't generate a tight observed pair. Pairing never crosses day
+    boundaries.
+
+    Each distinct date resolves its own EXACT scheduled pool via
+    `fetch_scheduled_cell_hours_for_date` (NOTES-109) — no day_type/modal
+    layer.
 
     `tz_name` (NOTES-103 multi-agency) buckets the observed side by the
     agency's own local hour; defaults to Eastern.
@@ -474,16 +484,17 @@ def compute_bunching_headline_for_routes_multi_date(
     from src.ewt import (
         _day_type_for,
         fetch_observed_stop_events_for_window,
-        fetch_scheduled_cell_hours_for_routes,
+        fetch_scheduled_cell_hours_for_date,
     )
 
     date_strs = [d.isoformat() for d in service_dates]
     day_types = {ds: _day_type_for(d) for ds, d in zip(date_strs, service_dates, strict=True)}
 
-    if sched_by_day_type is None:
-        sched_by_day_type = {}
-        for dt in set(day_types.values()):
-            sched_by_day_type[dt] = fetch_scheduled_cell_hours_for_routes(db, dt, route_ids)
+    if sched_by_date is None:
+        sched_by_date = {}
+        for ds, d in zip(date_strs, service_dates, strict=True):
+            if ds not in sched_by_date:
+                sched_by_date[ds] = fetch_scheduled_cell_hours_for_date(db, d, route_ids)
 
     if observed_rows is None:
         observed_rows = fetch_observed_stop_events_for_window(db, service_dates, route_ids)
@@ -513,7 +524,7 @@ def compute_bunching_headline_for_routes_multi_date(
     results: dict[str, dict[str, dict]] = {ds: {} for ds in date_strs}
     for service_date_str in date_strs:
         day_type = day_types[service_date_str]
-        sched_by_route_cell_hour = sched_by_day_type.get(day_type, {})
+        sched_by_route_cell_hour = sched_by_date.get(service_date_str, {})
         all_routes = set(sched_by_route_cell_hour.keys()) | {
             r for (d, r) in obs_by_date_route_cell_hour if d == service_date_str
         }
@@ -658,9 +669,9 @@ def _bunched_pairs_with_deviations(
     formula as `compute_bunching_for_route_date` — so a route's "bunching
     rate" and its "cause breakdown" agree on which pairs are bunched.
 
-    Scheduled headways are pulled per-day_type (using `_day_type_for` on
-    each service_date). Caching the per-day_type schedule across the date
-    window avoids re-querying GTFS for every day.
+    Scheduled headways are pulled per EXACT service_date (NOTES-109, no
+    day_type/modal layer). Caching per-date within this call avoids
+    re-resolving the same date twice inside one window walk.
     """
     rows = (
         db.query(
@@ -687,22 +698,21 @@ def _bunched_pairs_with_deviations(
         .all()
     )
 
-    # Cache the per-day_type scheduled cell-hour map so the repeated calls
-    # across a multi-day window don't re-query GTFS for every day. Day_types
-    # are at most three values (`weekday` / `saturday` / `sunday`).
+    # Cache the per-exact-date scheduled cell-hour map so a date repeated
+    # across the window walk (every stop_event on that date) doesn't
+    # re-resolve it more than once.
     sched_cache: dict[str, dict[CellHour, list[float]]] = {}
 
     def _sched_for_date(service_date_str: str) -> dict[CellHour, list[float]]:
-        """Return cell-hour scheduled headways for the date's day_type, cached."""
+        """Return cell-hour scheduled headways for the EXACT date, cached."""
         try:
             d = datetime.strptime(service_date_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
             return {}
-        day_type = _day_type_for(d)
-        cached = sched_cache.get(day_type)
+        cached = sched_cache.get(service_date_str)
         if cached is None:
-            cached = _scheduled_headways_by_cell_hour(db, route_id, day_type)
-            sched_cache[day_type] = cached
+            cached = _scheduled_headways_by_cell_hour_for_date(db, route_id, d)
+            sched_cache[service_date_str] = cached
         return cached
 
     # Eastern-only (not threaded with tz_name): this feeds

@@ -363,11 +363,11 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
     db_session.add(Route(route_id="64", route_short_name="64", route_type=3, is_current=True))
     db_session.commit()
 
-    def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
+    def _fake_sched(db, service_date, route_ids=None, gtfs_snapshot_id=None):
         # One frequent cell: two 600s headways -> SWT = (600²+600²)/(2·1200) = 300.
         return {"64": {(0, "S1", 8): [600.0, 600.0]}}
 
-    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_routes", _fake_sched)
+    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_date", _fake_sched)
     monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
 
     ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(
@@ -403,7 +403,7 @@ def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monke
     )
     db_session.commit()
 
-    def _fake_sched(db, day_type, route_ids=None, gtfs_snapshot_id=None):
+    def _fake_sched(db, service_date, route_ids=None, gtfs_snapshot_id=None):
         return {
             "BUS1": {(0, "S1", 8): [600.0, 600.0]},
             # Much shorter headway -- if pooled in, it would pull SWT well
@@ -411,7 +411,7 @@ def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monke
             "RAIL1": {(0, "S2", 8): [60.0, 60.0]},
         }
 
-    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_routes", _fake_sched)
+    monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_date", _fake_sched)
     monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
 
     ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(
@@ -419,6 +419,88 @@ def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monke
     )
     assert swt == pytest.approx(300.0)
     # No stop_events seeded -> trivially None; see docstring above.
+    assert ewt is None
+    assert bunching is None
+
+
+def test_swt_stays_populated_for_a_date_predating_the_feeds_validity_window(db_session):
+    """PR #233 review finding 2: write-path consequence of finding 1.
+
+    Without the modal fallback in `_resolve_service_ids_for_date`, an
+    unpinned historical re-derive over a `service_date` older than the
+    current feed's `calendar` coverage (e.g. WMATA's `stop_events` history
+    starting 2026-05-02 while a live feed's validity window starts weeks
+    later) would silently NULL `swt_seconds` on that `system_metrics_daily`
+    row -- the schedule pool resolves empty, not "unavailable."
+
+    Exercises the REAL (non-monkeypatched) path --
+    `_system_ewt_and_bunching_for_date` ->
+    `src.ewt.fetch_scheduled_cell_hours_for_date` ->
+    `_resolve_service_ids_for_date` -- against an in-memory fixture DB
+    (never the production DB) so the fallback is proven end to end, not
+    just at the resolver's own unit-test layer.
+    """
+    import api.aggregations as agg
+    from src.models import Calendar, Route, StopTime, Trip
+
+    # The feed's ONLY calendar coverage starts well after the date under
+    # test -- `_feed_validity_window` resolves to exactly this range.
+    db_session.add(Route(route_id="64", route_short_name="64", route_type=3, is_current=True))
+    db_session.add(
+        Calendar(
+            service_id="WK",
+            monday=0,
+            tuesday=1,
+            wednesday=0,
+            thursday=0,
+            friday=0,
+            saturday=0,
+            sunday=0,
+            start_date="20260621",
+            end_date="20260912",
+            is_current=True,
+        )
+    )
+    db_session.add_all(
+        [
+            Trip(trip_id="T1", route_id="64", service_id="WK", direction_id=0, is_current=True),
+            Trip(trip_id="T2", route_id="64", service_id="WK", direction_id=0, is_current=True),
+        ]
+    )
+    db_session.add_all(
+        [
+            StopTime(
+                trip_id="T1",
+                stop_id="S1",
+                arrival_time="8:00:00",
+                departure_time="8:00:00",
+                stop_sequence=1,
+                is_current=True,
+            ),
+            StopTime(
+                trip_id="T2",
+                stop_id="S1",
+                arrival_time="8:10:00",
+                departure_time="8:10:00",
+                stop_sequence=1,
+                is_current=True,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # A Tuesday that predates the feed's 2026-06-21 validity-window start
+    # by weeks -- the exact-date rule alone resolves this to an empty
+    # service_id set; only the out-of-window modal fallback recovers "WK".
+    pre_window_date = datetime(2026, 6, 2).date()
+    assert pre_window_date.weekday() == 1  # Tuesday, matching "WK"'s flag
+
+    ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(db_session, pre_window_date, {})
+
+    # SWT is schedule-side only (no stop_events seeded, so EWT/bunching
+    # stay None) -- two 600s headways at an 8am cell -> SWT = 300s. Without
+    # the finding-1 fallback this would be `None` (empty pool), not 300.0.
+    assert swt == pytest.approx(300.0)
     assert ewt is None
     assert bunching is None
 

@@ -39,7 +39,7 @@ from src.ewt import (
     compute_ewt_for_route_date,
     compute_ewt_headline_for_route,
     compute_ewt_headline_for_routes,
-    fetch_scheduled_cell_hours_for_routes,
+    fetch_scheduled_cell_hours_for_date,
 )
 from src.excess_trip_time import compute_excess_trip_time
 from src.frequent_routes import get_cell_hour_gate_sec, load_frequent_route_ids
@@ -254,13 +254,14 @@ def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]
     """One-pass live compute of the four new scorecard metrics for every route.
 
     EWT and bunching share the scheduled-cell-hour fetch (the dominant cost,
-    ~1.7s for ~422k stop_times rows). Service-delivered and OTP split are
-    independent and cheap. Returns `{route_id: {service_delivered, otp_split,
-    ewt, bunching}}` — each sub-key is the dict shape from the corresponding
-    compute function, or None when the route has no entry in that source.
+    ~1.7s for ~422k stop_times rows), resolved against the EXACT
+    `service_date` (NOTES-109, no day_type/modal layer). Service-delivered
+    and OTP split are independent and cheap. Returns `{route_id:
+    {service_delivered, otp_split, ewt, bunching}}` — each sub-key is the
+    dict shape from the corresponding compute function, or None when the
+    route has no entry in that source.
     """
-    day_type = _day_type_for(service_date)
-    sched = fetch_scheduled_cell_hours_for_routes(db, day_type)
+    sched = fetch_scheduled_cell_hours_for_date(db, service_date)
     ewt_by_route = compute_ewt_headline_for_routes(db, service_date, sched_by_route_cell_hour=sched)
     bunching_by_route = compute_bunching_headline_for_routes(
         db, service_date, sched_by_route_cell_hour=sched
@@ -737,14 +738,15 @@ def _compute_live_metrics_for_window_uncached(
                 cold_dates.append(d)
 
     if cold_dates:
-        # Pre-fetch schedule once per distinct day_type across the cold dates;
-        # the EWT and bunching multi-date computes will share the dict and
-        # avoid re-fetching for every date.
-        sched_by_day_type: dict[str, dict] = {}
+        # Pre-fetch schedule once per distinct EXACT date across the cold
+        # dates (NOTES-109 — no day_type/modal layer); the EWT and
+        # bunching multi-date computes will share the dict and avoid
+        # re-fetching a date already fetched in this window.
+        sched_by_date: dict[str, dict] = {}
         for d in cold_dates:
-            dt = _day_type_for(d)
-            if dt not in sched_by_day_type:
-                sched_by_day_type[dt] = fetch_scheduled_cell_hours_for_routes(db, dt)
+            ds = d.isoformat()
+            if ds not in sched_by_date:
+                sched_by_date[ds] = fetch_scheduled_cell_hours_for_date(db, d)
 
         # Pull observed stop_events ONCE for the window — EWT and bunching
         # share the same source filter (source='trip_update' + non-null
@@ -755,13 +757,13 @@ def _compute_live_metrics_for_window_uncached(
         ewt_by_date = compute_ewt_headline_for_routes_multi_date(
             db,
             cold_dates,
-            sched_by_day_type=sched_by_day_type,
+            sched_by_date=sched_by_date,
             observed_rows=observed_rows,
         )
         bunching_by_date = compute_bunching_headline_for_routes_multi_date(
             db,
             cold_dates,
-            sched_by_day_type=sched_by_day_type,
+            sched_by_date=sched_by_date,
             observed_rows=observed_rows,
         )
 
@@ -2161,7 +2163,7 @@ def _system_service_delivered_series(
 def _system_ewt_and_bunching_for_date(
     db: Session,
     service_date: date_type,
-    sched_by_day_type: dict[str, dict],
+    sched_by_date: dict[str, dict],
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
 ) -> tuple[float | None, float | None, float | None]:
@@ -2186,19 +2188,22 @@ def _system_ewt_and_bunching_for_date(
     the agency-comparison page — away from a bus-to-bus comparison. WMATA's
     feed is verified 100% route_type 3, so the filter is a no-op there.
 
-    `sched_by_day_type` is a memoized fetch of per-route schedule data per
-    day_type so the schedule cost is amortized across many days in the
-    window. Caller-provided invariant: because the bus-route filter above
-    is only applied on this function's own cache-miss fill (the `if
-    day_type not in sched_by_day_type` branch below), any dict passed in
-    here must either be empty/fresh or already bus-filtered by a prior
-    call to this same function -- do not share this dict with
-    `_compute_live_metrics_for_window_uncached`'s identically-named local
-    (~line 719), which fills it unfiltered for the per-route headline
-    path and does not need bus filtering. `tz_name` (NOTES-103
-    multi-agency) buckets the observed side by the agency's own local
-    hour so it agrees with the scheduled side's (always agency-local,
-    GTFS clock-time) hour key; defaults to Eastern.
+    The scheduled pool resolves against the EXACT `service_date`
+    (NOTES-109, no day_type/modal layer) via
+    `src.ewt.fetch_scheduled_cell_hours_for_date`. `sched_by_date` is a
+    memoized fetch of per-route schedule data keyed by
+    `service_date.isoformat()` so the schedule cost is amortized across
+    many days in a window. Caller-provided invariant: because the
+    bus-route filter above is only applied on this function's own
+    cache-miss fill (the `if service_date_str not in sched_by_date`
+    branch below), any dict passed in here must either be empty/fresh or
+    already bus-filtered by a prior call to this same function -- do not
+    share this dict with `_compute_live_metrics_for_window_uncached`'s
+    identically-named `sched_by_date` local, which fills it unfiltered
+    for the per-route headline path and does not need bus filtering.
+    `tz_name` (NOTES-103 multi-agency) buckets the observed side by the
+    agency's own local hour so it agrees with the scheduled side's
+    (always agency-local, GTFS clock-time) hour key; defaults to Eastern.
 
     Returns `(ewt_seconds, swt_seconds, bunching_rate)`. SWT is
     schedule-side only — it's computed from the frequent scheduled cell-hour
@@ -2207,16 +2212,15 @@ def _system_ewt_and_bunching_for_date(
     Any of the three may be `None` when its underlying pool is empty.
     """
     service_date_str = service_date.isoformat()
-    day_type = _day_type_for(service_date)
-    if day_type not in sched_by_day_type:
-        all_sched = fetch_scheduled_cell_hours_for_routes(
-            db, day_type, gtfs_snapshot_id=gtfs_snapshot_id
+    if service_date_str not in sched_by_date:
+        all_sched = fetch_scheduled_cell_hours_for_date(
+            db, service_date, gtfs_snapshot_id=gtfs_snapshot_id
         )
         bus_ids = bus_route_ids(db, gtfs_snapshot_id=gtfs_snapshot_id)
-        sched_by_day_type[day_type] = {
+        sched_by_date[service_date_str] = {
             route_id: cells for route_id, cells in all_sched.items() if route_id in bus_ids
         }
-    sched_by_route = sched_by_day_type[day_type]
+    sched_by_route = sched_by_date[service_date_str]
 
     obs_q = (
         db.query(

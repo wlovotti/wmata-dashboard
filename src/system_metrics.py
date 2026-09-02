@@ -67,9 +67,9 @@ def compute_system_metrics_for_date(
 
     otp_by_date = _system_otp_series(db, [service_date])
     sd_by_date = _system_service_delivered_series(db, [service_date], gtfs_snapshot_id)
-    sched_by_day_type: dict[str, dict] = {}
+    sched_by_date: dict[str, dict] = {}
     ewt_seconds, swt_seconds, bunching_rate = _system_ewt_and_bunching_for_date(
-        db, service_date, sched_by_day_type, gtfs_snapshot_id, tz_name=tz_name
+        db, service_date, sched_by_date, gtfs_snapshot_id, tz_name=tz_name
     )
 
     iso = service_date.isoformat()
