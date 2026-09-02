@@ -2626,7 +2626,245 @@ AGENCY_COMPARISON_CAVEATS = [
     "every route in each agency's feed, so SFMTA's figures there "
     "include its light-rail and cable-car service (~15% of SFMTA's "
     "stop_events).",
+    "The OTP and service-delivered route_distribution blocks (NOTES-141) "
+    "weight every route equally, regardless of ridership -- neither "
+    "agency's data here carries ridership/APC counts, so a 2-trip-a-day "
+    "route counts the same as a trunk line. The two agencies also have "
+    "different route counts (WMATA's bus-only feed vs SFMTA's bus + "
+    "light-rail + cable-car feed), so a share figure (e.g. 'X% of routes "
+    "at or above target') is a share of different denominators between "
+    "columns -- read the accompanying route_count before comparing "
+    "shares directly.",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Route-level distributions (NOTES-141): the headline above collapses each
+# metric to one window-mean per agency, which hides the spread -- two
+# agencies with identical mean OTP can have very different shares of bad
+# routes. This block adds a per-agency, per-metric distribution over the
+# SAME matched window the headline already computes, built from each
+# agency's own route-level window means -- the same per-route figures
+# `_contributors_uncached` computes, summarized instead of ranked.
+#
+# Scope: OTP and service_delivered only. Both are computed for every
+# current route regardless of frequency; EWT/bunching/SWT are frequent-
+# route-gated (a data-driven per-cell-hour gate, not every route), so a
+# route-level distribution there would silently exclude every
+# non-frequent route -- a different, more complicated disclosure than
+# this wave covers.
+#
+# Equal weighting and the "route counts differ" caveat above are the
+# scope decision: there is no ridership/APC data to weight by, so a
+# per-route mean is the only available reading, and it is disclosed
+# rather than presented as ridership-representative.
+#
+# Threshold: `config/route_targets.yaml`'s `system_default` -- the same
+# system-wide OTP (75%) / service-delivered (95%) commitments the
+# contributors view and RouteDetail already treat as "the" targets
+# (NOTES-47) -- rather than inventing a second threshold just for this
+# view. Applied identically to both agencies' route sets.
+#
+# Histogram: one fixed set of percentage-scale bucket edges
+# (<60/60-70/70-80/80-90/>=90) shared by both metrics -- service_delivered
+# is a 0-1 ratio, scaled onto the same 0-100 percentage axis as OTP before
+# bucketing, so a single set of cut points serves both metrics and both
+# agencies identically. The edges straddle the 75%/95% targets without
+# being defined by them, so the histogram reads as "the shape of the
+# distribution," not "pass/fail buckets."
+# ---------------------------------------------------------------------------
+
+ROUTE_DISTRIBUTION_METRICS = ("otp", "service_delivered")
+
+_ROUTE_DISTRIBUTION_BUCKET_EDGES: tuple[float, ...] = (0.0, 60.0, 70.0, 80.0, 90.0, 100.0)
+_ROUTE_DISTRIBUTION_BUCKET_LABELS: tuple[str, ...] = ("<60", "60-70", "70-80", "80-90", "90+")
+
+
+def _route_distribution_bucket_index(pct: float) -> int:
+    """Index into `_ROUTE_DISTRIBUTION_BUCKET_LABELS` for a percentage-scale value.
+
+    Buckets are right-open except the last, which catches everything from
+    its lower edge up (including any value over 100 from a bad upstream
+    read -- clamped into the top bucket rather than raising).
+
+    Args:
+        pct: A value already on the shared 0-100 percentage scale (see
+            `_route_distribution_to_pct`).
+
+    Returns:
+        The bucket index into `_ROUTE_DISTRIBUTION_BUCKET_EDGES` /
+        `_ROUTE_DISTRIBUTION_BUCKET_LABELS`.
+    """
+    edges = _ROUTE_DISTRIBUTION_BUCKET_EDGES
+    last = len(edges) - 2
+    for i in range(last):
+        if pct < edges[i + 1]:
+            return i
+    return last
+
+
+def _route_distribution_to_pct(metric: str, value: float) -> float:
+    """Rescale one route's canonical-units value onto the shared 0-100 histogram axis.
+
+    OTP is already 0-100. `service_delivered` is a 0-1 ratio
+    (`service_delivered_ratio` throughout this module) and is scaled up
+    by 100 so it lands on the same bucket edges as OTP.
+
+    Args:
+        metric: One of `ROUTE_DISTRIBUTION_METRICS`.
+        value: The route's value in its own canonical units.
+
+    Returns:
+        The value rescaled onto 0-100.
+    """
+    return value if metric == "otp" else value * 100.0
+
+
+def _percentile(sorted_values: list[float], pct: float) -> float:
+    """Linear-interpolated percentile of an already-sorted list.
+
+    Same interpolation as numpy's default `'linear'` method. Written by
+    hand rather than adding a dependency, since this view only ever needs
+    three percentiles (25/50/75) over a per-route list capped at a few
+    hundred routes.
+
+    Args:
+        sorted_values: Non-empty list, ascending order.
+        pct: Percentile to compute, 0-100.
+
+    Returns:
+        The interpolated value. A single-element list returns that
+        element regardless of `pct`.
+    """
+    n = len(sorted_values)
+    if n == 1:
+        return sorted_values[0]
+    rank = (pct / 100.0) * (n - 1)
+    lo = int(rank)
+    hi = min(lo + 1, n - 1)
+    frac = rank - lo
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
+
+
+def _summarize_route_distribution(
+    route_values: dict[str, float | None], metric: str, threshold: float | None
+) -> dict:
+    """Median/IQR/histogram/threshold-share summary of one metric's per-route values.
+
+    `route_values` -- one value per route, or `None` where the route has
+    no qualifying data in the window -- comes from the same per-route
+    window means `get_route_contributors` computes (`_route_otp_window_mean`
+    for OTP, `get_live_metrics_for_window` for service_delivered). Routes
+    with a `None` value are excluded from every statistic here, matching
+    how the contributors view drops unscoreable routes rather than
+    treating "no data" as zero.
+
+    Args:
+        route_values: `{route_id: value_or_None}` in the metric's
+            canonical units (0-100 for OTP, 0-1 ratio for
+            service_delivered).
+        metric: One of `ROUTE_DISTRIBUTION_METRICS`.
+        threshold: The value (canonical units) `share_at_or_above_threshold`
+            is measured against, or `None` when no target is configured.
+
+    Returns:
+        Dict with `route_count`, `median`, `p25`, `p75` (all in the
+        metric's own canonical units), `histogram` (a list of
+        `{label, count}` in `_ROUTE_DISTRIBUTION_BUCKET_LABELS` order),
+        `threshold`, and `share_at_or_above_threshold` (fraction 0-1, or
+        `None` when there are no routes with data or no threshold).
+    """
+    values = sorted(v for v in route_values.values() if v is not None)
+    n = len(values)
+
+    histogram_counts = [0] * len(_ROUTE_DISTRIBUTION_BUCKET_LABELS)
+    for v in values:
+        idx = _route_distribution_bucket_index(_route_distribution_to_pct(metric, v))
+        histogram_counts[idx] += 1
+
+    return {
+        "route_count": n,
+        "median": _percentile(values, 50) if n else None,
+        "p25": _percentile(values, 25) if n else None,
+        "p75": _percentile(values, 75) if n else None,
+        "histogram": [
+            {"label": label, "count": count}
+            for label, count in zip(
+                _ROUTE_DISTRIBUTION_BUCKET_LABELS, histogram_counts, strict=True
+            )
+        ],
+        "threshold": threshold,
+        "share_at_or_above_threshold": (
+            sum(1 for v in values if v >= threshold) / n if n and threshold is not None else None
+        ),
+    }
+
+
+def _route_distribution_for_agency(db: Session, end_date: date_type, days: int) -> dict[str, dict]:
+    """Per-route OTP and service_delivered distributions for one agency's matched window.
+
+    Mirrors the per-route computation `_contributors_uncached` already
+    does for these two metrics (`_route_otp_window_mean` for OTP,
+    `get_live_metrics_for_window` + `_live_metric_fields` for
+    service_delivered), scoped to every current route rather than ranked
+    -- this is a distribution view, not a leaderboard. Shares
+    `_partial_service_dates_in_window` with that code path so a
+    collection-outage day is excluded from both the headline mean and
+    this per-route spread the same way.
+
+    Args:
+        db: One agency's own open session.
+        end_date: The shared matched-window anchor (the earlier of the
+            two agencies' latest available dates).
+        days: Window length in days, `(end_date - window_start).days + 1`.
+
+    Returns:
+        Dict keyed by `ROUTE_DISTRIBUTION_METRICS`, each a
+        `_summarize_route_distribution` result.
+    """
+    from src.route_targets import get_system_targets
+
+    system_targets = get_system_targets()
+    partial_dates = _partial_service_dates_in_window(db, end_date, days)
+    routes = db.query(Route).filter(Route.is_current).all()
+
+    otp_values: dict[str, float | None] = {
+        r.route_id: _route_otp_window_mean(
+            db, r.route_id, end_date, days, partial_dates=partial_dates
+        )
+        for r in routes
+    }
+
+    windowed = get_live_metrics_for_window(db, end_date, days)
+    sd_values: dict[str, float | None] = {
+        r.route_id: _live_metric_fields(windowed.get(r.route_id)).get("service_delivered_ratio")
+        for r in routes
+    }
+
+    return {
+        "otp": _summarize_route_distribution(otp_values, "otp", system_targets.get("otp")),
+        "service_delivered": _summarize_route_distribution(
+            sd_values, "service_delivered", system_targets.get("service_delivered")
+        ),
+    }
+
+
+def _empty_route_distribution() -> dict[str, dict]:
+    """Null-window `route_distribution` block for an agency with no data in the matched window.
+
+    Used when the comparison has no shared anchor at all (neither agency
+    has any `system_metrics_daily` row in the window yet) -- there is no
+    date to compute a per-route window mean over. Still carries the real
+    configured threshold per metric (rather than `None`) so the frontend
+    can render "target: 75%" even with zero routes scored.
+    """
+    from src.route_targets import get_system_targets
+
+    system_targets = get_system_targets()
+    return {
+        metric: _summarize_route_distribution({}, metric, system_targets.get(metric))
+        for metric in ROUTE_DISTRIBUTION_METRICS
+    }
 
 
 def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
@@ -2767,12 +3005,27 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
                 "n_headways": 0,
             }
 
+        # Route-level OTP / service_delivered distributions (NOTES-141),
+        # additive to the existing envelope -- see the module comment
+        # above `ROUTE_DISTRIBUTION_METRICS` for the scope/threshold/
+        # bucket rationale. Computed over the same shared anchor as every
+        # other figure on this page; degrades to the null block (real
+        # thresholds, zero routes) when there's no shared anchor at all.
+        if anchor is not None:
+            window_days = (anchor - start).days + 1
+            route_distribution = _route_distribution_for_agency(
+                sessions[agency_name], anchor, window_days
+            )
+        else:
+            route_distribution = _empty_route_distribution()
+
         agencies_out.append(
             {
                 "agency": agency_name,
                 "display_name": cfg.display_name,
                 "metrics": metrics_out,
                 "service_level": service_level,
+                "route_distribution": route_distribution,
             }
         )
 

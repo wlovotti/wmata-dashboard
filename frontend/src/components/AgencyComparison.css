@@ -1,0 +1,86 @@
+/* Route-level distributions on the agency comparison page (NOTES-141).
+   Component-scoped stylesheet -- App.css is owned by another in-flight
+   change, so every new class lives here instead. Palette matches the
+   existing agency-compare-* tokens in App.css (slate text/borders,
+   green/red/neutral delta tints) so the new rows read as part of the same
+   table rather than a bolted-on widget. */
+
+.agency-distribution-sublabel {
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: #64748b;
+  padding-left: 1rem;
+}
+
+.agency-distribution-row td {
+  border-top: none;
+  padding-top: 0;
+}
+
+.agency-distribution-stats {
+  font-size: 0.8rem;
+  color: #334155;
+  line-height: 1.5;
+}
+
+.agency-distribution-stats dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 0.4rem;
+  row-gap: 0.15rem;
+  justify-content: center;
+}
+
+.agency-distribution-stats dt {
+  color: #64748b;
+  text-align: right;
+}
+
+.agency-distribution-stats dd {
+  margin: 0;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.agency-distribution-empty {
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.agency-distribution-histogram-cell {
+  padding: 0.5rem 0.5rem 0.75rem;
+}
+
+.agency-distribution-histogram {
+  width: 100%;
+  height: 150px;
+}
+
+.agency-distribution-tooltip {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.25rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
+.agency-distribution-tooltip-label {
+  font-weight: 600;
+  color: #1e293b;
+  margin-bottom: 0.2rem;
+}
+
+.agency-distribution-tooltip-row {
+  color: #475569;
+}
+
+/* Error state retry affordance (NOTES-141) -- reuses the app's existing
+   .retry-btn class from App.css for visual consistency; only the layout
+   wrapper is new. */
+.agency-comparison-error-actions {
+  margin-top: 0.75rem;
+}
