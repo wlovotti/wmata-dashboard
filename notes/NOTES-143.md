@@ -4,7 +4,7 @@
 **Effort: medium-high (touches the app shell, the fetch layer, and every page).**
 
 Wave 2 of the 2026-09 UX program. Depends on the `agency` API query
-param (NOTES-139, PR #TBD) and the URL-state mechanism from the window
+param (NOTES-139, PR #236) and the URL-state mechanism from the window
 picker (NOTES-140, PR #TBD).
 
 Work:

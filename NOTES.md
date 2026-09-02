@@ -14,7 +14,7 @@ git log --all -p -- NOTES.md notes/ | grep -oE 'NOTES-[0-9]+' | sort -t- -k2 -n 
 Numbers can also be consumed by items created and closed within a
 single session without ever being committed under `NOTES.md` or
 `notes/` — the command above won't see those. The highest number used
-to date is NOTES-144 (PR #TBD); update this anchor if you mint a higher
+to date is NOTES-144 (PR #236); update this anchor if you mint a higher
 one.
 
 Punch-list edits ride on substantive PRs; standalone reconciliation
