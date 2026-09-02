@@ -842,6 +842,7 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
         import time
 
         from api.aggregations import _live_metrics_cache, get_live_metrics_for_route_today
+        from src.ewt import _db_identity
 
         self._seed_stop_event(db_session, "TEST1", "2026-08-07")
         self._seed_stop_event(db_session, "TEST2", "2026-08-08")
@@ -850,8 +851,10 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
         # only has an entry for TEST2 — TEST1 has none, same as production
         # when the cross-route pass finds nothing for it. (`_live_metrics_cache`
         # starts empty and is cleared again after the test by the autouse
-        # `_clear_live_metrics_cache` fixture.)
-        _live_metrics_cache["2026-08-08"] = (
+        # `_clear_live_metrics_cache` fixture.) Keyed `(db_identity, date)`
+        # since NOTES-139 (agency query param) added a database component
+        # to this cache's key.
+        _live_metrics_cache[(_db_identity(db_session), "2026-08-08")] = (
             time.monotonic(),
             {"TEST2": {"service_delivered": {"ratio": 1.0}}},
         )
@@ -952,12 +955,15 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
         import time
 
         from api.aggregations import _live_metrics_cache, get_live_metrics_for_route_today
+        from src.ewt import _db_identity
 
         self._seed_stop_event(db_session, "TEST1", "2026-08-05")
         self._seed_gtfs_scheduled(db_session, "TEST1", "2026-08-08")
         self._seed_stop_event(db_session, "TEST2", "2026-08-08")
 
-        _live_metrics_cache["2026-08-08"] = (
+        # Keyed `(db_identity, date)` since NOTES-139 added a database
+        # component to this cache's key.
+        _live_metrics_cache[(_db_identity(db_session), "2026-08-08")] = (
             time.monotonic(),
             {"TEST2": {"service_delivered": {"ratio": 1.0}}},  # no TEST1 entry
         )

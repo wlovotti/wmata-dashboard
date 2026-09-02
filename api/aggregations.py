@@ -32,6 +32,7 @@ from src.bunching import (
 from src.diagnosis_hash import compute_profile_hash, compute_system_snapshot_hash
 from src.ewt import (
     _day_type_for,
+    _db_identity,
     _hour_in_zone,
     _is_cell_hour_frequent,
     bus_route_ids,
@@ -97,7 +98,14 @@ from src.timezones import utcnow_naive
 # window dwarfs any in-day delta). The 1-hour TTL is the right tradeoff
 # given how expensive a recompute is.
 _LIVE_METRICS_TTL_SEC = 3600.0
-_live_metrics_cache: dict[str, tuple[float, dict[str, dict]]] = {}
+# Keyed `(db_identity, service_date_iso)` (NOTES-139 review finding 1) --
+# `db_identity` (`src.ewt._db_identity`) namespaces entries by which
+# physical database `db` is bound to, so `?agency=sfmta` and the default
+# WMATA request never share an entry even though both may compute the
+# SAME service_date string. Without it, whichever agency's request
+# happened to populate a given date's slot first would silently serve
+# its numbers back to every other agency's request for that date.
+_live_metrics_cache: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
 _live_metrics_lock = Lock()
 
 # Default scorecard window (in days). The scorecard pools each metric over
@@ -106,20 +114,26 @@ _live_metrics_lock = Lock()
 # route's metric is computed over the same calendar window.
 _SCORECARD_WINDOW_DAYS = 7
 
-# Windowed live-metrics cache keyed by `(end_service_date, days)`. Shorter
+# Windowed live-metrics cache keyed by `(db_identity, end_service_date,
+# days)`. The `db_identity` component (NOTES-139 review finding 1 -- see
+# `_live_metrics_cache`'s module comment) keeps `?agency=sfmta` and the
+# default WMATA request from sharing a windowed-rollup entry. Shorter
 # TTL than the per-date cache because this layer also caches the
 # cross-route aggregation pass; refreshing it lets newly-warmed per-date
 # entries flow into the rollup without waiting an hour.
 _WINDOW_METRICS_TTL_SEC = 300.0
-_window_metrics_cache: dict[tuple[str, int], tuple[float, dict[str, dict]]] = {}
+_window_metrics_cache: dict[tuple[str, str, int], tuple[float, dict[str, dict]]] = {}
 _window_metrics_lock = Lock()
 
 # Singleflight registry for windowed-cache compute. Without this, two
 # concurrent callers on a cold cache (e.g. the lifespan-startup warm task
 # and the first user request) each run the full ~40s compute in parallel.
 # Threads that find an in-flight Event for their cache key wait on it,
-# then read the freshly-populated cache.
-_window_metrics_inflight: dict[tuple[str, int], Event] = {}
+# then read the freshly-populated cache. Keyed the same
+# `(db_identity, end_service_date, days)` way as `_window_metrics_cache`
+# so two different agencies' cold-cache requests never wait on each
+# other's compute.
+_window_metrics_inflight: dict[tuple[str, str, int], Event] = {}
 
 
 def _latest_service_date_with_stop_events(db: Session):
@@ -706,6 +720,7 @@ def _compute_live_metrics_for_window_uncached(
         fetch_observed_stop_events_for_window,
     )
 
+    db_identity = _db_identity(db)
     all_dates = [end_date - timedelta(days=i) for i in range(days)]
     partial_dates = _partial_service_dates_in_window(db, end_date, days)
     dates = [d for d in all_dates if d.isoformat() not in partial_dates]
@@ -715,10 +730,10 @@ def _compute_live_metrics_for_window_uncached(
     now = time.monotonic()
     with _live_metrics_lock:
         for d in dates:
-            cache_key = d.isoformat()
-            cached = _live_metrics_cache.get(cache_key)
+            ds = d.isoformat()
+            cached = _live_metrics_cache.get((db_identity, ds))
             if cached is not None and (now - cached[0]) < _LIVE_METRICS_TTL_SEC:
-                cached_results[cache_key] = cached[1]
+                cached_results[ds] = cached[1]
             else:
                 uncached_dates.append(d)
 
@@ -733,7 +748,7 @@ def _compute_live_metrics_for_window_uncached(
             if ds in overlay:
                 cached_results[ds] = overlay[ds]
                 with _live_metrics_lock:
-                    _live_metrics_cache[ds] = (time.monotonic(), overlay[ds])
+                    _live_metrics_cache[(db_identity, ds)] = (time.monotonic(), overlay[ds])
             else:
                 cold_dates.append(d)
 
@@ -798,7 +813,7 @@ def _compute_live_metrics_for_window_uncached(
             }
             cached_results[ds] = per_date
             with _live_metrics_lock:
-                _live_metrics_cache[ds] = (time.monotonic(), per_date)
+                _live_metrics_cache[(db_identity, ds)] = (time.monotonic(), per_date)
 
     per_date_results = [cached_results[d.isoformat()] for d in dates]
     return _aggregate_live_metrics_window(per_date_results)
@@ -810,9 +825,10 @@ def _compute_live_metrics_for_date(db: Session, service_date) -> dict[str, dict]
     The pre-existing `get_live_metrics_for_today` cache only covers the
     latest service_date. The windowed scorecard needs cached lookup for any
     date in the window, so this helper applies the same cache + TTL logic
-    keyed by `service_date.isoformat()`.
+    keyed by `(db_identity, service_date.isoformat())` (NOTES-139 review
+    finding 1 -- see `_live_metrics_cache`'s module comment).
     """
-    cache_key = service_date.isoformat()
+    cache_key = (_db_identity(db), service_date.isoformat())
     with _live_metrics_lock:
         cached = _live_metrics_cache.get(cache_key)
         if cached is not None:
@@ -837,8 +853,11 @@ def get_live_metrics_for_window(db: Session, end_date: date_type, days: int) -> 
     Cold-cache cost grows roughly linearly in `days`, but the per-date cache
     means a window-slide hits the slow path only on the newly-included date.
     Empty result dict if the window has no derived stop_events at all.
+
+    Cache key includes `_db_identity(db)` (NOTES-139 review finding 1) so
+    `?agency=sfmta` and the default WMATA request never share an entry.
     """
-    cache_key = (end_date.isoformat(), days)
+    cache_key = (_db_identity(db), end_date.isoformat(), days)
     while True:
         with _window_metrics_lock:
             cached = _window_metrics_cache.get(cache_key)
@@ -951,8 +970,10 @@ def get_live_metrics_for_route_today(
             # call already computed it. Whether that date happens to be
             # the system-wide max or this route's own earlier date, the
             # cache is keyed by literal service_date, so the lookup is
-            # correct either way.
-            cache_key = anchor_date.isoformat()
+            # correct either way. `_db_identity(db)` component (NOTES-139
+            # review finding 1) keeps this agency's lookup from reading
+            # another agency's entry for the same date string.
+            cache_key = (_db_identity(db), anchor_date.isoformat())
             with _live_metrics_lock:
                 cached = _live_metrics_cache.get(cache_key)
             if cached is not None and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC:
@@ -990,7 +1011,10 @@ def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
     service_date = _latest_service_date_with_stop_events(db)
     if service_date is None:
         return {}
-    cache_key = service_date.isoformat()
+    # `_db_identity(db)` component (NOTES-139 review finding 1) keeps this
+    # agency's lookup from reading another agency's entry for the same
+    # date string.
+    cache_key = (_db_identity(db), service_date.isoformat())
 
     with _live_metrics_lock:
         cached = _live_metrics_cache.get(cache_key)
@@ -1163,7 +1187,9 @@ DELTA_MIN_VALID_DAYS = 3
 EWT_MIN_OBS_HEADWAYS = 20  # minimum pooled observed headways per window
 
 _DELTAS_TTL_SEC = 60.0
-_deltas_cache: dict[str, tuple[float, dict[str, dict]]] = {}
+# Keyed `(db_identity, today_iso)` (NOTES-139 review finding 1) so
+# `?agency=sfmta` and the default WMATA request never share an entry.
+_deltas_cache: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
 _deltas_lock = Lock()
 
 
@@ -1434,13 +1460,15 @@ def _compute_route_deltas_uncached(db: Session) -> dict[str, dict]:
 def get_route_deltas_all(db: Session) -> dict[str, dict]:
     """Cached-by-today wrapper for the all-routes deltas computation.
 
-    Cache key is today's Eastern service date so the cache rolls naturally
-    at the day boundary. TTL `_DELTAS_TTL_SEC` (60s) absorbs repeated
-    scorecard polls within the same minute. Thread-safe via `_deltas_lock`.
+    Cache key is `(db_identity, today's Eastern service date)` so the
+    cache rolls naturally at the day boundary and `?agency=sfmta` never
+    shares an entry with the default WMATA request (NOTES-139 review
+    finding 1). TTL `_DELTAS_TTL_SEC` (60s) absorbs repeated scorecard
+    polls within the same minute. Thread-safe via `_deltas_lock`.
     """
     from src.timezones import eastern_today
 
-    cache_key = eastern_today().isoformat()
+    cache_key = (_db_identity(db), eastern_today().isoformat())
     with _deltas_lock:
         cached = _deltas_cache.get(cache_key)
         if cached is not None:
@@ -2058,7 +2086,9 @@ def get_route_trend_data(
 # ---------------------------------------------------------------------------
 
 _SYSTEM_TREND_TTL_SEC = 60.0
-_system_trend_cache: dict[tuple[str, int, str], tuple[float, dict]] = {}
+# Keyed `(db_identity, metric, days, today_iso)` (NOTES-139 review finding
+# 1) so `?agency=sfmta` and the default WMATA request never share an entry.
+_system_trend_cache: dict[tuple[str, str, int, str], tuple[float, dict]] = {}
 _system_trend_lock = Lock()
 
 
@@ -2509,7 +2539,7 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
     """
     from src.timezones import eastern_today
 
-    cache_key = (metric, days, eastern_today().isoformat())
+    cache_key = (_db_identity(db), metric, days, eastern_today().isoformat())
     with _system_trend_lock:
         cached = _system_trend_cache.get(cache_key)
         if cached is not None:
@@ -2818,7 +2848,10 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
 # ---------------------------------------------------------------------------
 
 _CONTRIBUTORS_TTL_SEC = 60.0
-_contributors_cache: dict[tuple[str, int, str], tuple[float, dict]] = {}
+# Keyed `(db_identity, metric, days, anchor_key)` (NOTES-139 review
+# finding 1) so `?agency=sfmta` and the default WMATA request never
+# share an entry.
+_contributors_cache: dict[tuple[str, str, int, str], tuple[float, dict]] = {}
 _contributors_lock = Lock()
 
 # `metric → (column-on-system-table, higher_is_better)`. The frontend uses
@@ -3207,7 +3240,7 @@ def get_route_contributors(
         anchor_key = as_of_date.isoformat()
     else:
         anchor_key = f"latest:{eastern_today().isoformat()}"
-    cache_key = (metric, days, anchor_key)
+    cache_key = (_db_identity(db), metric, days, anchor_key)
     with _contributors_lock:
         cached = _contributors_cache.get(cache_key)
         if cached is not None:
@@ -3616,7 +3649,12 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
 # ---------------------------------------------------------------------------
 
 _STOP_DIAGNOSTICS_TTL_SEC = 60.0
-_stop_diagnostics_cache: dict[tuple[str, int, str, str, int | None, str], tuple[float, dict]] = {}
+# Keyed `(db_identity, route_id, days, day_type, period, direction_id,
+# today_iso)` (NOTES-139 review finding 1) so `?agency=sfmta` and the
+# default WMATA request never share an entry.
+_stop_diagnostics_cache: dict[
+    tuple[str, str, int, str, str, int | None, str], tuple[float, dict]
+] = {}
 _stop_diagnostics_lock = Lock()
 
 
@@ -3996,7 +4034,15 @@ def get_route_stop_diagnostics(
     """
     from src.timezones import eastern_today
 
-    cache_key = (route_id, days, day_type, period, direction_id, eastern_today().isoformat())
+    cache_key = (
+        _db_identity(db),
+        route_id,
+        days,
+        day_type,
+        period,
+        direction_id,
+        eastern_today().isoformat(),
+    )
     with _stop_diagnostics_lock:
         cached = _stop_diagnostics_cache.get(cache_key)
         if cached is not None:
@@ -4035,7 +4081,10 @@ def get_route_stop_diagnostics(
 # ---------------------------------------------------------------------------
 
 _BUNCHING_CAUSES_TTL_SEC = 60.0
-_bunching_causes_cache: dict[tuple[str, int, str, str, str], tuple[float, dict]] = {}
+# Keyed `(db_identity, route_id, days, day_type, period, today_iso)`
+# (NOTES-139 review finding 1) so `?agency=sfmta` and the default WMATA
+# request never share an entry.
+_bunching_causes_cache: dict[tuple[str, str, int, str, str, str], tuple[float, dict]] = {}
 _bunching_causes_lock = Lock()
 
 
@@ -4073,7 +4122,7 @@ def get_route_bunching_causes(
     """
     from src.timezones import eastern_today
 
-    cache_key = (route_id, days, day_type, period, eastern_today().isoformat())
+    cache_key = (_db_identity(db), route_id, days, day_type, period, eastern_today().isoformat())
     with _bunching_causes_lock:
         cached = _bunching_causes_cache.get(cache_key)
         if cached is not None:
@@ -5476,8 +5525,12 @@ def get_corridor_constituent_segments(
 
 
 # Bulk system-map shapes (NOTES-84). One representative simplified polyline
-# per current route. Keyed by a constant because the payload only changes on
-# GTFS reload; the short TTL exists to pick that reload up without a restart.
+# per current route. Keyed by `db_identity` (NOTES-139 review finding 1)
+# because the payload only changes on GTFS reload OF A GIVEN DATABASE --
+# without the db-identity component, `?agency=sfmta` and the default
+# WMATA request would share the single "system" slot and serve each
+# other's shapes; the short TTL exists to pick a reload up without a
+# restart.
 _SHAPES_TTL_SEC = 60.0
 _shapes_cache: dict[str, tuple[float, dict]] = {}
 
@@ -5495,10 +5548,12 @@ def get_system_shapes(db: Session) -> dict:
         sorted by route_id. Routes whose elected shape has < 2 points are
         omitted (nothing drawable).
 
-    Cached for ``_SHAPES_TTL_SEC`` under a constant key — the payload is a
-    pure function of the current GTFS snapshot.
+    Cached for ``_SHAPES_TTL_SEC`` under `db_identity(db)` — the payload
+    is a pure function of the current GTFS snapshot IN THAT DATABASE
+    (NOTES-139 review finding 1).
     """
-    cached = _shapes_cache.get("system")
+    cache_key = _db_identity(db)
+    cached = _shapes_cache.get(cache_key)
     if cached is not None and (time.monotonic() - cached[0]) < _SHAPES_TTL_SEC:
         return cached[1]
 
@@ -5534,5 +5589,5 @@ def get_system_shapes(db: Session) -> dict:
             routes.append({"route_id": route_id, "points": [[lat, lon] for lat, lon in simplified]})
 
     result = {"routes": routes}
-    _shapes_cache["system"] = (time.monotonic(), result)
+    _shapes_cache[cache_key] = (time.monotonic(), result)
     return result

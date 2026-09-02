@@ -9,6 +9,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from functools import cache
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +67,10 @@ def _valid_agency_names() -> list[str]:
 
     Backs the 404 detail message in `_session_for_agency` so an unknown
     agency name comes back with the list of names that would have worked.
+    Also doubles as the allowlist `_session_for_agency` checks an `agency`
+    value against BEFORE touching the filesystem with it (NOTES-139 review
+    finding 2) — this glob only ever reads the fixed `config/agencies/`
+    directory, never a caller-controlled path.
 
     Returns:
         Sorted list of agency name strings (yaml stems).
@@ -73,6 +78,37 @@ def _valid_agency_names() -> list[str]:
     from src.agency_config import CONFIG_DIR
 
     return sorted(p.stem for p in CONFIG_DIR.glob("*.yaml"))
+
+
+@cache
+def _load_agency_config_cached(agency: str):
+    """Memoized `load_agency_config(agency)` (NOTES-139 review finding 8).
+
+    The yaml is static for the life of the process (there's no hot-reload
+    path for `config/agencies/*.yaml`), so re-parsing it from disk on
+    every request is pure waste — every DB-backed endpoint now calls
+    `_session_for_agency` once per request. Deliberately caches only the
+    parsed `AgencyConfig`, NOT the resolved database URL: env-var
+    resolution (`resolve_agency_db_url`) still happens fresh on every call
+    in `_session_for_agency`, so tests that monkeypatch e.g.
+    `SFMTA_DATABASE_URL` between requests keep working. `agency` is
+    validated against `_valid_agency_names()` before this is ever called,
+    so the only way it can raise is a malformed-but-present yaml file
+    (missing key / bad auth style) or a TOCTOU race (file removed between
+    the allowlist check and this load) -- `functools.cache` never
+    caches a raised exception, so both cases are simply retried, and
+    correctly re-fail, on the next request.
+
+    Args:
+        agency: Agency name, already validated against
+            `_valid_agency_names()`.
+
+    Returns:
+        The `AgencyConfig` for `agency`.
+    """
+    from src.agency_config import load_agency_config
+
+    return load_agency_config(agency)
 
 
 def _session_for_agency(agency: str):
@@ -86,13 +122,21 @@ def _session_for_agency(agency: str):
     `database.url_env` IS `DATABASE_URL`, the same env var
     `get_session(db_url=None)` already reads.
 
-    An unknown agency name (no `config/agencies/<agency>.yaml`) 404s with
-    the list of valid names. A known agency whose database URL env var
-    isn't set (e.g. a fresh dev box without `SFMTA_DATABASE_URL`) 503s
-    naming the missing env var. This is a read-only GET path, so it
-    degrades loudly with a clear client-facing status rather than either
-    silently falling back to `DATABASE_URL` (see
-    `MissingAgencyDatabaseUrlError`) or 500ing on an unhandled exception.
+    `agency` is checked against `_valid_agency_names()` BEFORE any
+    filesystem access with the raw value (NOTES-139 review finding 2) --
+    otherwise `agency` flows straight into `CONFIG_DIR / f"{agency}.yaml"`
+    inside `load_agency_config`, and a value like `../frequent_routes`
+    would resolve to a real file elsewhere under `config/` and 500 with a
+    confusing `KeyError` instead of a clean 404, which also makes
+    404-vs-500 an oracle for which files exist on disk. An unknown name
+    404s with the list of valid names. A present-but-malformed config
+    (missing key, bad `auth` style, invalid yaml) 500s with a generic
+    message rather than leaking the parse error. A known agency whose
+    database URL env var isn't set (e.g. a fresh dev box without
+    `SFMTA_DATABASE_URL`) 503s naming the missing env var. This is a
+    read-only GET path, so it degrades loudly with a clear client-facing
+    status rather than either silently falling back to `DATABASE_URL`
+    (see `MissingAgencyDatabaseUrlError`) or 500ing uninformatively.
 
     Args:
         agency: Agency name, expected to match a
@@ -103,16 +147,29 @@ def _session_for_agency(agency: str):
         Caller owns closing it, matching every handler's existing
         `try/finally: db.close()` pattern.
     """
-    from src.agency_config import (
-        MissingAgencyDatabaseUrlError,
-        load_agency_config,
-        resolve_agency_db_url,
-    )
+    import yaml
+
+    from src.agency_config import MissingAgencyDatabaseUrlError, resolve_agency_db_url
+
+    valid = _valid_agency_names()
+    if agency not in valid:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown agency {agency!r}. Valid agencies: {', '.join(valid)}",
+        )
 
     try:
-        cfg = load_agency_config(agency)
+        cfg = _load_agency_config_cached(agency)
+    except (KeyError, ValueError, yaml.YAMLError):
+        logger.exception("Malformed agency config for agency=%r", agency)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Agency {agency!r} is misconfigured; check the server logs.",
+        ) from None
     except FileNotFoundError:
-        valid = _valid_agency_names()
+        # TOCTOU: the yaml existed for `_valid_agency_names()`'s glob but
+        # is gone by the time we load it. Same client-facing outcome as
+        # never having been valid.
         raise HTTPException(
             status_code=404,
             detail=f"Unknown agency {agency!r}. Valid agencies: {', '.join(valid)}",
@@ -120,8 +177,17 @@ def _session_for_agency(agency: str):
 
     try:
         db_url = resolve_agency_db_url(cfg)
-    except MissingAgencyDatabaseUrlError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except MissingAgencyDatabaseUrlError:
+        # Deliberately not `str(exc)`: that message is written for
+        # pipeline callers ("...could write into the wrong database") --
+        # misleading language on this read-only GET path, which never
+        # writes anything.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Agency {agency!r} has no database configured: {cfg.database_url_env} is not set."
+            ),
+        ) from None
 
     return get_session(db_url)
 
@@ -369,7 +435,20 @@ async def get_routes(
         days = 30
     db = _session_for_agency(agency)
     try:
-        return get_all_routes_scorecard(db, days=days)
+        result = get_all_routes_scorecard(db, days=days)
+        if agency != "wmata":
+            # `config/frequent_routes.yaml` and `config/route_targets.yaml`
+            # are keyed by WMATA route_id, and route_ids overlap across
+            # agencies (SFMTA has its own "1", "9", "14", "90", ...). Left
+            # alone, a non-wmata agency would get WMATA's classification
+            # and targets applied to the WRONG routes -- wrong data, not
+            # just absent data -- and `is_frequent` drives the EWT-vs-OTP
+            # headline choice on the frontend. Stopgap until this config
+            # is made agency-aware (NOTES-143): force both absent here.
+            for route in result.get("routes", []):
+                route["is_frequent"] = False
+                route["targets"] = None
+        return result
     finally:
         db.close()
 
@@ -489,6 +568,13 @@ async def get_route(
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
+        if agency != "wmata":
+            # See the matching comment in `get_routes` above: frequent-route
+            # and per-route-target config are WMATA route_id-keyed and
+            # route_ids overlap across agencies, so this stays a stopgap
+            # absence rather than a (wrong) computed value until NOTES-143.
+            result["is_frequent"] = False
+            result["targets"] = None
         return result
     finally:
         db.close()
