@@ -14,7 +14,7 @@ git log --all -p -- NOTES.md notes/ | grep -oE 'NOTES-[0-9]+' | sort -t- -k2 -n 
 Numbers can also be consumed by items created and closed within a
 single session without ever being committed under `NOTES.md` or
 `notes/` — the command above won't see those. The highest number used
-to date is NOTES-138 (PR #234); update this anchor if you mint a higher
+to date is NOTES-144 (PR #TBD); update this anchor if you mint a higher
 one.
 
 Punch-list edits ride on substantive PRs; standalone reconciliation
@@ -49,6 +49,8 @@ designed UI. The comparison sprint shipped with PR #198.
 - [NOTES-61](notes/NOTES-61.md) Hold-down policy / dispatching candidates page — sev low — unblocked
 - [NOTES-20](notes/NOTES-20.md) Tighter rider-experience OTP — sev low — deferred
 - [NOTES-126](notes/NOTES-126.md) Add an observed-departure timestamp to stop_events for a principled slip-origin exclusion — sev low / eff medium-high — unblocked; deferred from the segment-slip origin guard (PR #213)
+- [NOTES-143](notes/NOTES-143.md) Agency switch in the dashboard UI — sev low-medium / eff medium-high — wave 2 of the 2026-09 UX program; depends on NOTES-139/140/144
+- [NOTES-144](notes/NOTES-144.md) Rider-experience OTP window (backend) — sev low / eff low-medium — wave 2 of the 2026-09 UX program; supersedes the backend half of NOTES-20
 
 ## Deferred / trigger-based
 

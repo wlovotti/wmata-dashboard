@@ -127,6 +127,15 @@ def client(db_session, monkeypatch):
     app.dependency_overrides has no effect. Monkeypatch the bound name in
     api.main, and shim .close() to a no-op so the per-request close in the
     handlers doesn't break the surrounding test transaction.
+
+    Every handler now resolves its session via `_session_for_agency`
+    (NOTES-139), which calls `get_session(db_url)` with a positional
+    `db_url` (`None` for the default `agency=wmata`, since
+    `config/agencies/wmata.yaml`'s `database.url_env` is `DATABASE_URL`
+    itself). The stub therefore accepts an optional `db_url` and ignores
+    it, always returning this fixture's single test session -- existing
+    tests exercise routing to *a* database, not per-agency isolation
+    (see tests/test_api_agency_param.py for that).
     """
 
     class _SessionProxy:
@@ -139,7 +148,7 @@ def client(db_session, monkeypatch):
         def close(self):
             return None
 
-    monkeypatch.setattr(api.main, "get_session", lambda: _SessionProxy(db_session))
+    monkeypatch.setattr(api.main, "get_session", lambda db_url=None: _SessionProxy(db_session))
     with TestClient(app) as test_client:
         yield test_client
 

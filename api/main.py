@@ -10,7 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
@@ -54,6 +54,76 @@ from src.time_periods import (
 from src.timezones import eastern_today, utcnow_naive
 
 logger = logging.getLogger(__name__)
+
+_AGENCY_QUERY_DESCRIPTION = (
+    "Agency name matching config/agencies/<name>.yaml. Defaults to wmata, "
+    "reproducing pre-NOTES-139 behavior exactly."
+)
+
+
+def _valid_agency_names() -> list[str]:
+    """List agency names with a config/agencies/<name>.yaml file, sorted.
+
+    Backs the 404 detail message in `_session_for_agency` so an unknown
+    agency name comes back with the list of names that would have worked.
+
+    Returns:
+        Sorted list of agency name strings (yaml stems).
+    """
+    from src.agency_config import CONFIG_DIR
+
+    return sorted(p.stem for p in CONFIG_DIR.glob("*.yaml"))
+
+
+def _session_for_agency(agency: str):
+    """Resolve an `agency` query-param value to an open DB session.
+
+    Every endpoint below except `/`, `/health`, and `/api/agency-comparison`
+    accepts an `agency` query parameter (NOTES-139, wave 1 of the 2026-09 UX
+    program) and opens its session through this helper instead of a bare
+    `get_session()`. `agency="wmata"` (the default) reproduces the
+    pre-NOTES-139 behavior exactly: `config/agencies/wmata.yaml`'s
+    `database.url_env` IS `DATABASE_URL`, the same env var
+    `get_session(db_url=None)` already reads.
+
+    An unknown agency name (no `config/agencies/<agency>.yaml`) 404s with
+    the list of valid names. A known agency whose database URL env var
+    isn't set (e.g. a fresh dev box without `SFMTA_DATABASE_URL`) 503s
+    naming the missing env var. This is a read-only GET path, so it
+    degrades loudly with a clear client-facing status rather than either
+    silently falling back to `DATABASE_URL` (see
+    `MissingAgencyDatabaseUrlError`) or 500ing on an unhandled exception.
+
+    Args:
+        agency: Agency name, expected to match a
+            `config/agencies/<agency>.yaml` file.
+
+    Returns:
+        An open SQLAlchemy `Session` for the resolved agency database.
+        Caller owns closing it, matching every handler's existing
+        `try/finally: db.close()` pattern.
+    """
+    from src.agency_config import (
+        MissingAgencyDatabaseUrlError,
+        load_agency_config,
+        resolve_agency_db_url,
+    )
+
+    try:
+        cfg = load_agency_config(agency)
+    except FileNotFoundError:
+        valid = _valid_agency_names()
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown agency {agency!r}. Valid agencies: {', '.join(valid)}",
+        ) from None
+
+    try:
+        db_url = resolve_agency_db_url(cfg)
+    except MissingAgencyDatabaseUrlError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+    return get_session(db_url)
 
 
 def _warm_scorecard_cache_sync():
@@ -209,7 +279,7 @@ def _feed_expiry_status(feed_end_date: str | None) -> str | None:
 
 
 @app.get("/api/gtfs/freshness")
-async def get_gtfs_freshness():
+async def get_gtfs_freshness(agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION)):
     """
     Return metadata for the most recent GTFS snapshot, plus a feed-expiry alarm.
 
@@ -232,7 +302,7 @@ async def get_gtfs_freshness():
         (naive UTC, matching storage convention); the frontend converts to
         Eastern for display.
     """
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         snapshot = (
             db.query(GTFSSnapshot)
@@ -275,7 +345,9 @@ async def get_gtfs_freshness():
 
 
 @app.get("/api/routes")
-async def get_routes(days: int = 7):
+async def get_routes(
+    days: int = 7, agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION)
+):
     """
     Get performance scorecard for all routes, pooled over a rolling window.
 
@@ -295,7 +367,7 @@ async def get_routes(days: int = 7):
         days = 1
     if days > 30:
         days = 30
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_all_routes_scorecard(db, days=days)
     finally:
@@ -303,7 +375,11 @@ async def get_routes(days: int = 7):
 
 
 @app.get("/api/routes/contributors")
-async def get_routes_contributors(metric: str = "otp", days: int = 30):
+async def get_routes_contributors(
+    metric: str = "otp",
+    days: int = 30,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     Routes ranked by their contribution to system underperformance (NOTES-39).
 
@@ -351,7 +427,7 @@ async def get_routes_contributors(metric: str = "otp", days: int = 30):
     if days > 90:
         days = 90
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_route_contributors(db, metric=metric, days=days)
     finally:
@@ -364,6 +440,7 @@ async def get_route(
     days: int = 7,
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     Get detailed metrics for a specific route
@@ -401,7 +478,7 @@ async def get_route(
             detail=f"Invalid period. Must be one of: {', '.join(VALID_PERIOD_KEYS)}",
         )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = get_route_detail_metrics(
             db,
@@ -424,6 +501,7 @@ async def get_route_trend(
     days: int = 30,
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     Get time-series trend data for a specific route metric
@@ -469,7 +547,7 @@ async def get_route_trend(
             detail=f"Invalid period. Must be one of: {', '.join(VALID_PERIOD_KEYS)}",
         )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = get_route_trend_data(
             db,
@@ -487,7 +565,11 @@ async def get_route_trend(
 
 
 @app.get("/api/system/trend")
-async def get_system_trend(metric: str = "otp", days: int = 30):
+async def get_system_trend(
+    metric: str = "otp",
+    days: int = 30,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     System-level trend rollup for the home-page trend strip (home-page system trend strip).
 
@@ -514,7 +596,7 @@ async def get_system_trend(metric: str = "otp", days: int = 30):
     if days > 90:
         days = 90
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_system_trend_data(db, metric=metric, days=days)
     finally:
@@ -522,7 +604,9 @@ async def get_system_trend(metric: str = "otp", days: int = 30):
 
 
 @app.get("/api/system/weekly-narrative")
-async def get_system_weekly_narrative_endpoint():
+async def get_system_weekly_narrative_endpoint(
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     Cached LLM narrative summarizing the most recent week of system-wide
     performance (system weekly narrative, PR #219).
@@ -557,7 +641,7 @@ async def get_system_weekly_narrative_endpoint():
         "then scripts/generate_system_weekly_narrative.py"
     )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         try:
             result = get_system_weekly_narrative(db)
@@ -698,7 +782,10 @@ async def get_route_time_periods(route_id: str, days: int = 7):
 
 
 @app.get("/api/routes/{route_id}/period-drilldown")
-async def get_route_period_drilldown_endpoint(route_id: str):
+async def get_route_period_drilldown_endpoint(
+    route_id: str,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     Per-time-period EWT and bunching for one route on the latest service_date.
 
@@ -714,7 +801,7 @@ async def get_route_period_drilldown_endpoint(route_id: str):
     Returns:
         EWT and bunching rows keyed by time_period, plus the anchor service_date.
     """
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = get_route_period_drilldown(db, route_id)
         if result.get("error"):
@@ -731,6 +818,7 @@ async def get_route_stop_diagnostics_endpoint(
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
     direction_id: int | None = None,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     Stop-level diagnostic metrics for one route over a window (NOTES-40).
@@ -786,7 +874,7 @@ async def get_route_stop_diagnostics_endpoint(
             detail="Invalid direction_id. Must be 0 or 1 if provided.",
         )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_route_stop_diagnostics(
             db,
@@ -806,6 +894,7 @@ async def get_route_bunching_causes_endpoint(
     days: int = 30,
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     Bunching cause decomposition for one route over a window (NOTES-42).
@@ -861,7 +950,7 @@ async def get_route_bunching_causes_endpoint(
     if days > 90:
         days = 90
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_route_bunching_causes(
             db,
@@ -875,7 +964,9 @@ async def get_route_bunching_causes_endpoint(
 
 
 @app.get("/api/shapes")
-async def get_system_shapes_endpoint():
+async def get_system_shapes_endpoint(
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """All current routes' representative simplified polylines, in one payload.
 
     Feeds the Overview system map (NOTES-84): the frontend joins these
@@ -883,7 +974,7 @@ async def get_system_shapes_endpoint():
     server-side (60s TTL; effectively always hot — the payload only changes
     on GTFS reload).
     """
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_system_shapes(db)
     finally:
@@ -891,7 +982,10 @@ async def get_system_shapes_endpoint():
 
 
 @app.get("/api/routes/{route_id}/shapes")
-async def get_route_shapes(route_id: str):
+async def get_route_shapes(
+    route_id: str,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     Get GTFS shapes data for a route
 
@@ -905,7 +999,7 @@ async def get_route_shapes(route_id: str):
     """
     from src.models import Shape, Trip
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         # Get distinct shape_ids for this route
         shape_ids = db.query(Trip.shape_id).filter(Trip.route_id == route_id).distinct().all()
@@ -940,7 +1034,11 @@ async def get_route_shapes(route_id: str):
 
 
 @app.get("/api/routes/{route_id}/recent-runs")
-async def get_route_recent_runs_endpoint(route_id: str, limit: int = 25):
+async def get_route_recent_runs_endpoint(
+    route_id: str,
+    limit: int = 25,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     Recent runs for a route — populates the RouteDetail "Recent runs" list.
 
@@ -963,7 +1061,7 @@ async def get_route_recent_runs_endpoint(route_id: str, limit: int = 25):
     if limit > 100:
         limit = 100
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = get_route_recent_runs(db, route_id, limit=limit)
         if isinstance(result, dict) and result.get("error"):
@@ -974,7 +1072,10 @@ async def get_route_recent_runs_endpoint(route_id: str, limit: int = 25):
 
 
 @app.get("/api/runs/{run_id}/deviations")
-async def get_run_deviations_endpoint(run_id: int):
+async def get_run_deviations_endpoint(
+    run_id: int,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     Per-stop schedule deviations for one run — feeds the per-run drift chart.
 
@@ -991,7 +1092,7 @@ async def get_run_deviations_endpoint(run_id: int):
         Run summary plus a `deviations` list with stop_sequence, stop_id,
         stop_name, scheduled, actual, and deviation_sec per stop.
     """
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = get_run_deviations(db, run_id)
         if result is None:
@@ -1022,7 +1123,11 @@ def _parse_service_date_param(service_date: str | None):
 
 
 @app.get("/api/routes/{route_id}/blocks")
-async def get_route_blocks_endpoint(route_id: str, service_date: str | None = None):
+async def get_route_blocks_endpoint(
+    route_id: str,
+    service_date: str | None = None,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     List blocks that touch one route on one service date (NOTES-45).
 
@@ -1040,7 +1145,7 @@ async def get_route_blocks_endpoint(route_id: str, service_date: str | None = No
         block's earliest scheduled start).
     """
     sd = _parse_service_date_param(service_date)
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = get_route_blocks(db, route_id, sd)
         if result.get("error"):
@@ -1051,7 +1156,11 @@ async def get_route_blocks_endpoint(route_id: str, service_date: str | None = No
 
 
 @app.get("/api/blocks/active")
-async def get_active_blocks_endpoint(service_date: str | None = None, limit: int = 100):
+async def get_active_blocks_endpoint(
+    service_date: str | None = None,
+    limit: int = 100,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     System-level list of active blocks for one service date (PR #105).
 
@@ -1071,7 +1180,7 @@ async def get_active_blocks_endpoint(service_date: str | None = None, limit: int
         Dict with `service_date` and `blocks` (ranked list).
     """
     sd = _parse_service_date_param(service_date)
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_active_blocks(db, sd, limit=limit)
     finally:
@@ -1103,7 +1212,11 @@ async def get_targets_endpoint():
 
 
 @app.get("/api/blocks/{block_id}")
-async def get_block_timeline_endpoint(block_id: str, service_date: str | None = None):
+async def get_block_timeline_endpoint(
+    block_id: str,
+    service_date: str | None = None,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """
     Block timeline for one block on one service date (NOTES-45).
 
@@ -1124,7 +1237,7 @@ async def get_block_timeline_endpoint(block_id: str, service_date: str | None = 
         scheduled start).
     """
     sd = _parse_service_date_param(service_date)
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = compute_block_timeline(db, block_id, sd)
         if result is None:
@@ -1141,6 +1254,7 @@ async def get_block_timeline_endpoint(block_id: str, service_date: str | None = 
 async def get_route_diagnostic_profile_endpoint(
     route_id: str,
     period: str = "all",
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     Pre-materialized diagnostic profile for one route and time-of-day period (PR #124).
@@ -1185,7 +1299,7 @@ async def get_route_diagnostic_profile_endpoint(
             detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
         )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_route_diagnostic_profile(db, route_id, period=period)
     finally:
@@ -1196,6 +1310,7 @@ async def get_route_diagnostic_profile_endpoint(
 async def get_route_diagnosis_endpoint(
     route_id: str,
     period: str = "all",
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     Cached LLM narrative for one route's diagnostic profile (PR #141).
@@ -1226,7 +1341,7 @@ async def get_route_diagnosis_endpoint(
             detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
         )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         result = get_route_diagnosis(db, route_id, period=period)
         if result is None:
@@ -1253,6 +1368,7 @@ async def get_schedule_audit_endpoint(
     period: str = "all",
     sign: str = "all",
     limit: int = 100,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     System-wide under-/over-padded segment audit (NOTES-60).
@@ -1306,7 +1422,7 @@ async def get_schedule_audit_endpoint(
             detail="Invalid direction_id. Must be 0 or 1 if provided.",
         )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         return get_schedule_audit(
             db,
@@ -1325,6 +1441,7 @@ async def get_segments(
     level: str = "segment",
     period: str = "all",
     limit: int = 100,
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
     Ranked cross-route diagnostic — either stop-pair (NOTES-59) or
@@ -1382,7 +1499,7 @@ async def get_segments(
     if limit > 500:
         limit = 500
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         if level == "corridor":
             return get_corridor_rollup(db, period=period, limit=limit)
@@ -1392,7 +1509,11 @@ async def get_segments(
 
 
 @app.get("/api/corridors/{corridor_id}/segments")
-async def get_corridor_segments(corridor_id: int, period: str = "all"):
+async def get_corridor_segments(
+    corridor_id: int,
+    period: str = "all",
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
     """Drill-down: per-route stop-pair segments inside a single corridor (NOTES-62).
 
     Companion to ``GET /api/segments?level=corridor``. For each
@@ -1419,7 +1540,7 @@ async def get_corridor_segments(corridor_id: int, period: str = "all"):
             detail=f"Invalid period. Must be one of: {', '.join(DIAGNOSTIC_PERIODS)}",
         )
 
-    db = get_session()
+    db = _session_for_agency(agency)
     try:
         if not db.query(Corridor).filter_by(corridor_id=corridor_id).first():
             raise HTTPException(status_code=404, detail="Corridor not found")
