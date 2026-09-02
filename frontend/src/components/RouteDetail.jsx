@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import RouteMap from './RouteMap'
 import PeriodDrilldown from './PeriodDrilldown'
 import RecentRuns from './RecentRuns'
@@ -14,6 +14,8 @@ import StopDiagnostic from './StopDiagnostic'
 import RouteDiagnosisPanel from './RouteDiagnosisPanel'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { getMoversFloor } from '../moversFloor'
+import useUrlState from '../hooks/useUrlState'
+import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
 
 // Day-type / time-period filter options (NOTES-41). Keys must match the API's
 // accepted values (src/time_periods.py: VALID_DAY_TYPES / VALID_PERIOD_KEYS).
@@ -43,21 +45,43 @@ function RouteDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  // Filter state (NOTES-41). Refetch the scorecard + trend whenever either
-  // changes. Defaults to no filter so the URL-less (`/routes/:routeId`)
-  // initial load preserves the unfiltered cached path.
-  const [dayType, setDayType] = useState('all')
-  const [period, setPeriod] = useState('all')
+  // Filter state (NOTES-41), moved to URL state (NOTES-140) so a filtered
+  // view is linkable and survives back/refresh. Refetch the scorecard +
+  // trend whenever either changes. Defaults to no filter so a link without
+  // these params renders the unfiltered view exactly as before.
+  const [dayType, setDayType] = useUrlState('day_type', 'all')
+  const [period, setPeriod] = useUrlState('period', 'all')
+  // Raw searchParams/setSearchParams (same idiom as SegmentDiagnostic.jsx)
+  // for the "Clear filter" button below, which must delete both `day_type`
+  // and `period` in one atomic update — two separate useUrlState setters
+  // fired synchronously would race (see useUrlState.js's docstring).
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Time-window picker (NOTES-140): `?days=` drives every fetch below whose
+  // endpoint accepts `days`. Read-only here — WindowPicker in the app shell
+  // owns writes.
+  const [days] = useWindowDays()
 
   // Recent runs vs Blocks tab (NOTES-45). 'runs' is the default; the user
   // switches to 'blocks' to see the per-vehicle chained-trip view that
   // surfaces cascade lateness.
   const [trailingTab, setTrailingTab] = useState('runs')
 
+  const clearFilters = () => {
+    const next = new URLSearchParams(searchParams)
+    next.delete('day_type')
+    next.delete('period')
+    setSearchParams(next, { replace: true })
+  }
+
   useEffect(() => {
     const params = new URLSearchParams()
     if (dayType !== 'all') params.set('day_type', dayType)
     if (period !== 'all') params.set('period', period)
+    // `days` is sent explicitly even at the default (30) — previously this
+    // fetch never sent `days` at all, silently taking the API's own 7-day
+    // default for the excess-trip-time freshest-day lookup (NOTES-140).
+    params.set('days', String(days))
     const qs = params.toString()
     const url = `/api/routes/${routeId}${qs ? `?${qs}` : ''}`
     fetch(url)
@@ -70,13 +94,14 @@ function RouteDetail() {
         setError(err.message || err)
         setLoading(false)
       })
-  }, [routeId, dayType, period])
+  }, [routeId, dayType, period, days])
 
   // Trend data is fetched here (rather than inside RouteTrend) so the same
-  // 30-day series can drive both the sparkline block and the per-KPI-card
-  // 7-vs-prior-7-day deltas above. Three fetches: OTP and excess_trip_time
-  // come from route_metrics_daily, service_delivered is computed live per
-  // service date (NOTES-37 / endpoint extension). NOTES-43 added the
+  // `days`-window series (NOTES-140 — previously a hardcoded 30) can drive
+  // both the sparkline block and the per-KPI-card 7-vs-prior-7-day deltas
+  // above. Three fetches: OTP and excess_trip_time come from
+  // route_metrics_daily, service_delivered is computed live per service
+  // date (NOTES-37 / endpoint extension). NOTES-43 added the
   // excess_trip_time trend.
   //
   // Build filter querystring fragment shared across the three trend fetches.
@@ -89,11 +114,11 @@ function RouteDetail() {
     if (period !== 'all') filterParams.push(`period=${encodeURIComponent(period)}`)
     const filterQs = filterParams.length ? `&${filterParams.join('&')}` : ''
     return [
-      `/api/routes/${routeId}/trend?metric=otp&days=30${filterQs}`,
-      `/api/routes/${routeId}/trend?metric=service_delivered&days=30${filterQs}`,
-      `/api/routes/${routeId}/trend?metric=excess_trip_time&days=30${filterQs}`,
+      `/api/routes/${routeId}/trend?metric=otp&days=${days}${filterQs}`,
+      `/api/routes/${routeId}/trend?metric=service_delivered&days=${days}${filterQs}`,
+      `/api/routes/${routeId}/trend?metric=excess_trip_time&days=${days}${filterQs}`,
     ]
-  }, [routeId, dayType, period])
+  }, [routeId, dayType, period, days])
 
   const {
     data: trendData,
@@ -165,7 +190,7 @@ function RouteDetail() {
     return (
       <main>
         <div className="route-detail-header">
-          <button onClick={() => navigate('/')} className="back-btn">
+          <button onClick={() => navigate(appendWindowParam('/', days))} className="back-btn">
             ← Back to All Routes
           </button>
         </div>
@@ -181,7 +206,7 @@ function RouteDetail() {
     return (
       <main>
         <div className="route-detail-header">
-          <button onClick={() => navigate('/')} className="back-btn">
+          <button onClick={() => navigate(appendWindowParam('/', days))} className="back-btn">
             ← Back to All Routes
           </button>
         </div>
@@ -190,7 +215,7 @@ function RouteDetail() {
           <div className="error-content">
             <strong>Error loading route data:</strong> {error || 'Route not found'}
             <div className="error-actions">
-              <button onClick={() => navigate('/')} className="retry-btn">
+              <button onClick={() => navigate(appendWindowParam('/', days))} className="retry-btn">
                 Back to Routes
               </button>
             </div>
@@ -246,7 +271,7 @@ function RouteDetail() {
   return (
     <main>
       <div className="route-detail-header">
-        <button onClick={() => navigate('/')} className="back-btn">
+        <button onClick={() => navigate(appendWindowParam('/', days))} className="back-btn">
           ← Back to All Routes
         </button>
         <div className="route-title">
@@ -322,10 +347,7 @@ function RouteDetail() {
         {filterActive && (
           <button
             type="button"
-            onClick={() => {
-              setDayType('all')
-              setPeriod('all')
-            }}
+            onClick={clearFilters}
             style={{
               padding: '0.2rem 0.55rem',
               fontSize: '0.75rem',
@@ -615,6 +637,7 @@ function RouteDetail() {
           }
           loading={trendLoading}
           error={trendError}
+          days={days}
         />
       )}
 

@@ -9,12 +9,14 @@ const BUN_LINE_COLOR = '#7C3AED'
 
 /**
  * Top-of-page system trend strip: four sparklines (OTP, service-delivered,
- * EWT, bunching) with a 30-vs-prior-30 delta on each.
+ * EWT, bunching) with an N-vs-prior-N delta on each, N being the time-window
+ * picker's `days` (NOTES-140; 30 by default).
  *
- * Closes NOTES-36. Reads from `/api/system/trend?metric=<m>&days=30`, which
- * returns the visible 30-day window plus a single scalar `prior_window_value`
+ * Closes NOTES-36. Reads from `/api/system/trend?metric=<m>&days=<days>`,
+ * which returns the visible `days`-window plus a single scalar
+ * `prior_window_value` summarizing the immediately preceding `days`-window
  * — option (b) from the NOTES-36 design choice (cleaner than transferring
- * 60 days of points just to compute a delta the server already knows).
+ * twice the points just to compute a delta the server already knows).
  *
  * Uses the `Sparkline` and `DeltaIndicator` primitives factored out of
  * `RouteTrend.jsx` so the visual style stays consistent with the per-route
@@ -34,9 +36,15 @@ const BUN_LINE_COLOR = '#7C3AED'
  *   combined trend payload keyed by metric, or null while loading.
  * @param {boolean} props.loading
  * @param {string|null} props.error
+ * @param {number} [props.days] - Time-window picker (NOTES-140) fetch
+ *   length, used only to label the N-vs-prior-N deltas below; defaults to
+ *   30 for any caller that hasn't been updated to pass it. Below
+ *   `computeSystemDelta`'s `SYSTEM_DELTA_MIN_DAYS` (10) the delta itself
+ *   goes null and disappears rather than mislabeling — see the NOTES-140
+ *   PR body.
  * @returns {JSX.Element}
  */
-function SystemTrend({ trendData, loading, error }) {
+function SystemTrend({ trendData, loading, error, days = 30 }) {
   const data = trendData ?? { otp: null, service_delivered: null, ewt: null, bunching: null }
 
   if (loading) {
@@ -124,11 +132,11 @@ function SystemTrend({ trendData, loading, error }) {
   // displayed magnitude and arrow direction still match the underlying
   // delta — only the color reverses.)
   const otpDeltaTitle = (d) =>
-    `Last 30 days mean ${d.currentMean.toFixed(1)}% vs prior 30-day mean ${d.priorMean.toFixed(1)}%`
+    `Last ${days} days mean ${d.currentMean.toFixed(1)}% vs prior ${days}-day mean ${d.priorMean.toFixed(1)}%`
   const ewtDeltaTitle = (d) =>
-    `Last 30 days mean ${d.currentMean.toFixed(1)}s vs prior 30-day mean ${d.priorMean.toFixed(1)}s`
+    `Last ${days} days mean ${d.currentMean.toFixed(1)}s vs prior ${days}-day mean ${d.priorMean.toFixed(1)}s`
   const bunDeltaTitle = (d) =>
-    `Last 30 days mean ${d.currentMean.toFixed(2)}% vs prior 30-day mean ${d.priorMean.toFixed(2)}%`
+    `Last ${days} days mean ${d.currentMean.toFixed(2)}% vs prior ${days}-day mean ${d.priorMean.toFixed(2)}%`
 
   // System-default targets (NOTES-47). The trend endpoint emits
   // `target_value` next to `prior_window_value`; units follow each
@@ -176,7 +184,7 @@ function SystemTrend({ trendData, loading, error }) {
           />
           {otpDelta && (
             <div className="route-trend-meta">
-              30d: {otpDelta.currentMean.toFixed(1)}% · Prior 30:{' '}
+              {days}d: {otpDelta.currentMean.toFixed(1)}% · Prior {days}:{' '}
               {otpDelta.priorMean.toFixed(1)}%
             </div>
           )}
@@ -207,7 +215,7 @@ function SystemTrend({ trendData, loading, error }) {
           />
           {sdDelta && (
             <div className="route-trend-meta">
-              30d: {sdDelta.currentMean.toFixed(1)}% · Prior 30:{' '}
+              {days}d: {sdDelta.currentMean.toFixed(1)}% · Prior {days}:{' '}
               {sdDelta.priorMean.toFixed(1)}%
             </div>
           )}
@@ -238,7 +246,7 @@ function SystemTrend({ trendData, loading, error }) {
           />
           {ewtDelta && (
             <div className="route-trend-meta">
-              30d: {Math.round(ewtDelta.currentMean)}s · Prior 30:{' '}
+              {days}d: {Math.round(ewtDelta.currentMean)}s · Prior {days}:{' '}
               {Math.round(ewtDelta.priorMean)}s
             </div>
           )}
@@ -269,7 +277,7 @@ function SystemTrend({ trendData, loading, error }) {
           />
           {bunDelta && (
             <div className="route-trend-meta">
-              30d: {bunDelta.currentMean.toFixed(2)}% · Prior 30:{' '}
+              {days}d: {bunDelta.currentMean.toFixed(2)}% · Prior {days}:{' '}
               {bunDelta.priorMean.toFixed(2)}%
             </div>
           )}

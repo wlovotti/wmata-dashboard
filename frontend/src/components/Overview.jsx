@@ -1,5 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
+import useUrlState from '../hooks/useUrlState'
+import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
@@ -20,21 +22,6 @@ const CONTRIB_METRICS = [
 ]
 
 const CONTRIB_TOP_N = 5
-
-// One page-level fan-out for the four trend payloads; SystemTrend and the
-// hero both read from this single fetch (props down — NOTES-84 data flow).
-const OVERVIEW_TREND_URLS = [
-  '/api/system/trend?metric=otp&days=30',
-  '/api/system/trend?metric=service_delivered&days=30',
-  '/api/system/trend?metric=ewt&days=30',
-  '/api/system/trend?metric=bunching&days=30',
-]
-
-// Stable module-level array (PR #218 finding 4) — this URL never depends
-// on props/state, so it's hoisted alongside OVERVIEW_TREND_URLS to honor
-// useMultiFetch's documented "memoize `urls`" contract instead of passing
-// a fresh `['/api/routes']` literal every render.
-const SCORECARD_URLS = ['/api/routes']
 
 /**
  * Overview landing page, rebuilt as an editorial stack (NOTES-84):
@@ -61,21 +48,45 @@ const SCORECARD_URLS = ['/api/routes']
  */
 function Overview() {
   const navigate = useNavigate()
-  const [contribMetric, setContribMetric] = useState('otp')
+  const [contribMetric, setContribMetric] = useUrlState('metric', 'otp')
+  // Time-window picker (NOTES-140): `?days=` drives every fetch below that
+  // its endpoint accepts. `/api/routes/contributors` and `/api/system/trend`
+  // both take `days`; `/api/routes` does too (previously called with none
+  // at all here, silently taking the API's own 7-day default) — see the
+  // NOTES-140 PR body for the resulting delta-suppression interaction with
+  // computeSystemDelta at the 7-day setting.
+  const [days] = useWindowDays()
 
+  // Memoized (PR #218 finding 4) so the array reference is stable across
+  // renders that don't change `days` — a fresh literal here would still
+  // work (useMultiFetch keys its effect on a JSON.stringify of the URLs,
+  // not reference identity), but the hook's docstring documents
+  // memoization as the caller contract.
+  const scorecardUrls = useMemo(() => [`/api/routes?days=${days}`], [days])
   const { data: scorecardResults, revalidateError: scorecardRevalidateError } =
-    useMultiFetch(SCORECARD_URLS)
+    useMultiFetch(scorecardUrls)
   // Hero and movers degrade gracefully while this is null (loading, or a
   // fetch failure — the raw-fetch predecessor of this effect silently
   // ignored errors the same way).
   const scorecard = scorecardResults ? scorecardResults[0] : null
 
+  // One page-level fan-out for the four trend payloads; SystemTrend and the
+  // hero both read from this single fetch (props down — NOTES-84 data flow).
+  const trendUrls = useMemo(
+    () => [
+      `/api/system/trend?metric=otp&days=${days}`,
+      `/api/system/trend?metric=service_delivered&days=${days}`,
+      `/api/system/trend?metric=ewt&days=${days}`,
+      `/api/system/trend?metric=bunching&days=${days}`,
+    ],
+    [days],
+  )
   const {
     data: rawSystemTrendData,
     loading: trendLoading,
     error: trendError,
     revalidateError: trendRevalidateError,
-  } = useMultiFetch(OVERVIEW_TREND_URLS, ([otp, sd, ewt, bun]) => ({
+  } = useMultiFetch(trendUrls, ([otp, sd, ewt, bun]) => ({
     otp,
     service_delivered: sd,
     ewt,
@@ -84,14 +95,14 @@ function Overview() {
   const systemTrendData = rawSystemTrendData ?? null
 
   // Memoized (PR #218 finding 4) so the array reference is stable across
-  // renders that don't change `contribMetric` — a fresh literal here would
-  // still work (useMultiFetch keys its effect on a JSON.stringify of the
-  // URLs, not reference identity), but the hook's docstring documents
+  // renders that don't change `contribMetric`/`days` — a fresh literal here
+  // would still work (useMultiFetch keys its effect on a JSON.stringify of
+  // the URLs, not reference identity), but the hook's docstring documents
   // memoization as the caller contract, and this is the one call site
   // whose URL genuinely depends on state.
   const contribUrls = useMemo(
-    () => [`/api/routes/contributors?metric=${contribMetric}&days=30`],
-    [contribMetric],
+    () => [`/api/routes/contributors?metric=${contribMetric}&days=${days}`],
+    [contribMetric, days],
   )
   const {
     data: contribResults,
@@ -190,7 +201,12 @@ function Overview() {
         <MoversPanel routes={scorecard?.routes ?? null} />
       </div>
 
-      <SystemTrend trendData={systemTrendData} loading={trendLoading} error={trendError} />
+      <SystemTrend
+        trendData={systemTrendData}
+        loading={trendLoading}
+        error={trendError}
+        days={days}
+      />
 
       <div className="table-container">
         <h2>Biggest drags</h2>
@@ -256,7 +272,7 @@ function Overview() {
               {visibleContributors.map((c, idx) => (
                 <tr
                   key={c.route_id}
-                  onClick={() => navigate(`/route/${c.route_id}`)}
+                  onClick={() => navigate(appendWindowParam(`/route/${c.route_id}`, days))}
                   style={{ cursor: 'pointer' }}
                 >
                   <td>{idx + 1}</td>
@@ -282,7 +298,7 @@ function Overview() {
         )}
 
         <div style={{ padding: '1rem 1.5rem 1.5rem' }}>
-          <Link to="/routes" className="see-all-link">
+          <Link to={appendWindowParam('/routes', days)} className="see-all-link">
             See all routes →
           </Link>
         </div>

@@ -158,7 +158,8 @@ function visibleGhostRows(ghostData) {
 }
 
 /**
- * Mini 30-day sparkline rendered with recharts.
+ * Mini sparkline rendered with recharts (`data`'s length tracks whatever
+ * window the caller fetched — the time-window picker's `days`, NOTES-140).
  *
  * `data` is an array of `{ date, value, data_quality?, coverage_pct? }` rows.
  * Rows where `data_quality === 'partial'` are rendered as grey dots with a
@@ -332,8 +333,9 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
 }
 
 /**
- * 30-day OTP, service-delivered, and excess-trip-time trend block for a
- * single route.
+ * OTP, service-delivered, and excess-trip-time trend block for a single
+ * route, over the time-window picker's `days` (NOTES-140; 30 by default —
+ * `days` prop below, heading only).
  *
  * Receives precomputed `{date, value}` series from RouteDetail (which fetches
  * the trend payload once and reuses it for the per-KPI-card deltas above).
@@ -362,11 +364,18 @@ function RouteTrend({
   sdCurrent,
   loading,
   error,
+  // Time-window picker (NOTES-140): the fetched trend length, for the
+  // heading only. Defaults to 30 for any caller that hasn't been updated
+  // to pass it. The per-card "Last 7 days / Prior 7" meta lines below stay
+  // fixed at 7 regardless — they reflect computeWindowDelta's own
+  // 7-vs-prior-7 sub-window, not the overall fetch length.
+  days = 30,
 }) {
+  const heading = `${days}-Day Trend`
   if (loading) {
     return (
       <div className="chart-container">
-        <h2>30-Day Trend</h2>
+        <h2>{heading}</h2>
         <p style={{ color: '#64748b', fontSize: '0.85rem' }}>Loading…</p>
       </div>
     )
@@ -374,7 +383,7 @@ function RouteTrend({
   if (error) {
     return (
       <div className="chart-container">
-        <h2>30-Day Trend</h2>
+        <h2>{heading}</h2>
         <p style={{ color: '#64748b', fontSize: '0.85rem' }}>
           Trend unavailable: {error}
         </p>
@@ -383,7 +392,7 @@ function RouteTrend({
   }
   return (
     <div className="chart-container">
-      <h2>30-Day Trend</h2>
+      <h2>{heading}</h2>
       <div className="route-trend-grid">
         <div className="route-trend-card">
           <div className="route-trend-header">
