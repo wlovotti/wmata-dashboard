@@ -26,6 +26,8 @@ actual fetch is silently broken).
 ## Dependencies
 
 None — self-contained to the stateless collector (`src/stateless_poller.py`,
-`scripts/stateless_collector.py`). Related to but distinct from
-NOTES-133's hardening list (that item is deferred-review code-quality
-minors; this one is a design gap in the alerting signal itself).
+`scripts/stateless_collector.py`). Related to but distinct from the
+deferred-review code-quality hardening batch closed by PR #235 (monotonic
+PingGate clock, zero-byte file pruning, per-stream upload error
+isolation, freshness/cadence slack comment, truncated-file manifest
+hardening); this item is a design gap in the alerting signal itself.

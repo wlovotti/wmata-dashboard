@@ -50,6 +50,26 @@ def test_uploads_closed_files_and_moves_to_uploaded(tmp_path):
     assert open_file.exists()  # skipped
 
 
+def test_zero_byte_closed_file_is_moved_to_uploaded_not_left_pending(tmp_path):
+    """A zero-byte closed file (a rotation that raced an empty tick) has
+    nothing to ship, but must not sit in the archive dir forever either
+    (PR #235 — zero-byte file pruning) — it's moved straight into ``uploaded/`` (same mtime
+    reset as a real upload) so ``prune_uploaded``'s 48-hour window reaches
+    it, without ever hitting S3 or counting as "shipped" (an empty file
+    must not make ``PingGate`` think the feed produced fresh data).
+    """
+    fake = FakeS3()
+    up = S3Uploader("bkt", s3_client=fake)
+    empty = _mk(tmp_path, "2026-08-22.1.100.jsonl.zst", content=b"")
+
+    shipped = up.upload_closed_files(tmp_path, "p/", skip=set())
+
+    assert shipped == []  # not reported as shipped — nothing was uploaded
+    assert fake.uploads == []  # never touched S3
+    assert not empty.exists()  # no longer stuck in the archive dir
+    assert (tmp_path / "uploaded" / empty.name).exists()  # disposed of via the usual buffer
+
+
 def test_verification_failure_leaves_file_in_place(tmp_path):
     """A ContentLength mismatch raises and leaves the file pending for the next cycle to retry."""
     up = S3Uploader("bkt", s3_client=FakeS3(corrupt=True))
@@ -92,12 +112,16 @@ def test_upload_resets_mtime_so_buffer_counts_from_upload_time(tmp_path):
     import os
     import time
 
-    # Captured before the pending file even exists, so every reset below is
-    # strictly downstream of it in wall-clock terms — the mtime comparison
-    # isn't racing test_start at microsecond granularity (os.utime and
-    # time.time() can read from clocks that skew by a few microseconds when
-    # called back-to-back; a small epsilon below absorbs that residual skew
-    # without weakening the intent of the assertion).
+    # Captured before the pending file even exists. This only guarantees
+    # test_start <= the reset mtime in *program order* — the intervening
+    # work is sub-millisecond, so that ordering alone wouldn't need any
+    # slack. The real reason for the epsilon below is that os.utime() and
+    # time.time() can read from clocks with coarser or skewed resolution
+    # (filesystem mtime granularity, clock-source jitter), so the epsilon
+    # absorbs that residual skew — it is not redundant with the ordering
+    # guarantee and should not be deleted as such. The regression this
+    # guards against is being off by ~172,801s, so a couple of seconds of
+    # tolerance here costs nothing.
     test_start = time.time()
 
     fake = FakeS3()
@@ -111,7 +135,7 @@ def test_upload_resets_mtime_so_buffer_counts_from_upload_time(tmp_path):
     assert shipped == [pending.name]
     uploaded_path = tmp_path / "uploaded" / pending.name
     assert uploaded_path.exists()
-    assert uploaded_path.stat().st_mtime >= test_start - 0.01
+    assert uploaded_path.stat().st_mtime >= test_start - 2.0
 
     # Immediate prune must delete nothing: the file just shipped, so its
     # (reset) mtime is nowhere near the 48-hour cutoff.

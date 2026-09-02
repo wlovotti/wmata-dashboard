@@ -13,11 +13,15 @@ during a quiet period nothing ships and ``PingGate`` correctly stops
 pinging — that silence is the intended failure signal, not a bug.
 """
 
+import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
 from src.archive_writer import JsonlArchiveWriter
 from src.deadman import ping_healthcheck
+
+logger = logging.getLogger(__name__)
 
 
 class PingGate:
@@ -37,6 +41,18 @@ class PingGate:
 
         ``url`` is passed straight through to ``ping_healthcheck`` on every
         ping, including ``None`` (which disables pinging there).
+
+        ``freshness_sec``'s default (1200s = 20 min) is intentionally
+        looser than ``scripts/stateless_collector.py``'s
+        ``ROTATE_INTERVAL_SEC`` (900s = 15 min): the ~5-minute margin is
+        the slack docs/DEPLOYMENT.md §13.5's grace-period math already
+        assumes. If either constant changes, re-check that margin rather
+        than letting it silently erode or balloon (PR #235 — named the
+        freshness/cadence slack as a tunable).
+
+        ``record_ship``/``maybe_ping`` take a caller-supplied ``now`` —
+        see ``run_upload_cycle``'s docstring for why that clock must be
+        monotonic (PR #235 — monotonic PingGate clock).
         """
         self._url = url
         self._freshness_sec = freshness_sec
@@ -91,21 +107,50 @@ def archive_vp_rows(
     return len(vehicles)
 
 
-def run_upload_cycle(uploader, streams, gate: PingGate, now: float) -> list[str]:
+def run_upload_cycle(uploader, streams, gate: PingGate, now: float | None = None) -> list[str]:
     """Ship every closed file across all feed streams, then maybe ping.
 
     ``streams`` is a list of ``(feed, archive_dir, key_prefix, writer)``.
     The writer's currently-open file is skipped; everything else directly
     under the dir is closed by construction. Prunes the 48-hour uploaded/
     buffer as it goes.
+
+    ``now`` defaults to ``time.monotonic()`` (PR #235 — monotonic PingGate
+    clock): it drives
+    only ``PingGate``'s freshness/rate-limit window math, which must be
+    immune to an NTP step or manual wall-clock change mid-run. Nothing
+    that lands in persisted artifacts or S3 key names (row timestamps,
+    ``JsonlArchiveWriter``'s filename tokens) goes through this value —
+    those still use wall-clock time elsewhere, untouched by this default.
+    Tests pass an explicit ``now`` to control the gate deterministically.
+
+    Each stream's upload+prune is isolated in its own try/except
+    (PR #235 — per-stream upload error isolation): a failure on one feed (e.g. an
+    ``UploadVerificationError`` on "tu") is logged and does not skip the
+    other, otherwise-independent feed's upload or prune. ``PingGate``
+    still only pings when every feed shipped fresh data, so a failed
+    stream correctly withholds the ping without any special-casing here.
+    The first exception encountered is re-raised after every stream has
+    had a chance to run, so it remains visible to the caller (the
+    collector loop's per-cycle try/except already logs and continues).
     """
+    if now is None:
+        now = time.monotonic()
     shipped_all: list[str] = []
+    first_error: Exception | None = None
     for feed, archive_dir, key_prefix, writer in streams:
-        skip = {writer.open_path} if writer.open_path is not None else set()
-        shipped = uploader.upload_closed_files(Path(archive_dir), key_prefix, skip)
-        if shipped:
-            gate.record_ship(feed, now)
-            shipped_all.extend(shipped)
-        uploader.prune_uploaded(Path(archive_dir))
+        try:
+            skip = {writer.open_path} if writer.open_path is not None else set()
+            shipped = uploader.upload_closed_files(Path(archive_dir), key_prefix, skip)
+            if shipped:
+                gate.record_ship(feed, now)
+                shipped_all.extend(shipped)
+            uploader.prune_uploaded(Path(archive_dir))
+        except Exception as exc:
+            logger.error("upload cycle: %s stream failed: %r", feed, exc)
+            if first_error is None:
+                first_error = exc
     gate.maybe_ping(now)
+    if first_error is not None:
+        raise first_error
     return shipped_all

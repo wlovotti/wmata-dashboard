@@ -243,6 +243,55 @@ def test_absurd_epoch_dropped_and_good_rows_still_load(db_session, tmp_path):
     assert db_session.query(VpArchiveLoadedFile).one().dropped_count == 1
 
 
+def test_complete_file_logs_no_truncation_warning(db_session, tmp_path, caplog):
+    """A normally-closed archive file (valid zstd footer) must not trip the
+    truncation warning (PR #235 — truncated-file manifest hardening) —
+    only a crash-truncated file should.
+    """
+    import logging
+
+    from pipelines.load_vp_archive import load_vp_file
+
+    path = _write_vp_file(tmp_path, [VEHICLE], COLLECTED)
+    with caplog.at_level(logging.WARNING, logger="pipelines.load_vp_archive"):
+        load_vp_file(db_session, path)
+
+    assert "crash-truncated" not in caplog.text
+
+
+def test_crash_truncated_file_loads_readable_prefix_and_logs_warning(db_session, tmp_path, caplog):
+    """A crash-truncated file (flushed compression blocks present, but no
+    closing zstd footer — exactly what a process death mid-write leaves
+    behind) still loads its readable prefix and is still marked loaded in
+    the manifest (files are immutable once uploaded, per the module
+    docstring), but now logs a visible warning instead of completing
+    silently (PR #235, closing the "theoretical gap" formerly tracked as
+    NOTES-133 item 5).
+    """
+    import logging
+
+    from pipelines.load_vp_archive import load_vp_file
+    from src.archive_writer import JsonlArchiveWriter
+    from src.models import VehiclePosition, VpArchiveLoadedFile
+    from src.stateless_poller import archive_vp_rows
+
+    writer = JsonlArchiveWriter(tmp_path)
+    for i in range(50):
+        archive_vp_rows(writer, [dict(VEHICLE, vehicle_id=str(i))], collected_at=COLLECTED)
+    path = writer._open_path
+    writer._raw_fh.flush()  # simulate a crash: flushed blocks, no frame footer
+    # Deliberately never call writer.close() — that would write the footer.
+
+    with caplog.at_level(logging.WARNING, logger="pipelines.load_vp_archive"):
+        inserted, dropped = load_vp_file(db_session, path)
+
+    assert inserted > 0  # readable prefix still loads
+    assert dropped == 0
+    assert db_session.query(VehiclePosition).count() == inserted
+    assert db_session.query(VpArchiveLoadedFile).one().filename == path.name  # still marked loaded
+    assert "crash-truncated" in caplog.text
+
+
 def test_main_continues_past_a_failing_file(db_session, tmp_path, monkeypatch):
     """main() isolates a per-file failure: it logs, continues, and reports nonzero exit.
 

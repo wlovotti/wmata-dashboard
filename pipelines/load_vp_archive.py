@@ -12,6 +12,7 @@ phantom-timestamp guard at load time — raw files stay raw.
 import argparse
 import io
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
 from src.models import VehiclePosition, VpArchiveLoadedFile
 from src.timezones import from_epoch_naive_utc, utcnow_naive
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -76,6 +79,36 @@ def parse_vp_line(obj: dict) -> dict | None:
     }
 
 
+def _zstd_frame_is_complete(path: Path) -> bool:
+    """Return whether ``path``'s zstd stream ended with a valid frame footer.
+
+    PR #235 (truncated-file manifest hardening): ``load_vp_file`` reads via ``stream_reader``, which
+    (per ``archive_writer.py``'s docstring) tolerates a missing footer and
+    silently stops at whatever full blocks were flushed before a crash —
+    exactly the behavior that lets a crash-truncated file's readable
+    prefix still load. That tolerance also means the read itself never
+    signals truncation, so this is a second, cheap pass over the same
+    (already-small, already-compressed) bytes using the lower-level
+    ``decompressobj`` API, whose ``.eof`` flag is False when the frame
+    epilogue never arrived — the zstandard-library equivalent of zlib's
+    ``decompressobj().eof``/``unused_data`` pattern. Any decompression
+    error while probing (corrupt bytes, not just a missing footer) also
+    reports incomplete rather than propagating — this is a best-effort
+    diagnostic, not a correctness gate.
+    """
+    try:
+        obj = zstd.ZstdDecompressor().decompressobj()
+        with open(path, "rb") as fh:
+            while not obj.eof:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                obj.decompress(chunk)
+        return obj.eof
+    except zstd.ZstdError:
+        return False
+
+
 def load_vp_file(session, path: Path) -> tuple[int, int]:
     """Load one archive file exactly once; returns (inserted, dropped).
 
@@ -104,6 +137,15 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     tripping ``GUARD_SEC``), and ``datetime.fromisoformat`` or a missing
     ``collected_at`` key can raise ``ValueError`` / ``TypeError`` /
     ``KeyError``. Any of those must drop the one bad line, not the file.
+
+    PR #235: the file is still marked loaded (row count and all) even
+    when its zstd frame never got a proper footer — files are immutable
+    once uploaded (verify-then-buffer in ``S3Uploader``), so a corrected
+    re-upload under the same name is not expected in practice. A
+    ``_zstd_frame_is_complete`` check runs anyway and logs a warning when
+    the frame looks crash-truncated, purely so the (currently
+    theoretical) gap is visible in pipeline/cron logs instead of silent —
+    it does not change what gets inserted or manifested.
     """
     already = session.get(VpArchiveLoadedFile, path.name)
     if already is not None:
@@ -140,6 +182,15 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
     if batch:
         session.execute(insert(VehiclePosition), batch)
         inserted += len(batch)
+
+    if not _zstd_frame_is_complete(path):
+        logger.warning(
+            "%s: zstd frame did not end cleanly (crash-truncated mid-upload?) — "
+            "loaded %d rows from the readable prefix only; marking loaded anyway "
+            "since archive files are immutable once uploaded",
+            path.name,
+            inserted,
+        )
 
     session.add(
         VpArchiveLoadedFile(
