@@ -1,8 +1,9 @@
 import useWindowDays, { WINDOW_DAY_OPTIONS } from '../hooks/useWindowDays'
 
 /**
- * App-shell time-window control (NOTES-140). A 3-way 7/30/90-day segmented
- * toggle that reads/writes the shared `?days=` URL param via
+ * App-shell time-window control (NOTES-140). A 7/30-day segmented toggle
+ * (90 was dropped in PR #239 review — see `useWindowDays.js`) that
+ * reads/writes the shared `?days=` URL param via
  * `useWindowDays`. Rendered in the header next to `RefreshButton`, outside
  * the routed subtree, so switching windows never remounts the current page
  * — every page reads the same URL param itself and refetches when it

@@ -61,7 +61,7 @@ header h1 {
   gap: 0.75rem;
 }
 
-/* Time-window picker (NOTES-140) — 7/30/90-day segmented toggle in the
+/* Time-window picker (NOTES-140) — 7/30-day segmented toggle in the
    header, styled as a pill to match .refresh-btn's translucent chrome. */
 .window-picker {
   display: flex;

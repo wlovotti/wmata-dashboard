@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { computeSpectrumBar } from '../utils/spectrumBar'
@@ -277,16 +277,25 @@ function RouteList() {
       })
   }
 
+  // Tracks the guard object owned by the currently-active `days` effect run
+  // below, so `handleRefresh`'s manual retry (PR #239 delta review finding
+  // 3) can share it instead of opting out of the out-of-order guard
+  // entirely — a retry is conceptually "redo the current window's fetch,"
+  // so it should be superseded by the same events that would supersede
+  // that fetch (a window switch while the retry is still in flight).
+  const activeGuardRef = useRef(null)
+
   useEffect(() => {
     const guard = { ignored: false }
-    // Set synchronously (not derived from a state update that only lands
-    // after this effect's fetch resolves) so the *first* render after
-    // `days` changes already shows the loading state — see
-    // `showLoadingState` below, which also consults the module cache
-    // directly at render time for the same reason (PR #239 review finding
-    // E: without it, the previous window's rows could paint for one frame
-    // before this effect even runs).
-    setLoading(true)
+    activeGuardRef.current = guard
+    // Only show the full-page spinner when this window isn't already
+    // cached (PR #239 delta review finding 2) — an unconditional
+    // `setLoading(true)` here defeated the stale-while-revalidate lazy
+    // `useState` init above: remounting at a window that's already in the
+    // module cache (e.g. navigating back to /routes) would spinner-block
+    // instead of rendering the cached rows immediately while this effect's
+    // fetch revalidates them in the background.
+    setLoading(_cachedDays !== days || _cachedRoutes === null)
     fetchRoutes(days, guard).finally(() => {
       if (!guard.ignored) setLoading(false)
     })
@@ -328,13 +337,15 @@ function RouteList() {
     }
   }, [viewMode, contribMetric, days])
 
-  // Manual refresh (the error banner's "Try Again" button) intentionally
-  // does not go through the out-of-order guard above — it's a single
-  // request against the currently-settled window, not a competitor with a
-  // superseded one — and, matching the pre-existing behavior, does not
-  // toggle `loading` (a silent background refetch, not a full reload).
+  // Manual refresh (the error banner's "Try Again" button). Shares the
+  // current `days` effect's guard (PR #239 delta review finding 3) so a
+  // window switch while the retry is still in flight supersedes it the
+  // same way it would a normal window-driven fetch, instead of letting a
+  // stale retry response land after the user has already moved on.
+  // Matching the pre-existing behavior, this does not toggle `loading` —
+  // it's a silent background refetch, not a full reload.
   const handleRefresh = () => {
-    fetchRoutes(days, null)
+    fetchRoutes(days, activeGuardRef.current)
   }
 
   // Render-time (not state-lagged) staleness check (PR #239 review finding
@@ -343,8 +354,13 @@ function RouteList() {
   // render body catches "the URL just changed to a window we haven't
   // fetched yet" on the very next render — before the effect above even
   // runs — and keeps the old window's `routes` out of the table for that
-  // frame by falling into the loading branch below instead.
-  const showLoadingState = loading || _cachedDays !== days
+  // frame by falling into the loading branch below instead. Gated on
+  // `!error` (PR #239 delta review finding 1): `_cachedDays` is only
+  // written on a *successful* fetch, so without this a failed fetch would
+  // latch `showLoadingState` true forever — `_cachedDays` can never catch
+  // up to `days` — permanently hiding the error banner and its "Try
+  // Again" button behind an infinite "Loading routes…" spinner.
+  const showLoadingState = loading || (_cachedDays !== days && !error)
 
   // Filter and sort routes
   const filteredAndSortedRoutes = routes

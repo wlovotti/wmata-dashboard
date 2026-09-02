@@ -140,7 +140,7 @@ function SystemTrend({ trendData, loading, error, days = 30 }) {
   // System-default targets (NOTES-47). The trend endpoint emits
   // `target_value` next to `prior_window_value`; units follow each
   // metric's payload (OTP %, service_delivered 0-1, EWT seconds,
-  // bunching 0-1). We compare against the current 30-day mean — the
+  // bunching 0-1). We compare against the current `days`-window mean — the
   // pill says "✓ Target X" / "✗ Target X" based on whether the window
   // mean meets the commitment.
   const otpTarget = data.otp?.target_value
