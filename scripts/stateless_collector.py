@@ -43,7 +43,13 @@ from src.wmata_collector import WMATADataCollector
 load_dotenv()
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ROTATE_INTERVAL_SEC = 900  # 15-minute upload cadence (spec decision 1)
+# 15-minute upload cadence (spec decision 1). PingGate's default
+# freshness_sec=1200 (20 min) is deliberately looser than this by ~5
+# minutes — that margin is the slack docs/DEPLOYMENT.md §13.5's
+# grace-period math assumes; if this cadence changes, re-check PingGate's
+# default too rather than letting the margin silently erode or balloon
+# (PR #235 — named the freshness/cadence slack as a tunable).
+ROTATE_INTERVAL_SEC = 900
 
 
 def now_str() -> str:
@@ -198,7 +204,10 @@ def main(argv=None) -> None:
                     print(f"[{now_str()}] tick={tick_idx} vehicle_positions ERROR: {e}")
 
             try:
-                shipped = run_upload_cycle(uploader, streams, gate, now=time.time())
+                # No explicit `now` — run_upload_cycle defaults PingGate's
+                # clock to time.monotonic() (PR #235 — monotonic PingGate
+                # clock), immune to wall-clock steps mid-run.
+                shipped = run_upload_cycle(uploader, streams, gate)
                 if shipped:
                     print(f"[{now_str()}] tick={tick_idx} uploaded: {', '.join(shipped)}")
             except Exception as e:

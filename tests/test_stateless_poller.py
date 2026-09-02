@@ -3,6 +3,8 @@
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from src.archive_writer import JsonlArchiveWriter
 from src.stateless_poller import PingGate, archive_vp_rows, run_upload_cycle
 
@@ -144,4 +146,196 @@ def test_run_upload_cycle_records_ships_per_feed(tmp_path, monkeypatch):
     assert uploader.prune_calls == [Path(tu_dir), Path(vp_dir)]
 
     # Only "tu" shipped, so the ping must not fire even though it's fresh.
+    assert pings == []
+
+
+def test_run_upload_cycle_defaults_to_monotonic_clock(tmp_path, monkeypatch):
+    """Without an explicit ``now``, run_upload_cycle must drive PingGate's
+    freshness/rate-limit math off the monotonic clock, not ``time.time()``
+    (PR #235 — monotonic PingGate clock) — an NTP step or manual clock change must not
+    perturb the gate. Proven by making wall-clock time read as something
+    absurd while monotonic time reads a normal, small value: the gate's
+    recorded ship time must reflect the monotonic reading.
+
+    Patches ``src.stateless_poller._monotonic_clock`` (a module-level
+    reference to ``time.monotonic``, PR #235 review) rather
+    than ``src.stateless_poller.time.monotonic`` — the latter is the same
+    object as the process-wide stdlib ``time`` module, so patching it
+    there would mutate ``time.monotonic`` for every other consumer in the
+    test process, not just this module.
+    """
+    monkeypatch.setattr("src.stateless_poller._monotonic_clock", lambda: 5000.0)
+    monkeypatch.setattr("src.stateless_poller.time.time", lambda: 10_000_000_000.0)
+    tu_dir, vp_dir = tmp_path / "tu", tmp_path / "vp"
+    tu_dir.mkdir()
+    vp_dir.mkdir()
+    (tu_dir / "2026-08-22.1.100.jsonl.zst").write_bytes(b"x")
+    tu_w, vp_w = JsonlArchiveWriter(tu_dir), JsonlArchiveWriter(vp_dir)
+    gate = PingGate("http://hc/x")
+    uploader = RecordingUploader()
+    streams = [
+        ("tu", tu_dir, "raw-jsonl-archive/", tu_w),
+        ("vp", vp_dir, "raw-jsonl-archive/vp/", vp_w),
+    ]
+
+    run_upload_cycle(uploader, streams, gate)  # no `now` passed
+
+    assert gate._last_ship["tu"] == 5000.0
+
+
+def test_run_upload_cycle_isolates_per_stream_upload_failures(tmp_path, monkeypatch):
+    """One stream's upload failure must not skip the other stream's upload
+    or prune (PR #235 — per-stream upload error isolation) — the failure is logged and re-raised
+    after every stream has had a chance to run, and PingGate correctly
+    withholds the ping for the failed feed (ping-after-commit must not
+    regress: only the healthy feed's ship is recorded).
+    """
+    pings = []
+    monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: pings.append(url))
+
+    class FlakyUploader:
+        """Raises on the "tu" stream; behaves like RecordingUploader otherwise."""
+
+        def __init__(self):
+            self.prune_calls = []
+
+        def upload_closed_files(self, archive_dir, key_prefix, skip):
+            if "tu" in str(archive_dir):
+                raise RuntimeError("simulated S3 failure for tu")
+            return [p.name for p in sorted(Path(archive_dir).glob("*.jsonl.zst")) if p not in skip]
+
+        def prune_uploaded(self, archive_dir, max_age_sec=48 * 3600):
+            self.prune_calls.append(archive_dir)
+            return 0
+
+    tu_dir, vp_dir = tmp_path / "tu", tmp_path / "vp"
+    tu_dir.mkdir()
+    vp_dir.mkdir()
+    (vp_dir / "2026-08-22.1.100.jsonl.zst").write_bytes(b"x")
+    tu_w, vp_w = JsonlArchiveWriter(tu_dir), JsonlArchiveWriter(vp_dir)
+    gate = PingGate("http://hc/x")
+    uploader = FlakyUploader()
+    streams = [
+        ("tu", tu_dir, "raw-jsonl-archive/", tu_w),
+        ("vp", vp_dir, "raw-jsonl-archive/vp/", vp_w),
+    ]
+
+    with pytest.raises(RuntimeError, match="simulated S3 failure for tu"):
+        run_upload_cycle(uploader, streams, gate, now=1000.0)
+
+    # vp still shipped and was pruned despite tu's failure.
+    assert Path(vp_dir) in uploader.prune_calls
+    assert "vp" in gate._last_ship
+    assert "tu" not in gate._last_ship
+    # Both feeds must be fresh for a ping; tu never shipped, so no ping.
+    assert pings == []
+
+
+class TotalOutageUploader:
+    """Raises on every stream's upload_closed_files call; models a total S3 outage
+    (e.g. a revoked IAM key) rather than a single feed's failure.
+    """
+
+    def __init__(self):
+        """Initialize with an empty prune-call log."""
+        self.prune_calls = []
+
+    def upload_closed_files(self, archive_dir, key_prefix, skip):
+        """Always raise, regardless of which stream's dir is passed."""
+        raise RuntimeError(f"simulated total S3 outage for {archive_dir}")
+
+    def prune_uploaded(self, archive_dir, max_age_sec=48 * 3600):
+        """No-op stand-in; records the call and reports 0 pruned."""
+        self.prune_calls.append(archive_dir)
+        return 0
+
+
+def test_run_upload_cycle_withholds_ping_on_total_outage(tmp_path, monkeypatch):
+    """A cycle where EVERY stream's upload fails must not ping the dead-man.
+
+    Regression guard (PR #235 review): once the per-stream
+    try/except was added, ``gate.maybe_ping(now)`` ran unconditionally at
+    the bottom of ``run_upload_cycle``, so a total upload outage (e.g. a
+    revoked IAM key) no longer silenced the dead-man immediately —
+    ``PingGate._last_ship`` still held each feed's last *successful* ship
+    from a prior, healthy cycle, and healthchecks.io kept getting pinged
+    for up to ``freshness_sec`` (1200s), regressing
+    docs/DEPLOYMENT.md §13.5's "~50 min for a total collector outage"
+    math. Pre-seeding both feeds as recently-shipped and then failing
+    every stream this cycle reproduces exactly that: freshness math alone
+    would still say "ping" (both feeds are within freshness_sec of
+    ``now``), so this only passes if a failed cycle withholds the ping
+    outright.
+    """
+    pings = []
+    monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: pings.append(url))
+    tu_dir, vp_dir = tmp_path / "tu", tmp_path / "vp"
+    tu_dir.mkdir()
+    vp_dir.mkdir()
+    tu_w, vp_w = JsonlArchiveWriter(tu_dir), JsonlArchiveWriter(vp_dir)
+    gate = PingGate("http://hc/x", freshness_sec=1200, min_gap_sec=300)
+    # Both feeds shipped recently in a prior, healthy cycle.
+    gate.record_ship("tu", now=900.0)
+    gate.record_ship("vp", now=900.0)
+    uploader = TotalOutageUploader()
+    streams = [
+        ("tu", tu_dir, "raw-jsonl-archive/", tu_w),
+        ("vp", vp_dir, "raw-jsonl-archive/vp/", vp_w),
+    ]
+
+    with pytest.raises(RuntimeError, match="simulated total S3 outage"):
+        run_upload_cycle(uploader, streams, gate, now=1000.0)
+
+    assert pings == []
+
+
+def test_run_upload_cycle_withholds_ping_on_partial_failure_even_if_still_fresh(
+    tmp_path, monkeypatch
+):
+    """One stream failing must withhold the ping even when the surviving
+    feed's fresh ship plus the failed feed's still-within-freshness prior
+    ship would otherwise satisfy ``PingGate.maybe_ping``'s freshness check.
+
+    Matches pre-PR behavior, where any exception in the cycle skipped
+    ``maybe_ping`` altogether (PR #235 review) — per-stream
+    isolation must not weaken that guarantee just because the failed
+    feed happens to still look "fresh" from its last successful cycle.
+    """
+    pings = []
+    monkeypatch.setattr("src.stateless_poller.ping_healthcheck", lambda url: pings.append(url))
+
+    class FlakyUploader:
+        """Raises on the "tu" stream; behaves like RecordingUploader otherwise."""
+
+        def __init__(self):
+            self.prune_calls = []
+
+        def upload_closed_files(self, archive_dir, key_prefix, skip):
+            if "tu" in str(archive_dir):
+                raise RuntimeError("simulated S3 failure for tu")
+            return [p.name for p in sorted(Path(archive_dir).glob("*.jsonl.zst")) if p not in skip]
+
+        def prune_uploaded(self, archive_dir, max_age_sec=48 * 3600):
+            self.prune_calls.append(archive_dir)
+            return 0
+
+    tu_dir, vp_dir = tmp_path / "tu", tmp_path / "vp"
+    tu_dir.mkdir()
+    vp_dir.mkdir()
+    (vp_dir / "2026-08-22.1.100.jsonl.zst").write_bytes(b"x")
+    tu_w, vp_w = JsonlArchiveWriter(tu_dir), JsonlArchiveWriter(vp_dir)
+    gate = PingGate("http://hc/x", freshness_sec=1200, min_gap_sec=300)
+    gate.record_ship("tu", now=900.0)  # tu shipped fine in a prior cycle...
+    uploader = FlakyUploader()
+    streams = [
+        ("tu", tu_dir, "raw-jsonl-archive/", tu_w),
+        ("vp", vp_dir, "raw-jsonl-archive/vp/", vp_w),
+    ]
+
+    with pytest.raises(RuntimeError, match="simulated S3 failure for tu"):
+        run_upload_cycle(uploader, streams, gate, now=1000.0)
+
+    # vp ships fresh at now=1000 and tu's stale 900.0 record is still within
+    # freshness_sec=1200, so freshness math alone would say "ping" — only
+    # the error-withholding guard should suppress it.
     assert pings == []

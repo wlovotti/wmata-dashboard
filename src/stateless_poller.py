@@ -13,11 +13,22 @@ during a quiet period nothing ships and ``PingGate`` correctly stops
 pinging — that silence is the intended failure signal, not a bug.
 """
 
+import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
 from src.archive_writer import JsonlArchiveWriter
 from src.deadman import ping_healthcheck
+
+logger = logging.getLogger(__name__)
+
+# Module-level indirection so tests can monkeypatch this specific reference
+# (PR #235 review) instead of `src.stateless_poller.time.monotonic`,
+# which is the SAME object as the process-wide `time` stdlib module — patching
+# it there would mutate `time.monotonic` for every other consumer in the test
+# process, not just this module.
+_monotonic_clock = time.monotonic
 
 
 class PingGate:
@@ -37,6 +48,18 @@ class PingGate:
 
         ``url`` is passed straight through to ``ping_healthcheck`` on every
         ping, including ``None`` (which disables pinging there).
+
+        ``freshness_sec``'s default (1200s = 20 min) is intentionally
+        looser than ``scripts/stateless_collector.py``'s
+        ``ROTATE_INTERVAL_SEC`` (900s = 15 min): the ~5-minute margin is
+        the slack docs/DEPLOYMENT.md §13.5's grace-period math already
+        assumes. If either constant changes, re-check that margin rather
+        than letting it silently erode or balloon (PR #235 — named the
+        freshness/cadence slack as a tunable).
+
+        ``record_ship``/``maybe_ping`` take a caller-supplied ``now`` —
+        see ``run_upload_cycle``'s docstring for why that clock must be
+        monotonic (PR #235 — monotonic PingGate clock).
         """
         self._url = url
         self._freshness_sec = freshness_sec
@@ -91,21 +114,61 @@ def archive_vp_rows(
     return len(vehicles)
 
 
-def run_upload_cycle(uploader, streams, gate: PingGate, now: float) -> list[str]:
+def run_upload_cycle(uploader, streams, gate: PingGate, now: float | None = None) -> list[str]:
     """Ship every closed file across all feed streams, then maybe ping.
 
     ``streams`` is a list of ``(feed, archive_dir, key_prefix, writer)``.
     The writer's currently-open file is skipped; everything else directly
     under the dir is closed by construction. Prunes the 48-hour uploaded/
     buffer as it goes.
+
+    ``now`` defaults to ``time.monotonic()`` (PR #235 — monotonic PingGate
+    clock): it drives
+    only ``PingGate``'s freshness/rate-limit window math, which must be
+    immune to an NTP step or manual wall-clock change mid-run. Nothing
+    that lands in persisted artifacts or S3 key names (row timestamps,
+    ``JsonlArchiveWriter``'s filename tokens) goes through this value —
+    those still use wall-clock time elsewhere, untouched by this default.
+    Tests pass an explicit ``now`` to control the gate deterministically.
+
+    Each stream's upload+prune is isolated in its own try/except
+    (PR #235 — per-stream upload error isolation): a failure on one feed (e.g. an
+    ``UploadVerificationError`` on "tu") is logged and does not skip the
+    other, otherwise-independent feed's upload or prune.
+
+    ``gate.maybe_ping`` is only called when NO stream raised this cycle
+    (PR #235 review): ``PingGate``'s freshness check alone is
+    not enough to withhold the ping on a total outage, because
+    ``_last_ship`` still holds each feed's last *successful* ship from a
+    prior, healthy cycle — a revoked IAM key (or any other error on
+    every stream) would otherwise still read as "fresh" for up to
+    ``freshness_sec`` and keep the dead-man pinged, silently regressing
+    docs/DEPLOYMENT.md §13.5's outage-detection math. Withholding the
+    ping on ANY stream error (not just a total one) also matches
+    pre-per-stream-isolation behavior, where a single try/except around
+    the whole cycle skipped ``maybe_ping`` on any exception. The first
+    exception encountered is re-raised after every stream has had a
+    chance to run, so it remains visible to the caller (the collector
+    loop's per-cycle try/except already logs and continues).
     """
+    if now is None:
+        now = _monotonic_clock()
     shipped_all: list[str] = []
+    first_error: Exception | None = None
     for feed, archive_dir, key_prefix, writer in streams:
-        skip = {writer.open_path} if writer.open_path is not None else set()
-        shipped = uploader.upload_closed_files(Path(archive_dir), key_prefix, skip)
-        if shipped:
-            gate.record_ship(feed, now)
-            shipped_all.extend(shipped)
-        uploader.prune_uploaded(Path(archive_dir))
-    gate.maybe_ping(now)
+        try:
+            skip = {writer.open_path} if writer.open_path is not None else set()
+            shipped = uploader.upload_closed_files(Path(archive_dir), key_prefix, skip)
+            if shipped:
+                gate.record_ship(feed, now)
+                shipped_all.extend(shipped)
+            uploader.prune_uploaded(Path(archive_dir))
+        except Exception as exc:
+            logger.error("upload cycle: %s stream failed: %r", feed, exc)
+            if first_error is None:
+                first_error = exc
+    if first_error is None:
+        gate.maybe_ping(now)
+    else:
+        raise first_error
     return shipped_all

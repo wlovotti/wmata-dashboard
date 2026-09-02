@@ -11,7 +11,10 @@ the next scan because it is closed and therefore not in ``skip``. The
 48-hour buffer is measured from upload time, not content age: the mtime
 is reset to "now" at the moment of the rename into ``uploaded/``, so a
 file that sat pending for a while (e.g. after a crash) still gets the
-full 48-hour local retention window after it ships.
+full 48-hour local retention window after it ships. A zero-byte closed
+file (nothing to ship) is moved into ``uploaded/`` the same way, without
+ever hitting S3, so it is pruned on the same schedule instead of sitting
+in the archive dir forever (PR #235 — zero-byte file pruning).
 """
 
 import os
@@ -50,6 +53,15 @@ class S3Uploader:
         (e.g. "10" before "9") — sorting by mtime instead keeps upload
         order correct when files from more than one crashed process are
         pending at once.
+
+        A zero-byte closed file (e.g. a rotation that raced an empty tick,
+        PR #235 — zero-byte file pruning) has nothing to ship — it's moved straight into
+        ``uploaded/`` (same mtime reset as a real upload) so
+        ``prune_uploaded``'s 48-hour window reaches it, rather than
+        sitting pending in ``archive_dir`` forever. It is never uploaded to
+        S3 and never appears in the returned list, since nothing was
+        actually shipped — a caller (``run_upload_cycle``) must not treat
+        this as fresh data for ``PingGate``'s purposes.
         """
         uploaded_dir = archive_dir / "uploaded"
         shipped: list[str] = []
@@ -59,6 +71,10 @@ class S3Uploader:
                 continue
             size = path.stat().st_size
             if size == 0:
+                uploaded_dir.mkdir(exist_ok=True)
+                dest = uploaded_dir / path.name
+                path.rename(dest)
+                os.utime(dest, None)
                 continue
             key = f"{key_prefix}{path.name}"
             self._s3.upload_file(str(path), self.bucket, key)
