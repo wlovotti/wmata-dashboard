@@ -1,5 +1,7 @@
 # NOTES-20. Tighter rider-experience OTP
 
+Backend half tracked as NOTES-144; UI toggle ships with NOTES-143.
+
 **Severity: low (deferred).**
 
 User considers WMATA's −2 / +7 window lax but wants comparability with
