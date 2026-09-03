@@ -219,7 +219,7 @@ def is_frequent_route(route_id: str, agency: str = "wmata") -> bool:
     return route_id in load_frequent_route_ids(agency)
 
 
-def get_cell_hour_gate_sec(route_id: str) -> int:
+def get_cell_hour_gate_sec(route_id: str, agency: str = "wmata") -> int:
     """Return the EWT cell-hour scheduled-headway gate (seconds) for `route_id`.
 
     `MEDIUM_FREQ_GATE_SEC` for routes WMATA publishes as medium-frequency;
@@ -227,8 +227,14 @@ def get_cell_hour_gate_sec(route_id: str) -> int:
     undesignated routes. The per-route lookup is what `src/ewt.py`'s
     cell-hour classifier uses to decide whether a (direction, stop, hour)
     cell contributes to EWT.
+
+    `agency` (PR #242 review finding 5) is forwarded to
+    `load_medium_freq_route_ids`, which already gates on it: for any
+    agency other than `"wmata"` the medium-freq set is empty, so a
+    same-numbered SFMTA route can never inherit WMATA's 20-min gate —
+    it always gets `DEFAULT_GATE_SEC`.
     """
-    if route_id in load_medium_freq_route_ids():
+    if route_id in load_medium_freq_route_ids(agency):
         return MEDIUM_FREQ_GATE_SEC
     return DEFAULT_GATE_SEC
 

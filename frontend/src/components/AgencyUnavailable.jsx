@@ -16,7 +16,7 @@ function AgencyUnavailable({ agencyLabel, reason }) {
     <p
       className="agency-unavailable-note"
       style={{
-        color: '#64748b',
+        color: 'var(--color-muted)',
         fontSize: '0.875rem',
         padding: '0.75rem 1rem',
         background: '#f1f5f9',

@@ -16,7 +16,10 @@ collector cadence doesn't poll every feed on every tick, e.g. SFMTA,
 can never reach the flat 80% WMATA threshold even under perfect
 collection). The EWT/bunching hour-of-day bucketing inside the metric
 computation itself is also agency-local, via the same ``tz_name`` (the
-agency-local hour bucketing fix, PR #190).
+agency-local hour bucketing fix, PR #190). ``--agency`` is also forwarded
+as ``agency`` into the EWT cell-hour gate lookup (PR #242 review finding
+5) so a non-wmata route never inherits WMATA's medium-freq 20-min gate
+for a same-numbered route_id.
 
 Usage:
   uv run python -m pipelines.upsert_system_metrics_daily --date 2026-05-08
@@ -84,6 +87,7 @@ def main() -> int:
             args.gtfs_snapshot_id,
             tz_name=cfg.timezone,
             completeness_threshold=agency_coverage_threshold(cfg),
+            agency=args.agency,
         )
         return 0 if result is not None else 1
     finally:

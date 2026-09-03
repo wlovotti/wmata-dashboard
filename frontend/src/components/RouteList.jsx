@@ -333,7 +333,7 @@ function RouteList() {
     const guard = { ignored: false }
     setContribLoading(true)
     setContribError(null)
-    fetch(apiUrl('/api/routes/contributors', { metric: contribMetric, days }))
+    fetch(apiUrl('/api/routes/contributors', { metric: contribMetric, days, agency }))
       .then(res => {
         if (!res.ok) {
           throw new Error(`HTTP error! status: ${res.status}`)
@@ -500,7 +500,7 @@ function RouteList() {
           <p className="scorecard-window-note" style={{ color: '#94a3b8' }}>
             Frequent-route designation and per-route targets aren&apos;t
             configured for this agency yet — no &quot;Freq&quot; badge and no
-            target column below.
+            target/spectrum indicators on the metric cells below.
           </p>
         )}
 
@@ -638,7 +638,13 @@ function RouteList() {
                       <th>Route</th>
                       <th>Name</th>
                       <th>Route value</th>
-                      <th title={`Per-route target if configured, otherwise system ${days}-day baseline`}>
+                      <th
+                        title={
+                          showTargets
+                            ? `Per-route target if configured, otherwise system ${days}-day baseline`
+                            : `System-wide target (per-route targets aren't configured for this agency yet)`
+                        }
+                      >
                         Reference
                       </th>
                       <th>Scheduled trips ({days}d)</th>

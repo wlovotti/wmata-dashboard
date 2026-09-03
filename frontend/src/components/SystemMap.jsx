@@ -5,7 +5,7 @@ import 'leaflet/dist/leaflet.css'
 import { routeLineColor } from '../utils/mapColors'
 import useMultiFetch from '../hooks/useMultiFetch'
 import useAgency from '../hooks/useAgency'
-import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
 
 /**
@@ -63,6 +63,10 @@ export function FitBounds({ bounds }) {
 function SystemMap({ scorecardRoutes }) {
   const navigate = useNavigate()
   const [agency] = useAgency()
+  // Carry the current time-window selection into RouteDetail navigation
+  // (PR #242 review finding 14) — read-only here, WindowPicker in the app
+  // shell owns writes.
+  const [days] = useWindowDays()
   // Memoized on `agency` (NOTES-143) so the URL array recomputes on an
   // agency switch instead of replaying the previous agency's shapes —
   // `useMultiFetch`'s documented contract asks callers to memoize `urls`.
@@ -139,9 +143,7 @@ function SystemMap({ scorecardRoutes }) {
             }}
             eventHandlers={{
               click: () =>
-                navigate(
-                  appendWindowParam(`/route/${route.route_id}`, DEFAULT_WINDOW_DAYS, agency),
-                ),
+                navigate(appendWindowParam(`/route/${route.route_id}`, days, agency)),
             }}
           />
         ))}

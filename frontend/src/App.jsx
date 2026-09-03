@@ -126,19 +126,37 @@ function AppShell({ refreshKey, handleRefresh }) {
   // Diagnostics respond to it when they don't.
   const location = useLocation()
   const isCompare = location.pathname === '/compare'
+  // Id-scoped pages whose path parameter is an opaque, per-database
+  // identifier with no cross-agency meaning (PR #242 review finding 4):
+  // `runs.id` is a per-DB autoincrement integer, and a GTFS `block_id`
+  // string can coincidentally exist in both agencies' schedules pointing
+  // at an unrelated block. Unlike `/route/:routeId` (route_ids are the
+  // one identifier users deliberately compare across agencies, and an
+  // agency switch there either loads that agency's own route or 404s
+  // honestly), switching agency on these pages would silently swap in a
+  // wrong-but-plausible-looking record from the other database instead of
+  // erroring — so the toggle is hidden rather than left to produce that.
+  // `/blocks` (the list) is NOT id-scoped; only `/blocks/:blockId` is.
+  const isIdScopedRoute =
+    location.pathname.startsWith('/runs/') ||
+    (location.pathname.startsWith('/blocks/') && location.pathname !== '/blocks')
   const showWindowPicker =
     location.pathname === '/' ||
     location.pathname === '/routes' ||
     location.pathname.startsWith('/route/')
 
   // `/compare` is deliberately agency-independent (NOTES-143 decision 2) —
-  // it renders both agencies side by side, so the toggle is hidden there
-  // and the header/title stay at the default (wmata) copy even if a stray
-  // `?agency=` param is present on the URL (e.g. carried over by browser
-  // history from another page), rather than flipping to Muni copy on a
-  // page that isn't scoped to either agency.
+  // it renders both agencies side by side, so the header/title stay at the
+  // default (wmata) copy even if `?agency=` is present on the URL (e.g.
+  // carried over from another page — see the nav links below, which now
+  // preserve it through the round trip per PR #242 review finding 10),
+  // rather than flipping to Muni copy on a page that isn't scoped to
+  // either agency. This pinned value drives ONLY the header copy and the
+  // GTFS-freshness fetch below — nav links use `agencyParam` (the real
+  // URL value) directly so navigating away from Compare restores whatever
+  // agency was selected before, instead of silently resetting to wmata.
   const agency = isCompare ? DEFAULT_AGENCY : agencyParam
-  const showAgencyToggle = !isCompare
+  const showAgencyToggle = !isCompare && !isIdScopedRoute
 
   // `useGtfsFreshness` needs the current agency (NOTES-143), which comes
   // from `useUrlState`/`useSearchParams` — only available inside `Router`.
@@ -175,29 +193,34 @@ function AppShell({ refreshKey, handleRefresh }) {
               selection (NOTES-140, NOTES-143) so both survive navigation
               instead of silently reverting to the default on the next page;
               appendWindowParam omits each param entirely at its default
-              (30 / wmata) so unfiltered URLs stay clean. The Compare link
-              deliberately does NOT carry `agency` — see `isCompare` above. */}
+              (30 / wmata) so unfiltered URLs stay clean. These use
+              `agencyParam` (the real URL value), not the header's pinned
+              `agency`, so navigating away from Compare restores whatever
+              agency was selected before rather than resetting to wmata
+              (PR #242 review finding 10) — Compare's own link now also
+              carries `agency` for the same round-trip reason, even though
+              Compare's fetches and header copy stay agency-independent. */}
           <NavLink
-            to={appendWindowParam('/', days, agency)}
+            to={appendWindowParam('/', days, agencyParam)}
             end
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
             Overview
           </NavLink>
           <NavLink
-            to={appendWindowParam('/routes', days, agency)}
+            to={appendWindowParam('/routes', days, agencyParam)}
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
             Routes
           </NavLink>
           <NavLink
-            to={appendWindowParam('/compare', days)}
+            to={appendWindowParam('/compare', days, agencyParam)}
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
             Compare
           </NavLink>
           <NavLink
-            to={appendWindowParam('/diagnostics', days, agency)}
+            to={appendWindowParam('/diagnostics', days, agencyParam)}
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
             Diagnostics

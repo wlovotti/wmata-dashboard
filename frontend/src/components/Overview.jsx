@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useRef, useEffect } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
 import useUrlState from '../hooks/useUrlState'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
@@ -71,8 +71,11 @@ function Overview() {
   // URLs, not reference identity), but the hook's docstring documents
   // memoization as the caller contract.
   const scorecardUrls = useMemo(() => [apiUrl('/api/routes', { days, agency })], [days, agency])
-  const { data: scorecardResults, revalidateError: scorecardRevalidateError } =
-    useMultiFetch(scorecardUrls)
+  const {
+    data: scorecardResults,
+    loading: scorecardLoading,
+    revalidateError: scorecardRevalidateError,
+  } = useMultiFetch(scorecardUrls)
   // Hero and movers degrade gracefully while this is null (loading, or a
   // fetch failure — the raw-fetch predecessor of this effect silently
   // ignored errors the same way).
@@ -129,9 +132,58 @@ function Overview() {
     () => [apiUrl('/api/system/trend', { metric: 'otp', days: 30, agency })],
     [agency],
   )
-  const { data: heroOtpResults, revalidateError: heroOtpRevalidateError } =
-    useMultiFetch(heroOtpTrendUrls)
+  const {
+    data: heroOtpResults,
+    loading: heroOtpLoading,
+    revalidateError: heroOtpRevalidateError,
+  } = useMultiFetch(heroOtpTrendUrls)
   const heroOtpTrend = heroOtpResults ? heroOtpResults[0] : null
+
+  // Agency-switch guard (PR #242 review finding 2). `useMultiFetch`'s
+  // `data` only updates once a fetch resolves — a genuine cross-agency
+  // cache miss (sfmta isn't pre-warmed the way `_warm_scorecard_cache_sync`
+  // covers wmata) otherwise leaves the PREVIOUS agency's scorecard/trend
+  // numbers rendering under the NEW agency's header for however long the
+  // cold fetch takes. `RouteList` already guards the equivalent case via
+  // its own `_cachedAgency !== agency` check; this is the same idea for
+  // Overview's `useMultiFetch`-backed fetches.
+  //
+  // Each of the three fetch groups tracks the URL(s) it last actually
+  // finished loading (settled), in a ref seeded to the INITIAL url set so
+  // a normal cold mount isn't treated as "stale." Comparing the ref to the
+  // CURRENT url set is a synchronous render-time check — unlike gating on
+  // the `loading` booleans directly, this can't race against the one-tick
+  // lag between a url-array changing and `useMultiFetch`'s own effect
+  // noticing and flipping `loading` true for it: the ref/url comparison
+  // itself changes in the very same render `scorecardUrls`/etc. recompute,
+  // so there's no window where a switch goes undetected. While any group
+  // is stale, its corresponding `display*` value below is null — the same
+  // "not loaded yet" state these components already render correctly
+  // (including the hero's PR #239 "verdict unavailable" copy, which is
+  // itself null-safe), so this reuses that existing path instead of adding
+  // a new one. A cache hit (revisiting a url set already fetched this
+  // session) settles on the very next render, so it never visibly gates.
+  const scorecardUrlRef = useRef(scorecardUrls[0])
+  useEffect(() => {
+    if (!scorecardLoading) scorecardUrlRef.current = scorecardUrls[0]
+  }, [scorecardLoading, scorecardUrls])
+  const scorecardStale = scorecardUrlRef.current !== scorecardUrls[0]
+
+  const trendUrlKeyRef = useRef(JSON.stringify(trendUrls))
+  useEffect(() => {
+    if (!trendLoading) trendUrlKeyRef.current = JSON.stringify(trendUrls)
+  }, [trendLoading, trendUrls])
+  const trendStale = trendUrlKeyRef.current !== JSON.stringify(trendUrls)
+
+  const heroOtpUrlRef = useRef(heroOtpTrendUrls[0])
+  useEffect(() => {
+    if (!heroOtpLoading) heroOtpUrlRef.current = heroOtpTrendUrls[0]
+  }, [heroOtpLoading, heroOtpTrendUrls])
+  const heroOtpStale = heroOtpUrlRef.current !== heroOtpTrendUrls[0]
+
+  const displayScorecard = scorecardStale ? null : scorecard
+  const displaySystemTrendData = trendStale ? null : systemTrendData
+  const displayHeroOtpTrend = heroOtpStale ? null : heroOtpTrend
 
   // Background-revalidate failure on any of the page's cached fetches
   // (NOTES-122 review finding 1): none of these ever blank the page — the
@@ -145,13 +197,17 @@ function Overview() {
 
   // The 4-entry worst-of-four input for the hero — same construction the
   // retired HealthPulse used (percent-scaled fractions, trend targets).
+  // Reads `displaySystemTrendData` (null while an agency switch is
+  // cold-loading — PR #242 review finding 2), not the raw `systemTrendData`
+  // that also feeds `SystemTrend` below (which already gates its own
+  // rendering on `trendLoading`, so it doesn't need the same treatment).
   const systemMetrics = [
     {
       key: 'otp',
       label: 'OTP',
       higherIsBetter: true,
-      current: latestNonNull(systemTrendData?.otp?.trend_data, 'otp_percentage'),
-      target: systemTrendData?.otp?.target_value ?? null,
+      current: latestNonNull(displaySystemTrendData?.otp?.trend_data, 'otp_percentage'),
+      target: displaySystemTrendData?.otp?.target_value ?? null,
     },
     {
       key: 'service_delivered',
@@ -159,34 +215,34 @@ function Overview() {
       higherIsBetter: true,
       current: (() => {
         const v = latestNonNull(
-          systemTrendData?.service_delivered?.trend_data,
+          displaySystemTrendData?.service_delivered?.trend_data,
           'service_delivered_ratio',
         )
         return v != null ? v * 100 : null
       })(),
       target:
-        systemTrendData?.service_delivered?.target_value != null
-          ? systemTrendData.service_delivered.target_value * 100
+        displaySystemTrendData?.service_delivered?.target_value != null
+          ? displaySystemTrendData.service_delivered.target_value * 100
           : null,
     },
     {
       key: 'ewt',
       label: 'EWT',
       higherIsBetter: false,
-      current: latestNonNull(systemTrendData?.ewt?.trend_data, 'ewt_seconds'),
-      target: systemTrendData?.ewt?.target_value ?? null,
+      current: latestNonNull(displaySystemTrendData?.ewt?.trend_data, 'ewt_seconds'),
+      target: displaySystemTrendData?.ewt?.target_value ?? null,
     },
     {
       key: 'bunching',
       label: 'Bunching',
       higherIsBetter: false,
       current: (() => {
-        const v = latestNonNull(systemTrendData?.bunching?.trend_data, 'bunching_rate')
+        const v = latestNonNull(displaySystemTrendData?.bunching?.trend_data, 'bunching_rate')
         return v != null ? v * 100 : null
       })(),
       target:
-        systemTrendData?.bunching?.target_value != null
-          ? systemTrendData.bunching.target_value * 100
+        displaySystemTrendData?.bunching?.target_value != null
+          ? displaySystemTrendData.bunching.target_value * 100
           : null,
     },
   ]
@@ -195,7 +251,7 @@ function Overview() {
   // 30-day fetch above, not the picker-driven `systemTrendData`, so the
   // verdict is stable regardless of the selected window (PR #239 review
   // finding C).
-  const otpSeries = (heroOtpTrend?.trend_data || []).map((row) => ({
+  const otpSeries = (displayHeroOtpTrend?.trend_data || []).map((row) => ({
     date: row.date,
     value: row.otp_percentage,
     data_quality: row.data_quality,
@@ -216,14 +272,17 @@ function Overview() {
       )}
       <OverviewHero
         systemMetrics={systemMetrics}
-        scorecardRoutes={scorecard?.routes ?? null}
+        scorecardRoutes={displayScorecard?.routes ?? null}
         otpSeries={otpSeries}
       />
 
-      {/* "Where is it going badly" fold: system map + movers side by side. */}
+      {/* "Where is it going badly" fold: system map + movers side by side.
+          `displayScorecard` (not `scorecard`) so an agency switch shows the
+          same "not loaded yet" state as a cold first mount instead of the
+          previous agency's routes (PR #242 review finding 2). */}
       <div className="overview-fold overview-fold-with-map">
-        <SystemMap scorecardRoutes={scorecard?.routes ?? null} />
-        <MoversPanel routes={scorecard?.routes ?? null} />
+        <SystemMap scorecardRoutes={displayScorecard?.routes ?? null} />
+        <MoversPanel routes={displayScorecard?.routes ?? null} />
       </div>
 
       <SystemTrend

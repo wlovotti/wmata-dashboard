@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import CorridorMap from './CorridorMap.jsx'
 import ErrorState from './ErrorState.jsx'
 import useAgency from '../hooks/useAgency'
-import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
 
 /**
@@ -79,6 +79,7 @@ const PERIOD_OPTIONS = [
  */
 function ContributingRoutesPanel({ routes }) {
   const [agency] = useAgency()
+  const [days] = useWindowDays()
   if (!routes || routes.length === 0) {
     return (
       <div className="segment-drilldown-card">
@@ -105,7 +106,7 @@ function ContributingRoutesPanel({ routes }) {
             <tr key={`${r.route_id}-${r.direction_id}-${idx}`}>
               <td>
                 <Link
-                  to={appendWindowParam(`/route/${r.route_id}`, DEFAULT_WINDOW_DAYS, agency)}
+                  to={appendWindowParam(`/route/${r.route_id}`, days, agency)}
                   className="segment-route-pill"
                   style={{ textDecoration: 'none' }}
                 >
@@ -145,6 +146,7 @@ function ContributingRoutesPanel({ routes }) {
  */
 function CorridorMembershipPanel({ routes }) {
   const [agency] = useAgency()
+  const [days] = useWindowDays()
   if (!routes || routes.length === 0) {
     return (
       <div className="segment-drilldown-card">
@@ -172,7 +174,7 @@ function CorridorMembershipPanel({ routes }) {
             <tr key={`${r.route_id}-${r.direction_id}`}>
               <td>
                 <Link
-                  to={appendWindowParam(`/route/${r.route_id}`, DEFAULT_WINDOW_DAYS, agency)}
+                  to={appendWindowParam(`/route/${r.route_id}`, days, agency)}
                   className="segment-route-pill"
                   style={{ textDecoration: 'none' }}
                 >
@@ -266,6 +268,7 @@ function CorridorExpansion({ corridor, period }) {
  */
 function CorridorConstituentSegments({ segments, error }) {
   const [agency] = useAgency()
+  const [days] = useWindowDays()
   return (
     <div className="corridor-constituent-segments">
       <h4>Constituent stop-pairs</h4>
@@ -301,7 +304,7 @@ function CorridorConstituentSegments({ segments, error }) {
               >
                 <td>
                   <Link
-                    to={appendWindowParam(`/route/${s.route_id}`, DEFAULT_WINDOW_DAYS, agency)}
+                    to={appendWindowParam(`/route/${s.route_id}`, days, agency)}
                     className="segment-route-pill"
                     style={{ textDecoration: 'none' }}
                   >

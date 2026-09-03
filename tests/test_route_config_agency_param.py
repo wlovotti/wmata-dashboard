@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from src import frequent_routes, route_targets
+from src.frequent_routes import DEFAULT_GATE_SEC, MEDIUM_FREQ_GATE_SEC
 
 
 @pytest.fixture
@@ -90,6 +91,25 @@ def test_non_wmata_agency_ignores_a_missing_or_malformed_file(tmp_path, monkeypa
         assert frequent_routes.is_frequent_route("D80", "sfmta") is False
     finally:
         frequent_routes.reset_cache_for_tests()
+
+
+def test_non_wmata_agency_never_gets_the_medium_freq_gate(isolated_frequent_routes):
+    """`get_cell_hour_gate_sec` (PR #242 review finding 5) is gated by
+    `agency` the same way `is_frequent`/`load_frequent_route_ids` are.
+
+    The overlapping-id case: X2 is WMATA's own medium-frequency route
+    (20-min EWT gate). If SFMTA ever runs a route also numbered "X2", it
+    must NOT inherit WMATA's medium-freq gate -- it always gets the
+    default 15-min gate, exactly as if it weren't on the list at all.
+    """
+    isolated_frequent_routes.write_text("high_freq: []\nmedium_freq:\n  - X2\n")
+
+    # wmata's own X2 really is medium-freq.
+    assert frequent_routes.get_cell_hour_gate_sec("X2", "wmata") == MEDIUM_FREQ_GATE_SEC
+    assert frequent_routes.get_cell_hour_gate_sec("X2") == MEDIUM_FREQ_GATE_SEC  # default agency
+
+    # SFMTA's same-numbered "X2" gets the default gate, not WMATA's tier.
+    assert frequent_routes.get_cell_hour_gate_sec("X2", "sfmta") == DEFAULT_GATE_SEC
 
 
 # ---------------------------------------------------------------------------

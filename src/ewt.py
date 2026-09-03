@@ -846,6 +846,7 @@ def compute_ewt_for_route_date(
     route_id: str,
     service_date: date_type,
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> list[dict]:
     """Compute EWT for one (route, service_date), one row per time_period.
 
@@ -861,6 +862,13 @@ def compute_ewt_for_route_date(
     always agency-local by construction (GTFS clock time), so this only
     matters for non-Eastern agencies.
 
+    `agency` (PR #242 review finding 5) selects the cell-hour gate tier via
+    `src/frequent_routes.py:get_cell_hour_gate_sec` — a non-wmata agency
+    always gets the default 15-min gate, never WMATA's medium-freq 20-min
+    tier for a same-numbered route_id. Defaults to `"wmata"` so every
+    existing caller (the daily batch, none of which pass this yet) keeps
+    today's behavior unchanged.
+
     The scheduled side resolves against the EXACT `service_date`
     (NOTES-109 — `_scheduled_headways_by_cell_hour_for_date`), not a
     day_type/modal representative day; `day_type` in the returned rows is
@@ -871,7 +879,7 @@ def compute_ewt_for_route_date(
 
     sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(db, route_id, service_date)
     obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str, tz_name)
-    gate_sec = get_cell_hour_gate_sec(route_id)
+    gate_sec = get_cell_hour_gate_sec(route_id, agency)
 
     obs_pool: dict[str, list[float]] = defaultdict(list)
     sched_pool: dict[str, list[float]] = defaultdict(list)
@@ -1013,6 +1021,7 @@ def compute_ewt_headline_for_route(
     service_date: date_type,
     period_key: str = "all",
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> dict:
     """Single-route EWT collapsed to one rider-weighted number for the day.
 
@@ -1040,13 +1049,19 @@ def compute_ewt_headline_for_route(
     (NOTES-109 — `_scheduled_headways_by_cell_hour_for_date`), not a
     day_type/modal representative day; the returned `day_type` is
     descriptive metadata only.
+
+    `agency` (PR #242 review finding 5) selects the cell-hour gate tier —
+    see `compute_ewt_for_route_date`'s docstring. This is the live-request
+    path behind `/api/routes/{id}` and the scorecard, so a real, non-default
+    `agency` reaches here whenever `_compute_single_route_live_metrics` /
+    `_compute_live_metrics_uncached` forward the caller's actual agency.
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
 
     sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(db, route_id, service_date)
     obs_by_cell_hour = _observed_headways_by_cell_hour(db, route_id, service_date_str, tz_name)
-    gate_sec = get_cell_hour_gate_sec(route_id)
+    gate_sec = get_cell_hour_gate_sec(route_id, agency)
 
     obs_pool: list[float] = []
     sched_pool: list[float] = []
@@ -1316,8 +1331,13 @@ def compute_ewt_headline_for_routes(
     route_ids: list[str] | None = None,
     sched_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] | None = None,
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> dict[str, dict]:
     """Vectorized headline EWT for all routes — two SQL passes, no per-route loop.
+
+    `agency` (PR #242 review finding 5) selects the cell-hour gate tier per
+    route via `src/frequent_routes.py:get_cell_hour_gate_sec` — see
+    `compute_ewt_for_route_date`'s docstring. Defaults to `"wmata"`.
 
     Pulls all scheduled stop_times (joined to trips, filtered to the
     EXACT `service_date`'s resolved service_id set — see
@@ -1390,7 +1410,7 @@ def compute_ewt_headline_for_routes(
     for route_id in all_routes:
         sched_cells = sched_by_route_cell_hour.get(route_id, {})
         obs_cells = obs_by_route_cell_hour.get(route_id, {})
-        gate_sec = get_cell_hour_gate_sec(route_id)
+        gate_sec = get_cell_hour_gate_sec(route_id, agency)
         obs_pool: list[float] = []
         sched_pool: list[float] = []
         freq_cells = 0
@@ -1458,8 +1478,13 @@ def compute_ewt_headline_for_routes_multi_date(
     route_ids: list[str] | None = None,
     observed_rows: list[tuple] | None = None,
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> dict[str, dict[str, dict]]:
     """Multi-date headline EWT — one SQL pull for the whole window.
+
+    `agency` (PR #242 review finding 5) selects the cell-hour gate tier per
+    route via `src/frequent_routes.py:get_cell_hour_gate_sec` — see
+    `compute_ewt_for_route_date`'s docstring. Defaults to `"wmata"`.
 
     Equivalent to calling `compute_ewt_headline_for_routes` once per date in
     `service_dates`, but collapses the per-date observed-stop_events queries
@@ -1535,7 +1560,7 @@ def compute_ewt_headline_for_routes_multi_date(
         for route_id in all_routes:
             sched_cells = sched_by_route_cell_hour.get(route_id, {})
             obs_cells = obs_by_date_route_cell_hour.get((service_date_str, route_id), {})
-            gate_sec = get_cell_hour_gate_sec(route_id)
+            gate_sec = get_cell_hour_gate_sec(route_id, agency)
             obs_pool: list[float] = []
             sched_pool: list[float] = []
             freq_cells = 0

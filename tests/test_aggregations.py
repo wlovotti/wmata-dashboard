@@ -1883,6 +1883,65 @@ routes:
         # The envelope still carries the system_target_value from the YAML.
         assert result["system_target_value"] == 78.0
 
+    def test_contributors_non_wmata_agency_ignores_the_per_route_target(
+        self, db_session, sample_routes, tmp_path, monkeypatch
+    ):
+        """PR #242 review finding 6: `agency` threads into `get_target` here too.
+
+        Same fixture as `test_contributors_per_route_target_overrides_baseline`
+        (TEST1 has a configured 90% OTP per-route override, system default
+        78%) but requested with `agency="sfmta"` — the per-route override
+        must be ignored (a same-numbered SFMTA route must never inherit
+        WMATA's per-route target). `get_target` for a non-wmata agency
+        returns the (agency-agnostic) system default rather than `None`
+        (`src/route_targets.py`'s "system-default-only targets" contract),
+        so the row's reference becomes the 78% system default, NOT WMATA's
+        90% override and NOT the 80% computed window baseline.
+        """
+        from src import route_targets as _rt
+
+        yaml_path = tmp_path / "with_target.yaml"
+        yaml_path.write_text(
+            """
+system_default:
+  otp: 78
+routes:
+  "TEST1":
+    otp: 90
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("WMATA_ROUTE_TARGETS_PATH", str(yaml_path))
+        _rt.reset_cache_for_tests()
+
+        self._clear_cache()
+        from api.aggregations import get_route_contributors
+
+        self._seed_system_baseline(db_session, otp=80.0)
+        self._seed_route_otp(db_session, "TEST1", 60.0)
+        self._seed_gtfs_trips(db_session, "TEST1", trip_count=10, day_type="weekday")
+
+        result = get_route_contributors(db_session, metric="otp", days=30, agency="sfmta")
+        ours = next((c for c in result["contributors"] if c["route_id"] == "TEST1"), None)
+        assert ours is not None
+        assert ours["target_value"] == 78.0
+        assert ours["reference_value"] == 78.0
+        assert ours["contribution_score"] == (78.0 - 60.0) * ours["scheduled_trips"]
+
+        # The same route_id/YAML under agency="wmata" still sees the real
+        # per-route override — confirms the difference is the agency gate,
+        # not a config change. Cache cleared first: in production, wmata
+        # and sfmta requests always carry distinct `db` sessions (so
+        # distinct `_db_identity(db)` cache slots) — this test shares one
+        # `db_session` for both calls, which the cache key alone can't
+        # tell apart.
+        self._clear_cache()
+        wmata_result = get_route_contributors(db_session, metric="otp", days=30, agency="wmata")
+        wmata_ours = next(
+            (c for c in wmata_result["contributors"] if c["route_id"] == "TEST1"), None
+        )
+        assert wmata_ours["target_value"] == 90.0
+
     def test_as_of_date_anchors_window_instead_of_latest_service_date(
         self, db_session, sample_routes
     ):

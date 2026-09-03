@@ -92,4 +92,23 @@ describe('SystemWeeklyNarrativeLede', () => {
     renderLede()
     await waitFor(() => expect(screen.getByText(/may be out of date/i)).toBeVisible())
   })
+
+  // PR #242 review finding 11: a page-level sanity check that `apiUrl`'s
+  // `window.location.search` fallback actually reaches a real fetch —
+  // this component builds its URL via `apiUrl('/api/system/weekly-narrative')`
+  // with no explicit `agency`, relying entirely on that fallback.
+  // `window.history.pushState` (not `MemoryRouter`'s `initialEntries`,
+  // which never touches the real `window.location`) is what makes this a
+  // meaningful positive-case test.
+  test('carries agency=sfmta on the fetch when the current URL has ?agency=sfmta', async () => {
+    window.history.pushState({}, '', '/?agency=sfmta')
+    try {
+      mockFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) }))
+      renderLede()
+      await waitFor(() => expect(fetch).toHaveBeenCalled())
+      expect(fetch.mock.calls[0][0]).toBe('/api/system/weekly-narrative?agency=sfmta')
+    } finally {
+      window.history.pushState({}, '', '/')
+    }
+  })
 })

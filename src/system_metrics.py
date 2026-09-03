@@ -27,6 +27,7 @@ def compute_system_metrics_for_date(
     service_date: date_type,
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> dict:
     """Compute system-level OTP / service-delivered / EWT / SWT / bunching for one date.
 
@@ -52,6 +53,12 @@ def compute_system_metrics_for_date(
             with the agency-local hour the scheduled side (GTFS clock
             time) already uses. `otp_percentage` / `service_delivered_ratio`
             don't bucket by hour at all and are unaffected either way.
+        agency: Agency name (PR #242 review finding 5), forwarded to
+            `_system_ewt_and_bunching_for_date`'s cell-hour gate lookup.
+            Defaults to `"wmata"` so existing callers keep today's
+            behavior; the daily batch (`pipelines/upsert_system_metrics_daily.py
+            --agency sfmta`) and the live "today" hybrid-serve path both
+            pass their real agency.
 
     Returns:
         Dict shaped like a single row of `system_metrics_daily` (minus
@@ -69,7 +76,7 @@ def compute_system_metrics_for_date(
     sd_by_date = _system_service_delivered_series(db, [service_date], gtfs_snapshot_id)
     sched_by_date: dict[str, dict] = {}
     ewt_seconds, swt_seconds, bunching_rate = _system_ewt_and_bunching_for_date(
-        db, service_date, sched_by_date, gtfs_snapshot_id, tz_name=tz_name
+        db, service_date, sched_by_date, gtfs_snapshot_id, tz_name=tz_name, agency=agency
     )
 
     iso = service_date.isoformat()
@@ -88,6 +95,7 @@ def upsert_system_metrics_for_date(
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
     completeness_threshold: float | None = None,
+    agency: str = "wmata",
 ) -> dict | None:
     """Compute and upsert one row of `system_metrics_daily` for `service_date`.
 
@@ -124,6 +132,10 @@ def upsert_system_metrics_for_date(
             ``src.data_completeness.agency_coverage_threshold``, which
             callers should compute from the agency's ``AgencyConfig``
             and pass here explicitly.
+        agency: Agency name (PR #242 review finding 5), forwarded to
+            `compute_system_metrics_for_date`'s cell-hour gate lookup.
+            Defaults to `"wmata"`; `pipelines/upsert_system_metrics_daily.py`
+            passes its `--agency` CLI value through here.
 
     Returns:
         The metrics dict written (includes ``data_quality`` and
@@ -154,7 +166,7 @@ def upsert_system_metrics_for_date(
 
     try:
         metrics = compute_system_metrics_for_date(
-            db, service_date, gtfs_snapshot_id, tz_name=tz_name
+            db, service_date, gtfs_snapshot_id, tz_name=tz_name, agency=agency
         )
     except Exception as exc:
         print(f"  ✗ System metrics compute failed for {service_date.isoformat()}: {exc}")

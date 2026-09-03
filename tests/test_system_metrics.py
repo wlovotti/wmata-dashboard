@@ -368,7 +368,7 @@ def test_system_swt_computed_from_schedule_pool_alone(db_session, monkeypatch):
         return {"64": {(0, "S1", 8): [600.0, 600.0]}}
 
     monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_date", _fake_sched)
-    monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
+    monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id, agency="wmata": 900)
 
     ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(
         db_session, datetime(2026, 8, 10).date(), {}
@@ -412,7 +412,7 @@ def test_system_swt_excludes_non_bus_routes_from_schedule_pool(db_session, monke
         }
 
     monkeypatch.setattr(agg, "fetch_scheduled_cell_hours_for_date", _fake_sched)
-    monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id: 900)
+    monkeypatch.setattr(agg, "get_cell_hour_gate_sec", lambda route_id, agency="wmata": 900)
 
     ewt, swt, bunching = agg._system_ewt_and_bunching_for_date(
         db_session, datetime(2026, 8, 10).date(), {}
@@ -509,7 +509,9 @@ def test_upsert_persists_swt_seconds(db_session, monkeypatch):
     """The upsert writes swt_seconds on both the insert and update paths."""
     from src import system_metrics as sm
 
-    def _fake_compute(db, service_date, gtfs_snapshot_id=None, tz_name="America/New_York"):
+    def _fake_compute(
+        db, service_date, gtfs_snapshot_id=None, tz_name="America/New_York", agency="wmata"
+    ):
         return {
             "otp_percentage": 70.0,
             "service_delivered_ratio": 0.9,
@@ -533,7 +535,9 @@ def test_upsert_persists_swt_seconds(db_session, monkeypatch):
     assert row.swt_seconds == 300.0
 
     # Update path: change the value, re-run, confirm overwrite.
-    def _fake_compute_2(db, service_date, gtfs_snapshot_id=None, tz_name="America/New_York"):
+    def _fake_compute_2(
+        db, service_date, gtfs_snapshot_id=None, tz_name="America/New_York", agency="wmata"
+    ):
         out = _fake_compute(db, service_date)
         out["swt_seconds"] = 280.0
         return out

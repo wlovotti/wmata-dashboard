@@ -196,17 +196,23 @@ def _warm_scorecard_cache_sync():
     """Compute the windowed scorecard once so the first user request finds a warm cache.
 
     Runs in a background thread at app startup. The cold compute is ~30-40s
-    per window (7 days x per-date EWT/bunching/SD/OTP); paying it once at
-    boot beats making the first user wait. Subsequent requests within the
-    1-hour per-date TTL hit dict-lookup speed.
+    for the 7-day window (7 days x per-date EWT/bunching/SD/OTP); paying it
+    once at boot beats making the first user wait. Subsequent requests
+    within the 1-hour per-date TTL hit dict-lookup speed.
 
     Warms both the 7-day and 30-day windows for wmata (NOTES-143): the
     frontend's default window moved to 30 days (PR #239), so warming only
     7 would leave every first 30-day request -- the common case now --
-    paying the cold-compute cost anyway. Deliberately does NOT warm sfmta:
-    it's a secondary agency with much lighter traffic, so pre-warming it
-    would roughly double the startup warm-up cost for a page that's
-    rarely the first hit.
+    paying the cold-compute cost anyway. Cold-cache cost grows roughly
+    linearly in `days` (see `get_live_metrics_for_window`'s docstring), so
+    the 30-day window costs roughly 4x the 7-day figure above (~120-160s)
+    on top of it -- warming both here roughly quintuples this function's
+    total startup cost versus the original 7-day-only warm-up, not the
+    ~2x a naive "one more window" read might suggest. Still worth paying
+    once at boot rather than on the first 30-day request. Deliberately
+    does NOT warm sfmta: it's a secondary agency with much lighter
+    traffic, so pre-warming it would add roughly as much again to startup
+    for a page that's rarely the first hit.
     """
     try:
         db = get_session()
@@ -510,7 +516,7 @@ async def get_routes_contributors(
 
     db = _session_for_agency(agency)
     try:
-        return get_route_contributors(db, metric=metric, days=days)
+        return get_route_contributors(db, metric=metric, days=days, agency=agency)
     finally:
         db.close()
 
@@ -703,7 +709,7 @@ async def get_system_trend(
 
     db = _session_for_agency(agency)
     try:
-        return get_system_trend_data(db, metric=metric, days=days)
+        return get_system_trend_data(db, metric=metric, days=days, agency=agency)
     finally:
         db.close()
 
@@ -919,7 +925,7 @@ async def get_route_period_drilldown_endpoint(
     """
     db = _session_for_agency(agency)
     try:
-        result = get_route_period_drilldown(db, route_id)
+        result = get_route_period_drilldown(db, route_id, agency=agency)
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         return result

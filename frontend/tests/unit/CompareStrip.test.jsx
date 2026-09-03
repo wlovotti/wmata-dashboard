@@ -113,15 +113,31 @@ describe('CompareStrip', () => {
   // fetch must never carry `?agency=`, even when the rest of the app is
   // currently viewing Muni. CompareStrip fetches a hardcoded URL rather
   // than routing through `apiUrl` for exactly this reason.
+  //
+  // PR #242 review finding 11: `MemoryRouter`'s `initialEntries` never
+  // touches the real `window.location` (only `apiUrl`'s fallback reads
+  // that), so passing `initialEntries={['/?agency=sfmta']}` here didn't
+  // actually exercise the "current URL has ?agency=sfmta" condition the
+  // test's own name claimed — it would have passed identically with no
+  // `?agency=` at all, since CompareStrip's fetch is hardcoded and never
+  // consults the router. `window.history.pushState` mutates the REAL
+  // `window.location`, which is what `apiUrl` (and any future CompareStrip
+  // fetch that might route through it) actually reads — making this
+  // assertion meaningful regardless of CompareStrip's fetch implementation.
   test('never sends agency, even when the current URL has ?agency=sfmta', async () => {
-    mockFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) }))
-    render(
-      <MemoryRouter initialEntries={['/?agency=sfmta']}>
-        <CompareStrip />
-      </MemoryRouter>,
-    )
-    await waitFor(() => expect(screen.getByText(/WMATA/)).toBeVisible())
-    // useMultiFetch calls `fetch(url, { signal })` — check the URL arg only.
-    expect(fetch.mock.calls[0][0]).toBe('/api/agency-comparison')
+    window.history.pushState({}, '', '/?agency=sfmta')
+    try {
+      mockFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) }))
+      render(
+        <MemoryRouter>
+          <CompareStrip />
+        </MemoryRouter>,
+      )
+      await waitFor(() => expect(screen.getByText(/WMATA/)).toBeVisible())
+      // useMultiFetch calls `fetch(url, { signal })` — check the URL arg only.
+      expect(fetch.mock.calls[0][0]).toBe('/api/agency-comparison')
+    } finally {
+      window.history.pushState({}, '', '/')
+    }
   })
 })

@@ -4,7 +4,7 @@ import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
 import ErrorState from './ErrorState.jsx'
 import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
-import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
 import AgencyUnavailable from './AgencyUnavailable'
 
@@ -190,6 +190,11 @@ function Targets() {
   // unavailable card instead.
   const unavailable = agency !== DEFAULT_AGENCY
   const diagnosticsLink = appendWindowParam('/diagnostics', DEFAULT_WINDOW_DAYS, agency)
+  // Carry the current time-window selection into RouteDetail navigation
+  // (PR #242 review finding 14) — `/targets` itself has no `days` window,
+  // but a route_id link should still preserve whatever `?days=` the user
+  // arrived with rather than resetting it.
+  const [days] = useWindowDays()
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -453,7 +458,7 @@ function Targets() {
                 <tr
                   key={r.routeId}
                   onClick={() =>
-                    navigate(appendWindowParam(`/route/${r.routeId}`, DEFAULT_WINDOW_DAYS, agency))
+                    navigate(appendWindowParam(`/route/${r.routeId}`, days, agency))
                   }
                   style={{ cursor: 'pointer' }}
                 >
@@ -504,7 +509,7 @@ function Targets() {
                 return (
                   <tr key={rid}>
                     <td className="route-id">
-                      <Link to={appendWindowParam(`/route/${rid}`, DEFAULT_WINDOW_DAYS, agency)}>
+                      <Link to={appendWindowParam(`/route/${rid}`, days, agency)}>
                         {rid}
                       </Link>
                     </td>

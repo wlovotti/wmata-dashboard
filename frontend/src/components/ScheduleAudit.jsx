@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 
 import ErrorState from './ErrorState.jsx'
 import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
-import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
 import AgencyUnavailable from './AgencyUnavailable'
 
@@ -77,6 +77,12 @@ const DIRECTION_OPTIONS = [
  */
 function ScheduleAudit() {
   const [agency] = useAgency()
+  // Carry the current time-window selection into RouteDetail navigation
+  // (PR #242 review finding 14) — read-only here, WindowPicker in the app
+  // shell owns writes. `/schedule-audit` itself has no `days` window (the
+  // picker isn't shown here), but a route_id link should still preserve
+  // whatever `?days=` the user arrived with rather than resetting it.
+  const [days] = useWindowDays()
   // WMATA-only (NOTES-143): `route_diagnostic_segment` is materialized
   // from `timepoints`, which uses GTFS-Plus internal stop_ids WMATA
   // publishes and SFMTA does not (see CLAUDE.md). Skip both fetches
@@ -398,7 +404,7 @@ function ScheduleAudit() {
                         <Link
                           to={appendWindowParam(
                             `/route/${s.route_id}`,
-                            DEFAULT_WINDOW_DAYS,
+                            days,
                             agency,
                           )}
                         >
