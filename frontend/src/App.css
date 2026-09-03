@@ -1909,3 +1909,84 @@ main {
   cursor: pointer;
   padding: 0;
 }
+
+/* ── Shared primitives for the last inline-style holdouts (NOTES-85) ──
+   Leaflet canvases, status text, link-styled buttons, trend annotations.
+   Anything still inline after this is data-driven (a color or width
+   computed from the row). */
+.map-container {
+  position: relative;
+}
+
+.map-canvas {
+  width: 100%;
+  border-radius: var(--radius-xl);
+}
+
+.map-canvas--sm {
+  height: 240px;
+  border-radius: var(--radius-lg);
+}
+
+.map-canvas--md {
+  height: 400px;
+}
+
+.map-canvas--lg {
+  height: 420px;
+}
+
+.no-data-message--padded {
+  padding: var(--space-8);
+}
+
+.status-text {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-brand);
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+}
+
+.run-title-headsign {
+  font-weight: var(--weight-normal);
+  color: var(--text-secondary);
+}
+
+.trend-target,
+.trend-delta {
+  font-weight: var(--weight-semibold);
+  margin-left: 0.4rem;
+}
+
+.trend-target {
+  font-size: 0.7rem;
+}
+
+.trend-delta {
+  font-size: var(--text-xs);
+}
+
+.sparkline-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  color: var(--color-neutral);
+}
+
+.agency-unavailable-note {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}

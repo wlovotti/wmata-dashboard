@@ -260,7 +260,7 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
     return (
       <div className="chart-container">
         <h2>Performance by Time of Day</h2>
-        <p style={{ color: '#64748b' }}>Loading…</p>
+        <p className="text-muted">Loading…</p>
       </div>
     )
   }
@@ -269,7 +269,7 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
     return (
       <div className="chart-container">
         <h2>Performance by Time of Day</h2>
-        <p style={{ color: '#64748b' }}>
+        <p className="text-muted">
           Unable to load drilldown: {error || 'no data'}
         </p>
       </div>

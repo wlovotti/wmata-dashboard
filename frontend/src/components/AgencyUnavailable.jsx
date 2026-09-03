@@ -13,23 +13,7 @@
  */
 function AgencyUnavailable({ agencyLabel, reason }) {
   return (
-    <p
-      className="agency-unavailable-note"
-      style={{
-        color: 'var(--color-muted)',
-        fontSize: '0.875rem',
-        padding: '0.75rem 1rem',
-        // App.css has no surface/border tokens yet (NOTES-85 owns minting
-        // that set) — reusing the existing `--color-neutral` token for
-        // both roles (round-2 review finding 6) rather than hardcoding an
-        // unrelated hex: a 15%-opacity tint of it (rgba — `--color-neutral`
-        // is `#94a3b8` = `rgb(148, 163, 184)`) for the background, the
-        // full color for the border.
-        background: 'rgba(148, 163, 184, 0.15)',
-        border: '1px solid var(--color-neutral)',
-        borderRadius: '6px',
-      }}
-    >
+    <p className="agency-unavailable-note">
       Not available for {agencyLabel}. {reason}
     </p>
   )

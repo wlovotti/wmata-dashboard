@@ -49,12 +49,7 @@ function TargetIndicator({
   return (
     <span
       className="trend-target"
-      style={{
-        color,
-        fontSize: '0.7rem',
-        fontWeight: 600,
-        marginLeft: '0.4rem',
-      }}
+      style={{ color }}
       title={`Current vs ${label.toLowerCase()}`}
     >
       {arrow} {label} {format(target)}
@@ -97,12 +92,7 @@ function DeltaIndicator({
   return (
     <span
       className="trend-delta"
-      style={{
-        color,
-        fontSize: '0.75rem',
-        fontWeight: 600,
-        marginLeft: '0.4rem',
-      }}
+      style={{ color }}
       title={title || '7-day mean vs prior 7-day mean'}
     >
       {arrow} {sign}{format(delta)}
@@ -218,14 +208,7 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
     return (
       <div
         className="sparkline-empty"
-        style={{
-          height,
-          fontSize: '0.7rem',
-          color: '#94a3b8',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
+        style={{ height }}
       >
         no trend data
       </div>
@@ -377,7 +360,7 @@ function RouteTrend({
     return (
       <div className="chart-container">
         <h2>{heading}</h2>
-        <p style={{ color: '#64748b', fontSize: '0.85rem' }}>Loading…</p>
+        <p className="status-text">Loading…</p>
       </div>
     )
   }
@@ -385,7 +368,7 @@ function RouteTrend({
     return (
       <div className="chart-container">
         <h2>{heading}</h2>
-        <p style={{ color: '#64748b', fontSize: '0.85rem' }}>
+        <p className="status-text">
           Trend unavailable: {error}
         </p>
       </div>

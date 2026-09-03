@@ -273,7 +273,7 @@ function AgencyComparison() {
       <main>
         <div className="chart-container">
           <h2>Agency comparison</h2>
-          <p style={{ color: '#64748b' }}>Unable to load agency comparison: {error}</p>
+          <p className="text-muted">Unable to load agency comparison: {error}</p>
           <div className="agency-comparison-error-actions">
             <button onClick={handleRetry} className="retry-btn">
               Try Again
@@ -301,7 +301,7 @@ function AgencyComparison() {
         </p>
 
         {agencies.length === 0 ? (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No agency database is currently configured. Set{' '}
             <code>DATABASE_URL</code> / <code>SFMTA_DATABASE_URL</code> and reload.
           </p>

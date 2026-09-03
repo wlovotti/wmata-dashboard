@@ -54,7 +54,7 @@ function RouteMap({ routeId }) {
   if (error || shapes.length === 0) {
     return (
       <div className="map-container">
-        <div className="no-data-message" style={{ padding: '2rem' }}>
+        <div className="no-data-message no-data-message--padded">
           <p>Map data not available for this route</p>
         </div>
       </div>
@@ -66,11 +66,11 @@ function RouteMap({ routeId }) {
   const defaultCenter = [38.9072, -77.0369]
 
   return (
-    <div className="map-container" style={{ position: 'relative' }}>
+    <div className="map-container">
       <MapContainer
         center={defaultCenter}
         zoom={13}
-        style={{ height: '400px', width: '100%', borderRadius: '0.75rem' }}
+        className="map-canvas map-canvas--md"
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'

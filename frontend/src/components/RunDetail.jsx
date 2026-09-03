@@ -155,12 +155,12 @@ function RunDetail() {
           <h1>
             Run on Route {data.route_id}
             {data.trip_headsign && (
-              <span style={{ fontWeight: 400, color: '#475569' }}>
+              <span className="run-title-headsign">
                 {' '}— {data.trip_headsign}
               </span>
             )}
           </h1>
-          <p style={{ color: '#64748b', marginTop: '0.25rem' }}>
+          <p className="text-muted mt-1">
             Service date {data.service_date} · Trip {data.trip_id} ·{' '}
             {directionLabel} · Source {data.source}
             {data.vehicle_id && ` · Vehicle ${data.vehicle_id}`}
@@ -174,15 +174,7 @@ function RunDetail() {
                       `/blocks/${encodeURIComponent(data.block_id)}?service_date=${encodeURIComponent(data.service_date)}`,
                     )
                   }
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    padding: 0,
-                    color: '#0a4a8c',
-                    cursor: 'pointer',
-                    textDecoration: 'underline',
-                    font: 'inherit',
-                  }}
+                  className="link-button"
                   title="View block timeline — chained trips on the same vehicle"
                 >
                   {data.block_id}
@@ -195,7 +187,7 @@ function RunDetail() {
 
       <div className="stats-summary">
         <div className="stat-card">
-          <div className="stat-value">{data.stops_observed ?? 0}<span style={{ fontSize: '1.5rem' }}> / {data.stops_scheduled ?? 0}</span></div>
+          <div className="stat-value">{data.stops_observed ?? 0}<span className="text-2xl"> / {data.stops_scheduled ?? 0}</span></div>
           <div className="stat-label">Stops observed</div>
         </div>
         <div className="stat-card">
