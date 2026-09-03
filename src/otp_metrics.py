@@ -18,9 +18,12 @@ So origin OTP reads `proximity` runs and destination OTP reads `trip_update`
 runs. See the Run model docstring for the full source-asymmetry write-up.
 
 All-timepoints OTP uses `proximity` stop_events (position-derived, every
-observed stop) — comparable to what WMATA publishes. Future variants
-(rider-experience window per NOTES-20, EWT for frequent routes — see
-`src/ewt.py`) layer on the same per-stop deviation data.
+observed stop) — comparable to what WMATA publishes. `compute_otp_split`
+takes an optional `early_sec`/`late_sec` on-time window (NOTES-144,
+NOTES-20) so callers can switch between the official WMATA scorecard
+window and the stricter rider-experience window without a second code
+path; EWT for frequent routes (see `src/ewt.py`) layers on the same
+per-stop deviation data separately.
 """
 
 from __future__ import annotations
@@ -75,25 +78,35 @@ def _local_hour_or_none(ts: datetime | None, tz: ZoneInfo) -> int | None:
     return _hour_in_zone(ts, tz)
 
 
-def _bucket_deviation(dev_sec: int) -> str:
-    """Classify one deviation_sec into 'early' / 'on_time' / 'late' per OTP constants."""
-    if dev_sec < OTP_EARLY_SEC:
+def _bucket_deviation(
+    dev_sec: int, early_sec: int = OTP_EARLY_SEC, late_sec: int = OTP_LATE_SEC
+) -> str:
+    """Classify one deviation_sec into 'early' / 'on_time' / 'late'.
+
+    `early_sec` / `late_sec` (NOTES-144) default to the official WMATA
+    window; callers that support the rider-experience window (see
+    `src.otp_constants.otp_window_bounds`) pass the resolved bounds.
+    """
+    if dev_sec < early_sec:
         return "early"
-    if dev_sec > OTP_LATE_SEC:
+    if dev_sec > late_sec:
         return "late"
     return "on_time"
 
 
-def _aggregate_deviations(devs: list[int]) -> dict:
+def _aggregate_deviations(
+    devs: list[int], early_sec: int = OTP_EARLY_SEC, late_sec: int = OTP_LATE_SEC
+) -> dict:
     """Bucket a list of deviation_sec values; return counts + percentages.
 
     Returns `{"n": 0}` for empty input — caller distinguishes "no data"
-    from "data exists but 0% on-time."
+    from "data exists but 0% on-time." `early_sec` / `late_sec` (NOTES-144)
+    default to the official WMATA window.
     """
     if not devs:
         return {"n": 0}
-    early = sum(1 for d in devs if d < OTP_EARLY_SEC)
-    late = sum(1 for d in devs if d > OTP_LATE_SEC)
+    early = sum(1 for d in devs if d < early_sec)
+    late = sum(1 for d in devs if d > late_sec)
     on_time = len(devs) - early - late
     n = len(devs)
     return {
@@ -113,6 +126,8 @@ def compute_otp_split(
     service_date: date_type,
     period_key: str = ALL_HOURS,
     tz_name: str = "America/New_York",
+    early_sec: int = OTP_EARLY_SEC,
+    late_sec: int = OTP_LATE_SEC,
 ) -> dict:
     """Compute origin / destination / all-timepoints OTP for one (route, date).
 
@@ -136,6 +151,13 @@ def compute_otp_split(
     `system_metrics_daily.otp_percentage` / `service_delivered_ratio`
     actually consume) never calls the hour helper at all, so it's
     unaffected by this parameter either way.
+
+    `early_sec` / `late_sec` (NOTES-144) are the on-time deviation bounds
+    applied to all three sub-blocks, defaulting to the official WMATA
+    window. Callers that support the rider-experience window resolve the
+    pair via `src.otp_constants.otp_window_bounds` and pass it explicitly;
+    `compute_otp_split_for_routes` (the scorecard batch) leaves these at
+    their default and is unaffected.
     """
     service_date_str = service_date.isoformat()
     no_filter = period_key == ALL_HOURS
@@ -211,10 +233,19 @@ def compute_otp_split(
     return {
         "route_id": route_id,
         "service_date": service_date_str,
-        "window": {"early_sec": OTP_EARLY_SEC, "late_sec": OTP_LATE_SEC},
-        "origin": {"source": "proximity", **_aggregate_deviations(origin_devs)},
-        "destination": {"source": "trip_update", **_aggregate_deviations(destination_devs)},
-        "all_timepoints": {"source": "proximity", **_aggregate_deviations(all_devs)},
+        "window": {"early_sec": early_sec, "late_sec": late_sec},
+        "origin": {
+            "source": "proximity",
+            **_aggregate_deviations(origin_devs, early_sec=early_sec, late_sec=late_sec),
+        },
+        "destination": {
+            "source": "trip_update",
+            **_aggregate_deviations(destination_devs, early_sec=early_sec, late_sec=late_sec),
+        },
+        "all_timepoints": {
+            "source": "proximity",
+            **_aggregate_deviations(all_devs, early_sec=early_sec, late_sec=late_sec),
+        },
     }
 
 

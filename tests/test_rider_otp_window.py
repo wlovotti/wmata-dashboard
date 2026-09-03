@@ -1,7 +1,8 @@
 """
 Tests for the rider-experience OTP window (NOTES-144).
 
-Covers the two request-time OTP endpoints wired for `otp_window`:
+Covers the three request-time OTP endpoints wired for `otp_window`:
+- GET /api/routes/{route_id} (headline `otp_all_pct` / grade)
 - GET /api/routes/{route_id}/trend?metric=otp
 - GET /api/routes/{route_id}/stops
 
@@ -15,7 +16,8 @@ So official OTP = 3/3 = 100%, rider OTP = 1/3 = 33.33...%.
 
 Also covers `otp_window_bounds` (src/otp_constants.py), invalid
 `otp_window` -> 422, and cache isolation between the two windows on the
-`/stops` endpoint's `_stop_diagnostics_cache`.
+`/stops` endpoint's `_stop_diagnostics_cache` and the `/api/routes/{id}`
+cross-route `_live_metrics_cache`.
 """
 
 from datetime import date, datetime, timedelta
@@ -23,7 +25,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from api import aggregations as agg
-from src.models import Route, Stop, StopEvent, StopTime, Trip
+from src.models import Calendar, Route, Run, Stop, StopEvent, StopTime, Trip
 from src.otp_constants import (
     OTP_EARLY_SEC,
     OTP_LATE_SEC,
@@ -35,6 +37,7 @@ from src.otp_constants import (
 ROUTE = "R144"
 STOP_ID = "S144_1"
 TRIP_ID = "T144_D0"
+SERVICE_ID = "SVC144"
 DIRECTION = 0
 SERVICE_DATE = date(2026, 5, 5)  # Tuesday — weekday, EDT (UTC-4)
 SERVICE_DATE_STR = SERVICE_DATE.isoformat()
@@ -60,15 +63,24 @@ def _freeze_eastern_today(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _clear_stop_diagnostics_cache():
-    """Drop the module-level stop-diagnostics cache before and after each test.
+def _clear_module_caches():
+    """Drop module-level caches this suite touches, before and after each test.
 
-    Otherwise a warm entry from an earlier test (or an earlier otp_window
-    within the same test) could mask a cache-key bug.
+    `_stop_diagnostics_cache` (`/stops`) and `_live_metrics_cache` /
+    `_window_metrics_cache` (`/api/routes/{id}`, shared with the
+    `/api/routes` scorecard) are process-lifetime dicts keyed partly by
+    `_db_identity(db)`, which resolves to the same value for every test in
+    this session (all tests share one in-memory SQLite engine) — so a warm
+    entry from an earlier test (or an earlier otp_window within the same
+    test) could otherwise mask a cache-key bug.
     """
     agg._stop_diagnostics_cache.clear()
+    agg._live_metrics_cache.clear()
+    agg._window_metrics_cache.clear()
     yield
     agg._stop_diagnostics_cache.clear()
+    agg._live_metrics_cache.clear()
+    agg._window_metrics_cache.clear()
 
 
 def _seed_route_with_stop_events(db) -> None:
@@ -77,8 +89,10 @@ def _seed_route_with_stop_events(db) -> None:
     Builds the minimal canonical stop sequence `/stops` needs (one trip,
     one stop, one direction) and three proximity `stop_events` rows at
     that stop with `DEVIATIONS`. `/trend` only needs the `stop_events`
-    rows (it doesn't consult GTFS), but seeding both once keeps the two
-    endpoint tests sharing one fixture.
+    rows (it doesn't consult GTFS), but seeding both once keeps the
+    endpoint tests sharing one fixture. `Trip.service_id` is set (but no
+    `Calendar` row exists yet) so `TestDetailEndpointOtpWindow` can layer
+    `_seed_service_delivered` on top without re-seeding the trip.
     """
     db.add(
         Route(
@@ -92,7 +106,15 @@ def _seed_route_with_stop_events(db) -> None:
     db.add(
         Stop(stop_id=STOP_ID, stop_name="Stop 144", stop_lat=38.9, stop_lon=-77.0, is_current=True)
     )
-    db.add(Trip(trip_id=TRIP_ID, route_id=ROUTE, direction_id=DIRECTION, is_current=True))
+    db.add(
+        Trip(
+            trip_id=TRIP_ID,
+            route_id=ROUTE,
+            direction_id=DIRECTION,
+            service_id=SERVICE_ID,
+            is_current=True,
+        )
+    )
     db.add(
         StopTime(
             trip_id=TRIP_ID,
@@ -129,6 +151,45 @@ def _seed_route_with_stop_events(db) -> None:
     db.commit()
 
 
+def _seed_service_delivered(db) -> None:
+    """Layer a `Calendar` row + one delivered `Run` on top of `_seed_route_with_stop_events`.
+
+    Gives `compute_service_delivered` a non-null `ratio` (1.0: one
+    scheduled trip, one delivered) so `/api/routes/{id}`'s `grade` isn't
+    `N/A` — `compute_route_grade` requires both `otp_pct` and
+    `service_delivered_ratio` to score at all. `Calendar.tuesday=1`
+    matches SERVICE_DATE (2026-05-05, a Tuesday); `stops_observable<=2`
+    puts the delivered threshold at 1, so `stops_observed=2` clears it.
+    """
+    db.add(
+        Calendar(
+            service_id=SERVICE_ID,
+            monday=0,
+            tuesday=1,
+            wednesday=0,
+            thursday=0,
+            friday=0,
+            saturday=0,
+            sunday=0,
+            start_date="20260101",
+            end_date="20261231",
+            is_current=True,
+        )
+    )
+    db.add(
+        Run(
+            service_date=SERVICE_DATE_STR,
+            trip_id=TRIP_ID,
+            route_id=ROUTE,
+            direction_id=DIRECTION,
+            source="proximity",
+            stops_observable=2,
+            stops_observed=2,
+        )
+    )
+    db.commit()
+
+
 class TestOtpWindowBounds:
     """`src.otp_constants.otp_window_bounds` — the name-to-bounds mapping."""
 
@@ -144,6 +205,91 @@ class TestOtpWindowBounds:
         """Anything else raises ValueError."""
         with pytest.raises(ValueError):
             otp_window_bounds("bogus")
+
+
+@pytest.mark.api
+class TestDetailEndpointOtpWindow:
+    """GET /api/routes/{route_id}?otp_window=... — the headline KPI card.
+
+    Regression coverage for the NOTES-144 review finding: without this
+    endpoint wired, the `otp_window` toggle would move the trend chart and
+    stop heatmap but leave the headline `otp_all_pct` — and the letter
+    grade, which scores on it — stuck on the official window.
+    """
+
+    def test_official_vs_rider_differ(self, client, db_session):
+        """Headline `otp_all_pct` (and the grade it feeds) differ by window."""
+        _seed_route_with_stop_events(db_session)
+        _seed_service_delivered(db_session)
+
+        official = client.get(f"/api/routes/{ROUTE}?otp_window=official")
+        rider = client.get(f"/api/routes/{ROUTE}?otp_window=rider")
+        assert official.status_code == 200
+        assert rider.status_code == 200
+        official_body = official.json()
+        rider_body = rider.json()
+
+        assert official_body["otp_all_pct"] == pytest.approx(100.0)
+        # `otp_all_pct` is `on_time_pct` from `_aggregate_deviations`, rounded
+        # to 2dp (33.33, not the exact repeating 33.333...) — abs tolerance
+        # matches that rounding.
+        assert rider_body["otp_all_pct"] == pytest.approx(100.0 / 3.0, abs=0.01)
+        assert official_body["otp_window"] == "official"
+        assert rider_body["otp_window"] == "rider"
+
+        # `service_delivered_ratio` (from `_seed_service_delivered`) is 1.0
+        # and identical in both bodies — grade differs solely because
+        # `otp_all_pct` does, proving the window actually reaches
+        # `compute_route_grade` and not just the raw OTP field.
+        assert official_body["service_delivered_ratio"] == pytest.approx(1.0)
+        assert official_body["service_delivered_ratio"] == rider_body["service_delivered_ratio"]
+        assert official_body["grade"] != "N/A"
+        assert rider_body["grade"] != "N/A"
+        assert official_body["grade"] != rider_body["grade"]
+
+        # `deltas` is sourced from the precomputed overlay (always official
+        # — see get_route_detail_metrics docstring) — unaffected by the
+        # request-time window either way.
+        assert official_body["deltas"] == rider_body["deltas"]
+
+    def test_default_is_official(self, client, db_session):
+        """Omitting `otp_window` behaves like `official` (today's numbers unchanged)."""
+        _seed_route_with_stop_events(db_session)
+        _seed_service_delivered(db_session)
+
+        default = client.get(f"/api/routes/{ROUTE}")
+        explicit_official = client.get(f"/api/routes/{ROUTE}?otp_window=official")
+        assert default.json()["otp_window"] == "official"
+        assert default.json()["otp_all_pct"] == explicit_official.json()["otp_all_pct"]
+        assert default.json()["grade"] == explicit_official.json()["grade"]
+
+    def test_invalid_otp_window_422(self, client, db_session):
+        """An `otp_window` outside official|rider is rejected by FastAPI validation."""
+        _seed_route_with_stop_events(db_session)
+        response = client.get(f"/api/routes/{ROUTE}?otp_window=bogus")
+        assert response.status_code == 422
+
+    def test_rider_never_served_from_official_cache(self, client, db_session):
+        """A warm official request never leaks into a rider request, or vice versa.
+
+        Regression guard for the review finding: `get_live_metrics_for_route_today`
+        must skip the cross-route `_live_metrics_cache` (official-only, shared
+        with the `/api/routes` scorecard) whenever `otp_window != "official"`.
+        """
+        _seed_route_with_stop_events(db_session)
+        _seed_service_delivered(db_session)
+
+        # Warm the official path first (populates nothing here directly —
+        # `_compute_single_route_live_metrics` never writes the cross-route
+        # cache — but exercises the read-path ordering a real warm scorecard
+        # cache would hit).
+        official_first = client.get(f"/api/routes/{ROUTE}?otp_window=official")
+        rider = client.get(f"/api/routes/{ROUTE}?otp_window=rider")
+        official_again = client.get(f"/api/routes/{ROUTE}?otp_window=official")
+
+        assert official_first.json()["otp_all_pct"] == pytest.approx(100.0)
+        assert rider.json()["otp_all_pct"] == pytest.approx(100.0 / 3.0, abs=0.01)
+        assert official_again.json()["otp_all_pct"] == pytest.approx(100.0)
 
 
 @pytest.mark.api
@@ -238,13 +384,45 @@ class TestStopsEndpointOtpWindow:
         cache_windows = {key[6] for key in agg._stop_diagnostics_cache}
         assert cache_windows == {"official", "rider"}
 
-        # And a second official request still reads the official value back
-        # from cache, not the rider value written afterward.
-        official_again = client.get(f"/api/routes/{ROUTE}/stops?otp_window=official")
         official_row = next(s for s in official.json()["stops"] if s["stop_id"] == STOP_ID)
+        rider_row = next(s for s in rider.json()["stops"] if s["stop_id"] == STOP_ID)
+
+        # Mutate the underlying data after both windows are warm: 5 more
+        # events, all wildly late (2000s), that would pull *either* window's
+        # otp_pct down noticeably on a fresh recompute. Committed directly —
+        # a genuine recompute would see it immediately.
+        sched_ts = datetime(2026, 5, 5, 17, 0, 0)
+        db_session.add_all(
+            [
+                StopEvent(
+                    service_date=SERVICE_DATE_STR,
+                    trip_id=f"{TRIP_ID}_MUTATE{i}",
+                    route_id=ROUTE,
+                    direction_id=DIRECTION,
+                    stop_id=STOP_ID,
+                    stop_sequence=1,
+                    scheduled_arrival_ts=sched_ts,
+                    observed_arrival_ts=sched_ts + timedelta(seconds=2000),
+                    deviation_sec=2000,
+                    source="proximity",
+                    schedule_relationship="SCHEDULED",
+                )
+                for i in range(5)
+            ]
+        )
+        db_session.commit()
+
+        # Both windows still read back their original (pre-mutation) value
+        # from cache — if either had been keyed wrong (or not cached at
+        # all), this would observe the new late events and the otp_pct
+        # would drop.
+        official_again = client.get(f"/api/routes/{ROUTE}/stops?otp_window=official")
+        rider_again = client.get(f"/api/routes/{ROUTE}/stops?otp_window=rider")
         official_again_row = next(
             s for s in official_again.json()["stops"] if s["stop_id"] == STOP_ID
         )
-        rider_row = next(s for s in rider.json()["stops"] if s["stop_id"] == STOP_ID)
+        rider_again_row = next(s for s in rider_again.json()["stops"] if s["stop_id"] == STOP_ID)
         assert official_again_row["otp_pct"] == official_row["otp_pct"]
-        assert official_again_row["otp_pct"] != rider_row["otp_pct"]
+        assert official_again_row["n_observations"] == official_row["n_observations"]
+        assert rider_again_row["otp_pct"] == rider_row["otp_pct"]
+        assert rider_again_row["n_observations"] == rider_row["n_observations"]

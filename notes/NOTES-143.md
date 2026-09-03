@@ -30,11 +30,11 @@ Work:
   per-agency config (or an explicit "not available for this agency"
   UI state) rather than just removing the stub. "Not available for
   this agency" states, not crashes or silently-wrong headlines.
-- Fold in the rider-experience OTP toggle UI (backend landed in the
-  rider-OTP backend, PR #241) on RouteDetail, so the
-  two changes share one Playwright baseline regen. The backend added
-  `otp_window=official|rider` on `/api/routes/{id}/trend` (metric=otp)
-  and `/api/routes/{id}/stops`.
+- Fold in the rider-experience OTP toggle UI (backend in PR #241, which
+  added `otp_window=official|rider` to `/api/routes/{id}`,
+  `/api/routes/{id}/trend` (metric=otp), and `/api/routes/{id}/stops`)
+  on RouteDetail, so the two changes share one Playwright baseline
+  regen.
 
 Changes Overview / RouteList / RouteDetail → Playwright baselines must
 be regenerated on both platforms by the user at PR time.

@@ -519,6 +519,7 @@ async def get_route(
     days: int = 7,
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
+    otp_window: str = Query("official", pattern="^(official|rider)$"),
     agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
@@ -533,12 +534,21 @@ async def get_route(
     doesn't change their values; `day_type` does, by anchoring on the
     latest matching service_date.
 
+    `otp_window` (NOTES-144) picks the on-time deviation bounds for the
+    OTP fields (`otp_all_pct` / `otp_origin_pct` / `otp_destination_pct`)
+    and therefore also `grade` (scored on `otp_all_pct`): `official`
+    (default, WMATA scorecard -2min/+7min) or `rider` (stricter
+    rider-experience -1min/+3min, see notes/NOTES-20.md). It does not
+    affect `deltas`, which is sourced from the precomputed daily overlay
+    and stays official-window regardless.
+
     Args:
         route_id: Route identifier (e.g., 'C51')
         days: Window for the excess-trip-time freshest-day lookup
         day_type: One of `all` (default), `weekday`, `saturday`, `sunday`
         period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
             `evening`, `late`
+        otp_window: One of `official` (default) or `rider`.
 
     Returns:
         Detailed route metrics — live OTP/EWT/bunching, service-delivered,
@@ -565,6 +575,7 @@ async def get_route(
             days=days,
             day_type_filter=day_type,
             period_key=period,
+            otp_window=otp_window,
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])

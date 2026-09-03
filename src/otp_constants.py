@@ -1,12 +1,16 @@
 """
 On-time performance window constants.
 
-Centralizes the early/late thresholds used to classify schedule deviations
-across all OTP calculations. Defined here so future tightening (e.g.
-notes/NOTES-20.md rider-experience window) is a one-line change.
+Centralizes the early/late thresholds used to classify schedule
+deviations across OTP calculations, for two windows: the official WMATA
+scorecard window (comparability with WMATA's published numbers) and a
+stricter rider-experience window (NOTES-20, NOTES-144) available as an
+opt-in on the request-time OTP endpoints. See "Two OTP windows" below
+for the full picture and `otp_window_bounds()` for resolving either by
+name.
 
-Aligned with WMATA's published scorecard standard for schedule-based
-timepoints: -2 minutes early to +7 minutes late.
+The official window is aligned with WMATA's published scorecard standard
+for schedule-based timepoints: -2 minutes early to +7 minutes late.
 
 Frequent-service routes — two levels of designation
 ---------------------------------------------------
@@ -62,8 +66,10 @@ There are two related-but-distinct OTP windows; do not conflate them.
    actually experiences lateness rather than WMATA's scorecard standard
    (see notes/NOTES-20.md). Available as an opt-in `otp_window=rider`
    request-time parameter on the route-level endpoints that compute OTP
-   live from `stop_events` (trend, stop diagnostics); it does not touch
-   system rollups, the daily batch, or bunching.
+   live from `stop_events` — route detail (`/api/routes/{id}`, which
+   also feeds the letter grade), trend, and stop diagnostics; it does
+   not touch system rollups, the daily batch, bunching, or the
+   `/api/routes` scorecard.
 
 Use `otp_window_bounds(name)` to resolve either window's `(early_sec,
 late_sec)` pair by name rather than branching on the constants directly.
