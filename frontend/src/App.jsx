@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useRef, useState } from 'react'
 import Overview from './components/Overview'
 import RouteList from './components/RouteList'
@@ -13,6 +13,8 @@ import AgencyComparison from './components/AgencyComparison'
 import DiagnosticsIndex from './components/DiagnosticsIndex'
 import useGtfsFreshness from './hooks/useGtfsFreshness'
 import { clearFetchCache } from './hooks/fetchCache'
+import useWindowDays, { appendWindowParam } from './hooks/useWindowDays'
+import WindowPicker from './components/WindowPicker'
 import './App.css'
 
 // Format a raw GTFS YYYYMMDD string (e.g. `feed_end_date`) as a
@@ -98,6 +100,99 @@ function GtfsExpiryBanner({ freshness }) {
   )
 }
 
+// Shell content rendered *inside* `<Router>` (App.jsx below only creates the
+// Router — a component isn't a descendant of the elements it returns, so
+// `useWindowDays`/`useSearchParams` can't be called directly in `App` itself;
+// it needs a child component that Router actually wraps). Everything that
+// reads or writes route/search-param state — the primary nav's `?days=`
+// links, `<Routes>` — has to live here.
+function AppShell({ refreshKey, gtfsFreshness, handleRefresh }) {
+  // Time-window picker (NOTES-140): `?days=` is the source of truth for
+  // every page's analysis window. Read here (not written — WindowPicker
+  // owns the write) so the primary nav links below can carry the current
+  // selection forward, and it survives a plain click into another tab.
+  const [days] = useWindowDays()
+
+  // Only Overview (`/`), RouteList (`/routes`), and RouteDetail
+  // (`/route/:id`) actually read `?days=` (PR #239 review finding H) — show
+  // the picker only there so it doesn't imply pages like Compare or
+  // Diagnostics respond to it when they don't.
+  const location = useLocation()
+  const showWindowPicker =
+    location.pathname === '/' ||
+    location.pathname === '/routes' ||
+    location.pathname.startsWith('/route/')
+
+  return (
+    <div className="app">
+      <header>
+        <div className="header-content">
+          <div>
+            <h1>WMATA Performance Dashboard</h1>
+            <p className="subtitle">Daily bus network performance metrics</p>
+          </div>
+          <div className="header-actions">
+            <div className="header-actions-row">
+              {showWindowPicker && <WindowPicker />}
+              <RefreshButton onRefresh={handleRefresh} />
+            </div>
+          </div>
+        </div>
+        <GtfsExpiryBanner freshness={gtfsFreshness} />
+        <nav className="primary-nav" aria-label="Primary">
+          {/* Nav links carry the current `?days=` window (NOTES-140) so it
+              survives navigation instead of silently reverting to the
+              default on the next page; appendWindowParam omits the param
+              entirely at the default (30) so unfiltered URLs stay clean. */}
+          <NavLink
+            to={appendWindowParam('/', days)}
+            end
+            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+          >
+            Overview
+          </NavLink>
+          <NavLink
+            to={appendWindowParam('/routes', days)}
+            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+          >
+            Routes
+          </NavLink>
+          <NavLink
+            to={appendWindowParam('/compare', days)}
+            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+          >
+            Compare
+          </NavLink>
+          <NavLink
+            to={appendWindowParam('/diagnostics', days)}
+            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+          >
+            Diagnostics
+          </NavLink>
+        </nav>
+      </header>
+
+      <div key={refreshKey}>
+        <Routes>
+          <Route path="/" element={<Overview />} />
+          <Route path="/routes" element={<RouteList />} />
+          <Route path="/route/:routeId" element={<RouteDetail />} />
+          <Route path="/runs/:runId" element={<RunDetail />} />
+          <Route path="/blocks" element={<ActiveBlocks />} />
+          <Route path="/blocks/:blockId" element={<BlockTimeline />} />
+          <Route path="/targets" element={<Targets />} />
+          <Route path="/schedule-audit" element={<ScheduleAudit />} />
+          <Route path="/segments" element={<SegmentDiagnostic />} />
+          <Route path="/diagnostics" element={<DiagnosticsIndex />} />
+          {/* Agency comparison page (PR #198), promoted to the nav by the
+              nav collapse (PR #208). */}
+          <Route path="/compare" element={<AgencyComparison />} />
+        </Routes>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   // Bumping this key remounts only the routed subtree below (wrapped
   // separately, not the whole `.app`), which re-runs each page's
@@ -121,52 +216,11 @@ function App() {
 
   return (
     <Router>
-      <div className="app">
-        <header>
-          <div className="header-content">
-            <div>
-              <h1>WMATA Performance Dashboard</h1>
-              <p className="subtitle">Daily bus network performance metrics</p>
-            </div>
-            <div className="header-actions">
-              <RefreshButton onRefresh={handleRefresh} />
-            </div>
-          </div>
-          <GtfsExpiryBanner freshness={gtfsFreshness} />
-          <nav className="primary-nav" aria-label="Primary">
-            <NavLink to="/" end className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Overview
-            </NavLink>
-            <NavLink to="/routes" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Routes
-            </NavLink>
-            <NavLink to="/compare" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Compare
-            </NavLink>
-            <NavLink to="/diagnostics" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              Diagnostics
-            </NavLink>
-          </nav>
-        </header>
-
-        <div key={refreshKey}>
-          <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/routes" element={<RouteList />} />
-            <Route path="/route/:routeId" element={<RouteDetail />} />
-            <Route path="/runs/:runId" element={<RunDetail />} />
-            <Route path="/blocks" element={<ActiveBlocks />} />
-            <Route path="/blocks/:blockId" element={<BlockTimeline />} />
-            <Route path="/targets" element={<Targets />} />
-            <Route path="/schedule-audit" element={<ScheduleAudit />} />
-            <Route path="/segments" element={<SegmentDiagnostic />} />
-            <Route path="/diagnostics" element={<DiagnosticsIndex />} />
-            {/* Agency comparison page (PR #198), promoted to the nav by the
-                nav collapse (PR #208). */}
-            <Route path="/compare" element={<AgencyComparison />} />
-          </Routes>
-        </div>
-      </div>
+      <AppShell
+        refreshKey={refreshKey}
+        gtfsFreshness={gtfsFreshness}
+        handleRefresh={handleRefresh}
+      />
     </Router>
   )
 }

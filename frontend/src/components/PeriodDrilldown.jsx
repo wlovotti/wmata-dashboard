@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import useWindowDays from '../hooks/useWindowDays'
 import {
   BarChart,
   Bar,
@@ -201,6 +202,10 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
   const [error, setError] = useState(null)
   const [causeData, setCauseData] = useState(null)
   const [causeError, setCauseError] = useState(null)
+  // Time-window picker (NOTES-140): `/bunching-causes` accepts `days`;
+  // `/period-drilldown` below is always the latest single service_date and
+  // has no `days` param, so it's left unwired.
+  const [days] = useWindowDays()
 
   useEffect(() => {
     let cancelled = false
@@ -231,6 +236,7 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
     const params = new URLSearchParams()
     if (dayType && dayType !== 'all') params.set('day_type', dayType)
     if (period && period !== 'all') params.set('period', period)
+    params.set('days', String(days))
     const qs = params.toString()
     const url = `/api/routes/${routeId}/bunching-causes${qs ? `?${qs}` : ''}`
     fetch(url)
@@ -244,7 +250,7 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
     return () => {
       cancelled = true
     }
-  }, [routeId, dayType, period])
+  }, [routeId, dayType, period, days])
 
   if (loading) {
     return (

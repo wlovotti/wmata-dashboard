@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { computeSpectrumBar } from '../utils/spectrumBar'
@@ -6,13 +6,19 @@ import { formatContribMetricValue } from '../utils/formatters'
 import { DeltaIndicator } from './RouteTrend'
 import useGtfsFreshness from '../hooks/useGtfsFreshness'
 import { getMoversFloor } from '../moversFloor'
+import useUrlState from '../hooks/useUrlState'
+import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
 // in the background. The API itself is also cached server-side (60s TTL),
-// so the background fetch is cheap when warm.
+// so the background fetch is cheap when warm. Keyed by `days` (NOTES-140):
+// a cache entry from one window is not a valid stand-in for another, so a
+// window switch is treated as a cache miss (`_cachedDays !== days` below)
+// rather than briefly rendering the wrong window's numbers.
 let _cachedRoutes = null
 let _cachedWindow = null
+let _cachedDays = null
 
 // Inline target subline for the scorecard table cells (NOTES-47).
 // `current` and `target` should already be in the same units the cell
@@ -181,22 +187,49 @@ function formatLoadedAt(isoString) {
   })
 }
 
+// Default value for the URL-state `sort` param (NOTES-140) — encodes both
+// the sort key and direction in one param (`<key>` for ascending, or
+// `<key>:desc`) so "reverse the current column" is a single atomic write.
+// Two separate `sortKey`/`sortDir` params would race: firing two different
+// useUrlState setters synchronously in one handler each computes its new
+// URL from the same pre-update `searchParams` snapshot, so only the last
+// call's change survives (see useUrlState.js's docstring).
+const DEFAULT_SORT = 'route_name'
+
+const SORT_DESC_SUFFIX = ':desc'
+
+function parseSort(raw) {
+  const desc = raw.endsWith(SORT_DESC_SUFFIX)
+  const key = desc ? raw.slice(0, -SORT_DESC_SUFFIX.length) : raw
+  return { key, direction: desc ? 'desc' : 'asc' }
+}
+
+function encodeSort(key, direction) {
+  return direction === 'desc' ? `${key}${SORT_DESC_SUFFIX}` : key
+}
+
 function RouteList() {
   const navigate = useNavigate()
-  const [routes, setRoutes] = useState(_cachedRoutes ?? [])
-  const [scorecardWindow, setScorecardWindow] = useState(_cachedWindow)
-  const [loading, setLoading] = useState(_cachedRoutes === null)
+  const [days] = useWindowDays()
+  const [routes, setRoutes] = useState(_cachedDays === days ? (_cachedRoutes ?? []) : [])
+  const [scorecardWindow, setScorecardWindow] = useState(
+    _cachedDays === days ? _cachedWindow : null,
+  )
+  const [loading, setLoading] = useState(_cachedDays !== days || _cachedRoutes === null)
   const [error, setError] = useState(null)
-  const [searchTerm, setSearchTerm] = useState('')
-  const [sortConfig, setSortConfig] = useState({ key: 'route_name', direction: 'asc' })
+  // Search/sort/view/metric are URL state (NOTES-140) so a linked/back-
+  // button view reproduces exactly what the user was looking at.
+  const [searchTerm, setSearchTerm] = useUrlState('q', '')
+  const [sortRaw, setSortRaw] = useUrlState('sort', DEFAULT_SORT)
+  const sortConfig = parseSort(sortRaw)
   const gtfsFreshness = useGtfsFreshness()
   // Mode toggle: 'contributors' (NOTES-39, default after NOTES-51) vs
   // 'default' (full alphabetic scorecard table, now collapsed behind a
   // <details> disclosure). Clicking the "Default" toggle still flips the
   // disclosure open; the disclosure can also be expanded independently
   // without leaving contributors mode.
-  const [viewMode, setViewMode] = useState('contributors')
-  const [contribMetric, setContribMetric] = useState('otp')
+  const [viewMode, setViewMode] = useUrlState('view', 'contributors')
+  const [contribMetric, setContribMetric] = useUrlState('metric', 'otp')
   const [contribData, setContribData] = useState(null)
   const [contribLoading, setContribLoading] = useState(false)
   const [contribError, setContribError] = useState(null)
@@ -208,8 +241,17 @@ function RouteList() {
     setShowAllContributors(false)
   }, [contribMetric])
 
-  const fetchRoutes = () => {
-    return fetch('/api/routes')
+  // `guard` is a per-run `{ ignored: false }` box (PR #239 review finding
+  // E). Without it, a slow response from an earlier `days` value can land
+  // after a newer request already committed the currently-selected
+  // window's rows, silently overwriting `routes` (and the module cache
+  // below) with a stale/mismatched window — e.g. a slow 30-day fetch
+  // resolving after the user has already switched to 7 and seen its
+  // (faster) response land first. Passing `null` opts a caller (manual
+  // refresh) out of the guard entirely, since a lone in-flight request has
+  // nothing else in the same window to be superseded by.
+  const fetchRoutes = (requestedDays, guard) => {
+    return fetch(`/api/routes?days=${requestedDays}`)
       .then(res => {
         if (!res.ok) {
           throw new Error(`HTTP error! status: ${res.status}`)
@@ -217,6 +259,7 @@ function RouteList() {
         return res.json()
       })
       .then(data => {
+        if (guard && guard.ignored) return
         // Response shape: `{window: {start, end, days}, routes: [...]}`. The
         // window block lets us label the pooled date range under the heading.
         const routesList = data.routes ?? []
@@ -225,25 +268,53 @@ function RouteList() {
         setScorecardWindow(window)
         _cachedRoutes = routesList
         _cachedWindow = window
+        _cachedDays = requestedDays
         setError(null)
       })
       .catch(err => {
+        if (guard && guard.ignored) return
         setError(err.message)
       })
   }
 
+  // Tracks the guard object owned by the currently-active `days` effect run
+  // below, so `handleRefresh`'s manual retry (PR #239 delta review finding
+  // 3) can share it instead of opting out of the out-of-order guard
+  // entirely — a retry is conceptually "redo the current window's fetch,"
+  // so it should be superseded by the same events that would supersede
+  // that fetch (a window switch while the retry is still in flight).
+  const activeGuardRef = useRef(null)
+
   useEffect(() => {
-    fetchRoutes().finally(() => setLoading(false))
-  }, [])
+    const guard = { ignored: false }
+    activeGuardRef.current = guard
+    // Only show the full-page spinner when this window isn't already
+    // cached (PR #239 delta review finding 2) — an unconditional
+    // `setLoading(true)` here defeated the stale-while-revalidate lazy
+    // `useState` init above: remounting at a window that's already in the
+    // module cache (e.g. navigating back to /routes) would spinner-block
+    // instead of rendering the cached rows immediately while this effect's
+    // fetch revalidates them in the background.
+    setLoading(_cachedDays !== days || _cachedRoutes === null)
+    fetchRoutes(days, guard).finally(() => {
+      if (!guard.ignored) setLoading(false)
+    })
+    return () => {
+      guard.ignored = true
+    }
+  }, [days])
 
   // Fetch contributors only while the contributors mode is selected, and
-  // refetch when the metric changes. Pure additive — never blocks the
-  // default view.
+  // refetch when the metric or window changes. Pure additive — never blocks
+  // the default view. Same out-of-order guard as the routes fetch above: a
+  // slow response for a superseded (metric, days) pair must not overwrite
+  // `contribData` for the pair the user is now looking at.
   useEffect(() => {
     if (viewMode !== 'contributors') return
+    const guard = { ignored: false }
     setContribLoading(true)
     setContribError(null)
-    fetch(`/api/routes/contributors?metric=${contribMetric}&days=30`)
+    fetch(`/api/routes/contributors?metric=${contribMetric}&days=${days}`)
       .then(res => {
         if (!res.ok) {
           throw new Error(`HTTP error! status: ${res.status}`)
@@ -251,17 +322,45 @@ function RouteList() {
         return res.json()
       })
       .then(data => {
+        if (guard.ignored) return
         setContribData(data)
       })
       .catch(err => {
+        if (guard.ignored) return
         setContribError(err.message)
       })
-      .finally(() => setContribLoading(false))
-  }, [viewMode, contribMetric])
+      .finally(() => {
+        if (!guard.ignored) setContribLoading(false)
+      })
+    return () => {
+      guard.ignored = true
+    }
+  }, [viewMode, contribMetric, days])
 
+  // Manual refresh (the error banner's "Try Again" button). Shares the
+  // current `days` effect's guard (PR #239 delta review finding 3) so a
+  // window switch while the retry is still in flight supersedes it the
+  // same way it would a normal window-driven fetch, instead of letting a
+  // stale retry response land after the user has already moved on.
+  // Matching the pre-existing behavior, this does not toggle `loading` —
+  // it's a silent background refetch, not a full reload.
   const handleRefresh = () => {
-    fetchRoutes()
+    fetchRoutes(days, activeGuardRef.current)
   }
+
+  // Render-time (not state-lagged) staleness check (PR #239 review finding
+  // E): `_cachedDays` only updates once a fetch for the *current* `days`
+  // actually resolves, so comparing it against `days` directly in the
+  // render body catches "the URL just changed to a window we haven't
+  // fetched yet" on the very next render — before the effect above even
+  // runs — and keeps the old window's `routes` out of the table for that
+  // frame by falling into the loading branch below instead. Gated on
+  // `!error` (PR #239 delta review finding 1): `_cachedDays` is only
+  // written on a *successful* fetch, so without this a failed fetch would
+  // latch `showLoadingState` true forever — `_cachedDays` can never catch
+  // up to `days` — permanently hiding the error banner and its "Try
+  // Again" button behind an infinite "Loading routes…" spinner.
+  const showLoadingState = loading || (_cachedDays !== days && !error)
 
   // Filter and sort routes
   const filteredAndSortedRoutes = routes
@@ -292,10 +391,9 @@ function RouteList() {
     })
 
   const handleSort = (key) => {
-    setSortConfig(prev => ({
-      key,
-      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
-    }))
+    const nextDirection =
+      sortConfig.key === key && sortConfig.direction === 'asc' ? 'desc' : 'asc'
+    setSortRaw(encodeSort(key, nextDirection))
   }
 
   const getSortIcon = (key) => {
@@ -304,7 +402,7 @@ function RouteList() {
   }
 
   const handleRouteClick = (routeId) => {
-    navigate(`/route/${routeId}`)
+    navigate(appendWindowParam(`/route/${routeId}`, days))
   }
 
   // NOTES-51: the lifted search input applies to both views. Filter
@@ -324,7 +422,7 @@ function RouteList() {
     ? filteredContributors
     : filteredContributors.slice(0, CONTRIB_TOP_N)
 
-  if (loading) {
+  if (showLoadingState) {
     return (
       <main>
         <div className="table-container">
@@ -446,7 +544,7 @@ function RouteList() {
                       </strong>
                       {contribData.baseline_value != null && (
                         <>
-                          {' '}· baseline (30d):{' '}
+                          {' '}· baseline ({days}d):{' '}
                           <strong>
                             {formatContribMetricValue(
                               contribMetric,
@@ -458,7 +556,7 @@ function RouteList() {
                     </>
                   ) : contribData.baseline_value != null ? (
                     <>
-                      System baseline (30d):{' '}
+                      System baseline ({days}d):{' '}
                       <strong>
                         {formatContribMetricValue(
                           contribMetric,
@@ -486,7 +584,7 @@ function RouteList() {
               </div>
             ) : contribData == null ? null : contribData.baseline_value == null ? (
               <p>
-                System baseline unavailable for this metric in the last 30 days — cannot rank
+                System baseline unavailable for this metric in the last {days} days — cannot rank
                 contributors yet. Once the daily metrics pipeline writes a row to{' '}
                 <code>system_metrics_daily</code> the table will populate.
               </p>
@@ -505,10 +603,10 @@ function RouteList() {
                       <th>Route</th>
                       <th>Name</th>
                       <th>Route value</th>
-                      <th title="Per-route target if configured, otherwise system 30-day baseline">
+                      <th title={`Per-route target if configured, otherwise system ${days}-day baseline`}>
                         Reference
                       </th>
-                      <th>Scheduled trips (30d)</th>
+                      <th>Scheduled trips ({days}d)</th>
                       <th>Contribution score</th>
                     </tr>
                   </thead>
@@ -528,7 +626,7 @@ function RouteList() {
                       return (
                         <tr
                           key={c.route_id}
-                          onClick={() => navigate(`/route/${c.route_id}`)}
+                          onClick={() => navigate(appendWindowParam(`/route/${c.route_id}`, days))}
                           style={{ cursor: 'pointer' }}
                         >
                           <td>{idx + 1}</td>
@@ -605,7 +703,7 @@ function RouteList() {
             <p style={{ marginTop: '1rem', fontSize: '0.85em', color: '#666' }}>
               Contribution = (reference − route value) × scheduled trips, sign-flipped for
               lower-is-better metrics. Reference is the route&apos;s configured target when set
-              (config/route_targets.yaml), otherwise the system 30-day window mean.
+              (config/route_targets.yaml), otherwise the system {days}-day window mean.
             </p>
           </div>
         )}

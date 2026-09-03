@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
+import useUrlState from '../hooks/useUrlState'
+import useWindowDays from '../hooks/useWindowDays'
 
 // Stop-level diagnostic strip chart (NOTES-40).
 //
@@ -83,11 +85,36 @@ function formatValueForMetric(metricKey, value) {
   return String(value)
 }
 
+// Direction selector options (NOTES-140) — the `/stops` endpoint's optional
+// `direction_id` restricts output to one direction; 'all' (both directions,
+// the pre-existing behavior) is the default so it's omitted from the URL.
+const DIRECTION_OPTIONS = [
+  { key: 'all', label: 'Both directions' },
+  { key: '0', label: 'Direction 0' },
+  { key: '1', label: 'Direction 1' },
+]
+
 function StopDiagnostic({ routeId, dayType, period }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [metric, setMetric] = useState('median_deviation_sec')
+  // Metric + direction are URL state (NOTES-140); dayType/period arrive as
+  // props from RouteDetail, which already owns those as URL state itself.
+  const [metric, setMetric] = useUrlState('metric', 'median_deviation_sec')
+  const [directionParam, setDirectionParam] = useUrlState('direction_id', 'all')
+  // Validate against the API's accepted values (PR #239 review finding F):
+  // anything other than the literal strings '0'/'1' — a stale/hand-edited
+  // `direction_id=2`, `direction_id=banana`, etc. — falls back to "all"
+  // rather than reaching the endpoint with a bad value (`Number('banana')`
+  // is NaN, which the API would reject) or leaving the <select> on an
+  // option that doesn't exist. `effectiveDirectionParam` re-derives the
+  // <select>'s displayed value from the validated result so an invalid URL
+  // value shows "Both directions" instead of a blank/mismatched control.
+  const directionId =
+    directionParam === '0' || directionParam === '1' ? Number(directionParam) : null
+  const effectiveDirectionParam = directionId == null ? 'all' : directionParam
+  // Time-window picker (NOTES-140): the `/stops` endpoint accepts `days`.
+  const [days] = useWindowDays()
   const [hoveredStop, setHoveredStop] = useState(null)
 
   useEffect(() => {
@@ -97,6 +124,8 @@ function StopDiagnostic({ routeId, dayType, period }) {
     const params = new URLSearchParams()
     if (dayType !== 'all') params.set('day_type', dayType)
     if (period !== 'all') params.set('period', period)
+    if (directionId != null) params.set('direction_id', String(directionId))
+    params.set('days', String(days))
     const qs = params.toString()
     const url = `/api/routes/${routeId}/stops${qs ? `?${qs}` : ''}`
     fetch(url)
@@ -116,7 +145,7 @@ function StopDiagnostic({ routeId, dayType, period }) {
     return () => {
       cancelled = true
     }
-  }, [routeId, dayType, period])
+  }, [routeId, dayType, period, directionId, days])
 
   // Group rows by direction so each direction renders as its own strip.
   const stopsByDirection = useMemo(() => {
@@ -187,6 +216,20 @@ function StopDiagnostic({ routeId, dayType, period }) {
             aria-label="Stop diagnostic metric"
           >
             {METRIC_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <span style={{ opacity: 0.8 }}>Direction:</span>
+          <select
+            value={effectiveDirectionParam}
+            onChange={(e) => setDirectionParam(e.target.value)}
+            aria-label="Stop diagnostic direction filter"
+          >
+            {DIRECTION_OPTIONS.map((o) => (
               <option key={o.key} value={o.key}>
                 {o.label}
               </option>
