@@ -928,6 +928,7 @@ def compute_ewt_for_routes(
     service_date: date_type,
     route_ids: list[str] | None = None,
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> list[dict]:
     """Compute EWT for every route seen in `stop_events` on the date, or pass
     `route_ids` to restrict. Returns a flat list — one dict per (route,
@@ -938,6 +939,12 @@ def compute_ewt_for_routes(
 
     `tz_name` (NOTES-103 multi-agency) is forwarded to
     `compute_ewt_for_route_date` for every route; defaults to Eastern.
+
+    `agency` (PR #242 round-2 review finding 5 follow-through) is likewise
+    forwarded to `compute_ewt_for_route_date`'s cell-hour gate lookup, so a
+    non-wmata route never inherits WMATA's medium-freq 20-min gate for a
+    same-numbered route_id. Defaults to `"wmata"`; this function currently
+    has no production callers (only tests/test_ewt.py).
     """
     service_date_str = service_date.isoformat()
     if route_ids is None:
@@ -950,7 +957,7 @@ def compute_ewt_for_routes(
         )
     out: list[dict] = []
     for r in route_ids:
-        out.extend(compute_ewt_for_route_date(db, r, service_date, tz_name))
+        out.extend(compute_ewt_for_route_date(db, r, service_date, tz_name, agency))
     return out
 
 
