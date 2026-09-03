@@ -1,0 +1,12 @@
+/* Component-scoped styles for Overview.jsx (NOTES-85 migration off
+   inline styles). */
+
+/* Empty/error-state paragraphs under the "Biggest drags" table header,
+   which sits directly under a bordered <h2> with no default padding. */
+.overview-contrib-note {
+  padding: 0 1.5rem 1rem;
+}
+
+.overview-see-all-row {
+  padding: 1rem 1.5rem 1.5rem;
+}

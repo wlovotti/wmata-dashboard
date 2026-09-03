@@ -446,6 +446,15 @@ main {
 .filter-label-flex-push {
   margin-left: auto;
 }
+
+/* "Showing cached data — background refresh failed" caveat, shared by
+   every page with a stale-while-revalidate fetch group (Overview,
+   RouteDetail). */
+.stale-data-note {
+  color: var(--color-muted);
+  font-size: 0.85rem;
+  margin: 0 0 0.75rem;
+}
 .font-medium { font-weight: var(--weight-medium); }
 .font-semibold { font-weight: var(--weight-semibold); }
 .text-center { text-align: center; }

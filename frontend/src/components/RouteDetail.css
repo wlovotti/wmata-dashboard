@@ -60,12 +60,6 @@
   margin: 0.5rem 0 0.75rem;
 }
 
-.stale-data-note {
-  color: var(--color-muted);
-  font-size: 0.85rem;
-  margin: 0 0 0.75rem;
-}
-
 .route-tab-row {
   display: flex;
   gap: 0.5rem;

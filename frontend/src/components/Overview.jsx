@@ -14,6 +14,7 @@ import SystemMap from './SystemMap'
 import SystemTrend from './SystemTrend'
 import SystemWeeklyNarrativeLede from './SystemWeeklyNarrativeLede'
 import ErrorState from './ErrorState.jsx'
+import './Overview.css'
 
 /**
  * Whether `dataUrlKey` (a `useMultiFetch` group's `JSON.stringify(urls)`
@@ -314,10 +315,7 @@ function Overview() {
         />
       )}
       {staleData && (
-        <p
-          className="stale-data-note"
-          style={{ color: 'var(--color-muted)', fontSize: '0.85rem', marginBottom: '0.75rem' }}
-        >
+        <p className="stale-data-note">
           Showing cached data — last refresh failed. Retrying in the background.
         </p>
       )}
@@ -345,20 +343,20 @@ function Overview() {
 
       <div className="table-container">
         <h2>Biggest drags</h2>
-        <p className="drilldown-anchor" style={{ marginBottom: '0.75rem' }}>
+        <p className="drilldown-anchor mb-3">
           Top {CONTRIB_TOP_N} routes ranked by their contribution to system
           underperformance — the routes whose attention would move the
           system the most.
         </p>
         {contribData?.days_included != null && contribData.days_included < contribData.days && (
-          <p style={{ color: 'var(--color-muted)', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
+          <p className="panel-note mb-3">
             Based on {contribData.days_included} of {contribData.days} days —{' '}
             {contribData.days - contribData.days_included} excluded for partial data collection.
           </p>
         )}
-        <div className="filters" style={{ marginBottom: '0.75rem' }}>
+        <div className="filters mb-3">
           <div>
-            <label htmlFor="overview-contrib-metric" style={{ marginRight: '0.5rem' }}>
+            <label htmlFor="overview-contrib-metric" className="mr-2">
               Metric:
             </label>
             <select
@@ -376,7 +374,7 @@ function Overview() {
         </div>
 
         {contribError && (
-          <p style={{ color: 'var(--color-muted)', padding: '0 1.5rem 1rem' }}>
+          <p className="overview-contrib-note text-muted">
             Unable to load contributors: {contribError}
           </p>
         )}
@@ -387,7 +385,7 @@ function Overview() {
             <p>Loading contributors...</p>
           </div>
         ) : contribData == null ? null : visibleContributors.length === 0 ? (
-          <p style={{ padding: '0 1.5rem 1rem' }}>
+          <p className="overview-contrib-note">
             No routes have enough data to score contribution for this metric yet.
           </p>
         ) : (
@@ -408,7 +406,7 @@ function Overview() {
                 <tr
                   key={c.route_id}
                   onClick={() => navigate(appendWindowParam(`/route/${c.route_id}`, days, agency))}
-                  style={{ cursor: 'pointer' }}
+                  className="cursor-pointer"
                 >
                   <td>{idx + 1}</td>
                   <td className="route-id">
@@ -432,7 +430,7 @@ function Overview() {
           </table>
         )}
 
-        <div style={{ padding: '1rem 1.5rem 1.5rem' }}>
+        <div className="overview-see-all-row">
           <Link to={appendWindowParam('/routes', days, agency)} className="see-all-link">
             See all routes →
           </Link>
