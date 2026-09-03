@@ -66,7 +66,7 @@ from src.models import (
     SystemWeeklyNarrative,
     Trip,
 )
-from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC
+from src.otp_constants import OTP_EARLY_SEC, OTP_LATE_SEC, otp_window_bounds
 from src.otp_metrics import compute_otp_split, compute_otp_split_for_routes
 from src.route_targets import (
     get_system_targets,
@@ -1825,6 +1825,8 @@ def _compute_otp_per_day_with_filters(
     start_date: date_type,
     end_date: date_type,
     period_key: str,
+    early_sec: int = OTP_EARLY_SEC,
+    late_sec: int = OTP_LATE_SEC,
 ) -> dict[str, float | None]:
     """Per-service-date OTP for one route, computed live from stop_events.
 
@@ -1838,6 +1840,14 @@ def _compute_otp_per_day_with_filters(
     (which can't `EXTRACT(HOUR FROM ... AT TIME ZONE ...)`).
     `is_hour_in_period(_, ALL_HOURS)` returns True for every hour, so
     passing `ALL_HOURS` produces the unfiltered daily aggregate.
+
+    `early_sec` / `late_sec` (NOTES-144) are the on-time window bounds — a
+    deviation is on-time when `early_sec <= dev <= late_sec`. Default to
+    the official WMATA window; callers that support the rider-experience
+    window (see `src/otp_constants.py:otp_window_bounds`) pass the
+    resolved bounds explicitly. Out-of-scope callers (e.g. the
+    contributors envelope's `_route_otp_window_mean`) leave these at
+    their default and are unaffected.
     """
     start_iso = start_date.isoformat()
     end_iso = end_date.isoformat()
@@ -1869,7 +1879,7 @@ def _compute_otp_per_day_with_filters(
         if not is_hour_in_period(h, period_key):
             continue
         counts[service_date][1] += 1
-        if OTP_EARLY_SEC <= dev <= OTP_LATE_SEC:
+        if early_sec <= dev <= late_sec:
             counts[service_date][0] += 1
 
     out: dict[str, float | None] = {}
@@ -1889,6 +1899,7 @@ def get_route_trend_data(
     days: int = 30,
     day_type_filter: str = ALL_DAY_TYPES,
     period_key: str = ALL_HOURS,
+    otp_window: str = "official",
 ) -> dict:
     """
     Get time-series trend data for a specific route metric.
@@ -1922,6 +1933,11 @@ def get_route_trend_data(
         period_key: One of `all` / `am_peak` / `midday` / `pm_peak` /
             `evening` / `late`. Only `otp` recomputes by hour; other
             metrics ignore it.
+        otp_window: One of `official` / `rider` (NOTES-144). Resolved via
+            `src.otp_constants.otp_window_bounds` into the on-time
+            deviation bounds passed to `_compute_otp_per_day_with_filters`.
+            Only `otp` uses it; other metrics ignore it (still echoed on
+            the response for a consistent shape).
 
     Returns:
         Time-series data for the specified metric
@@ -2002,6 +2018,7 @@ def get_route_trend_data(
             "days": days,
             "day_type_filter": day_type_filter,
             "period_key": period_key,
+            "otp_window": otp_window,
             "trend_data": trend_data,
         }
 
@@ -2029,6 +2046,7 @@ def get_route_trend_data(
             "days": days,
             "day_type_filter": day_type_filter,
             "period_key": period_key,
+            "otp_window": otp_window,
             "trend_data": trend_data,
         }
 
@@ -2039,8 +2057,13 @@ def get_route_trend_data(
     # the legacy `route_metrics_daily.otp_percentage` field used to carry.
     # OTP is the only remaining trend metric; the legacy `early/late/
     # headway/headway_std_dev/speed` metrics were dropped in NOTES-19
-    # alongside the source table.
-    otp_by_date = _compute_otp_per_day_with_filters(db, route_id, start_date, end_date, period_key)
+    # alongside the source table. `otp_window` (NOTES-144) resolves to
+    # explicit on-time bounds so the rider-experience window doesn't touch
+    # the default official comparison other callers of the helper rely on.
+    early_sec, late_sec = otp_window_bounds(otp_window)
+    otp_by_date = _compute_otp_per_day_with_filters(
+        db, route_id, start_date, end_date, period_key, early_sec=early_sec, late_sec=late_sec
+    )
     trend_data = []
     current = start_date
     while current <= end_date:
@@ -2058,6 +2081,7 @@ def get_route_trend_data(
         "days": days,
         "day_type_filter": day_type_filter,
         "period_key": period_key,
+        "otp_window": otp_window,
         "trend_data": trend_data,
     }
 
@@ -4191,10 +4215,11 @@ def get_route_recent_runs(db: Session, route_id: str, limit: int = 25) -> dict:
 
 _STOP_DIAGNOSTICS_TTL_SEC = 60.0
 # Keyed `(db_identity, route_id, days, day_type, period, direction_id,
-# today_iso)` (NOTES-139 review finding 1) so `?agency=sfmta` and the
-# default WMATA request never share an entry.
+# otp_window, today_iso)` (NOTES-139 review finding 1; `otp_window` added
+# NOTES-144) so `?agency=sfmta` and the default WMATA request never share
+# an entry, and neither do `otp_window=official` / `otp_window=rider`.
 _stop_diagnostics_cache: dict[
-    tuple[str, str, int, str, str, int | None, str], tuple[float, dict]
+    tuple[str, str, int, str, str, int | None, str, str], tuple[float, dict]
 ] = {}
 _stop_diagnostics_lock = Lock()
 
@@ -4306,6 +4331,7 @@ def compute_route_stop_diagnostics(
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
     direction_id: int | None = None,
+    otp_window: str = "official",
 ) -> dict:
     """Compute per-stop diagnostic metrics for one route over a time window.
 
@@ -4349,13 +4375,19 @@ def compute_route_stop_diagnostics(
         direction_id: Optional — restrict output to one direction. When
             None, both directions are returned interleaved by
             (direction_id, stop_sequence).
+        otp_window: One of `official` / `rider` (NOTES-144). Resolved via
+            `src.otp_constants.otp_window_bounds` into the on-time
+            deviation bounds used for `otp_pct` below — the rest of the
+            row (median/p95 deviation, skip%) is unaffected by the window.
 
     Returns:
-        Dict with `route_id`, `days`, `day_type`, `period`, and `stops`
-        (list ordered by direction_id ASC then stop_sequence ASC).
+        Dict with `route_id`, `days`, `day_type`, `period`, `otp_window`,
+        and `stops` (list ordered by direction_id ASC then stop_sequence
+        ASC).
     """
     from src.timezones import eastern_today
 
+    early_sec, late_sec = otp_window_bounds(otp_window)
     end_date = eastern_today()
     start_date = end_date - timedelta(days=days)
     start_iso = start_date.isoformat()
@@ -4375,6 +4407,7 @@ def compute_route_stop_diagnostics(
             "days": days,
             "day_type": day_type,
             "period": period,
+            "otp_window": otp_window,
             "stops": [],
         }
 
@@ -4388,6 +4421,7 @@ def compute_route_stop_diagnostics(
                 "days": days,
                 "day_type": day_type,
                 "period": period,
+                "otp_window": otp_window,
                 "stops": [],
             }
 
@@ -4519,7 +4553,7 @@ def compute_route_stop_diagnostics(
                 # twice — once for median, once for p95).
                 median = _percentile(list(devs), 50.0)
                 p95 = _percentile(list(devs), 95.0)
-                on_time = sum(1 for x in devs if OTP_EARLY_SEC <= x <= OTP_LATE_SEC)
+                on_time = sum(1 for x in devs if early_sec <= x <= late_sec)
                 otp_pct = round(on_time / n_obs, 4)
 
             skip_pct = round(tu_skipped / tu_total, 4) if tu_total > 0 else None
@@ -4544,6 +4578,7 @@ def compute_route_stop_diagnostics(
         "days": days,
         "day_type": day_type,
         "period": period,
+        "otp_window": otp_window,
         "stops": out_stops,
     }
 
@@ -4555,13 +4590,17 @@ def get_route_stop_diagnostics(
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
     direction_id: int | None = None,
+    otp_window: str = "official",
 ) -> dict:
     """Cached wrapper around `compute_route_stop_diagnostics`.
 
     60-second TTL keyed by (route_id, days, day_type, period, direction_id,
-    today_iso). Cache key includes today's Eastern date so the cache
-    rolls naturally at the service-day boundary (matches the system-trend
-    and contributors caches above).
+    otp_window, today_iso). `otp_window` (NOTES-144) is part of the cache
+    key so a `rider`-window request never reads back an `official`-window
+    entry (or vice versa) — see `compute_route_stop_diagnostics` for what
+    the window affects. Cache key includes today's Eastern date so the
+    cache rolls naturally at the service-day boundary (matches the
+    system-trend and contributors caches above).
 
     Args:
         db: SQLAlchemy session.
@@ -4571,10 +4610,12 @@ def get_route_stop_diagnostics(
         period: One of `all` / `am_peak` / `midday` / `pm_peak` /
             `evening` / `late`.
         direction_id: Optional direction filter.
+        otp_window: One of `official` / `rider` (NOTES-144).
 
     Returns:
-        Dict with `route_id`, `days`, `day_type`, `period`, and `stops`
-        (list ordered by direction_id ASC then stop_sequence ASC).
+        Dict with `route_id`, `days`, `day_type`, `period`, `otp_window`,
+        and `stops` (list ordered by direction_id ASC then stop_sequence
+        ASC).
     """
     from src.timezones import eastern_today
 
@@ -4585,6 +4626,7 @@ def get_route_stop_diagnostics(
         day_type,
         period,
         direction_id,
+        otp_window,
         eastern_today().isoformat(),
     )
     with _stop_diagnostics_lock:
@@ -4601,6 +4643,7 @@ def get_route_stop_diagnostics(
         day_type=day_type,
         period=period,
         direction_id=direction_id,
+        otp_window=otp_window,
     )
 
     with _stop_diagnostics_lock:
