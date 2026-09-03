@@ -1764,7 +1764,12 @@ def get_route_detail_metrics(
     affect `deltas` — the period-over-period delta block is sourced from
     the precomputed `route_metrics_daily_overlay` (always the official
     window; see `compute_route_deltas`), which is out of scope for the
-    live, request-time rider window this parameter controls.
+    live, request-time rider window this parameter controls. The response
+    always echoes `deltas_otp_window: "official"` alongside the requested
+    `otp_window` so the frontend has a machine-readable signal to label or
+    hide the OTP delta arrow when `otp_window="rider"` rather than
+    silently rendering an official-window delta next to a rider-window
+    value.
 
     Args:
         db: Database session
@@ -1833,6 +1838,12 @@ def get_route_detail_metrics(
         "day_type_filter": day_type_filter,
         "period_key": period_key,
         "otp_window": otp_window,
+        # NOTES-144: `deltas` (below) is always computed from the official
+        # window regardless of `otp_window` — see docstring above. This
+        # constant marker lets the frontend detect the mismatch when
+        # otp_window="rider" without hardcoding the "official" literal
+        # itself.
+        "deltas_otp_window": "official",
         # NOTES-117: the service_date the live KPIs below are anchored on
         # (the route's own latest, not necessarily the system-wide latest).
         # `None` only when the route has no stop_events at all yet.

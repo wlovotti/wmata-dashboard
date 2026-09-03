@@ -78,22 +78,6 @@ def _local_hour_or_none(ts: datetime | None, tz: ZoneInfo) -> int | None:
     return _hour_in_zone(ts, tz)
 
 
-def _bucket_deviation(
-    dev_sec: int, early_sec: int = OTP_EARLY_SEC, late_sec: int = OTP_LATE_SEC
-) -> str:
-    """Classify one deviation_sec into 'early' / 'on_time' / 'late'.
-
-    `early_sec` / `late_sec` (NOTES-144) default to the official WMATA
-    window; callers that support the rider-experience window (see
-    `src.otp_constants.otp_window_bounds`) pass the resolved bounds.
-    """
-    if dev_sec < early_sec:
-        return "early"
-    if dev_sec > late_sec:
-        return "late"
-    return "on_time"
-
-
 def _aggregate_deviations(
     devs: list[int], early_sec: int = OTP_EARLY_SEC, late_sec: int = OTP_LATE_SEC
 ) -> dict:

@@ -249,8 +249,12 @@ class TestDetailEndpointOtpWindow:
 
         # `deltas` is sourced from the precomputed overlay (always official
         # — see get_route_detail_metrics docstring) — unaffected by the
-        # request-time window either way.
+        # request-time window either way. `deltas_otp_window` is the
+        # machine-readable marker the frontend uses to detect that mismatch
+        # in rider mode; it's always "official" regardless of `otp_window`.
         assert official_body["deltas"] == rider_body["deltas"]
+        assert official_body["deltas_otp_window"] == "official"
+        assert rider_body["deltas_otp_window"] == "official"
 
     def test_default_is_official(self, client, db_session):
         """Omitting `otp_window` behaves like `official` (today's numbers unchanged)."""
@@ -270,26 +274,37 @@ class TestDetailEndpointOtpWindow:
         assert response.status_code == 422
 
     def test_rider_never_served_from_official_cache(self, client, db_session):
-        """A warm official request never leaks into a rider request, or vice versa.
+        """A warm scorecard cache never leaks into a rider detail request.
 
         Regression guard for the review finding: `get_live_metrics_for_route_today`
         must skip the cross-route `_live_metrics_cache` (official-only, shared
         with the `/api/routes` scorecard) whenever `otp_window != "official"`.
+        The detail endpoint's own official-window request never writes that
+        cache (`_compute_single_route_live_metrics` doesn't touch it) — only
+        `GET /api/routes` (the scorecard, via `get_live_metrics_for_window` /
+        `_compute_live_metrics_for_window_uncached`) does, keyed by
+        `(db_identity, service_date)`, the same key
+        `get_live_metrics_for_route_today`'s official branch reads. So the
+        cache must be warmed via the scorecard endpoint, not a second detail
+        call, or this test can't actually exercise the bypass: mutation-
+        tested by removing the `otp_window == "official"` guard at
+        `get_live_metrics_for_route_today` — this test FAILS without the
+        guard (rider reads back the scorecard's official value, ~100.0) and
+        PASSES with it (rider still computes ~33.33).
         """
         _seed_route_with_stop_events(db_session)
         _seed_service_delivered(db_session)
 
-        # Warm the official path first (populates nothing here directly —
-        # `_compute_single_route_live_metrics` never writes the cross-route
-        # cache — but exercises the read-path ordering a real warm scorecard
-        # cache would hit).
-        official_first = client.get(f"/api/routes/{ROUTE}?otp_window=official")
-        rider = client.get(f"/api/routes/{ROUTE}?otp_window=rider")
-        official_again = client.get(f"/api/routes/{ROUTE}?otp_window=official")
+        # Warm `_live_metrics_cache[(db_identity, SERVICE_DATE)]` via the
+        # scorecard — the only path that actually writes it.
+        scorecard = client.get("/api/routes")
+        assert scorecard.status_code == 200
 
-        assert official_first.json()["otp_all_pct"] == pytest.approx(100.0)
+        rider = client.get(f"/api/routes/{ROUTE}?otp_window=rider")
+        official = client.get(f"/api/routes/{ROUTE}?otp_window=official")
+
         assert rider.json()["otp_all_pct"] == pytest.approx(100.0 / 3.0, abs=0.01)
-        assert official_again.json()["otp_all_pct"] == pytest.approx(100.0)
+        assert official.json()["otp_all_pct"] == pytest.approx(100.0)
 
 
 @pytest.mark.api
