@@ -1,8 +1,8 @@
-import { useMemo, useRef, useEffect } from 'react'
+import { useMemo } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
 import useUrlState from '../hooks/useUrlState'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
-import useAgency from '../hooks/useAgency'
+import useAgency, { DEFAULT_AGENCY } from '../hooks/useAgency'
 import { apiUrl } from '../utils/apiUrl'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
@@ -13,6 +13,29 @@ import MoversPanel from './MoversPanel'
 import SystemMap from './SystemMap'
 import SystemTrend from './SystemTrend'
 import SystemWeeklyNarrativeLede from './SystemWeeklyNarrativeLede'
+import ErrorState from './ErrorState.jsx'
+
+/**
+ * Whether `dataUrlKey` (a `useMultiFetch` group's `JSON.stringify(urls)`
+ * for its CURRENT `data`) was fetched for `agency` — deliberately ignoring
+ * every other param (`days` in particular) so a time-window switch keeps
+ * showing the old window's data while the new one loads (PR #239's
+ * stale-while-revalidate), rather than blanking on every `days` change too
+ * (PR #242 round-2 review finding 5). `apiUrl` encodes a non-default
+ * agency literally as `agency=<value>` and omits it entirely at the
+ * default, so a plain substring check is exact for the two known agency
+ * values — `null` (nothing loaded yet) never matches.
+ *
+ * @param {string|null} dataUrlKey
+ * @param {string} agency
+ * @returns {boolean}
+ */
+function dataAgencyMatches(dataUrlKey, agency) {
+  if (dataUrlKey == null) return false
+  return agency === DEFAULT_AGENCY
+    ? !dataUrlKey.includes('agency=')
+    : dataUrlKey.includes(`agency=${agency}`)
+}
 
 // Metric options for the "Biggest drags" table. Same 4-entry list as
 // RouteList — kept inline per the existing convention.
@@ -73,7 +96,8 @@ function Overview() {
   const scorecardUrls = useMemo(() => [apiUrl('/api/routes', { days, agency })], [days, agency])
   const {
     data: scorecardResults,
-    loading: scorecardLoading,
+    dataUrlKey: scorecardDataUrlKey,
+    error: scorecardError,
     revalidateError: scorecardRevalidateError,
   } = useMultiFetch(scorecardUrls)
   // Hero and movers degrade gracefully while this is null (loading, or a
@@ -94,6 +118,7 @@ function Overview() {
   )
   const {
     data: rawSystemTrendData,
+    dataUrlKey: trendDataUrlKey,
     loading: trendLoading,
     error: trendError,
     revalidateError: trendRevalidateError,
@@ -134,52 +159,49 @@ function Overview() {
   )
   const {
     data: heroOtpResults,
-    loading: heroOtpLoading,
+    dataUrlKey: heroOtpDataUrlKey,
+    error: heroOtpError,
     revalidateError: heroOtpRevalidateError,
   } = useMultiFetch(heroOtpTrendUrls)
   const heroOtpTrend = heroOtpResults ? heroOtpResults[0] : null
 
-  // Agency-switch guard (PR #242 review finding 2). `useMultiFetch`'s
-  // `data` only updates once a fetch resolves — a genuine cross-agency
-  // cache miss (sfmta isn't pre-warmed the way `_warm_scorecard_cache_sync`
-  // covers wmata) otherwise leaves the PREVIOUS agency's scorecard/trend
-  // numbers rendering under the NEW agency's header for however long the
-  // cold fetch takes. `RouteList` already guards the equivalent case via
-  // its own `_cachedAgency !== agency` check; this is the same idea for
-  // Overview's `useMultiFetch`-backed fetches.
+  // Agency-switch guard (PR #242 review finding 2; reworked in round 2
+  // review finding 1). `useMultiFetch`'s `data` only updates once a fetch
+  // resolves — a genuine cross-agency cache miss (sfmta isn't pre-warmed
+  // the way `_warm_scorecard_cache_sync` covers wmata) otherwise leaves
+  // the PREVIOUS agency's scorecard/trend numbers rendering under the NEW
+  // agency's header for however long the cold fetch takes (or forever, on
+  // a hard failure — see the `scorecardError`/`heroOtpError` handling
+  // below). `RouteList` already guards the equivalent case via its own
+  // `_cachedAgency !== agency` check; this is the same idea for Overview's
+  // `useMultiFetch`-backed fetches.
   //
-  // Each of the three fetch groups tracks the URL(s) it last actually
-  // finished loading (settled), in a ref seeded to the INITIAL url set so
-  // a normal cold mount isn't treated as "stale." Comparing the ref to the
-  // CURRENT url set is a synchronous render-time check — unlike gating on
-  // the `loading` booleans directly, this can't race against the one-tick
-  // lag between a url-array changing and `useMultiFetch`'s own effect
-  // noticing and flipping `loading` true for it: the ref/url comparison
-  // itself changes in the very same render `scorecardUrls`/etc. recompute,
-  // so there's no window where a switch goes undetected. While any group
-  // is stale, its corresponding `display*` value below is null — the same
-  // "not loaded yet" state these components already render correctly
-  // (including the hero's PR #239 "verdict unavailable" copy, which is
-  // itself null-safe), so this reuses that existing path instead of adding
-  // a new one. A cache hit (revisiting a url set already fetched this
-  // session) settles on the very next render, so it never visibly gates.
-  const scorecardUrlRef = useRef(scorecardUrls[0])
-  useEffect(() => {
-    if (!scorecardLoading) scorecardUrlRef.current = scorecardUrls[0]
-  }, [scorecardLoading, scorecardUrls])
-  const scorecardStale = scorecardUrlRef.current !== scorecardUrls[0]
-
-  const trendUrlKeyRef = useRef(JSON.stringify(trendUrls))
-  useEffect(() => {
-    if (!trendLoading) trendUrlKeyRef.current = JSON.stringify(trendUrls)
-  }, [trendLoading, trendUrls])
-  const trendStale = trendUrlKeyRef.current !== JSON.stringify(trendUrls)
-
-  const heroOtpUrlRef = useRef(heroOtpTrendUrls[0])
-  useEffect(() => {
-    if (!heroOtpLoading) heroOtpUrlRef.current = heroOtpTrendUrls[0]
-  }, [heroOtpLoading, heroOtpTrendUrls])
-  const heroOtpStale = heroOtpUrlRef.current !== heroOtpTrendUrls[0]
+  // The FIRST version of this guard derived staleness from each group's
+  // `loading` flag via a ref + effect, seeded to the initial url and only
+  // advanced once `loading` went false. That raced `useMultiFetch`'s own
+  // effect: on the very render where `urls` changes, `loading` still holds
+  // its OLD value (React hasn't run the child hook's effect yet), so the
+  // guard's own effect saw `loading === false`, advanced the ref
+  // immediately, and let stale data straight back through on the next
+  // render. Comparing `dataUrlKey` (the url key `data` actually came from
+  // — see useMultiFetch's docstring) against the CURRENT url has no such
+  // lag: `dataUrlKey` only ever changes in the same state update that
+  // changes `data`, so a url-set change is detected the instant it
+  // happens, not one render later.
+  //
+  // `dataAgencyMatches` (not a full url-equality check) deliberately
+  // ignores `days` so a time-window switch keeps the old window's data
+  // on screen while the new one loads (PR #239's stale-while-revalidate),
+  // rather than blanking on every `days` change too (round-2 review
+  // finding 5) — only an AGENCY mismatch is treated as "not loaded yet."
+  // While any group is stale, its corresponding `display*` value below is
+  // null — the same "not loaded yet" state these components already
+  // render correctly (including the hero's PR #239 "verdict unavailable"
+  // copy, which is itself null-safe), so this reuses that existing path
+  // instead of adding a new one.
+  const scorecardStale = !dataAgencyMatches(scorecardDataUrlKey, agency)
+  const trendStale = !dataAgencyMatches(trendDataUrlKey, agency)
+  const heroOtpStale = !dataAgencyMatches(heroOtpDataUrlKey, agency)
 
   const displayScorecard = scorecardStale ? null : scorecard
   const displaySystemTrendData = trendStale ? null : systemTrendData
@@ -259,9 +281,22 @@ function Overview() {
 
   const visibleContributors = (contribData?.contributors ?? []).slice(0, CONTRIB_TOP_N)
 
+  // Cold-load failure for the hero/map/movers' data (PR #242 round-2
+  // review finding 2). Distinct from `staleData` above: `staleData` is a
+  // background-revalidate failure with good stale data still on screen;
+  // this is a failure with NOTHING to show for the current agency/window
+  // (e.g. a 500 on a freshly-selected agency's `/api/routes`) — `error` on
+  // `useMultiFetch` is only ever set on that cold-load path. Surfaced once
+  // for whichever of the two groups failed rather than duplicating the
+  // banner.
+  const pageError = scorecardError || heroOtpError
+
   return (
     <main>
       <SystemWeeklyNarrativeLede />
+      {pageError && (
+        <ErrorState title="Unable to load system data" message={pageError} />
+      )}
       {staleData && (
         <p
           className="stale-data-note"

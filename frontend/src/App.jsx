@@ -136,10 +136,12 @@ function AppShell({ refreshKey, handleRefresh }) {
   // honestly), switching agency on these pages would silently swap in a
   // wrong-but-plausible-looking record from the other database instead of
   // erroring — so the toggle is hidden rather than left to produce that.
-  // `/blocks` (the list) is NOT id-scoped; only `/blocks/:blockId` is.
+  // `/blocks` (the list) is NOT id-scoped; only `/blocks/:blockId` is —
+  // `startsWith('/blocks/')` (with the trailing slash) already excludes
+  // the bare `/blocks` list path on its own, so no separate `!==` check
+  // is needed (round-2 review finding 7).
   const isIdScopedRoute =
-    location.pathname.startsWith('/runs/') ||
-    (location.pathname.startsWith('/blocks/') && location.pathname !== '/blocks')
+    location.pathname.startsWith('/runs/') || location.pathname.startsWith('/blocks/')
   const showWindowPicker =
     location.pathname === '/' ||
     location.pathname === '/routes' ||

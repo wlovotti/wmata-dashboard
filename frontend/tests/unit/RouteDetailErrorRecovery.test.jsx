@@ -9,7 +9,7 @@
  * back to an agency/route that resolves fine. This pins that a 404
  * followed by a 200 clears the banner and renders the route.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { vi } from 'vitest'
 import RouteDetail from '../../src/components/RouteDetail'
@@ -103,6 +103,58 @@ describe('RouteDetail error-banner recovery', () => {
     await waitFor(() =>
       expect(screen.queryByText(/Error loading route data/i)).not.toBeInTheDocument(),
     )
+    await waitFor(() => expect(screen.getAllByText('On-Time Performance')[0]).toBeVisible())
+  })
+})
+
+/**
+ * PR #242 round-2 review finding 4 (cosmetic): the finding-1 fix's
+ * unconditional `setLoading(true)` flashed a full-page spinner on every
+ * filter change (dayType/period/otpWindow) where it previously swapped
+ * data in place. `setLoading(true)` should only fire on a genuine
+ * identity change (a different route_id or agency) — a filter change
+ * re-fetches the SAME route/agency and should keep stale-while-revalidate
+ * behavior: the old content stays on screen (no "Loading route
+ * details..." spinner) while the re-sliced data loads in the background.
+ */
+describe('RouteDetail filter changes keep stale-while-revalidate (no spinner flash)', () => {
+  test('changing the day-type filter does not show the full-page loading spinner', async () => {
+    let resolveWeekday
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url) => {
+        const u = String(url)
+        if (u.startsWith('/api/routes/D72/trend')) return jsonResponse({ trend_data: [] })
+        if (u.startsWith('/api/routes/D72')) {
+          if (u.includes('day_type=weekday')) {
+            return new Promise((resolve) => {
+              resolveWeekday = resolve
+            })
+          }
+          return jsonResponse(wmataRouteData)
+        }
+        return jsonResponse({})
+      }),
+    )
+
+    render(
+      <MemoryRouter initialEntries={['/route/D72']}>
+        <Routes>
+          <Route path="/route/:routeId" element={<RouteDetail />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getAllByText('On-Time Performance')[0]).toBeVisible())
+
+    fireEvent.change(screen.getByLabelText('Day-type filter'), { target: { value: 'weekday' } })
+
+    // The weekday fetch is deliberately left pending, but the page must
+    // NOT fall back to the full-page spinner — the previously loaded
+    // content (and its filter controls) stay on screen the whole time.
+    expect(screen.queryByText('Loading route details...')).not.toBeInTheDocument()
+    expect(screen.getAllByText('On-Time Performance')[0]).toBeVisible()
+
+    resolveWeekday(jsonResponse(wmataRouteData))
     await waitFor(() => expect(screen.getAllByText('On-Time Performance')[0]).toBeVisible())
   })
 })

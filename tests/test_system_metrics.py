@@ -321,6 +321,50 @@ def test_upsert_system_metrics_forwards_completeness_threshold(
 
 
 @pytest.mark.smoke
+def test_upsert_system_metrics_forwards_agency_to_ewt_gate_lookup(
+    db_session, sample_routes, monkeypatch
+):
+    """PR #242 round-2 review finding 3 follow-through: `agency` reaches
+    `_system_ewt_and_bunching_for_date`'s cell-hour gate lookup (fixed in
+    the same PR's round-1 finding 5) -- mirrors the equivalent
+    `route_metrics_overlay` test for the OTHER half of the daily batch.
+    `compute_system_metrics_for_date` imports `_system_ewt_and_bunching_for_date`
+    from `api.aggregations` locally (avoiding an import cycle), so the
+    monkeypatch targets that module, not `src.system_metrics`.
+    """
+    import api.aggregations as agg
+
+    seen_agencies = []
+
+    def _fake_ewt_bunching(
+        db,
+        service_date,
+        sched_by_date,
+        gtfs_snapshot_id=None,
+        tz_name="America/New_York",
+        agency="wmata",
+    ):
+        seen_agencies.append(agency)
+        return (None, None, None)
+
+    monkeypatch.setattr(agg, "_system_ewt_and_bunching_for_date", _fake_ewt_bunching)
+    monkeypatch.setattr(
+        "src.data_completeness.coverage_pct_for_date",
+        lambda db, service_date, tz_name="America/New_York": 1.0,
+    )
+    monkeypatch.setattr(
+        "src.data_completeness.is_date_sufficiently_complete",
+        lambda db, service_date, threshold=0.80, tz_name="America/New_York": True,
+    )
+
+    target_date = eastern_today() - timedelta(days=7)
+    upsert_system_metrics_for_date(db_session, target_date, agency="sfmta")
+    upsert_system_metrics_for_date(db_session, target_date - timedelta(days=1))
+
+    assert seen_agencies == ["sfmta", "wmata"]
+
+
+@pytest.mark.smoke
 def test_upsert_system_metrics_default_threshold_is_the_flat_constant(
     db_session, sample_routes, monkeypatch
 ):

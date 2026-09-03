@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import RouteMap from './RouteMap'
@@ -101,18 +101,33 @@ function RouteDetail() {
     setSearchParams(next, { replace: true })
   }
 
+  // Tracks the (routeId, agency) this effect last ran for (PR #242 round-2
+  // review finding 4). Only an actual IDENTITY change — a different route
+  // or a different agency's database — is a genuine cold navigation that
+  // should show the full-page spinner; a filter change (dayType, period,
+  // otpWindow) re-fetches the SAME route/agency and should swap data in
+  // place like any other stale-while-revalidate update, not flash a
+  // spinner over content that's still perfectly valid to look at while
+  // the re-slice loads.
+  const routeIdentityRef = useRef({ routeId, agency })
+
   useEffect(() => {
-    // Reset both `error` and `loading` at the top of every run (PR #242
-    // review finding 1) — previously `error` was only ever set inside the
-    // `.catch`, never cleared, so one 404 (e.g. switching to an agency
-    // whose DB doesn't have this route_id) latched the error banner
-    // permanently: `if (error || !routeData)` short-circuited every
-    // subsequent successful fetch. `cancelled` guards against a slow
-    // response for a superseded (routeId/agency/...) combination landing
-    // after a newer request already committed its result.
+    // Reset `error` at the top of every run (PR #242 review finding 1) —
+    // previously `error` was only ever set inside the `.catch`, never
+    // cleared, so one 404 (e.g. switching to an agency whose DB doesn't
+    // have this route_id) latched the error banner permanently:
+    // `if (error || !routeData)` short-circuited every subsequent
+    // successful fetch. `cancelled` guards against a slow response for a
+    // superseded (routeId/agency/...) combination landing after a newer
+    // request already committed its result.
     let cancelled = false
     setError(null)
-    setLoading(true)
+    const identityChanged =
+      routeIdentityRef.current.routeId !== routeId || routeIdentityRef.current.agency !== agency
+    routeIdentityRef.current = { routeId, agency }
+    if (identityChanged) {
+      setLoading(true)
+    }
     // `agency` passed explicitly (not left to apiUrl's window.location.search
     // fallback) so this fetch is correct under MemoryRouter in tests too,
     // not just under the real BrowserRouter in production — matches the

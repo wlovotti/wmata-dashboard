@@ -38,6 +38,7 @@ def compute_route_metrics_overlay_for_date(
     service_date: date_type,
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> list[dict]:
     """Compute per-route sufficient statistics for one service_date.
 
@@ -61,6 +62,15 @@ def compute_route_metrics_overlay_for_date(
     The EWT/bunching scheduled side resolves against the EXACT
     `service_date` (NOTES-109, no day_type/modal layer); `day_type`
     (below) is still computed for the output row's descriptive label.
+
+    `agency` (PR #242 round-2 review finding 3) is forwarded to
+    `compute_ewt_headline_for_routes_multi_date`'s cell-hour gate lookup —
+    the other half of the daily batch alongside
+    `src/system_metrics.py:_system_ewt_and_bunching_for_date` (fixed in
+    the same PR's round-1 finding 5): without it, a non-wmata route
+    materialized into `route_metrics_daily_overlay` could inherit WMATA's
+    medium-freq 20-min EWT gate for a same-numbered route_id. Defaults to
+    `"wmata"` so existing callers keep today's behavior.
     """
     day_type = _day_type_for(service_date)
     service_date_iso = service_date.isoformat()
@@ -82,6 +92,7 @@ def compute_route_metrics_overlay_for_date(
         sched_by_date=sched_by_date,
         observed_rows=observed_rows,
         tz_name=tz_name,
+        agency=agency,
     )
     bunching_by_date = compute_bunching_headline_for_routes_multi_date(
         db,
@@ -157,6 +168,7 @@ def upsert_route_metrics_for_date(
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
     completeness_threshold: float | None = None,
+    agency: str = "wmata",
 ) -> int | None:
     """Compute and upsert overlay rows for every route active on `service_date`.
 
@@ -186,6 +198,11 @@ def upsert_route_metrics_for_date(
     — correct for WMATA, but a lower cadence-derived value is required
     for any agency that doesn't poll every feed on every collector tick
     (e.g. SFMTA); see ``src.data_completeness.agency_coverage_threshold``.
+
+    ``agency`` (PR #242 round-2 review finding 3), forwarded to
+    ``compute_route_metrics_overlay_for_date``'s cell-hour gate lookup.
+    Defaults to ``"wmata"``; ``pipelines/upsert_route_metrics_overlay.py``
+    passes its ``--agency`` CLI value through here.
     """
     from src.data_completeness import (
         MIN_COVERAGE_FOR_MATERIALIZATION,
@@ -212,7 +229,7 @@ def upsert_route_metrics_for_date(
 
     try:
         rows = compute_route_metrics_overlay_for_date(
-            db, service_date, gtfs_snapshot_id, tz_name=tz_name
+            db, service_date, gtfs_snapshot_id, tz_name=tz_name, agency=agency
         )
     except Exception as exc:
         print(f"  ✗ Route metrics overlay compute failed for {service_date.isoformat()}: {exc}")
