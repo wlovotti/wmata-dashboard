@@ -180,31 +180,54 @@ def test_agency_param_applied_across_endpoint_family(agency_client, monkeypatch)
 
 
 @pytest.mark.api
-def test_non_wmata_agency_stubs_frequent_and_targets(agency_client, db_session, monkeypatch):
-    """`agency=sfmta` forces `is_frequent=False` / `targets=None` on
-    `/api/routes` and `/api/routes/{route_id}` (NOTES-139 review finding
-    3). `config/frequent_routes.yaml` and `config/route_targets.yaml` are
+def test_non_wmata_agency_uses_agency_aware_route_config(
+    agency_client, db_session, monkeypatch, tmp_path
+):
+    """`agency=sfmta` gets a real agency-aware per-agency config (NOTES-143),
+    replacing the PR #236 stopgap that unconditionally forced
+    `is_frequent=False` / `targets=None` at the API layer.
+
+    `config/frequent_routes.yaml` and `config/route_targets.yaml` are
     WMATA route_id-keyed, and route_ids overlap across agencies (SFMTA
     has its own "1", "9", "14", "90", ...) -- applying them unfiltered to
     a non-wmata request would silently classify e.g. SFMTA's own route
-    "TEST1" using WMATA route TEST1's frequent/target data. That's wrong
-    data, not just missing data, so it's stubbed absent instead until
-    NOTES-143 makes this config agency-aware.
-
-    Monkeypatches the underlying frequent-route and per-route-target
-    lookups to return a truthy value for `TEST1` regardless of agency, so
-    this proves the API layer's override actually fires -- not just that
-    a fresh test route with no config entry happens to read as absent.
+    "TEST1" using WMATA route TEST1's frequent/target data. Points the
+    loaders at temp YAML fixtures (via their env-var overrides, see
+    `src/frequent_routes.py` / `src/route_targets.py`) with `TEST1`
+    classified high-frequency and given a per-route OTP override, then
+    confirms: wmata sees both; sfmta sees neither the frequent
+    designation nor the per-route override, but DOES still get the
+    (agency-agnostic) system-default target rather than `None` --
+    `src/route_targets.py`'s "system-default-only" behavior for
+    non-wmata agencies, a real per-agency answer rather than the old
+    all-or-nothing stub.
     """
-    import api.aggregations as agg
+    import src.frequent_routes as fr_mod
+    import src.route_targets as rt_mod
     from src.models import Route
+
+    freq_yaml = tmp_path / "frequent_routes.yaml"
+    freq_yaml.write_text("high_freq:\n  - TEST1\nmedium_freq: []\n")
+    targets_yaml = tmp_path / "route_targets.yaml"
+    targets_yaml.write_text(
+        "system_default:\n"
+        "  otp: 75.0\n"
+        "  service_delivered: 0.95\n"
+        "  ewt_minutes: 3.0\n"
+        "  bunching_pct: 0.04\n"
+        "routes:\n"
+        "  TEST1:\n"
+        "    otp: 90.0\n"
+    )
+    monkeypatch.setenv("WMATA_FREQUENT_ROUTES_PATH", str(freq_yaml))
+    monkeypatch.setenv("WMATA_ROUTE_TARGETS_PATH", str(targets_yaml))
+    fr_mod.reset_cache_for_tests()
+    rt_mod.reset_cache_for_tests()
 
     db_session.add(Route(route_id="TEST1", route_short_name="TEST1", route_type=3, is_current=True))
     db_session.commit()
 
     monkeypatch.setenv("SFMTA_DATABASE_URL", "postgresql:///unused-not-actually-opened")
-    monkeypatch.setattr(agg, "load_frequent_route_ids", lambda: {"TEST1"})
-    monkeypatch.setattr(agg, "get_targets_for_route", lambda route_id: {"otp": 90.0})
 
     client, _calls = agency_client
 
@@ -221,18 +244,18 @@ def test_non_wmata_agency_stubs_frequent_and_targets(agency_client, db_session, 
     wmata_route = next(r for r in wmata_list.json()["routes"] if r["route_id"] == "TEST1")
     sfmta_route = next(r for r in sfmta_list.json()["routes"] if r["route_id"] == "TEST1")
 
-    # wmata sees the (monkeypatched) real classification/targets...
+    # wmata sees the real classification/per-route override...
     assert wmata_route["is_frequent"] is True
-    assert wmata_route["targets"] == {"otp": 90.0}
+    assert wmata_route["targets"]["otp"] == 90.0
     assert wmata_detail.json()["is_frequent"] is True
-    assert wmata_detail.json()["targets"] == {"otp": 90.0}
+    assert wmata_detail.json()["targets"]["otp"] == 90.0
 
-    # ...but sfmta is forced absent despite the same underlying config
-    # claiming TEST1 is frequent and targeted.
+    # ...sfmta gets no frequent designation and no per-route override,
+    # but still a real (system-default) target -- not `None`.
     assert sfmta_route["is_frequent"] is False
-    assert sfmta_route["targets"] is None
+    assert sfmta_route["targets"]["otp"] == 75.0
     assert sfmta_detail.json()["is_frequent"] is False
-    assert sfmta_detail.json()["targets"] is None
+    assert sfmta_detail.json()["targets"]["otp"] == 75.0
 
 
 @pytest.mark.api

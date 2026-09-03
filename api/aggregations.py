@@ -1577,7 +1577,9 @@ def _empty_deltas() -> dict:
     }
 
 
-def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) -> dict:
+def get_all_routes_scorecard(
+    db: Session, days: int = _SCORECARD_WINDOW_DAYS, agency: str = "wmata"
+) -> dict:
     """
     Get performance scorecard for all routes, pooled over a rolling window.
 
@@ -1601,6 +1603,11 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
         db: Database session
         days: Window length in days (default 7). The window ends on the
             latest service_date with stop_events.
+        agency: Agency name (NOTES-143). Gates `is_frequent` and
+            `targets` — see `src/frequent_routes.py` and
+            `src/route_targets.py` for why a non-wmata agency gets an
+            empty designation / system-default-only targets rather
+            than WMATA's per-route config applied to the wrong routes.
 
     Returns:
         Dict with `window` (with `start`, `end`, `days`) and `routes` (list
@@ -1632,7 +1639,8 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
 
     # WMATA-designated frequent-service routes (NOTES-56). One mtime-cached
     # read of the YAML; the set membership check below is constant-time.
-    frequent_route_ids = load_frequent_route_ids()
+    # Empty for any non-wmata `agency` (NOTES-143).
+    frequent_route_ids = load_frequent_route_ids(agency)
 
     # Period-over-period deltas (NOTES-38) for every metric. Cached separately
     # (60s TTL keyed by Eastern date) so cold-cache cost only hits once per
@@ -1666,7 +1674,7 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
                 # live fields (OTP %, service_delivered fraction, EWT
                 # seconds, bunching fraction). `None` when no target is
                 # configured in `config/route_targets.yaml`.
-                "targets": get_targets_for_route(route.route_id),
+                "targets": get_targets_for_route(route.route_id, agency),
                 # Period-over-period deltas (NOTES-38). Shape per metric:
                 # {value, valid, current_n, prior_n}. `valid=False` means
                 # thin data — don't render an arrow. Sign is raw
@@ -1737,6 +1745,7 @@ def get_route_detail_metrics(
     day_type_filter: str = ALL_DAY_TYPES,
     period_key: str = ALL_HOURS,
     otp_window: str = "official",
+    agency: str = "wmata",
 ) -> dict:
     """
     Get detailed performance metrics for a specific route.
@@ -1779,6 +1788,9 @@ def get_route_detail_metrics(
         period_key: One of `all` / `am_peak` / `midday` / `pm_peak` /
             `evening` / `late`
         otp_window: One of `official` (default) / `rider`.
+        agency: Agency name (NOTES-143). Gates `is_frequent` and
+            `targets` — see `get_all_routes_scorecard` and
+            `src/frequent_routes.py` / `src/route_targets.py`.
 
     Returns:
         Dictionary with detailed route metrics; echoes the active filter
@@ -1854,7 +1866,7 @@ def get_route_detail_metrics(
         # NOTES-56: WMATA-designated frequent-service routes get EWT as
         # the headline KPI on the frontend; standard routes keep OTP.
         # Same source-of-truth as the all-routes scorecard.
-        "is_frequent": route_id in load_frequent_route_ids(),
+        "is_frequent": route_id in load_frequent_route_ids(agency),
         "grade": compute_route_grade(
             live_fields["otp_all_pct"],
             live_fields["service_delivered_ratio"],
@@ -1863,7 +1875,7 @@ def get_route_detail_metrics(
         # Per-route targets (NOTES-47). See `get_all_routes_scorecard`
         # for the shape — keyed by canonical metric name in canonical
         # units. The frontend renders them next to each KPI card.
-        "targets": get_targets_for_route(route_id),
+        "targets": get_targets_for_route(route_id, agency),
         # Period-over-period deltas (NOTES-38). Shape per metric:
         # {value, valid, current_n, prior_n}. `valid=False` means
         # thin data — don't render an arrow. Sign is raw

@@ -107,4 +107,21 @@ describe('CompareStrip', () => {
     expect(screen.getByText(/WMATA/)).toBeVisible()
     expect(screen.getByText(/SFMTA \(Muni\)/)).toBeVisible()
   })
+
+  // NOTES-143: /compare (and its hero teaser) is deliberately
+  // agency-independent — it renders both agencies side by side, so its
+  // fetch must never carry `?agency=`, even when the rest of the app is
+  // currently viewing Muni. CompareStrip fetches a hardcoded URL rather
+  // than routing through `apiUrl` for exactly this reason.
+  test('never sends agency, even when the current URL has ?agency=sfmta', async () => {
+    mockFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) }))
+    render(
+      <MemoryRouter initialEntries={['/?agency=sfmta']}>
+        <CompareStrip />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText(/WMATA/)).toBeVisible())
+    // useMultiFetch calls `fetch(url, { signal })` — check the URL arg only.
+    expect(fetch.mock.calls[0][0]).toBe('/api/agency-comparison')
+  })
 })

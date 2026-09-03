@@ -4,12 +4,9 @@ import { MapContainer, TileLayer, Polyline, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { routeLineColor } from '../utils/mapColors'
 import useMultiFetch from '../hooks/useMultiFetch'
-
-// Stable module-level array (PR #218 finding 4) — useMultiFetch's
-// documented contract asks callers to memoize the `urls` array rather than
-// pass a fresh literal every render; this URL never depends on props, so
-// hoisting it out of the component is the simplest way to honor that.
-const SHAPES_URLS = ['/api/shapes']
+import useAgency from '../hooks/useAgency'
+import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import { apiUrl } from '../utils/apiUrl'
 
 /**
  * Fit the map viewport to the full network extent once bounds are known —
@@ -65,10 +62,15 @@ export function FitBounds({ bounds }) {
  */
 function SystemMap({ scorecardRoutes }) {
   const navigate = useNavigate()
+  const [agency] = useAgency()
+  // Memoized on `agency` (NOTES-143) so the URL array recomputes on an
+  // agency switch instead of replaying the previous agency's shapes —
+  // `useMultiFetch`'s documented contract asks callers to memoize `urls`.
+  const shapesUrls = useMemo(() => [apiUrl('/api/shapes', { agency })], [agency])
   const {
     data: shapes,
     error,
-  } = useMultiFetch(SHAPES_URLS, ([json]) => json?.routes ?? [])
+  } = useMultiFetch(shapesUrls, ([json]) => json?.routes ?? [])
 
   const byRouteId = useMemo(
     () => new Map((scorecardRoutes || []).map((r) => [r.route_id, r])),
@@ -135,7 +137,12 @@ function SystemMap({ scorecardRoutes }) {
               weight: 3,
               opacity: 0.85,
             }}
-            eventHandlers={{ click: () => navigate(`/route/${route.route_id}`) }}
+            eventHandlers={{
+              click: () =>
+                navigate(
+                  appendWindowParam(`/route/${route.route_id}`, DEFAULT_WINDOW_DAYS, agency),
+                ),
+            }}
           />
         ))}
         {bounds.length > 0 && <FitBounds bounds={bounds} />}

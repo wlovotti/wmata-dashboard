@@ -3,6 +3,9 @@ import { Link, useSearchParams } from 'react-router-dom'
 
 import CorridorMap from './CorridorMap.jsx'
 import ErrorState from './ErrorState.jsx'
+import useAgency from '../hooks/useAgency'
+import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import { apiUrl } from '../utils/apiUrl'
 
 /**
  * Format a signed seconds value as `±M:SS` for slip display.
@@ -75,6 +78,7 @@ const PERIOD_OPTIONS = [
  * @returns {JSX.Element}
  */
 function ContributingRoutesPanel({ routes }) {
+  const [agency] = useAgency()
   if (!routes || routes.length === 0) {
     return (
       <div className="segment-drilldown-card">
@@ -101,7 +105,7 @@ function ContributingRoutesPanel({ routes }) {
             <tr key={`${r.route_id}-${r.direction_id}-${idx}`}>
               <td>
                 <Link
-                  to={`/route/${r.route_id}`}
+                  to={appendWindowParam(`/route/${r.route_id}`, DEFAULT_WINDOW_DAYS, agency)}
                   className="segment-route-pill"
                   style={{ textDecoration: 'none' }}
                 >
@@ -140,6 +144,7 @@ function ContributingRoutesPanel({ routes }) {
  * @returns {JSX.Element}
  */
 function CorridorMembershipPanel({ routes }) {
+  const [agency] = useAgency()
   if (!routes || routes.length === 0) {
     return (
       <div className="segment-drilldown-card">
@@ -167,7 +172,7 @@ function CorridorMembershipPanel({ routes }) {
             <tr key={`${r.route_id}-${r.direction_id}`}>
               <td>
                 <Link
-                  to={`/route/${r.route_id}`}
+                  to={appendWindowParam(`/route/${r.route_id}`, DEFAULT_WINDOW_DAYS, agency)}
                   className="segment-route-pill"
                   style={{ textDecoration: 'none' }}
                 >
@@ -203,12 +208,13 @@ function CorridorExpansion({ corridor, period }) {
   const routeShortNames = corridor.route_set ? corridor.route_set.split(',') : []
   const [constituents, setConstituents] = useState(null)
   const [constituentsErr, setConstituentsErr] = useState(null)
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
     setConstituents(null)
     setConstituentsErr(null)
-    fetch(`/api/corridors/${corridor.corridor_id}/segments?period=${period}`)
+    fetch(apiUrl(`/api/corridors/${corridor.corridor_id}/segments`, { period }))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) setConstituents(json.segments || [])
@@ -219,7 +225,7 @@ function CorridorExpansion({ corridor, period }) {
     return () => {
       cancelled = true
     }
-  }, [corridor.corridor_id, period])
+  }, [corridor.corridor_id, period, agency])
 
   return (
     <div className="corridor-expansion">
@@ -259,6 +265,7 @@ function CorridorExpansion({ corridor, period }) {
  * @returns {JSX.Element}
  */
 function CorridorConstituentSegments({ segments, error }) {
+  const [agency] = useAgency()
   return (
     <div className="corridor-constituent-segments">
       <h4>Constituent stop-pairs</h4>
@@ -294,7 +301,7 @@ function CorridorConstituentSegments({ segments, error }) {
               >
                 <td>
                   <Link
-                    to={`/route/${s.route_id}`}
+                    to={appendWindowParam(`/route/${s.route_id}`, DEFAULT_WINDOW_DAYS, agency)}
                     className="segment-route-pill"
                     style={{ textDecoration: 'none' }}
                   >
@@ -341,6 +348,7 @@ function CorridorConstituentSegments({ segments, error }) {
  * Click any row to expand the per-route drilldown panel.
  */
 function SegmentDiagnostic() {
+  const [agency] = useAgency()
   const [searchParams, setSearchParams] = useSearchParams()
   const level = searchParams.get('level') === 'corridor' ? 'corridor' : 'segment'
   const period = searchParams.get('period') || 'all'
@@ -373,11 +381,7 @@ function SegmentDiagnostic() {
     setLoading(true)
     setError(null)
     setExpandedIdx(null)
-    const params = new URLSearchParams()
-    params.set('level', level)
-    params.set('period', period)
-    params.set('limit', String(limit))
-    fetch(`/api/segments?${params.toString()}`)
+    fetch(apiUrl('/api/segments', { level, period, limit }))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -394,7 +398,7 @@ function SegmentDiagnostic() {
     return () => {
       cancelled = true
     }
-  }, [level, period, limit, retryTick])
+  }, [level, period, limit, retryTick, agency])
 
   const segments = useMemo(() => data?.segments || [], [data])
   const corridors = useMemo(() => {

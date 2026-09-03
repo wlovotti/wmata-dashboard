@@ -10,8 +10,20 @@
  * guard on `data.narrative` being non-empty instead.
  */
 import { render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { vi } from 'vitest'
 import SystemWeeklyNarrativeLede from '../../src/components/SystemWeeklyNarrativeLede'
+
+// NOTES-143: the component now reads the current agency (`useAgency`,
+// which needs Router context for `useSearchParams`) to build its fetch
+// URL, so every render below needs a MemoryRouter ancestor.
+function renderLede() {
+  return render(
+    <MemoryRouter>
+      <SystemWeeklyNarrativeLede />
+    </MemoryRouter>,
+  )
+}
 
 const payload = {
   as_of_date: '2026-08-16',
@@ -31,14 +43,14 @@ afterEach(() => vi.unstubAllGlobals())
 describe('SystemWeeklyNarrativeLede', () => {
   test('renders nothing on 404 / no data', async () => {
     mockFetch(() => Promise.resolve({ ok: false, json: () => Promise.resolve(null) }))
-    const { container } = render(<SystemWeeklyNarrativeLede />)
+    const { container } = renderLede()
     await waitFor(() => expect(fetch).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
   })
 
   test('renders nothing on fetch failure', async () => {
     mockFetch(() => Promise.reject(new Error('down')))
-    const { container } = render(<SystemWeeklyNarrativeLede />)
+    const { container } = renderLede()
     await waitFor(() => expect(fetch).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
   })
@@ -47,7 +59,7 @@ describe('SystemWeeklyNarrativeLede', () => {
     mockFetch(() =>
       Promise.resolve({ ok: true, json: () => Promise.resolve({ ...payload, narrative: '' }) }),
     )
-    const { container } = render(<SystemWeeklyNarrativeLede />)
+    const { container } = renderLede()
     await waitFor(() => expect(fetch).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
   })
@@ -59,14 +71,14 @@ describe('SystemWeeklyNarrativeLede', () => {
         json: () => Promise.resolve({ ...payload, narrative: '   \n  ' }),
       }),
     )
-    const { container } = render(<SystemWeeklyNarrativeLede />)
+    const { container } = renderLede()
     await waitFor(() => expect(fetch).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
   })
 
   test('renders the narrative and meta line when present', async () => {
     mockFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) }))
-    render(<SystemWeeklyNarrativeLede />)
+    renderLede()
     await waitFor(() => expect(screen.getByText(payload.narrative)).toBeVisible())
     expect(screen.getByText(/week ending 2026-08-16/i)).toBeVisible()
     expect(screen.getByText(/claude-sonnet-4-6/)).toBeVisible()
@@ -77,7 +89,7 @@ describe('SystemWeeklyNarrativeLede', () => {
     mockFetch(() =>
       Promise.resolve({ ok: true, json: () => Promise.resolve({ ...payload, is_stale: true }) }),
     )
-    render(<SystemWeeklyNarrativeLede />)
+    renderLede()
     await waitFor(() => expect(screen.getByText(/may be out of date/i)).toBeVisible())
   })
 })

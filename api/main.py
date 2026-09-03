@@ -196,9 +196,17 @@ def _warm_scorecard_cache_sync():
     """Compute the windowed scorecard once so the first user request finds a warm cache.
 
     Runs in a background thread at app startup. The cold compute is ~30-40s
-    (7 days × per-date EWT/bunching/SD/OTP); paying it once at boot beats
-    making the first user wait. Subsequent requests within the 1-hour
-    per-date TTL hit dict-lookup speed.
+    per window (7 days x per-date EWT/bunching/SD/OTP); paying it once at
+    boot beats making the first user wait. Subsequent requests within the
+    1-hour per-date TTL hit dict-lookup speed.
+
+    Warms both the 7-day and 30-day windows for wmata (NOTES-143): the
+    frontend's default window moved to 30 days (PR #239), so warming only
+    7 would leave every first 30-day request -- the common case now --
+    paying the cold-compute cost anyway. Deliberately does NOT warm sfmta:
+    it's a secondary agency with much lighter traffic, so pre-warming it
+    would roughly double the startup warm-up cost for a page that's
+    rarely the first hit.
     """
     try:
         db = get_session()
@@ -208,9 +216,10 @@ def _warm_scorecard_cache_sync():
                 logger.info("Scorecard warm-up skipped: no derived stop_events yet")
                 return
             get_live_metrics_for_window(db, end_date, 7)
+            get_live_metrics_for_window(db, end_date, 30)
             get_system_shapes(db)
             logger.info("System shapes cache warmed")
-            logger.info("Scorecard cache warmed for window ending %s", end_date)
+            logger.info("Scorecard cache warmed for window ending %s (7d + 30d)", end_date)
         finally:
             db.close()
     except Exception:
@@ -435,20 +444,13 @@ async def get_routes(
         days = 30
     db = _session_for_agency(agency)
     try:
-        result = get_all_routes_scorecard(db, days=days)
-        if agency != "wmata":
-            # `config/frequent_routes.yaml` and `config/route_targets.yaml`
-            # are keyed by WMATA route_id, and route_ids overlap across
-            # agencies (SFMTA has its own "1", "9", "14", "90", ...). Left
-            # alone, a non-wmata agency would get WMATA's classification
-            # and targets applied to the WRONG routes -- wrong data, not
-            # just absent data -- and `is_frequent` drives the EWT-vs-OTP
-            # headline choice on the frontend. Stopgap until this config
-            # is made agency-aware (NOTES-143): force both absent here.
-            for route in result.get("routes", []):
-                route["is_frequent"] = False
-                route["targets"] = None
-        return result
+        # `is_frequent` / `targets` are agency-aware inside the scorecard
+        # builder itself (NOTES-143, the agency switch UI PR) — a non-wmata
+        # agency gets an empty frequent-route designation and system-
+        # default-only targets rather than WMATA's per-route config
+        # applied to the wrong routes. See `src/frequent_routes.py` /
+        # `src/route_targets.py`.
+        return get_all_routes_scorecard(db, days=days, agency=agency)
     finally:
         db.close()
 
@@ -569,6 +571,9 @@ async def get_route(
 
     db = _session_for_agency(agency)
     try:
+        # `is_frequent` / `targets` are agency-aware inside the metrics
+        # builder itself (NOTES-143) — see the matching comment in
+        # `get_routes` above.
         result = get_route_detail_metrics(
             db,
             route_id,
@@ -576,16 +581,10 @@ async def get_route(
             day_type_filter=day_type,
             period_key=period,
             otp_window=otp_window,
+            agency=agency,
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
-        if agency != "wmata":
-            # See the matching comment in `get_routes` above: frequent-route
-            # and per-route-target config are WMATA route_id-keyed and
-            # route_ids overlap across agencies, so this stays a stopgap
-            # absence rather than a (wrong) computed value until NOTES-143.
-            result["is_frequent"] = False
-            result["targets"] = None
         return result
     finally:
         db.close()
@@ -821,9 +820,20 @@ def _open_agency_sessions(agency_names: list[str]) -> dict:
 
 
 @app.get("/api/agency-comparison")
-async def get_agency_comparison_endpoint():
+def get_agency_comparison_endpoint():
     """
     Agency comparison page data (PR #198 -- "the north star").
+
+    Plain `def`, not `async def` (NOTES-143 review): the handler body
+    (`_open_agency_sessions` + `get_agency_comparison_data`) is a
+    synchronous, CPU/DB-bound aggregation across two agencies' databases
+    with no `await` anywhere in it. FastAPI/Starlette runs a plain `def`
+    endpoint in a worker threadpool automatically; an `async def` with a
+    blocking body instead runs straight on the single event loop thread,
+    so this call's ~seconds-long aggregation would stall every other
+    in-flight request on the server for its duration. `async def` was
+    the wrong shape from PR #198 -- this endpoint never awaited
+    anything.
 
     Headline OTP / service-delivered / scheduled wait (SWT) / EWT /
     bunching for WMATA and SFMTA side by side over the matched window

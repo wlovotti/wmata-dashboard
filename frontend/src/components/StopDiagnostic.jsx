@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import useUrlState from '../hooks/useUrlState'
 import useWindowDays from '../hooks/useWindowDays'
+import useAgency from '../hooks/useAgency'
+import { apiUrl } from '../utils/apiUrl'
 
 // Stop-level diagnostic strip chart (NOTES-40).
 //
@@ -94,7 +96,7 @@ const DIRECTION_OPTIONS = [
   { key: '1', label: 'Direction 1' },
 ]
 
-function StopDiagnostic({ routeId, dayType, period }) {
+function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -115,19 +117,23 @@ function StopDiagnostic({ routeId, dayType, period }) {
   const effectiveDirectionParam = directionId == null ? 'all' : directionParam
   // Time-window picker (NOTES-140): the `/stops` endpoint accepts `days`.
   const [days] = useWindowDays()
+  const [agency] = useAgency()
   const [hoveredStop, setHoveredStop] = useState(null)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    const params = new URLSearchParams()
-    if (dayType !== 'all') params.set('day_type', dayType)
-    if (period !== 'all') params.set('period', period)
-    if (directionId != null) params.set('direction_id', String(directionId))
-    params.set('days', String(days))
-    const qs = params.toString()
-    const url = `/api/routes/${routeId}/stops${qs ? `?${qs}` : ''}`
+    const params = {}
+    if (dayType !== 'all') params.day_type = dayType
+    if (period !== 'all') params.period = period
+    if (directionId != null) params.direction_id = String(directionId)
+    params.days = String(days)
+    // Rider-experience OTP toggle (NOTES-143): only sent when non-default
+    // so the request/response shape stays identical to today for the
+    // official window.
+    if (otpWindow === 'rider') params.otp_window = otpWindow
+    const url = apiUrl(`/api/routes/${routeId}/stops`, params)
     fetch(url)
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
@@ -145,7 +151,7 @@ function StopDiagnostic({ routeId, dayType, period }) {
     return () => {
       cancelled = true
     }
-  }, [routeId, dayType, period, directionId, days])
+  }, [routeId, dayType, period, directionId, days, agency, otpWindow])
 
   // Group rows by direction so each direction renders as its own strip.
   const stopsByDirection = useMemo(() => {

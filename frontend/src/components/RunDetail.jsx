@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import ErrorState from './ErrorState.jsx'
+import { apiUrl } from '../utils/apiUrl'
+import useAgency from '../hooks/useAgency'
 import {
   LineChart,
   Line,
@@ -60,12 +62,13 @@ function RunDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [retryTick, setRetryTick] = useState(0)
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/runs/${runId}/deviations`)
+    fetch(apiUrl(`/api/runs/${runId}/deviations`))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -82,7 +85,7 @@ function RunDetail() {
     return () => {
       cancelled = true
     }
-  }, [runId, retryTick])
+  }, [runId, retryTick, agency])
 
   const backToRoute = () => {
     if (data?.route_id) {

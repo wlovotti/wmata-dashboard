@@ -169,30 +169,54 @@ class _FrequentRoutesCache:
 _CACHE = _FrequentRoutesCache()
 
 
-def load_high_freq_route_ids() -> frozenset[str]:
-    """Return the set of WMATA-designated high-frequency `route_id`s (≤ 12 min)."""
+def load_high_freq_route_ids(agency: str = "wmata") -> frozenset[str]:
+    """Return the set of WMATA-designated high-frequency `route_id`s (≤ 12 min).
+
+    `agency` gates the whole designation (NOTES-143): `config/
+    frequent_routes.yaml` is keyed by WMATA `route_id`, and route_ids
+    overlap across agencies (SFMTA has its own "1", "9", "14", ...), so
+    applying it to a non-wmata agency would misclassify a same-numbered
+    SFMTA route using WMATA's designation. Any `agency` other than
+    `"wmata"` short-circuits to an empty set without touching the file.
+    """
+    if agency != "wmata":
+        return frozenset()
     return _CACHE.get_high_freq(_config_path_for_env())
 
 
-def load_medium_freq_route_ids() -> frozenset[str]:
-    """Return the set of WMATA-designated medium-frequency `route_id`s (≤ 20 min)."""
+def load_medium_freq_route_ids(agency: str = "wmata") -> frozenset[str]:
+    """Return the set of WMATA-designated medium-frequency `route_id`s (≤ 20 min).
+
+    See `load_high_freq_route_ids` for why `agency` gates this to
+    `"wmata"` only.
+    """
+    if agency != "wmata":
+        return frozenset()
     return _CACHE.get_medium_freq(_config_path_for_env())
 
 
-def load_frequent_route_ids() -> frozenset[str]:
+def load_frequent_route_ids(agency: str = "wmata") -> frozenset[str]:
     """Return the union of high-freq + medium-freq designated `route_id`s.
 
     This is the "is this route on WMATA's frequent map at all?" answer
     callers want for headline-KPI selection. Returns an empty frozenset
     when the file is missing or malformed so `is_frequent` falls back
-    to `False` for every route rather than 500'ing the API.
+    to `False` for every route rather than 500'ing the API. Also empty
+    for any `agency` other than `"wmata"` (NOTES-143) — see
+    `load_high_freq_route_ids`.
     """
-    return load_high_freq_route_ids() | load_medium_freq_route_ids()
+    if agency != "wmata":
+        return frozenset()
+    return load_high_freq_route_ids(agency) | load_medium_freq_route_ids(agency)
 
 
-def is_frequent_route(route_id: str) -> bool:
-    """Return True iff `route_id` is on WMATA's frequent-service map (either tier)."""
-    return route_id in load_frequent_route_ids()
+def is_frequent_route(route_id: str, agency: str = "wmata") -> bool:
+    """Return True iff `route_id` is on WMATA's frequent-service map (either tier).
+
+    Always `False` for a non-`"wmata"` `agency` — see
+    `load_high_freq_route_ids`.
+    """
+    return route_id in load_frequent_route_ids(agency)
 
 
 def get_cell_hour_gate_sec(route_id: str) -> int:

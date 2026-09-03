@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import useAgency from '../hooks/useAgency'
+import { apiUrl } from '../utils/apiUrl'
 
 /**
  * Overview lede — cached LLM narrative summarizing the most recent week of
@@ -22,10 +24,11 @@ import { useEffect, useState } from 'react'
  */
 function SystemWeeklyNarrativeLede() {
   const [data, setData] = useState(null)
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/system/weekly-narrative')
+    fetch(apiUrl('/api/system/weekly-narrative'))
       .then((res) => (res.ok ? res.json() : null))
       .then((json) => {
         if (!cancelled) setData(json)
@@ -39,7 +42,7 @@ function SystemWeeklyNarrativeLede() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [agency])
 
   // Guard on the narrative text itself, not just the presence of a `data`
   // object -- a cached row with an empty/whitespace-only `narrative` (e.g.

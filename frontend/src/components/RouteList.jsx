@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { computeSpectrumBar } from '../utils/spectrumBar'
@@ -8,17 +8,21 @@ import useGtfsFreshness from '../hooks/useGtfsFreshness'
 import { getMoversFloor } from '../moversFloor'
 import useUrlState from '../hooks/useUrlState'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
+import useAgency, { DEFAULT_AGENCY } from '../hooks/useAgency'
+import { apiUrl } from '../utils/apiUrl'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
 // in the background. The API itself is also cached server-side (60s TTL),
-// so the background fetch is cheap when warm. Keyed by `days` (NOTES-140):
-// a cache entry from one window is not a valid stand-in for another, so a
-// window switch is treated as a cache miss (`_cachedDays !== days` below)
-// rather than briefly rendering the wrong window's numbers.
+// so the background fetch is cheap when warm. Keyed by `days` AND `agency`
+// (NOTES-140, NOTES-143): a cache entry from one window/agency is not a
+// valid stand-in for another, so a window or agency switch is treated as a
+// cache miss (`_cachedDays !== days || _cachedAgency !== agency` below)
+// rather than briefly rendering the wrong window/agency's numbers.
 let _cachedRoutes = null
 let _cachedWindow = null
 let _cachedDays = null
+let _cachedAgency = null
 
 // Inline target subline for the scorecard table cells (NOTES-47).
 // `current` and `target` should already be in the same units the cell
@@ -211,18 +215,25 @@ function encodeSort(key, direction) {
 function RouteList() {
   const navigate = useNavigate()
   const [days] = useWindowDays()
-  const [routes, setRoutes] = useState(_cachedDays === days ? (_cachedRoutes ?? []) : [])
-  const [scorecardWindow, setScorecardWindow] = useState(
-    _cachedDays === days ? _cachedWindow : null,
-  )
-  const [loading, setLoading] = useState(_cachedDays !== days || _cachedRoutes === null)
+  const [agency] = useAgency()
+  // Per-route targets/frequent-designation aren't available for a non-
+  // wmata agency (NOTES-143) — the backend still returns system-default
+  // targets (never `None`) so contributors/other panels keep working, but
+  // this table hides the target column / spectrum bar / "Freq" semantics
+  // entirely rather than showing WMATA's own system-default numbers next
+  // to Muni routes as if they were configured for Muni.
+  const showTargets = agency === DEFAULT_AGENCY
+  const cacheIsCurrent = _cachedDays === days && _cachedAgency === agency
+  const [routes, setRoutes] = useState(cacheIsCurrent ? (_cachedRoutes ?? []) : [])
+  const [scorecardWindow, setScorecardWindow] = useState(cacheIsCurrent ? _cachedWindow : null)
+  const [loading, setLoading] = useState(!cacheIsCurrent || _cachedRoutes === null)
   const [error, setError] = useState(null)
   // Search/sort/view/metric are URL state (NOTES-140) so a linked/back-
   // button view reproduces exactly what the user was looking at.
   const [searchTerm, setSearchTerm] = useUrlState('q', '')
   const [sortRaw, setSortRaw] = useUrlState('sort', DEFAULT_SORT)
   const sortConfig = parseSort(sortRaw)
-  const gtfsFreshness = useGtfsFreshness()
+  const gtfsFreshness = useGtfsFreshness(undefined, agency)
   // Mode toggle: 'contributors' (NOTES-39, default after NOTES-51) vs
   // 'default' (full alphabetic scorecard table, now collapsed behind a
   // <details> disclosure). Clicking the "Default" toggle still flips the
@@ -250,32 +261,40 @@ function RouteList() {
   // (faster) response land first. Passing `null` opts a caller (manual
   // refresh) out of the guard entirely, since a lone in-flight request has
   // nothing else in the same window to be superseded by.
-  const fetchRoutes = (requestedDays, guard) => {
-    return fetch(`/api/routes?days=${requestedDays}`)
-      .then(res => {
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`)
-        }
-        return res.json()
-      })
-      .then(data => {
-        if (guard && guard.ignored) return
-        // Response shape: `{window: {start, end, days}, routes: [...]}`. The
-        // window block lets us label the pooled date range under the heading.
-        const routesList = data.routes ?? []
-        const window = data.window ?? null
-        setRoutes(routesList)
-        setScorecardWindow(window)
-        _cachedRoutes = routesList
-        _cachedWindow = window
-        _cachedDays = requestedDays
-        setError(null)
-      })
-      .catch(err => {
-        if (guard && guard.ignored) return
-        setError(err.message)
-      })
-  }
+  // Wrapped in useCallback (stable identity keyed on `agency`) so the
+  // effects below can list it as a real dependency instead of eslint
+  // flagging a missing one — `fetchRoutes` closes over `agency` (to stamp
+  // `_cachedAgency`), so its identity must change when `agency` does.
+  const fetchRoutes = useCallback(
+    (requestedDays, guard) => {
+      return fetch(apiUrl('/api/routes', { days: requestedDays, agency }))
+        .then(res => {
+          if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`)
+          }
+          return res.json()
+        })
+        .then(data => {
+          if (guard && guard.ignored) return
+          // Response shape: `{window: {start, end, days}, routes: [...]}`. The
+          // window block lets us label the pooled date range under the heading.
+          const routesList = data.routes ?? []
+          const window = data.window ?? null
+          setRoutes(routesList)
+          setScorecardWindow(window)
+          _cachedRoutes = routesList
+          _cachedWindow = window
+          _cachedDays = requestedDays
+          _cachedAgency = agency
+          setError(null)
+        })
+        .catch(err => {
+          if (guard && guard.ignored) return
+          setError(err.message)
+        })
+    },
+    [agency],
+  )
 
   // Tracks the guard object owned by the currently-active `days` effect run
   // below, so `handleRefresh`'s manual retry (PR #239 delta review finding
@@ -288,21 +307,21 @@ function RouteList() {
   useEffect(() => {
     const guard = { ignored: false }
     activeGuardRef.current = guard
-    // Only show the full-page spinner when this window isn't already
-    // cached (PR #239 delta review finding 2) — an unconditional
+    // Only show the full-page spinner when this window/agency isn't
+    // already cached (PR #239 delta review finding 2) — an unconditional
     // `setLoading(true)` here defeated the stale-while-revalidate lazy
-    // `useState` init above: remounting at a window that's already in the
-    // module cache (e.g. navigating back to /routes) would spinner-block
-    // instead of rendering the cached rows immediately while this effect's
-    // fetch revalidates them in the background.
-    setLoading(_cachedDays !== days || _cachedRoutes === null)
+    // `useState` init above: remounting at a window/agency that's already
+    // in the module cache (e.g. navigating back to /routes) would
+    // spinner-block instead of rendering the cached rows immediately while
+    // this effect's fetch revalidates them in the background.
+    setLoading(_cachedDays !== days || _cachedAgency !== agency || _cachedRoutes === null)
     fetchRoutes(days, guard).finally(() => {
       if (!guard.ignored) setLoading(false)
     })
     return () => {
       guard.ignored = true
     }
-  }, [days])
+  }, [days, agency, fetchRoutes])
 
   // Fetch contributors only while the contributors mode is selected, and
   // refetch when the metric or window changes. Pure additive — never blocks
@@ -314,7 +333,7 @@ function RouteList() {
     const guard = { ignored: false }
     setContribLoading(true)
     setContribError(null)
-    fetch(`/api/routes/contributors?metric=${contribMetric}&days=${days}`)
+    fetch(apiUrl('/api/routes/contributors', { metric: contribMetric, days }))
       .then(res => {
         if (!res.ok) {
           throw new Error(`HTTP error! status: ${res.status}`)
@@ -335,7 +354,7 @@ function RouteList() {
     return () => {
       guard.ignored = true
     }
-  }, [viewMode, contribMetric, days])
+  }, [viewMode, contribMetric, days, agency])
 
   // Manual refresh (the error banner's "Try Again" button). Shares the
   // current `days` effect's guard (PR #239 delta review finding 3) so a
@@ -360,7 +379,8 @@ function RouteList() {
   // latch `showLoadingState` true forever — `_cachedDays` can never catch
   // up to `days` — permanently hiding the error banner and its "Try
   // Again" button behind an infinite "Loading routes…" spinner.
-  const showLoadingState = loading || (_cachedDays !== days && !error)
+  const showLoadingState =
+    loading || ((_cachedDays !== days || _cachedAgency !== agency) && !error)
 
   // Filter and sort routes
   const filteredAndSortedRoutes = routes
@@ -401,8 +421,16 @@ function RouteList() {
     return sortConfig.direction === 'asc' ? '↑' : '↓'
   }
 
+  // Per-route targets are hidden entirely for a non-wmata agency
+  // (NOTES-143) — see `showTargets` above. Centralizes the
+  // `showTargets ? ... : null` gate so every SpectrumBar/TargetSubline
+  // call site below stays a one-liner; `metric` is the canonical key
+  // (`otp` / `service_delivered` / `ewt` / `bunching`) in `route.targets`'
+  // own units (see `src/route_targets.py`'s canonical-units contract).
+  const routeTarget = (route, metric) => (showTargets ? route.targets?.[metric] : null)
+
   const handleRouteClick = (routeId) => {
-    navigate(appendWindowParam(`/route/${routeId}`, days))
+    navigate(appendWindowParam(`/route/${routeId}`, days, agency))
   }
 
   // NOTES-51: the lifted search input applies to both views. Filter
@@ -468,6 +496,13 @@ function RouteList() {
             </p>
           )
         })()}
+        {!showTargets && (
+          <p className="scorecard-window-note" style={{ color: '#94a3b8' }}>
+            Frequent-route designation and per-route targets aren&apos;t
+            configured for this agency yet — no &quot;Freq&quot; badge and no
+            target column below.
+          </p>
+        )}
 
         {/* NOTES-51: search lifted above both views so name lookup is one
             keystroke regardless of which mode is active. The same
@@ -626,7 +661,9 @@ function RouteList() {
                       return (
                         <tr
                           key={c.route_id}
-                          onClick={() => navigate(appendWindowParam(`/route/${c.route_id}`, days))}
+                          onClick={() =>
+                            navigate(appendWindowParam(`/route/${c.route_id}`, days, agency))
+                          }
                           style={{ cursor: 'pointer' }}
                         >
                           <td>{idx + 1}</td>
@@ -816,12 +853,12 @@ function RouteList() {
                   )}
                   <SpectrumBar
                     current={route.otp_all_pct}
-                    target={route.targets?.otp}
+                    target={routeTarget(route, 'otp')}
                     higherIsBetter
                   />
                   <TargetSubline
                     current={route.otp_all_pct}
-                    target={route.targets?.otp}
+                    target={routeTarget(route, 'otp')}
                     higherIsBetter
                     format={(t) => `${t.toFixed(0)}%`}
                   />
@@ -843,8 +880,8 @@ function RouteList() {
                         : null
                     }
                     target={
-                      route.targets?.service_delivered != null
-                        ? route.targets.service_delivered * 100
+                      routeTarget(route, 'service_delivered') != null
+                        ? routeTarget(route, 'service_delivered') * 100
                         : null
                     }
                     higherIsBetter
@@ -856,8 +893,8 @@ function RouteList() {
                         : null
                     }
                     target={
-                      route.targets?.service_delivered != null
-                        ? route.targets.service_delivered * 100
+                      routeTarget(route, 'service_delivered') != null
+                        ? routeTarget(route, 'service_delivered') * 100
                         : null
                     }
                     higherIsBetter
@@ -888,12 +925,12 @@ function RouteList() {
                   )}
                   <SpectrumBar
                     current={route.ewt_seconds}
-                    target={route.targets?.ewt}
+                    target={routeTarget(route, 'ewt')}
                     higherIsBetter={false}
                   />
                   <TargetSubline
                     current={route.ewt_seconds}
-                    target={route.targets?.ewt}
+                    target={routeTarget(route, 'ewt')}
                     higherIsBetter={false}
                     format={(t) => `${(t / 60).toFixed(1)}m`}
                   />
@@ -923,8 +960,8 @@ function RouteList() {
                         : null
                     }
                     target={
-                      route.targets?.bunching != null
-                        ? route.targets.bunching * 100
+                      routeTarget(route, 'bunching') != null
+                        ? routeTarget(route, 'bunching') * 100
                         : null
                     }
                     higherIsBetter={false}
@@ -936,8 +973,8 @@ function RouteList() {
                         : null
                     }
                     target={
-                      route.targets?.bunching != null
-                        ? route.targets.bunching * 100
+                      routeTarget(route, 'bunching') != null
+                        ? routeTarget(route, 'bunching') * 100
                         : null
                     }
                     higherIsBetter={false}

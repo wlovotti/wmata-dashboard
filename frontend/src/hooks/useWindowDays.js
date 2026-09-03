@@ -1,4 +1,5 @@
 import useUrlState from './useUrlState'
+import { DEFAULT_AGENCY } from './useAgency'
 
 // Time-window picker (NOTES-140, wave 1 of the 2026-09 UX program). `?days=`
 // on the URL is the single source of truth for "how far back" every page's
@@ -47,20 +48,33 @@ export function useWindowDays() {
 }
 
 /**
- * Append the current `days` window to a path as a query param, omitting it
- * when `days` is the default (30) so unfiltered URLs stay clean. Used by
- * the shell's primary nav and by row-click navigation into RouteDetail, so
- * the selected window survives navigation instead of silently reverting to
- * the default on the next page.
+ * Append the current `days` window and `agency` selection to a path as
+ * query params, omitting each when it's at its default (30 / `wmata`) so
+ * unfiltered URLs stay clean. Used by the shell's primary nav and by
+ * row-click navigation into RouteDetail, so both selections survive
+ * navigation instead of silently reverting to the default on the next
+ * page (NOTES-143 generalized this from `days`-only to `days` + `agency`
+ * — every nav/in-table link that carried `days` now also carries
+ * `agency`, with the deliberate exception of the `/compare` nav link,
+ * which stays agency-independent — see `App.jsx`).
  *
  * @param {string} path - A path, optionally already carrying a query string.
  * @param {number} days - The current window selection.
- * @returns {string} `path`, with `days=<days>` appended when non-default.
+ * @param {string} [agency] - The current agency selection. Omitted
+ *   entirely (not just left at the default) by callers that intend the
+ *   link to stay agency-independent.
+ * @returns {string} `path`, with `days=<days>` and/or `agency=<agency>`
+ *   appended when non-default.
  */
-export function appendWindowParam(path, days) {
-  if (days === DEFAULT_WINDOW_DAYS) return path
+export function appendWindowParam(path, days, agency) {
+  const parts = []
+  if (days !== DEFAULT_WINDOW_DAYS) parts.push(`days=${days}`)
+  if (agency != null && agency !== DEFAULT_AGENCY) {
+    parts.push(`agency=${encodeURIComponent(agency)}`)
+  }
+  if (parts.length === 0) return path
   const separator = path.includes('?') ? '&' : '?'
-  return `${path}${separator}days=${days}`
+  return `${path}${separator}${parts.join('&')}`
 }
 
 export default useWindowDays

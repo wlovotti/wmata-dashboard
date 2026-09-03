@@ -14,7 +14,9 @@ import DiagnosticsIndex from './components/DiagnosticsIndex'
 import useGtfsFreshness from './hooks/useGtfsFreshness'
 import { clearFetchCache } from './hooks/fetchCache'
 import useWindowDays, { appendWindowParam } from './hooks/useWindowDays'
+import useAgency, { DEFAULT_AGENCY } from './hooks/useAgency'
 import WindowPicker from './components/WindowPicker'
+import AgencyToggle from './components/AgencyToggle'
 import './App.css'
 
 // Format a raw GTFS YYYYMMDD string (e.g. `feed_end_date`) as a
@@ -106,33 +108,62 @@ function GtfsExpiryBanner({ freshness }) {
 // it needs a child component that Router actually wraps). Everything that
 // reads or writes route/search-param state — the primary nav's `?days=`
 // links, `<Routes>` — has to live here.
-function AppShell({ refreshKey, gtfsFreshness, handleRefresh }) {
+function AppShell({ refreshKey, handleRefresh }) {
   // Time-window picker (NOTES-140): `?days=` is the source of truth for
   // every page's analysis window. Read here (not written — WindowPicker
   // owns the write) so the primary nav links below can carry the current
   // selection forward, and it survives a plain click into another tab.
   const [days] = useWindowDays()
 
+  // Agency switch (NOTES-143): `?agency=` is the source of truth for which
+  // backend database the dashboard renders. Read here (not written —
+  // AgencyToggle owns the write) for the same reason as `days` above.
+  const [agencyParam] = useAgency()
+
   // Only Overview (`/`), RouteList (`/routes`), and RouteDetail
   // (`/route/:id`) actually read `?days=` (PR #239 review finding H) — show
   // the picker only there so it doesn't imply pages like Compare or
   // Diagnostics respond to it when they don't.
   const location = useLocation()
+  const isCompare = location.pathname === '/compare'
   const showWindowPicker =
     location.pathname === '/' ||
     location.pathname === '/routes' ||
     location.pathname.startsWith('/route/')
+
+  // `/compare` is deliberately agency-independent (NOTES-143 decision 2) —
+  // it renders both agencies side by side, so the toggle is hidden there
+  // and the header/title stay at the default (wmata) copy even if a stray
+  // `?agency=` param is present on the URL (e.g. carried over by browser
+  // history from another page), rather than flipping to Muni copy on a
+  // page that isn't scoped to either agency.
+  const agency = isCompare ? DEFAULT_AGENCY : agencyParam
+  const showAgencyToggle = !isCompare
+
+  // `useGtfsFreshness` needs the current agency (NOTES-143), which comes
+  // from `useUrlState`/`useSearchParams` — only available inside `Router`.
+  // Fetched here (not in `App` below, which renders outside `Router`) so
+  // this hook has router context; App only owns `refreshKey`/`handleRefresh`.
+  const gtfsFreshness = useGtfsFreshness(refreshKey, agency)
+
+  const headerTitle =
+    agency === 'sfmta' ? 'SFMTA (Muni) Performance Dashboard' : 'WMATA Performance Dashboard'
+  const headerSubtitle =
+    agency === 'sfmta'
+      ? 'Daily Muni bus network performance metrics'
+      : 'Daily bus network performance metrics'
 
   return (
     <div className="app">
       <header>
         <div className="header-content">
           <div>
-            <h1>WMATA Performance Dashboard</h1>
-            <p className="subtitle">Daily bus network performance metrics</p>
+            <h1>{headerTitle}</h1>
+            <p className="subtitle">{headerSubtitle}</p>
           </div>
           <div className="header-actions">
             <div className="header-actions-row">
+              {showAgencyToggle && <AgencyToggle />}
               {showWindowPicker && <WindowPicker />}
               <RefreshButton onRefresh={handleRefresh} />
             </div>
@@ -140,19 +171,21 @@ function AppShell({ refreshKey, gtfsFreshness, handleRefresh }) {
         </div>
         <GtfsExpiryBanner freshness={gtfsFreshness} />
         <nav className="primary-nav" aria-label="Primary">
-          {/* Nav links carry the current `?days=` window (NOTES-140) so it
-              survives navigation instead of silently reverting to the
-              default on the next page; appendWindowParam omits the param
-              entirely at the default (30) so unfiltered URLs stay clean. */}
+          {/* Nav links carry the current `?days=` window and `?agency=`
+              selection (NOTES-140, NOTES-143) so both survive navigation
+              instead of silently reverting to the default on the next page;
+              appendWindowParam omits each param entirely at its default
+              (30 / wmata) so unfiltered URLs stay clean. The Compare link
+              deliberately does NOT carry `agency` — see `isCompare` above. */}
           <NavLink
-            to={appendWindowParam('/', days)}
+            to={appendWindowParam('/', days, agency)}
             end
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
             Overview
           </NavLink>
           <NavLink
-            to={appendWindowParam('/routes', days)}
+            to={appendWindowParam('/routes', days, agency)}
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
             Routes
@@ -164,7 +197,7 @@ function AppShell({ refreshKey, gtfsFreshness, handleRefresh }) {
             Compare
           </NavLink>
           <NavLink
-            to={appendWindowParam('/diagnostics', days)}
+            to={appendWindowParam('/diagnostics', days, agency)}
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
             Diagnostics
@@ -203,8 +236,10 @@ function App() {
   // RefreshButton's comment) and the GTFS-expiry banner (refetched instead
   // via `refreshKey` threaded into `useGtfsFreshness`, since remounting it
   // would just replay the cached value rather than force a real refetch).
+  // `useGtfsFreshness` itself now lives in `AppShell` (NOTES-143 — it needs
+  // the current `?agency=`, which requires `Router` context this `App`
+  // component doesn't have).
   const [refreshKey, setRefreshKey] = useState(0)
-  const gtfsFreshness = useGtfsFreshness(refreshKey)
   // Manual invalidation path for the stale-while-revalidate fetch cache
   // (NOTES-122): clear every cached entry before remounting the routed
   // subtree so the remount's fetches are all cold misses instead of an
@@ -216,11 +251,7 @@ function App() {
 
   return (
     <Router>
-      <AppShell
-        refreshKey={refreshKey}
-        gtfsFreshness={gtfsFreshness}
-        handleRefresh={handleRefresh}
-      />
+      <AppShell refreshKey={refreshKey} handleRefresh={handleRefresh} />
     </Router>
   )
 }

@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { formatDeviationMmSs, todayEasternIso } from '../utils/formatters'
 import ErrorState from './ErrorState.jsx'
+import { apiUrl } from '../utils/apiUrl'
+import useAgency from '../hooks/useAgency'
+import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 
 const LIMIT_OPTIONS = [25, 50, 100, 200, 500]
 
@@ -48,14 +51,13 @@ function ActiveBlocks() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [retryTick, setRetryTick] = useState(0)
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(
-      `/api/blocks/active?service_date=${encodeURIComponent(serviceDate)}&limit=${limit}`,
-    )
+    fetch(apiUrl('/api/blocks/active', { service_date: serviceDate, limit }))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -72,7 +74,7 @@ function ActiveBlocks() {
     return () => {
       cancelled = true
     }
-  }, [serviceDate, limit, retryTick])
+  }, [serviceDate, limit, retryTick, agency])
 
   const blocks = data?.blocks || []
 
@@ -80,7 +82,10 @@ function ActiveBlocks() {
     <main>
       <div className="chart-container">
         <p style={{ margin: '0 0 0.5rem' }}>
-          <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <Link
+            to={appendWindowParam('/diagnostics', DEFAULT_WINDOW_DAYS, agency)}
+            style={{ fontSize: '0.85rem', color: '#0a4a8c' }}
+          >
             ← Diagnostics
           </Link>
         </p>
@@ -163,14 +168,22 @@ function ActiveBlocks() {
                     title="View block timeline"
                     onClick={() =>
                       navigate(
-                        `/blocks/${encodeURIComponent(b.block_id)}?service_date=${encodeURIComponent(serviceDate)}`,
+                        appendWindowParam(
+                          `/blocks/${encodeURIComponent(b.block_id)}?service_date=${encodeURIComponent(serviceDate)}`,
+                          DEFAULT_WINDOW_DAYS,
+                          agency,
+                        ),
                       )
                     }
                     style={{ cursor: 'pointer' }}
                   >
                     <td>
                       <Link
-                        to={`/blocks/${encodeURIComponent(b.block_id)}?service_date=${encodeURIComponent(serviceDate)}`}
+                        to={appendWindowParam(
+                          `/blocks/${encodeURIComponent(b.block_id)}?service_date=${encodeURIComponent(serviceDate)}`,
+                          DEFAULT_WINDOW_DAYS,
+                          agency,
+                        )}
                         onClick={(e) => e.stopPropagation()}
                       >
                         {b.block_id}
