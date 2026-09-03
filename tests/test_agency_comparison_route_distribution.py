@@ -43,7 +43,16 @@ from api.aggregations import (
     _summarize_route_distribution,
     get_agency_comparison_data,
 )
-from src.models import Base, Calendar, Route, Run, StopEvent, SystemMetricsDaily, Trip
+from src.models import (
+    Base,
+    Calendar,
+    Route,
+    RouteMetricsDailyOverlay,
+    Run,
+    StopEvent,
+    SystemMetricsDaily,
+    Trip,
+)
 from src.time_periods import ALL_HOURS
 
 _WEEKDAY_FIELDS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
@@ -100,14 +109,21 @@ def _seed_route_otp(session, route_id, otp_value, service_date):
     date reads `otp_value`%.
 
     Mirrors `TestGetRouteContributors._seed_route_otp` in
-    test_aggregations.py: a uniform on-time/late split over 100 events on
-    one date so the daily percentage equals the seed value exactly.
+    test_aggregations.py: a uniform on-time/not-on-time split over 100
+    events on one date so the daily percentage equals the seed value
+    exactly. Of the not-on-time events, one is seeded EARLY
+    (deviation_sec=-300, below `OTP_EARLY_SEC`) rather than late whenever
+    there's at least one to spare -- exercising the window's lower bound,
+    not just its upper one (`+600`) -- without changing `on_time_count`
+    or the total, so `otp_value` still comes out exact.
     """
     from datetime import datetime as _dt
 
     events_per_day = 100
     on_time_count = int(round(otp_value / 100.0 * events_per_day))
-    late_count = events_per_day - on_time_count
+    not_on_time_count = events_per_day - on_time_count
+    early_count = 1 if not_on_time_count >= 1 else 0
+    late_count = not_on_time_count - early_count
     base_ts = _dt.combine(service_date, _dt.min.time()).replace(hour=14)
     rows = []
     for j in range(on_time_count):
@@ -136,6 +152,21 @@ def _seed_route_otp(session, route_id, otp_value, service_date):
                 stop_sequence=1,
                 observed_arrival_ts=base_ts + timedelta(seconds=on_time_count + j),
                 deviation_sec=600,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+    for j in range(early_count):
+        rows.append(
+            StopEvent(
+                service_date=service_date.isoformat(),
+                trip_id=f"TRIP_{route_id}_{service_date.isoformat()}_EARLY_{j}",
+                route_id=route_id,
+                direction_id=0,
+                stop_id=f"STOP_{route_id}",
+                stop_sequence=1,
+                observed_arrival_ts=base_ts + timedelta(seconds=on_time_count + late_count + j),
+                deviation_sec=-300,
                 source="proximity",
                 schedule_relationship="SCHEDULED",
             )
@@ -194,6 +225,36 @@ def _seed_service_delivered(
                 stops_observable=5,
             )
         )
+
+
+def _seed_overlay_row(
+    session,
+    route_id,
+    service_date,
+    otp_all_early=0,
+    otp_all_on_time=0,
+    otp_all_late=0,
+    scheduled_trips=0,
+    delivered_trips=0,
+):
+    """Seed one `route_metrics_daily_overlay` row -- the materialized fast
+    path both bulk distribution helpers read first (NOTES-141 delta
+    review). Only the OTP-all-timepoints and service-delivered fields
+    these tests care about are parameterized; every other sufficient-
+    statistic column defaults to 0 on the model.
+    """
+    session.add(
+        RouteMetricsDailyOverlay(
+            route_id=route_id,
+            service_date=service_date.isoformat(),
+            day_type="weekday",
+            otp_all_early=otp_all_early,
+            otp_all_on_time=otp_all_on_time,
+            otp_all_late=otp_all_late,
+            scheduled_trips=scheduled_trips,
+            delivered_trips=delivered_trips,
+        )
+    )
 
 
 class TestRouteDistributionBucketing:
@@ -375,6 +436,62 @@ class TestBulkRouteOtpMatchesPerRouteHelper:
         assert per_route[d.isoformat()] is None
 
 
+class TestBulkRouteOtpOverlayPath:
+    """NOTES-141 delta review finding 1: the overlay is the PRIMARY read
+    path, not just a fallback -- `_bulk_route_otp_daily_percentages` must
+    read `otp_all_early/on_time/late` from `route_metrics_daily_overlay`
+    for materialized dates without touching `stop_events` at all. An
+    earlier version scanned `stop_events` unconditionally for the whole
+    window and was the dominant cold cost once the sibling
+    service_delivered fix already used the overlay (33.1s WMATA + 7.8s
+    SFMTA; see `_bulk_route_otp_daily_percentages`'s docstring).
+    """
+
+    def test_overlay_row_used_without_any_stop_events(self, db_session):
+        """No `stop_events` seeded at all -- if the overlay path weren't
+        used, this would return nothing. 8 on-time / 2 late / 0 early on
+        the overlay row -> 80%.
+        """
+        d = date(2026, 8, 3)
+        _seed_overlay_row(db_session, "A", d, otp_all_early=0, otp_all_on_time=8, otp_all_late=2)
+        db_session.commit()
+
+        result = _bulk_route_otp_daily_percentages(db_session, d, d)
+
+        assert result["A"] == pytest.approx(80.0)
+
+    def test_zero_n_overlay_row_contributes_nothing(self, db_session):
+        """An overlay row with no OTP observations at all (n=0, the
+        model's all-zero default) must not contribute a bogus 0% or
+        crash -- same 'no data' semantics as the live scan.
+        """
+        d = date(2026, 8, 3)
+        _seed_overlay_row(db_session, "A", d)
+        db_session.commit()
+
+        result = _bulk_route_otp_daily_percentages(db_session, d, d)
+
+        assert result.get("A") is None
+
+    def test_missing_date_falls_back_to_live_scan(self, db_session):
+        """Day 1 is materialized (overlay row only, no stop_events for
+        that date); day 2 has NO overlay row but DOES have stop_events --
+        the window mean must combine both sources, proving the fallback
+        tier actually engages per-date rather than all-or-nothing.
+        """
+        d1 = date(2026, 8, 3)
+        d2 = date(2026, 8, 4)
+        _seed_overlay_row(db_session, "A", d1, otp_all_early=0, otp_all_on_time=9, otp_all_late=1)
+        _seed_route(db_session, "A")
+        _seed_route_otp(db_session, "A", 70.0, d2)  # live-scan path: no overlay row for d2
+        db_session.commit()
+
+        result = _bulk_route_otp_daily_percentages(db_session, d1, d2)
+
+        # (90 + 70) / 2 = 80 -- mean of the overlay day and the scanned day.
+        assert result["A"] == pytest.approx(80.0)
+
+
 class TestBulkRouteServiceDeliveredWindow:
     """`_bulk_route_service_delivered_window` -- pools service_delivered
     across the window from real GTFS + Runs rows, with NO partial-day
@@ -382,30 +499,42 @@ class TestBulkRouteServiceDeliveredWindow:
     """
 
     def test_pools_across_dates(self, db_session):
+        """Unequal daily denominators (10/10 then 3/5) so the pooled
+        sum-then-recompute ratio is distinguishable from a naive mean of
+        daily ratios -- mean-of-ratios would be (1.0 + 0.6) / 2 = 0.8;
+        the pooled ratio is 13/15 ≈ 0.8667.
+        """
         d1 = date(2026, 8, 3)
         d2 = date(2026, 8, 4)
         _seed_service_delivered(
-            db_session, "A", d1, scheduled_trip_count=10, delivered_trip_count=9
+            db_session, "A", d1, scheduled_trip_count=10, delivered_trip_count=10
         )
-        _seed_service_delivered(
-            db_session, "A", d2, scheduled_trip_count=10, delivered_trip_count=8
-        )
+        _seed_service_delivered(db_session, "A", d2, scheduled_trip_count=5, delivered_trip_count=3)
         db_session.commit()
 
         result = _bulk_route_service_delivered_window(db_session, d1, d2)
 
-        # (9 + 8) / (10 + 10) = 0.85, the sum-then-recompute pooling formula
-        # -- not a naive mean of the two daily ratios (which would be 0.85
-        # too here by coincidence of equal daily denominators, but the
-        # implementation pools raw counts, matching every other window
-        # aggregator in this module).
-        assert result["A"] == pytest.approx(0.85)
+        # `_reduce_service_delivered` rounds to 4dp: 13/15 -> 0.8667.
+        assert result["A"] == pytest.approx(0.8667)
+        assert result["A"] != pytest.approx(0.8)
 
     def test_route_with_no_schedule_is_absent(self, db_session):
         assert (
             _bulk_route_service_delivered_window(db_session, date(2026, 8, 3), date(2026, 8, 3))
             == {}
         )
+
+    def test_overlay_row_used_without_any_runs_or_trips(self, db_session):
+        """No Calendar/Trip/Run rows seeded at all -- if the overlay path
+        weren't used, this would return nothing.
+        """
+        d = date(2026, 8, 3)
+        _seed_overlay_row(db_session, "A", d, scheduled_trips=10, delivered_trips=7)
+        db_session.commit()
+
+        result = _bulk_route_service_delivered_window(db_session, d, d)
+
+        assert result["A"] == pytest.approx(0.7)
 
 
 class TestRouteDistributionForAgency:
@@ -765,3 +894,39 @@ class TestCrossAgencyIsolation:
         by_agency = {a["agency"]: a for a in result["agencies"]}
         assert by_agency["wmata"]["route_distribution"]["otp"]["median"] == pytest.approx(95.0)
         assert by_agency["sfmta"]["route_distribution"]["otp"]["median"] == pytest.approx(20.0)
+
+
+class TestRouteDistributionFailureIsolation:
+    """NOTES-141 delta review finding 5: a `route_distribution` compute
+    failure must not 500 the whole `/api/agency-comparison` response --
+    `CompareStrip.jsx` on the Overview page also calls this endpoint, so
+    a bug in this feature shouldn't be able to take that down too. Same
+    failure-isolation contract `service_level` already has.
+    """
+
+    def test_compute_failure_degrades_to_none_not_a_crash(self, monkeypatch):
+        wmata_db = _make_session()
+        wmata_db.add(
+            SystemMetricsDaily(
+                service_date=AGENCY_COMPARISON_WINDOW_START.isoformat(),
+                otp_percentage=70.0,
+                data_quality="complete",
+            )
+        )
+        wmata_db.commit()
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("route_metrics_daily_overlay schema mismatch")
+
+        monkeypatch.setattr("api.aggregations._get_route_distribution_cached", _boom)
+
+        try:
+            result = get_agency_comparison_data({"wmata": wmata_db})
+        finally:
+            wmata_db.close()
+
+        agency = result["agencies"][0]
+        assert agency["route_distribution"] is None
+        # Everything else on the envelope is unaffected by the failure.
+        assert agency["metrics"]["otp"]["window_mean"] == pytest.approx(70.0)
+        assert "service_level" in agency

@@ -136,11 +136,15 @@ function HistogramTooltip({ active, payload, label, agencies }) {
  * Compact side-by-side histogram of route counts per bucket for one
  * metric, one grouped bar per agency so the two agencies' shapes read
  * directly against each other rather than as two separate charts
- * (NOTES-141). Buckets are the shared fixed percentage-scale edges the
- * backend computes with (`<60/60-70/70-80/80-90/90+`) — identical cut
- * points for every agency and both metrics, per the dataviz skill's "color
- * follows the entity" rule each agency keeps one fixed color across every
- * chart on the page (`agencySeriesColor`).
+ * (NOTES-141). Bucket labels/edges come straight from the backend
+ * payload (`buildDistributionHistogramData`) and are fixed PER METRIC,
+ * identical for both agencies but NOT shared between OTP and
+ * service_delivered — service_delivered's real range clusters near
+ * 90-100%, so it gets its own tighter edges (`<85/85-90/90-92.5/
+ * 92.5-95/95+`) rather than reusing OTP's (`<60/60-70/70-80/80-90/90+`).
+ * Per the dataviz skill's "color follows the entity" rule, each agency
+ * keeps one fixed color across every chart on the page
+ * (`agencySeriesColor`).
  */
 function RouteDistributionHistogram({ metric, agencies }) {
   const data = buildDistributionHistogramData(agencies, metric)
