@@ -427,6 +427,16 @@ main {
 .text-primary-color { color: var(--text-primary); }
 .font-medium { font-weight: var(--weight-medium); }
 .font-semibold { font-weight: var(--weight-semibold); }
+.text-center { text-align: center; }
+.text-right { text-align: right; }
+.text-left { text-align: left; }
+.nums { font-variant-numeric: tabular-nums; }
+
+/* Horizontal scroll wrapper for a table that isn't already inside
+   .table-container (which provides this itself). */
+.table-scroll-x {
+  overflow-x: auto;
+}
 
 /* Loading and Error States */
 .loading-spinner {

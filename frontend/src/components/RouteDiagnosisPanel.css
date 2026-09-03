@@ -1,0 +1,222 @@
+/* Component-scoped styles for RouteDiagnosisPanel.jsx (NOTES-85 migration
+   off inline styles). Follows the pattern set by ErrorState.css /
+   AgencyComparison.css — one stylesheet per component, imported directly
+   by the .jsx file, using the shared tokens from App.css's :root block. */
+
+.info-tip {
+  display: inline-block;
+  margin-left: 0.3em;
+  width: 1em;
+  height: 1em;
+  line-height: 1em;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--border-default);
+  color: var(--text-secondary);
+  font-size: 0.65em;
+  cursor: help;
+  font-weight: var(--weight-bold);
+  vertical-align: super;
+  flex-shrink: 0;
+}
+
+/* Classification badge — one modifier class per classification enum value
+   (recovery/leaky/underpowered/neutral) instead of a JS style-object map,
+   since the classification set is small and fixed. */
+.classification-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-full);
+  border: 1px solid transparent;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.classification-recovery {
+  border-color: #16a34a;
+  background: #dcfce7;
+  color: #14532d;
+}
+
+.classification-leaky {
+  border-color: #ca8a04;
+  background: #fef9c3;
+  color: #713f12;
+}
+
+.classification-underpowered {
+  border-color: var(--color-bad);
+  background: #fee2e2;
+  color: #7f1d1d;
+}
+
+.classification-neutral {
+  border-color: var(--color-neutral);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+}
+
+/* Slip-chart custom tooltip (recharts <Tooltip content>) — distinct from
+   the shared .chart-tooltip (smaller/tighter) because this chart is a
+   compact 200px-tall per-direction sparkline-scale chart, not a full-size
+   one. */
+.slip-tooltip {
+  background: var(--surface-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  max-width: 220px;
+  box-shadow: var(--shadow-popover);
+}
+
+.slip-tooltip-header {
+  font-weight: var(--weight-semibold);
+  margin-bottom: var(--space-1);
+  color: var(--text-primary);
+}
+
+.slip-tooltip-timepoint-tag {
+  margin-left: 0.4em;
+  font-size: 0.7rem;
+  background: #dbeafe;
+  color: #1d4ed8;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.slip-tooltip-stops {
+  color: var(--text-muted);
+  margin-bottom: var(--space-1);
+}
+
+.slip-tooltip-meta {
+  color: var(--color-neutral);
+  margin-top: var(--space-1);
+  font-size: 0.7rem;
+}
+
+.direction-label {
+  font-size: 0.8rem;
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  margin-bottom: 0.3rem;
+}
+
+.slip-chart-grid {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.slip-chart-grid-2up {
+  grid-template-columns: 1fr 1fr;
+}
+
+.timepoint-label-strip {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin-top: 0.15rem;
+  padding-left: 36px;
+}
+
+.timepoint-table-wrap {
+  margin-bottom: 0.75rem;
+}
+
+.timepoint-table-wrap .direction-label {
+  margin-bottom: 0.4rem;
+}
+
+.timepoint-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.timepoint-table thead tr {
+  border-bottom: 1px solid var(--border-default);
+}
+
+.timepoint-table th {
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  font-weight: var(--weight-semibold);
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.timepoint-table td {
+  padding: 0.35rem 0.5rem;
+  vertical-align: middle;
+}
+
+.timepoint-table tbody tr {
+  border-bottom: 1px solid var(--surface-subtle);
+}
+
+.timepoint-table tbody tr.row-odd {
+  background: var(--surface-page);
+}
+
+.timepoint-stop-id {
+  color: var(--color-neutral);
+  margin-left: 0.4em;
+  font-size: 0.7rem;
+}
+
+.diagnosis-section-heading {
+  font-size: 0.95rem;
+  margin-bottom: 0.4rem;
+  color: var(--text-primary);
+}
+
+.diagnosis-section-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+  line-height: var(--leading-normal);
+}
+
+.diagnosis-glossary-term {
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
+.narrative-code {
+  background: var(--surface-subtle);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.narrative-stale-banner {
+  background: #fefce8;
+  border: 1px solid #facc15;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+  color: #713f12;
+}
+
+.narrative-stale-banner code {
+  background: #fef9c3;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+}
+
+.narrative-text {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.65;
+  margin-bottom: var(--space-2);
+  white-space: pre-wrap;
+}
+
+.narrative-meta {
+  font-size: 0.7rem;
+  color: var(--color-neutral);
+}
