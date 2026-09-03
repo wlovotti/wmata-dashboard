@@ -7,7 +7,6 @@ import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
 import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
 import AgencyUnavailable from './AgencyUnavailable'
-import './Targets.css'
 
 /**
  * Format a target value for display, given the canonical metric key. Mirrors
@@ -139,7 +138,7 @@ function formatGap(metric, current, target) {
 export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabel }) {
   if (!targetsLoaded) {
     return (
-      <p className="targets-padded-note">
+      <p className="card-section-note">
         Per-route target configuration isn't available right now, so this
         panel can't say whether any overrides are configured.
       </p>
@@ -147,7 +146,7 @@ export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabe
   }
   if (!hasAnyOverrides) {
     return (
-      <p className="targets-padded-note">
+      <p className="card-section-note">
         This panel is empty because no route has a per-route target — the
         default <code>config/route_targets.yaml</code> ships with an empty{' '}
         <code>routes:</code> block, so every route currently just inherits
@@ -158,7 +157,7 @@ export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabe
     )
   }
   return (
-    <p className="targets-padded-note">
+    <p className="card-section-note">
       No per-route overrides configured for {metricLabel}.
     </p>
   )
