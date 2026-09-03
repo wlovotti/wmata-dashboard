@@ -264,7 +264,9 @@ def sanitize_float(value):
         return None
 
 
-def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]:
+def _compute_live_metrics_uncached(
+    db: Session, service_date, agency: str = "wmata"
+) -> dict[str, dict]:
     """One-pass live compute of the four new scorecard metrics for every route.
 
     EWT and bunching share the scheduled-cell-hour fetch (the dominant cost,
@@ -274,9 +276,16 @@ def _compute_live_metrics_uncached(db: Session, service_date) -> dict[str, dict]
     {service_delivered, otp_split, ewt, bunching}}` — each sub-key is the
     dict shape from the corresponding compute function, or None when the
     route has no entry in that source.
+
+    `agency` (PR #242 review finding 5) is forwarded to
+    `compute_ewt_headline_for_routes` for its cell-hour gate lookup;
+    defaults to `"wmata"` so callers that don't know their agency (this
+    function's cache key is per-database anyway) keep today's behavior.
     """
     sched = fetch_scheduled_cell_hours_for_date(db, service_date)
-    ewt_by_route = compute_ewt_headline_for_routes(db, service_date, sched_by_route_cell_hour=sched)
+    ewt_by_route = compute_ewt_headline_for_routes(
+        db, service_date, sched_by_route_cell_hour=sched, agency=agency
+    )
     bunching_by_route = compute_bunching_headline_for_routes(
         db, service_date, sched_by_route_cell_hour=sched
     )
@@ -690,8 +699,13 @@ def _compute_live_metrics_for_window_uncached(
     db: Session,
     end_date: date_type,
     days: int,
+    agency: str = "wmata",
 ) -> dict[str, dict]:
     """Pool the four scorecard metrics over `[end_date - days + 1, end_date]`.
+
+    `agency` (PR #242 review finding 5) is forwarded to
+    `compute_ewt_headline_for_routes_multi_date` for its per-route
+    cell-hour gate lookup; defaults to `"wmata"`.
 
     `data_quality='partial'` dates (NOTES-123) are dropped from the window
     up front, before any tier below is consulted — same treatment as a
@@ -774,6 +788,7 @@ def _compute_live_metrics_for_window_uncached(
             cold_dates,
             sched_by_date=sched_by_date,
             observed_rows=observed_rows,
+            agency=agency,
         )
         bunching_by_date = compute_bunching_headline_for_routes_multi_date(
             db,
@@ -841,7 +856,9 @@ def _compute_live_metrics_for_date(db: Session, service_date) -> dict[str, dict]
     return result
 
 
-def get_live_metrics_for_window(db: Session, end_date: date_type, days: int) -> dict[str, dict]:
+def get_live_metrics_for_window(
+    db: Session, end_date: date_type, days: int, agency: str = "wmata"
+) -> dict[str, dict]:
     """Cached-by-(end_date, days) wrapper around `_compute_live_metrics_for_window_uncached`.
 
     Singleflight: when one thread is computing a given (end_date, days),
@@ -855,7 +872,11 @@ def get_live_metrics_for_window(db: Session, end_date: date_type, days: int) -> 
     Empty result dict if the window has no derived stop_events at all.
 
     Cache key includes `_db_identity(db)` (NOTES-139 review finding 1) so
-    `?agency=sfmta` and the default WMATA request never share an entry.
+    `?agency=sfmta` and the default WMATA request never share an entry —
+    `agency` (the name string, PR #242 review finding 5) is NOT part of
+    the key on top of that: it's a 1:1 function of which database `db`
+    points at, so `_db_identity(db)` already disambiguates it. `agency`
+    only feeds the cell-hour gate lookup inside the uncached compute.
     """
     cache_key = (_db_identity(db), end_date.isoformat(), days)
     while True:
@@ -878,7 +899,7 @@ def get_live_metrics_for_window(db: Session, end_date: date_type, days: int) -> 
             inflight.wait()
             continue
         try:
-            result = _compute_live_metrics_for_window_uncached(db, end_date, days)
+            result = _compute_live_metrics_for_window_uncached(db, end_date, days, agency=agency)
         except Exception:
             with _window_metrics_lock:
                 _window_metrics_inflight.pop(cache_key, None)
@@ -897,6 +918,7 @@ def _compute_single_route_live_metrics(
     service_date,
     period_key: str = ALL_HOURS,
     otp_window: str = "official",
+    agency: str = "wmata",
 ) -> dict:
     """Single-route equivalent of `_compute_live_metrics_uncached` for one route.
 
@@ -913,6 +935,9 @@ def _compute_single_route_live_metrics(
     `src.otp_constants.otp_window_bounds` and applied only to the OTP
     block — EWT and bunching keep the official window by design
     (`src/bunching.py` is explicitly official-window-only).
+
+    `agency` (PR #242 review finding 5) is forwarded to
+    `compute_ewt_headline_for_route`'s cell-hour gate lookup.
     """
     early_sec, late_sec = otp_window_bounds(otp_window)
     return {
@@ -925,7 +950,9 @@ def _compute_single_route_live_metrics(
             early_sec=early_sec,
             late_sec=late_sec,
         ),
-        "ewt": compute_ewt_headline_for_route(db, route_id, service_date, period_key=period_key),
+        "ewt": compute_ewt_headline_for_route(
+            db, route_id, service_date, period_key=period_key, agency=agency
+        ),
         "bunching": compute_bunching_headline_for_route(
             db, route_id, service_date, period_key=period_key
         ),
@@ -938,8 +965,15 @@ def get_live_metrics_for_route_today(
     day_type_filter: str = ALL_DAY_TYPES,
     period_key: str = ALL_HOURS,
     otp_window: str = "official",
+    agency: str = "wmata",
 ) -> tuple[dict | None, date_type | None]:
     """Latest derived service_date's live metrics for one route, cached when warm.
+
+    `agency` (PR #242 review finding 5) is forwarded to
+    `_compute_single_route_live_metrics` on the (uncached) compute path
+    below; it doesn't affect the cross-route cache read above, which
+    holds only official-window WMATA-computed values already isolated
+    per `_db_identity(db)`.
 
     On a warm cache (any /api/routes call within the TTL) for a route that
     has an entry for its resolved anchor date, returns the cached bundle
@@ -1010,7 +1044,12 @@ def get_live_metrics_for_route_today(
 
         return (
             _compute_single_route_live_metrics(
-                db, route_id, anchor_date, period_key=period_key, otp_window=otp_window
+                db,
+                route_id,
+                anchor_date,
+                period_key=period_key,
+                otp_window=otp_window,
+                agency=agency,
             ),
             anchor_date,
         )
@@ -1022,7 +1061,12 @@ def get_live_metrics_for_route_today(
         return None, None
     return (
         _compute_single_route_live_metrics(
-            db, route_id, service_date, period_key=period_key, otp_window=otp_window
+            db,
+            route_id,
+            service_date,
+            period_key=period_key,
+            otp_window=otp_window,
+            agency=agency,
         ),
         service_date,
     )
@@ -1577,7 +1621,9 @@ def _empty_deltas() -> dict:
     }
 
 
-def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) -> dict:
+def get_all_routes_scorecard(
+    db: Session, days: int = _SCORECARD_WINDOW_DAYS, agency: str = "wmata"
+) -> dict:
     """
     Get performance scorecard for all routes, pooled over a rolling window.
 
@@ -1601,6 +1647,11 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
         db: Database session
         days: Window length in days (default 7). The window ends on the
             latest service_date with stop_events.
+        agency: Agency name (NOTES-143). Gates `is_frequent` and
+            `targets` — see `src/frequent_routes.py` and
+            `src/route_targets.py` for why a non-wmata agency gets an
+            empty designation / system-default-only targets rather
+            than WMATA's per-route config applied to the wrong routes.
 
     Returns:
         Dict with `window` (with `start`, `end`, `days`) and `routes` (list
@@ -1623,7 +1674,7 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
         window_start_iso = None
         window_end_iso = None
     else:
-        live = get_live_metrics_for_window(db, end_date, days)
+        live = get_live_metrics_for_window(db, end_date, days, agency=agency)
         window_end_iso = end_date.isoformat()
         window_start_iso = (end_date - timedelta(days=days - 1)).isoformat()
 
@@ -1632,7 +1683,8 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
 
     # WMATA-designated frequent-service routes (NOTES-56). One mtime-cached
     # read of the YAML; the set membership check below is constant-time.
-    frequent_route_ids = load_frequent_route_ids()
+    # Empty for any non-wmata `agency` (NOTES-143).
+    frequent_route_ids = load_frequent_route_ids(agency)
 
     # Period-over-period deltas (NOTES-38) for every metric. Cached separately
     # (60s TTL keyed by Eastern date) so cold-cache cost only hits once per
@@ -1666,7 +1718,7 @@ def get_all_routes_scorecard(db: Session, days: int = _SCORECARD_WINDOW_DAYS) ->
                 # live fields (OTP %, service_delivered fraction, EWT
                 # seconds, bunching fraction). `None` when no target is
                 # configured in `config/route_targets.yaml`.
-                "targets": get_targets_for_route(route.route_id),
+                "targets": get_targets_for_route(route.route_id, agency),
                 # Period-over-period deltas (NOTES-38). Shape per metric:
                 # {value, valid, current_n, prior_n}. `valid=False` means
                 # thin data — don't render an arrow. Sign is raw
@@ -1737,6 +1789,7 @@ def get_route_detail_metrics(
     day_type_filter: str = ALL_DAY_TYPES,
     period_key: str = ALL_HOURS,
     otp_window: str = "official",
+    agency: str = "wmata",
 ) -> dict:
     """
     Get detailed performance metrics for a specific route.
@@ -1779,6 +1832,9 @@ def get_route_detail_metrics(
         period_key: One of `all` / `am_peak` / `midday` / `pm_peak` /
             `evening` / `late`
         otp_window: One of `official` (default) / `rider`.
+        agency: Agency name (NOTES-143). Gates `is_frequent` and
+            `targets` — see `get_all_routes_scorecard` and
+            `src/frequent_routes.py` / `src/route_targets.py`.
 
     Returns:
         Dictionary with detailed route metrics; echoes the active filter
@@ -1798,7 +1854,12 @@ def get_route_detail_metrics(
     # (NOTES-117) — see `get_live_metrics_for_route_today` for why that
     # differs from the system-wide anchor other endpoints use.
     live_metrics, live_metrics_as_of_date = get_live_metrics_for_route_today(
-        db, route_id, day_type_filter=day_type_filter, period_key=period_key, otp_window=otp_window
+        db,
+        route_id,
+        day_type_filter=day_type_filter,
+        period_key=period_key,
+        otp_window=otp_window,
+        agency=agency,
     )
     live_fields = _live_metric_fields(live_metrics)
 
@@ -1854,7 +1915,7 @@ def get_route_detail_metrics(
         # NOTES-56: WMATA-designated frequent-service routes get EWT as
         # the headline KPI on the frontend; standard routes keep OTP.
         # Same source-of-truth as the all-routes scorecard.
-        "is_frequent": route_id in load_frequent_route_ids(),
+        "is_frequent": route_id in load_frequent_route_ids(agency),
         "grade": compute_route_grade(
             live_fields["otp_all_pct"],
             live_fields["service_delivered_ratio"],
@@ -1863,7 +1924,7 @@ def get_route_detail_metrics(
         # Per-route targets (NOTES-47). See `get_all_routes_scorecard`
         # for the shape — keyed by canonical metric name in canonical
         # units. The frontend renders them next to each KPI card.
-        "targets": get_targets_for_route(route_id),
+        "targets": get_targets_for_route(route_id, agency),
         # Period-over-period deltas (NOTES-38). Shape per metric:
         # {value, valid, current_n, prior_n}. `valid=False` means
         # thin data — don't render an arrow. Sign is raw
@@ -2280,8 +2341,18 @@ def _system_ewt_and_bunching_for_date(
     sched_by_date: dict[str, dict],
     gtfs_snapshot_id: int | None = None,
     tz_name: str = "America/New_York",
+    agency: str = "wmata",
 ) -> tuple[float | None, float | None, float | None]:
     """Pooled EWT, SWT, and bunching across all bus routes for one service date.
+
+    `agency` (PR #242 review finding 5) is forwarded to `get_cell_hour_gate_sec`
+    for the per-route cell-hour gate — this system-level rollup is reached
+    on the SFMTA path via both the "today" hybrid-serve row
+    (`get_system_trend_data`) and the daily batch
+    (`pipelines/upsert_system_metrics_daily.py --agency sfmta`), and a
+    same-numbered SFMTA route must never inherit WMATA's medium-freq
+    20-min gate. Defaults to `"wmata"` so every caller that doesn't pass
+    it yet keeps today's behavior.
 
     EWT is computed over the union of every route's frequent (direction,
     stop, hour) cell-hours — pooling all observed and scheduled headways into
@@ -2398,7 +2469,7 @@ def _system_ewt_and_bunching_for_date(
     obs_pool: list[float] = []
     sched_pool: list[float] = []
     for route_id, sched_cells in sched_by_route.items():
-        gate_sec = get_cell_hour_gate_sec(route_id)
+        gate_sec = get_cell_hour_gate_sec(route_id, agency)
         for cell_hour, sched_headways in sched_cells.items():
             if not _is_cell_hour_frequent(sched_headways, gate_sec):
                 continue
@@ -2489,8 +2560,11 @@ def _read_system_metrics_history(
     return {d.isoformat(): by_date.get(d.isoformat(), absent) for d in dates}
 
 
-def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
+def _system_trend_uncached(db: Session, metric: str, days: int, agency: str = "wmata") -> dict:
     """Compute a system-trend payload for one metric over `days + prior days`.
+
+    `agency` (PR #242 review finding 5) is forwarded to
+    `compute_system_metrics_for_date` for today's live-computed row.
 
     Hybrid path: prior dates and visible-but-not-today dates come from the
     materialized `system_metrics_daily` table; today's row is computed
@@ -2544,7 +2618,7 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
 
     # Compute today live — single-date cost, ~1-2s rather than 60×.
     try:
-        today_metrics = compute_system_metrics_for_date(db, today)
+        today_metrics = compute_system_metrics_for_date(db, today, agency=agency)
         # Today is always live-computed and therefore considered complete
         # for the trend strip (the live compute doesn't have a quality flag).
         history[today.isoformat()] = {
@@ -2594,8 +2668,15 @@ def _system_trend_uncached(db: Session, metric: str, days: int) -> dict:
     }
 
 
-def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> dict:
+def get_system_trend_data(
+    db: Session, metric: str = "otp", days: int = 30, agency: str = "wmata"
+) -> dict:
     """System-level trend rollup for the home-page trend strip (home-page system trend strip).
+
+    `agency` (PR #242 review finding 5) is forwarded to `_system_trend_uncached`
+    for its "today" hybrid-serve row's cell-hour gate lookup; not part of
+    `cache_key` below since it's a 1:1 function of `_db_identity(db)`,
+    which the key already includes.
 
     Returns 30 days (or `days`) of system-level values for one of OTP /
     service-delivered / EWT / bunching, plus a single `prior_window_value`
@@ -2631,7 +2712,7 @@ def get_system_trend_data(db: Session, metric: str = "otp", days: int = 30) -> d
             if (time.monotonic() - ts) < _SYSTEM_TREND_TTL_SEC:
                 return value
 
-    result = _system_trend_uncached(db, metric, days)
+    result = _system_trend_uncached(db, metric, days, agency=agency)
 
     with _system_trend_lock:
         _system_trend_cache[cache_key] = (time.monotonic(), result)
@@ -3660,9 +3741,19 @@ def _scheduled_trips_in_window_by_route(
 
 
 def _contributors_uncached(
-    db: Session, metric: str, days: int, as_of_date: date_type | None = None
+    db: Session,
+    metric: str,
+    days: int,
+    as_of_date: date_type | None = None,
+    agency: str = "wmata",
 ) -> dict:
     """Compute the contributors payload for one metric / window.
+
+    `agency` (PR #242 review finding 6) is forwarded to `get_live_metrics_for_window`
+    (EWT's cell-hour gate lookup) and to `get_target` below (the per-route
+    override, which must never apply a WMATA route_id's override to a
+    same-numbered route on another agency — mirrors the `/api/routes` /
+    `/api/routes/{id}` fix in `src/route_targets.py`).
 
     `route_value` is a genuine `days`-window figure for every metric: OTP
     averages per-day percentages (`_route_otp_window_mean`); service_delivered,
@@ -3744,7 +3835,9 @@ def _contributors_uncached(
         # service_delivered / EWT / bunching: pooled over the window,
         # same anchor as above. Skipped entirely (not a live compute over
         # an empty DB) when there are no stop_events anywhere yet.
-        windowed = get_live_metrics_for_window(db, end_date, days) if anchor_date else {}
+        windowed = (
+            get_live_metrics_for_window(db, end_date, days, agency=agency) if anchor_date else {}
+        )
         for r in routes:
             metrics_bundle = windowed.get(r.route_id)
             fields = _live_metric_fields(metrics_bundle)
@@ -3773,7 +3866,7 @@ def _contributors_uncached(
             # Drop rather than list with a 0 score; surfacing it would
             # rank it dead-last for every metric and add visual noise.
             continue
-        per_route_target = get_target(route_id, metric)
+        per_route_target = get_target(route_id, metric, agency)
         if per_route_target is not None:
             reference_value = per_route_target
             reference_source = "target"
@@ -3827,9 +3920,17 @@ def _contributors_uncached(
 
 
 def get_route_contributors(
-    db: Session, metric: str = "otp", days: int = 30, as_of_date: date_type | None = None
+    db: Session,
+    metric: str = "otp",
+    days: int = 30,
+    as_of_date: date_type | None = None,
+    agency: str = "wmata",
 ) -> dict:
     """Cached-by-(metric, days, anchor) wrapper for the contributors view.
+
+    `agency` (PR #242 review finding 6) is forwarded to `_contributors_uncached`
+    on a cache miss — not part of `cache_key` below since it's a 1:1
+    function of `_db_identity(db)`, which the key already includes.
 
     See module comment above for the contribution formula and baseline
     semantics. Cache key includes the window's anchor so the cache rolls
@@ -3873,14 +3974,14 @@ def get_route_contributors(
             if (time.monotonic() - ts) < _CONTRIBUTORS_TTL_SEC:
                 return value
 
-    result = _contributors_uncached(db, metric, days, as_of_date=as_of_date)
+    result = _contributors_uncached(db, metric, days, as_of_date=as_of_date, agency=agency)
 
     with _contributors_lock:
         _contributors_cache[cache_key] = (time.monotonic(), result)
     return result
 
 
-def get_route_period_drilldown(db: Session, route_id: str) -> dict:
+def get_route_period_drilldown(db: Session, route_id: str, agency: str = "wmata") -> dict:
     """Per-time-period EWT and bunching for one route on its resolved anchor date.
 
     Surfaces the AM peak vs evening variance the headline scorecard collapses.
@@ -3893,6 +3994,9 @@ def get_route_period_drilldown(db: Session, route_id: str) -> dict:
 
     Returns `{"error": ...}` if the route is missing. Returns empty `ewt` /
     `bunching` lists when the route has no stop_events anywhere yet.
+
+    `agency` (PR #242 review finding 5) is forwarded to
+    `compute_ewt_for_route_date`'s cell-hour gate lookup.
     """
     route = db.query(Route).filter(Route.route_id == route_id, Route.is_current).first()
     if not route:
@@ -3908,7 +4012,7 @@ def get_route_period_drilldown(db: Session, route_id: str) -> dict:
             "bunching": [],
         }
 
-    ewt_rows = compute_ewt_for_route_date(db, route_id, service_date)
+    ewt_rows = compute_ewt_for_route_date(db, route_id, service_date, agency=agency)
     bunching_rows = compute_bunching_for_route_date(db, route_id, service_date)
 
     return {

@@ -2,6 +2,8 @@ import { useMemo } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
 import useUrlState from '../hooks/useUrlState'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
+import useAgency, { DEFAULT_AGENCY } from '../hooks/useAgency'
+import { apiUrl } from '../utils/apiUrl'
 import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
@@ -11,6 +13,29 @@ import MoversPanel from './MoversPanel'
 import SystemMap from './SystemMap'
 import SystemTrend from './SystemTrend'
 import SystemWeeklyNarrativeLede from './SystemWeeklyNarrativeLede'
+import ErrorState from './ErrorState.jsx'
+
+/**
+ * Whether `dataUrlKey` (a `useMultiFetch` group's `JSON.stringify(urls)`
+ * for its CURRENT `data`) was fetched for `agency` — deliberately ignoring
+ * every other param (`days` in particular) so a time-window switch keeps
+ * showing the old window's data while the new one loads (PR #239's
+ * stale-while-revalidate), rather than blanking on every `days` change too
+ * (PR #242 round-2 review finding 5). `apiUrl` encodes a non-default
+ * agency literally as `agency=<value>` and omits it entirely at the
+ * default, so a plain substring check is exact for the two known agency
+ * values — `null` (nothing loaded yet) never matches.
+ *
+ * @param {string|null} dataUrlKey
+ * @param {string} agency
+ * @returns {boolean}
+ */
+function dataAgencyMatches(dataUrlKey, agency) {
+  if (dataUrlKey == null) return false
+  return agency === DEFAULT_AGENCY
+    ? !dataUrlKey.includes('agency=')
+    : dataUrlKey.includes(`agency=${agency}`)
+}
 
 // Metric options for the "Biggest drags" table. Same 4-entry list as
 // RouteList — kept inline per the existing convention.
@@ -22,17 +47,6 @@ const CONTRIB_METRICS = [
 ]
 
 const CONTRIB_TOP_N = 5
-
-// Fixed independent of the time-window picker (PR #239 review finding C).
-// The hero's week-over-week "up/down/steady" verdict needs a stable 30-day
-// OTP series to compute a real 7-vs-prior-7 delta (`computeWindowDelta`
-// needs ~14 valid days across both halves) — if the hero read the
-// picker-driven trend fetch instead, picking the 7-day window would starve
-// it down to 7 rows and the verdict would fall back to "System verdict
-// unavailable — not enough history yet this week," which is false: 30 days
-// of system OTP history exists, it just wasn't fetched at that setting.
-// Module-level (not memoized) since it never depends on props/state.
-const HERO_OTP_TREND_URLS = ['/api/system/trend?metric=otp&days=30']
 
 /**
  * Overview landing page, rebuilt as an editorial stack (NOTES-84):
@@ -67,15 +81,25 @@ function Overview() {
   // for the resulting delta-suppression interaction with computeSystemDelta
   // at the 7-day setting.
   const [days] = useWindowDays()
+  // Agency switch (NOTES-143): `?agency=` drives every fetch below via
+  // `apiUrl`, which reads it straight off the URL — included here only so
+  // the URL arrays below (which must be memoized per `useMultiFetch`'s
+  // contract) recompute on an agency switch instead of replaying the
+  // previous agency's cached URLs.
+  const [agency] = useAgency()
 
   // Memoized (PR #218 finding 4) so the array reference is stable across
-  // renders that don't change `days` — a fresh literal here would still
-  // work (useMultiFetch keys its effect on a JSON.stringify of the URLs,
-  // not reference identity), but the hook's docstring documents
+  // renders that don't change `days`/`agency` — a fresh literal here would
+  // still work (useMultiFetch keys its effect on a JSON.stringify of the
+  // URLs, not reference identity), but the hook's docstring documents
   // memoization as the caller contract.
-  const scorecardUrls = useMemo(() => [`/api/routes?days=${days}`], [days])
-  const { data: scorecardResults, revalidateError: scorecardRevalidateError } =
-    useMultiFetch(scorecardUrls)
+  const scorecardUrls = useMemo(() => [apiUrl('/api/routes', { days, agency })], [days, agency])
+  const {
+    data: scorecardResults,
+    dataUrlKey: scorecardDataUrlKey,
+    error: scorecardError,
+    revalidateError: scorecardRevalidateError,
+  } = useMultiFetch(scorecardUrls)
   // Hero and movers degrade gracefully while this is null (loading, or a
   // fetch failure — the raw-fetch predecessor of this effect silently
   // ignored errors the same way).
@@ -85,15 +109,16 @@ function Overview() {
   // hero both read from this single fetch (props down — NOTES-84 data flow).
   const trendUrls = useMemo(
     () => [
-      `/api/system/trend?metric=otp&days=${days}`,
-      `/api/system/trend?metric=service_delivered&days=${days}`,
-      `/api/system/trend?metric=ewt&days=${days}`,
-      `/api/system/trend?metric=bunching&days=${days}`,
+      apiUrl('/api/system/trend', { metric: 'otp', days, agency }),
+      apiUrl('/api/system/trend', { metric: 'service_delivered', days, agency }),
+      apiUrl('/api/system/trend', { metric: 'ewt', days, agency }),
+      apiUrl('/api/system/trend', { metric: 'bunching', days, agency }),
     ],
-    [days],
+    [days, agency],
   )
   const {
     data: rawSystemTrendData,
+    dataUrlKey: trendDataUrlKey,
     loading: trendLoading,
     error: trendError,
     revalidateError: trendRevalidateError,
@@ -106,14 +131,14 @@ function Overview() {
   const systemTrendData = rawSystemTrendData ?? null
 
   // Memoized (PR #218 finding 4) so the array reference is stable across
-  // renders that don't change `contribMetric`/`days` — a fresh literal here
-  // would still work (useMultiFetch keys its effect on a JSON.stringify of
-  // the URLs, not reference identity), but the hook's docstring documents
-  // memoization as the caller contract, and this is the one call site
-  // whose URL genuinely depends on state.
+  // renders that don't change `contribMetric`/`days`/`agency` — a fresh
+  // literal here would still work (useMultiFetch keys its effect on a
+  // JSON.stringify of the URLs, not reference identity), but the hook's
+  // docstring documents memoization as the caller contract, and this is
+  // one of the call sites whose URL genuinely depends on state.
   const contribUrls = useMemo(
-    () => [`/api/routes/contributors?metric=${contribMetric}&days=${days}`],
-    [contribMetric, days],
+    () => [apiUrl('/api/routes/contributors', { metric: contribMetric, days, agency })],
+    [contribMetric, days, agency],
   )
   const {
     data: contribResults,
@@ -123,12 +148,64 @@ function Overview() {
   } = useMultiFetch(contribUrls)
   const contribData = contribResults ? contribResults[0] : null
 
-  // Hero's own fixed-30-day OTP fetch (PR #239 review finding C) — see
-  // HERO_OTP_TREND_URLS above for why this can't just reuse
-  // `systemTrendData.otp` from the picker-driven fan-out.
-  const { data: heroOtpResults, revalidateError: heroOtpRevalidateError } =
-    useMultiFetch(HERO_OTP_TREND_URLS)
+  // Hero's own fixed-30-day OTP fetch (PR #239 review finding C) — this
+  // can't just reuse `systemTrendData.otp` from the picker-driven fan-out;
+  // see the comment on `trendUrls` above for why. Memoized on `agency`
+  // alone (days is fixed at 30) so an agency switch still recomputes the
+  // URL instead of replaying the previous agency's cached array.
+  const heroOtpTrendUrls = useMemo(
+    () => [apiUrl('/api/system/trend', { metric: 'otp', days: 30, agency })],
+    [agency],
+  )
+  const {
+    data: heroOtpResults,
+    dataUrlKey: heroOtpDataUrlKey,
+    error: heroOtpError,
+    revalidateError: heroOtpRevalidateError,
+  } = useMultiFetch(heroOtpTrendUrls)
   const heroOtpTrend = heroOtpResults ? heroOtpResults[0] : null
+
+  // Agency-switch guard (PR #242 review finding 2; reworked in round 2
+  // review finding 1). `useMultiFetch`'s `data` only updates once a fetch
+  // resolves — a genuine cross-agency cache miss (sfmta isn't pre-warmed
+  // the way `_warm_scorecard_cache_sync` covers wmata) otherwise leaves
+  // the PREVIOUS agency's scorecard/trend numbers rendering under the NEW
+  // agency's header for however long the cold fetch takes (or forever, on
+  // a hard failure — see the `scorecardError`/`heroOtpError` handling
+  // below). `RouteList` already guards the equivalent case via its own
+  // `_cachedAgency !== agency` check; this is the same idea for Overview's
+  // `useMultiFetch`-backed fetches.
+  //
+  // The FIRST version of this guard derived staleness from each group's
+  // `loading` flag via a ref + effect, seeded to the initial url and only
+  // advanced once `loading` went false. That raced `useMultiFetch`'s own
+  // effect: on the very render where `urls` changes, `loading` still holds
+  // its OLD value (React hasn't run the child hook's effect yet), so the
+  // guard's own effect saw `loading === false`, advanced the ref
+  // immediately, and let stale data straight back through on the next
+  // render. Comparing `dataUrlKey` (the url key `data` actually came from
+  // — see useMultiFetch's docstring) against the CURRENT url has no such
+  // lag: `dataUrlKey` only ever changes in the same state update that
+  // changes `data`, so a url-set change is detected the instant it
+  // happens, not one render later.
+  //
+  // `dataAgencyMatches` (not a full url-equality check) deliberately
+  // ignores `days` so a time-window switch keeps the old window's data
+  // on screen while the new one loads (PR #239's stale-while-revalidate),
+  // rather than blanking on every `days` change too (round-2 review
+  // finding 5) — only an AGENCY mismatch is treated as "not loaded yet."
+  // While any group is stale, its corresponding `display*` value below is
+  // null — the same "not loaded yet" state these components already
+  // render correctly (including the hero's PR #239 "verdict unavailable"
+  // copy, which is itself null-safe), so this reuses that existing path
+  // instead of adding a new one.
+  const scorecardStale = !dataAgencyMatches(scorecardDataUrlKey, agency)
+  const trendStale = !dataAgencyMatches(trendDataUrlKey, agency)
+  const heroOtpStale = !dataAgencyMatches(heroOtpDataUrlKey, agency)
+
+  const displayScorecard = scorecardStale ? null : scorecard
+  const displaySystemTrendData = trendStale ? null : systemTrendData
+  const displayHeroOtpTrend = heroOtpStale ? null : heroOtpTrend
 
   // Background-revalidate failure on any of the page's cached fetches
   // (NOTES-122 review finding 1): none of these ever blank the page — the
@@ -142,13 +219,17 @@ function Overview() {
 
   // The 4-entry worst-of-four input for the hero — same construction the
   // retired HealthPulse used (percent-scaled fractions, trend targets).
+  // Reads `displaySystemTrendData` (null while an agency switch is
+  // cold-loading — PR #242 review finding 2), not the raw `systemTrendData`
+  // that also feeds `SystemTrend` below (which already gates its own
+  // rendering on `trendLoading`, so it doesn't need the same treatment).
   const systemMetrics = [
     {
       key: 'otp',
       label: 'OTP',
       higherIsBetter: true,
-      current: latestNonNull(systemTrendData?.otp?.trend_data, 'otp_percentage'),
-      target: systemTrendData?.otp?.target_value ?? null,
+      current: latestNonNull(displaySystemTrendData?.otp?.trend_data, 'otp_percentage'),
+      target: displaySystemTrendData?.otp?.target_value ?? null,
     },
     {
       key: 'service_delivered',
@@ -156,34 +237,34 @@ function Overview() {
       higherIsBetter: true,
       current: (() => {
         const v = latestNonNull(
-          systemTrendData?.service_delivered?.trend_data,
+          displaySystemTrendData?.service_delivered?.trend_data,
           'service_delivered_ratio',
         )
         return v != null ? v * 100 : null
       })(),
       target:
-        systemTrendData?.service_delivered?.target_value != null
-          ? systemTrendData.service_delivered.target_value * 100
+        displaySystemTrendData?.service_delivered?.target_value != null
+          ? displaySystemTrendData.service_delivered.target_value * 100
           : null,
     },
     {
       key: 'ewt',
       label: 'EWT',
       higherIsBetter: false,
-      current: latestNonNull(systemTrendData?.ewt?.trend_data, 'ewt_seconds'),
-      target: systemTrendData?.ewt?.target_value ?? null,
+      current: latestNonNull(displaySystemTrendData?.ewt?.trend_data, 'ewt_seconds'),
+      target: displaySystemTrendData?.ewt?.target_value ?? null,
     },
     {
       key: 'bunching',
       label: 'Bunching',
       higherIsBetter: false,
       current: (() => {
-        const v = latestNonNull(systemTrendData?.bunching?.trend_data, 'bunching_rate')
+        const v = latestNonNull(displaySystemTrendData?.bunching?.trend_data, 'bunching_rate')
         return v != null ? v * 100 : null
       })(),
       target:
-        systemTrendData?.bunching?.target_value != null
-          ? systemTrendData.bunching.target_value * 100
+        displaySystemTrendData?.bunching?.target_value != null
+          ? displaySystemTrendData.bunching.target_value * 100
           : null,
     },
   ]
@@ -192,7 +273,7 @@ function Overview() {
   // 30-day fetch above, not the picker-driven `systemTrendData`, so the
   // verdict is stable regardless of the selected window (PR #239 review
   // finding C).
-  const otpSeries = (heroOtpTrend?.trend_data || []).map((row) => ({
+  const otpSeries = (displayHeroOtpTrend?.trend_data || []).map((row) => ({
     date: row.date,
     value: row.otp_percentage,
     data_quality: row.data_quality,
@@ -200,9 +281,22 @@ function Overview() {
 
   const visibleContributors = (contribData?.contributors ?? []).slice(0, CONTRIB_TOP_N)
 
+  // Cold-load failure for the hero/map/movers' data (PR #242 round-2
+  // review finding 2). Distinct from `staleData` above: `staleData` is a
+  // background-revalidate failure with good stale data still on screen;
+  // this is a failure with NOTHING to show for the current agency/window
+  // (e.g. a 500 on a freshly-selected agency's `/api/routes`) — `error` on
+  // `useMultiFetch` is only ever set on that cold-load path. Surfaced once
+  // for whichever of the two groups failed rather than duplicating the
+  // banner.
+  const pageError = scorecardError || heroOtpError
+
   return (
     <main>
       <SystemWeeklyNarrativeLede />
+      {pageError && (
+        <ErrorState title="Unable to load system data" message={pageError} />
+      )}
       {staleData && (
         <p
           className="stale-data-note"
@@ -213,14 +307,17 @@ function Overview() {
       )}
       <OverviewHero
         systemMetrics={systemMetrics}
-        scorecardRoutes={scorecard?.routes ?? null}
+        scorecardRoutes={displayScorecard?.routes ?? null}
         otpSeries={otpSeries}
       />
 
-      {/* "Where is it going badly" fold: system map + movers side by side. */}
+      {/* "Where is it going badly" fold: system map + movers side by side.
+          `displayScorecard` (not `scorecard`) so an agency switch shows the
+          same "not loaded yet" state as a cold first mount instead of the
+          previous agency's routes (PR #242 review finding 2). */}
       <div className="overview-fold overview-fold-with-map">
-        <SystemMap scorecardRoutes={scorecard?.routes ?? null} />
-        <MoversPanel routes={scorecard?.routes ?? null} />
+        <SystemMap scorecardRoutes={displayScorecard?.routes ?? null} />
+        <MoversPanel routes={displayScorecard?.routes ?? null} />
       </div>
 
       <SystemTrend
@@ -294,7 +391,7 @@ function Overview() {
               {visibleContributors.map((c, idx) => (
                 <tr
                   key={c.route_id}
-                  onClick={() => navigate(appendWindowParam(`/route/${c.route_id}`, days))}
+                  onClick={() => navigate(appendWindowParam(`/route/${c.route_id}`, days, agency))}
                   style={{ cursor: 'pointer' }}
                 >
                   <td>{idx + 1}</td>
@@ -320,7 +417,7 @@ function Overview() {
         )}
 
         <div style={{ padding: '1rem 1.5rem 1.5rem' }}>
-          <Link to={appendWindowParam('/routes', days)} className="see-all-link">
+          <Link to={appendWindowParam('/routes', days, agency)} className="see-all-link">
             See all routes →
           </Link>
         </div>

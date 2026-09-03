@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { formatDeviationMmSs, todayEasternIso } from '../utils/formatters'
+import { apiUrl } from '../utils/apiUrl'
+import useAgency from '../hooks/useAgency'
+import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 
 function BlockList({ routeId }) {
   /**
@@ -17,12 +20,13 @@ function BlockList({ routeId }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/routes/${routeId}/blocks?service_date=${encodeURIComponent(serviceDate)}`)
+    fetch(apiUrl(`/api/routes/${routeId}/blocks`, { service_date: serviceDate }))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -39,7 +43,7 @@ function BlockList({ routeId }) {
     return () => {
       cancelled = true
     }
-  }, [routeId, serviceDate])
+  }, [routeId, serviceDate, agency])
 
   const blocks = data?.blocks || []
 
@@ -102,7 +106,11 @@ function BlockList({ routeId }) {
                   title="View block timeline"
                   onClick={() =>
                     navigate(
-                      `/blocks/${encodeURIComponent(b.block_id)}?service_date=${encodeURIComponent(serviceDate)}`,
+                      appendWindowParam(
+                        `/blocks/${encodeURIComponent(b.block_id)}?service_date=${encodeURIComponent(serviceDate)}`,
+                        DEFAULT_WINDOW_DAYS,
+                        agency,
+                      ),
                     )
                   }
                 >

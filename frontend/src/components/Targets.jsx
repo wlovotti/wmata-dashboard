@@ -3,6 +3,10 @@ import { useNavigate, Link } from 'react-router-dom'
 import { badgeColor } from '../frequencyClass'
 import { formatContribMetricValue } from '../utils/formatters'
 import ErrorState from './ErrorState.jsx'
+import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
+import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import { apiUrl } from '../utils/apiUrl'
+import AgencyUnavailable from './AgencyUnavailable'
 
 /**
  * Format a target value for display, given the canonical metric key. Mirrors
@@ -177,6 +181,20 @@ export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabe
  */
 function Targets() {
   const navigate = useNavigate()
+  const [agency] = useAgency()
+  // WMATA-only (NOTES-143): `/api/targets` doesn't even accept an `agency`
+  // param — it always reads `config/route_targets.yaml`, which is WMATA
+  // route_id-keyed. Fetching it under a Muni header would render WMATA's
+  // own targets as if they were configured for Muni, so this page skips
+  // both fetches entirely for a non-wmata agency and shows a short
+  // unavailable card instead.
+  const unavailable = agency !== DEFAULT_AGENCY
+  const diagnosticsLink = appendWindowParam('/diagnostics', DEFAULT_WINDOW_DAYS, agency)
+  // Carry the current time-window selection into RouteDetail navigation
+  // (PR #242 review finding 14) — `/targets` itself has no `days` window,
+  // but a route_id link should still preserve whatever `?days=` the user
+  // arrived with rather than resetting it.
+  const [days] = useWindowDays()
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -187,10 +205,14 @@ function Targets() {
   const [retryTick, setRetryTick] = useState(0)
 
   useEffect(() => {
+    if (unavailable) {
+      setLoading(false)
+      return
+    }
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch('/api/targets')
+    fetch(apiUrl('/api/targets'))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -207,14 +229,15 @@ function Targets() {
     return () => {
       cancelled = true
     }
-  }, [retryTick])
+  }, [retryTick, unavailable])
 
   // Fetch scorecard once for the off-target panel's current-value column.
   // The /api/routes endpoint is cached server-side (60s TTL) so the cost is
   // amortized across this page and Overview/RouteList.
   useEffect(() => {
+    if (unavailable) return
     let cancelled = false
-    fetch('/api/routes')
+    fetch(apiUrl('/api/routes'))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) setScorecard(json)
@@ -226,14 +249,33 @@ function Targets() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [unavailable])
+
+  if (unavailable) {
+    return (
+      <main>
+        <div className="chart-container">
+          <p style={{ margin: '0 0 0.5rem' }}>
+            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+              ← Diagnostics
+            </Link>
+          </p>
+          <h2>Performance targets</h2>
+          <AgencyUnavailable
+            agencyLabel={AGENCY_LABELS[agency] || agency}
+            reason="config/route_targets.yaml is WMATA route_id-keyed and doesn't have a per-agency equivalent yet."
+          />
+        </div>
+      </main>
+    )
+  }
 
   if (loading) {
     return (
       <main>
         <div className="chart-container">
           <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
               ← Diagnostics
             </Link>
           </p>
@@ -252,7 +294,7 @@ function Targets() {
       <main>
         <div className="chart-container">
           <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
               ← Diagnostics
             </Link>
           </p>
@@ -334,7 +376,7 @@ function Targets() {
     <main>
       <div className="chart-container">
         <p style={{ margin: '0 0 0.5rem' }}>
-          <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
             ← Diagnostics
           </Link>
         </p>
@@ -415,7 +457,9 @@ function Targets() {
               {offTargetRows.map((r) => (
                 <tr
                   key={r.routeId}
-                  onClick={() => navigate(`/route/${r.routeId}`)}
+                  onClick={() =>
+                    navigate(appendWindowParam(`/route/${r.routeId}`, days, agency))
+                  }
                   style={{ cursor: 'pointer' }}
                 >
                   <td className="route-id">
@@ -465,7 +509,9 @@ function Targets() {
                 return (
                   <tr key={rid}>
                     <td className="route-id">
-                      <Link to={`/route/${rid}`}>{rid}</Link>
+                      <Link to={appendWindowParam(`/route/${rid}`, days, agency)}>
+                        {rid}
+                      </Link>
                     </td>
                     {METRIC_ORDER.map((m) => (
                       <td key={m} className="metric">

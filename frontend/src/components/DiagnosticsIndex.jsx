@@ -1,4 +1,6 @@
 import { Link } from 'react-router-dom'
+import useAgency from '../hooks/useAgency'
+import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 
 // The four tools demoted from the top-level nav by the NOTES-84 collapse.
 // Existing URLs are preserved verbatim — this page is an index, not a move.
@@ -33,6 +35,9 @@ const TOOLS = [
  * bare list of nouns.
  */
 function DiagnosticsIndex() {
+  // Carry the current agency selection into each tool (NOTES-143) — none
+  // of these pages have a `days` window, so only `agency` is threaded.
+  const [agency] = useAgency()
   return (
     <main>
       <div className="chart-container">
@@ -42,7 +47,11 @@ function DiagnosticsIndex() {
         </p>
         <div className="diagnostics-grid">
           {TOOLS.map((tool) => (
-            <Link key={tool.to} to={tool.to} className="diagnostics-card">
+            <Link
+              key={tool.to}
+              to={appendWindowParam(tool.to, DEFAULT_WINDOW_DAYS, agency)}
+              className="diagnostics-card"
+            >
               <h3>{tool.title}</h3>
               <p>{tool.description}</p>
             </Link>

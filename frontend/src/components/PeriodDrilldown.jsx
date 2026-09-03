@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import useWindowDays from '../hooks/useWindowDays'
+import useAgency from '../hooks/useAgency'
+import { apiUrl } from '../utils/apiUrl'
 import {
   BarChart,
   Bar,
@@ -206,12 +208,13 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
   // `/period-drilldown` below is always the latest single service_date and
   // has no `days` param, so it's left unwired.
   const [days] = useWindowDays()
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/routes/${routeId}/period-drilldown`)
+    fetch(apiUrl(`/api/routes/${routeId}/period-drilldown`))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -228,17 +231,16 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
     return () => {
       cancelled = true
     }
-  }, [routeId])
+  }, [routeId, agency])
 
   useEffect(() => {
     let cancelled = false
     setCauseError(null)
-    const params = new URLSearchParams()
-    if (dayType && dayType !== 'all') params.set('day_type', dayType)
-    if (period && period !== 'all') params.set('period', period)
-    params.set('days', String(days))
-    const qs = params.toString()
-    const url = `/api/routes/${routeId}/bunching-causes${qs ? `?${qs}` : ''}`
+    const params = {}
+    if (dayType && dayType !== 'all') params.day_type = dayType
+    if (period && period !== 'all') params.period = period
+    params.days = String(days)
+    const url = apiUrl(`/api/routes/${routeId}/bunching-causes`, params)
     fetch(url)
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
@@ -250,7 +252,7 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
     return () => {
       cancelled = true
     }
-  }, [routeId, dayType, period, days])
+  }, [routeId, dayType, period, days, agency])
 
   if (loading) {
     return (

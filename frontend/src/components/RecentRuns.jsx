@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { formatDeviationSignedSec } from '../utils/formatters'
+import { apiUrl } from '../utils/apiUrl'
+import useAgency from '../hooks/useAgency'
+import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 
 function RecentRuns({ routeId }) {
   /**
@@ -16,12 +19,13 @@ function RecentRuns({ routeId }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/routes/${routeId}/recent-runs`)
+    fetch(apiUrl(`/api/routes/${routeId}/recent-runs`))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -38,7 +42,7 @@ function RecentRuns({ routeId }) {
     return () => {
       cancelled = true
     }
-  }, [routeId])
+  }, [routeId, agency])
 
   if (loading) {
     return (
@@ -90,7 +94,9 @@ function RecentRuns({ routeId }) {
               {runs.map((r) => (
                 <tr
                   key={r.run_id}
-                  onClick={() => navigate(`/runs/${r.run_id}`)}
+                  onClick={() =>
+                    navigate(appendWindowParam(`/runs/${r.run_id}`, DEFAULT_WINDOW_DAYS, agency))
+                  }
                   className="recent-runs-row"
                   title="View per-stop deviation chart"
                 >

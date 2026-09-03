@@ -50,6 +50,9 @@ import {
   ReferenceLine,
   Cell,
 } from 'recharts'
+import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
+import { apiUrl } from '../utils/apiUrl'
+import AgencyUnavailable from './AgencyUnavailable'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -543,7 +546,7 @@ const tdStyle = {
  *
  * @param {{ routeId: string, period: string }} props
  */
-function NarrativeSection({ routeId, period }) {
+function NarrativeSection({ routeId, period, agency }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
@@ -555,10 +558,9 @@ function NarrativeSection({ routeId, period }) {
     setError(null)
     setNotFound(false)
     setData(null)
-    const params = new URLSearchParams()
-    if (period && period !== 'all') params.set('period', period)
-    const qs = params.toString()
-    const url = `/api/routes/${routeId}/diagnosis${qs ? `?${qs}` : ''}`
+    const params = {}
+    if (period && period !== 'all') params.period = period
+    const url = apiUrl(`/api/routes/${routeId}/diagnosis`, params)
     fetch(url)
       .then((res) => {
         if (res.status === 404) {
@@ -581,7 +583,7 @@ function NarrativeSection({ routeId, period }) {
         }
       })
     return () => { cancelled = true }
-  }, [routeId, period])
+  }, [routeId, period, agency])
 
   const headerStyle = {
     fontSize: '0.95rem',
@@ -724,22 +726,40 @@ function directionLabel(directionId, asymmetry) {
  * renders both sub-panels per direction. Returns null when there is no
  * materialized data for the route (normal before the pipeline has run).
  *
+ * WMATA-only (NOTES-143): for any other agency, skips the fetch entirely
+ * and renders a short "not available for this agency" card instead —
+ * see `unavailable` below.
+ *
  * @param {{ routeId: string, period: string }} props
  */
 function RouteDiagnosisPanel({ routeId, period }) {
+  const [agency] = useAgency()
+  // WMATA-only (NOTES-143): the diagnostic profile is materialized from
+  // `timepoints`, which uses GTFS-Plus internal stop_ids WMATA publishes
+  // and SFMTA does not (see CLAUDE.md's "timepoints uses GTFS-Plus
+  // internal stop_ids" gotcha). Rather than let a non-wmata request 200
+  // with an empty profile and render the generic "no diagnostic profile"
+  // message — which reads as "not generated yet for this WMATA route,"
+  // not "not available for this agency" — skip the fetch entirely and
+  // show a dedicated unavailable card below.
+  const unavailable = agency !== DEFAULT_AGENCY
+
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   useEffect(() => {
+    if (unavailable) {
+      setLoading(false)
+      return
+    }
     let cancelled = false
     setLoading(true)
     setError(null)
     setData(null)
-    const params = new URLSearchParams()
-    if (period && period !== 'all') params.set('period', period)
-    const qs = params.toString()
-    const url = `/api/routes/${routeId}/diagnostic_profile${qs ? `?${qs}` : ''}`
+    const params = {}
+    if (period && period !== 'all') params.period = period
+    const url = apiUrl(`/api/routes/${routeId}/diagnostic_profile`, params)
     fetch(url)
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
@@ -757,7 +777,7 @@ function RouteDiagnosisPanel({ routeId, period }) {
     return () => {
       cancelled = true
     }
-  }, [routeId, period])
+  }, [routeId, period, agency, unavailable])
 
   // Group segments and timepoints by direction
   const byDirection = useMemo(() => {
@@ -802,6 +822,18 @@ function RouteDiagnosisPanel({ routeId, period }) {
     data &&
     ((data.segments && data.segments.length > 0) ||
       (data.timepoints && data.timepoints.length > 0))
+
+  if (unavailable) {
+    return (
+      <div className="chart-container">
+        <h2>Diagnosis</h2>
+        <AgencyUnavailable
+          agencyLabel={AGENCY_LABELS[agency] || agency}
+          reason="The slip trajectory and timepoint behavior panels are built from WMATA's GTFS-Plus timepoint data, which this agency doesn't publish."
+        />
+      </div>
+    )
+  }
 
   if (loading) {
     return (
@@ -921,7 +953,7 @@ function RouteDiagnosisPanel({ routeId, period }) {
       </div>
 
       {/* LLM narrative section (route diagnosis narrative, PR #141) */}
-      <NarrativeSection routeId={routeId} period={period} />
+      <NarrativeSection routeId={routeId} period={period} agency={agency} />
     </div>
   )
 }

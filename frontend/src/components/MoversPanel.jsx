@@ -5,6 +5,7 @@ import { DeltaIndicator } from './RouteTrend'
 import { formatContribMetricValue } from '../utils/formatters'
 import { getMoversFloor } from '../moversFloor'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
+import useAgency from '../hooks/useAgency'
 
 // Metric options — same 4-entry list as Overview/RouteList (kept inline per
 // the existing convention comment in those files).
@@ -78,6 +79,8 @@ function MoversPanel({ routes }) {
   // Carry the current time-window selection into RouteDetail navigation
   // (NOTES-140) — read-only here, WindowPicker in the app shell owns writes.
   const [days] = useWindowDays()
+  // Same for the agency selection (NOTES-143) — AgencyToggle owns writes.
+  const [agency] = useAgency()
 
   // See getMoversFloor in ../moversFloor — one shared floor for both the
   // ranking filter and the DeltaIndicator flatThreshold prop below.
@@ -169,7 +172,7 @@ function MoversPanel({ routes }) {
             {movers.map((r) => (
               <tr
                 key={r.routeId}
-                onClick={() => navigate(appendWindowParam(`/route/${r.routeId}`, days))}
+                onClick={() => navigate(appendWindowParam(`/route/${r.routeId}`, days, agency))}
                 style={{ cursor: 'pointer' }}
               >
                 <td className="route-id">

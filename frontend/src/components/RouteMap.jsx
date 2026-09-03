@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { MapContainer, TileLayer, Polyline, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
+import { apiUrl } from '../utils/apiUrl'
+import useAgency from '../hooks/useAgency'
 
 function FitBounds({ bounds }) {
   const map = useMap()
@@ -18,9 +20,15 @@ function RouteMap({ routeId }) {
   const [shapes, setShapes] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // Re-fetch on an agency switch (NOTES-143), not just a routeId change —
+  // `apiUrl` reads the agency straight off the URL, but this effect still
+  // needs `agency` in its dependency array to actually re-run when only
+  // the agency changes (e.g. the header toggle, while routeId stays the
+  // same literal string across agencies).
+  const [agency] = useAgency()
 
   useEffect(() => {
-    fetch(`/api/routes/${routeId}/shapes`)
+    fetch(apiUrl(`/api/routes/${routeId}/shapes`))
       .then(res => res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`))
       .then(shapesData => {
         setShapes(shapesData.shapes || [])
@@ -30,7 +38,7 @@ function RouteMap({ routeId }) {
         setError(err.message || err)
         setLoading(false)
       })
-  }, [routeId])
+  }, [routeId, agency])
 
   if (loading) {
     return (

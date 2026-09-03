@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import ErrorState from './ErrorState.jsx'
+import { apiUrl } from '../utils/apiUrl'
+import useAgency from '../hooks/useAgency'
+import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 
 // WMATA on-time band: -2 min early to +7 min late. Mirrors `src/otp_constants.py`
 // and the per-run chart in RunDetail. Same thresholds drive the card color
@@ -78,15 +81,14 @@ function BlockTimeline() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [retryTick, setRetryTick] = useState(0)
+  const [agency] = useAgency()
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    const qs = serviceDateParam
-      ? `?service_date=${encodeURIComponent(serviceDateParam)}`
-      : ''
-    fetch(`/api/blocks/${encodeURIComponent(blockId)}${qs}`)
+    const params = serviceDateParam ? { service_date: serviceDateParam } : undefined
+    fetch(apiUrl(`/api/blocks/${encodeURIComponent(blockId)}`, params))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -103,7 +105,7 @@ function BlockTimeline() {
     return () => {
       cancelled = true
     }
-  }, [blockId, serviceDateParam, retryTick])
+  }, [blockId, serviceDateParam, retryTick, agency])
 
   if (loading) {
     return (
@@ -302,7 +304,9 @@ function BlockTimeline() {
                     cursor: t.run_id ? 'pointer' : 'default',
                   }}
                   onClick={() => {
-                    if (t.run_id) navigate(`/runs/${t.run_id}`)
+                    if (t.run_id) {
+                      navigate(appendWindowParam(`/runs/${t.run_id}`, DEFAULT_WINDOW_DAYS, agency))
+                    }
                   }}
                   title={t.run_id ? 'View per-run deviation chart' : ''}
                 >

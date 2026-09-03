@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
 import ErrorState from './ErrorState.jsx'
+import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
+import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import { apiUrl } from '../utils/apiUrl'
+import AgencyUnavailable from './AgencyUnavailable'
 
 /**
  * Format signed seconds as `±M:SS` (minutes:seconds). Used for the per-row
@@ -72,6 +76,20 @@ const DIRECTION_OPTIONS = [
  * default are omitted from the URL to keep it clean.
  */
 function ScheduleAudit() {
+  const [agency] = useAgency()
+  // Carry the current time-window selection into RouteDetail navigation
+  // (PR #242 review finding 14) — read-only here, WindowPicker in the app
+  // shell owns writes. `/schedule-audit` itself has no `days` window (the
+  // picker isn't shown here), but a route_id link should still preserve
+  // whatever `?days=` the user arrived with rather than resetting it.
+  const [days] = useWindowDays()
+  // WMATA-only (NOTES-143): `route_diagnostic_segment` is materialized
+  // from `timepoints`, which uses GTFS-Plus internal stop_ids WMATA
+  // publishes and SFMTA does not (see CLAUDE.md). Skip both fetches
+  // entirely for a non-wmata agency and show an unavailable card instead
+  // of an empty table under a Muni header.
+  const unavailable = agency !== DEFAULT_AGENCY
+  const diagnosticsLink = appendWindowParam('/diagnostics', DEFAULT_WINDOW_DAYS, agency)
   const [searchParams, setSearchParams] = useSearchParams()
   const routeId = searchParams.get('route_id') || ''
   const direction = searchParams.get('direction_id') || 'all'
@@ -113,10 +131,14 @@ function ScheduleAudit() {
   // filtered. Shares `retryTick` with the main fetch so a single Retry
   // click retries both.
   useEffect(() => {
+    if (unavailable) {
+      setRoutesLoading(false)
+      return
+    }
     let cancelled = false
     setRoutesLoading(true)
     setRoutesError(null)
-    fetch('/api/routes')
+    fetch(apiUrl('/api/routes'))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -133,19 +155,23 @@ function ScheduleAudit() {
     return () => {
       cancelled = true
     }
-  }, [retryTick])
+  }, [retryTick, unavailable])
 
   useEffect(() => {
+    if (unavailable) {
+      setLoading(false)
+      return
+    }
     let cancelled = false
     setLoading(true)
     setError(null)
-    const params = new URLSearchParams()
-    if (routeId) params.set('route_id', routeId)
-    if (direction !== 'all') params.set('direction_id', direction)
-    if (period) params.set('period', period)
-    if (sign) params.set('sign', sign)
-    if (limit) params.set('limit', String(limit))
-    fetch(`/api/schedule-audit?${params.toString()}`)
+    const params = {}
+    if (routeId) params.route_id = routeId
+    if (direction !== 'all') params.direction_id = direction
+    if (period) params.period = period
+    if (sign) params.sign = sign
+    if (limit) params.limit = String(limit)
+    fetch(apiUrl('/api/schedule-audit', params))
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
         if (!cancelled) {
@@ -162,7 +188,7 @@ function ScheduleAudit() {
     return () => {
       cancelled = true
     }
-  }, [routeId, direction, period, sign, limit, retryTick])
+  }, [routeId, direction, period, sign, limit, retryTick, unavailable])
 
   const routeOptions = useMemo(() => {
     return [...routes].sort((a, b) =>
@@ -186,11 +212,30 @@ function ScheduleAudit() {
     return segments.reduce((acc, s) => acc + (s.minutes_per_day || 0), 0)
   }, [segments])
 
+  if (unavailable) {
+    return (
+      <main>
+        <div className="chart-container">
+          <p style={{ margin: '0 0 0.5rem' }}>
+            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+              ← Diagnostics
+            </Link>
+          </p>
+          <h2>Schedule audit</h2>
+          <AgencyUnavailable
+            agencyLabel={AGENCY_LABELS[agency] || agency}
+            reason="This audit is built from WMATA's GTFS-Plus timepoint data, which this agency doesn't publish."
+          />
+        </div>
+      </main>
+    )
+  }
+
   return (
     <main>
       <div className="chart-container">
         <p style={{ margin: '0 0 0.5rem' }}>
-          <Link to="/diagnostics" style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
             ← Diagnostics
           </Link>
         </p>
@@ -356,7 +401,13 @@ function ScheduleAudit() {
                       key={`${s.route_id}-${s.direction_id}-${s.period}-${s.from_stop_id}-${s.to_stop_id}-${idx}`}
                     >
                       <td className="route-id">
-                        <Link to={`/route/${s.route_id}`}>
+                        <Link
+                          to={appendWindowParam(
+                            `/route/${s.route_id}`,
+                            days,
+                            agency,
+                          )}
+                        >
                           {s.route_short_name || s.route_id}
                         </Link>
                       </td>

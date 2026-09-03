@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import useMultiFetch from '../hooks/useMultiFetch'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import RouteMap from './RouteMap'
@@ -16,6 +16,8 @@ import { badgeColor, FREQUENCY_CLASS_LABELS } from '../frequencyClass'
 import { getMoversFloor } from '../moversFloor'
 import useUrlState from '../hooks/useUrlState'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
+import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
+import { apiUrl } from '../utils/apiUrl'
 
 // Day-type / time-period filter options (NOTES-41). Keys must match the API's
 // accepted values (src/time_periods.py: VALID_DAY_TYPES / VALID_PERIOD_KEYS).
@@ -62,6 +64,31 @@ function RouteDetail() {
   // owns writes.
   const [days] = useWindowDays()
 
+  // Agency switch (NOTES-143): `?agency=` drives every fetch below via
+  // `apiUrl`. Read-only here — AgencyToggle in the app shell owns writes.
+  const [agency] = useAgency()
+
+  // Rider-experience OTP toggle (NOTES-143, backend in PR #241). RouteDetail
+  // is the only page this applies to — the scorecard and system pages stay
+  // on the official WMATA -2/+7 window regardless. Omitted from the URL at
+  // the default ("official") so existing links/fixtures/Playwright specs
+  // are unaffected.
+  const [otpWindowParam, setOtpWindow] = useUrlState('otp_window', 'official')
+  // Validate against the API's accepted values (mirrors useAgency /
+  // useWindowDays — PR #242 review finding 8): a hand-edited or malformed
+  // `?otp_window=` (e.g. `Rider`, `banana`) falls back to `official`
+  // rather than sending an unrecognized value to the API and then
+  // comparing against it with no explanation.
+  const otpWindow = otpWindowParam === 'rider' ? 'rider' : 'official'
+  const isRiderWindow = otpWindow === 'rider'
+
+  // Per-route targets and the frequent-route designation aren't available
+  // for a non-wmata agency (NOTES-143) — the backend still returns
+  // system-default targets (never null) and `is_frequent: false` rather
+  // than erroring, so this is an explicit UI choice (hide the target
+  // indicators, keep OTP as the headline) rather than a value check.
+  const showTargets = agency === DEFAULT_AGENCY
+
   // Recent runs vs Blocks tab (NOTES-45). 'runs' is the default; the user
   // switches to 'blocks' to see the per-vehicle chained-trip view that
   // surfaces cascade lateness.
@@ -74,10 +101,40 @@ function RouteDetail() {
     setSearchParams(next, { replace: true })
   }
 
+  // Tracks the (routeId, agency) this effect last ran for (PR #242 round-2
+  // review finding 4). Only an actual IDENTITY change — a different route
+  // or a different agency's database — is a genuine cold navigation that
+  // should show the full-page spinner; a filter change (dayType, period,
+  // otpWindow) re-fetches the SAME route/agency and should swap data in
+  // place like any other stale-while-revalidate update, not flash a
+  // spinner over content that's still perfectly valid to look at while
+  // the re-slice loads.
+  const routeIdentityRef = useRef({ routeId, agency })
+
   useEffect(() => {
-    const params = new URLSearchParams()
-    if (dayType !== 'all') params.set('day_type', dayType)
-    if (period !== 'all') params.set('period', period)
+    // Reset `error` at the top of every run (PR #242 review finding 1) —
+    // previously `error` was only ever set inside the `.catch`, never
+    // cleared, so one 404 (e.g. switching to an agency whose DB doesn't
+    // have this route_id) latched the error banner permanently:
+    // `if (error || !routeData)` short-circuited every subsequent
+    // successful fetch. `cancelled` guards against a slow response for a
+    // superseded (routeId/agency/...) combination landing after a newer
+    // request already committed its result.
+    let cancelled = false
+    setError(null)
+    const identityChanged =
+      routeIdentityRef.current.routeId !== routeId || routeIdentityRef.current.agency !== agency
+    routeIdentityRef.current = { routeId, agency }
+    if (identityChanged) {
+      setLoading(true)
+    }
+    // `agency` passed explicitly (not left to apiUrl's window.location.search
+    // fallback) so this fetch is correct under MemoryRouter in tests too,
+    // not just under the real BrowserRouter in production — matches the
+    // explicit-agency pattern the trend fetches below already use.
+    const params = { agency }
+    if (dayType !== 'all') params.day_type = dayType
+    if (period !== 'all') params.period = period
     // Deliberately NOT wired to the time-window picker's `days` (PR #239
     // review finding B). This endpoint's `days` scopes the
     // excess-trip-time freshest-day lookup (`_excess_trip_time_fields` in
@@ -86,19 +143,24 @@ function RouteDetail() {
     // value up to N days stale. Sending the picker's value here would
     // silently change what "current" excess-trip-time means whenever the
     // user picks a wider window. Left at the endpoint's own default (7).
-    const qs = params.toString()
-    const url = `/api/routes/${routeId}${qs ? `?${qs}` : ''}`
+    if (otpWindow === 'rider') params.otp_window = otpWindow
+    const url = apiUrl(`/api/routes/${routeId}`, params)
     fetch(url)
       .then(res => res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`))
       .then(data => {
+        if (cancelled) return
         setRouteData(data)
         setLoading(false)
       })
       .catch(err => {
+        if (cancelled) return
         setError(err.message || err)
         setLoading(false)
       })
-  }, [routeId, dayType, period])
+    return () => {
+      cancelled = true
+    }
+  }, [routeId, dayType, period, agency, otpWindow])
 
   // Trend data is fetched here (rather than inside RouteTrend) so the same
   // `days`-window series (NOTES-140 — previously a hardcoded 30) can drive
@@ -113,16 +175,30 @@ function RouteDetail() {
   // / daily aggregates that don't decompose by hour); pass it on every
   // call anyway — the API silently ignores it for non-otp metrics.
   const trendUrls = useMemo(() => {
-    const filterParams = []
-    if (dayType !== 'all') filterParams.push(`day_type=${encodeURIComponent(dayType)}`)
-    if (period !== 'all') filterParams.push(`period=${encodeURIComponent(period)}`)
-    const filterQs = filterParams.length ? `&${filterParams.join('&')}` : ''
+    const filterParams = {}
+    if (dayType !== 'all') filterParams.day_type = dayType
+    if (period !== 'all') filterParams.period = period
+    // otp_window (NOTES-143/144) only applies to metric=otp; the API
+    // silently ignores it for the other two metrics, so it's only worth
+    // sending on that one call.
+    const otpParams = { ...filterParams, metric: 'otp', days, agency }
+    if (otpWindow === 'rider') otpParams.otp_window = otpWindow
     return [
-      `/api/routes/${routeId}/trend?metric=otp&days=${days}${filterQs}`,
-      `/api/routes/${routeId}/trend?metric=service_delivered&days=${days}${filterQs}`,
-      `/api/routes/${routeId}/trend?metric=excess_trip_time&days=${days}${filterQs}`,
+      apiUrl(`/api/routes/${routeId}/trend`, otpParams),
+      apiUrl(`/api/routes/${routeId}/trend`, {
+        ...filterParams,
+        metric: 'service_delivered',
+        days,
+        agency,
+      }),
+      apiUrl(`/api/routes/${routeId}/trend`, {
+        ...filterParams,
+        metric: 'excess_trip_time',
+        days,
+        agency,
+      }),
     ]
-  }, [routeId, dayType, period, days])
+  }, [routeId, dayType, period, days, agency, otpWindow])
 
   const {
     data: trendData,
@@ -194,7 +270,7 @@ function RouteDetail() {
     return (
       <main>
         <div className="route-detail-header">
-          <button onClick={() => navigate(appendWindowParam('/', days))} className="back-btn">
+          <button onClick={() => navigate(appendWindowParam('/', days, agency))} className="back-btn">
             ← Back to All Routes
           </button>
         </div>
@@ -210,7 +286,7 @@ function RouteDetail() {
     return (
       <main>
         <div className="route-detail-header">
-          <button onClick={() => navigate(appendWindowParam('/', days))} className="back-btn">
+          <button onClick={() => navigate(appendWindowParam('/', days, agency))} className="back-btn">
             ← Back to All Routes
           </button>
         </div>
@@ -219,7 +295,7 @@ function RouteDetail() {
           <div className="error-content">
             <strong>Error loading route data:</strong> {error || 'Route not found'}
             <div className="error-actions">
-              <button onClick={() => navigate(appendWindowParam('/', days))} className="retry-btn">
+              <button onClick={() => navigate(appendWindowParam('/', days, agency))} className="retry-btn">
                 Back to Routes
               </button>
             </div>
@@ -234,6 +310,22 @@ function RouteDetail() {
     || routeData.ewt_seconds != null
     || routeData.bunching_rate != null
     || routeData.excess_trip_time_pct != null
+
+  // The `deltas` block is always computed from the official OTP window
+  // regardless of `otp_window` (NOTES-144) — the response echoes which
+  // window it used for `deltas` as `deltas_otp_window`, and which window
+  // it actually computed the live OTP fields with as `otp_window`.
+  // Compare those two server-echoed fields to each other (PR #242 review
+  // finding 8), not the server's `deltas_otp_window` against this
+  // component's own local `otpWindow` state — the local value can race
+  // ahead of `routeData` (the URL updates synchronously; the fetch
+  // hasn't landed yet), and comparing two fields off the SAME response is
+  // what actually answers "is the arrow on this render comparable to the
+  // value on this render," rather than hardcoding "hide when rider"
+  // (which would silently go stale if the backend's official-only delta
+  // behavior ever changes). Hoisted above the stats-summary IIFE (not
+  // declared inside it) so the rider-mode note below can also gate on it.
+  const otpDeltaMismatch = routeData.deltas_otp_window !== routeData.otp_window
 
   // Subline for the excess-trip-time card: "median trip ran X min,
   // schedule Y min" so a GM can see whether the running-over-110% rate
@@ -275,7 +367,7 @@ function RouteDetail() {
   return (
     <main>
       <div className="route-detail-header">
-        <button onClick={() => navigate(appendWindowParam('/', days))} className="back-btn">
+        <button onClick={() => navigate(appendWindowParam('/', days, agency))} className="back-btn">
           ← Back to All Routes
         </button>
         <div className="route-title">
@@ -364,6 +456,25 @@ function RouteDetail() {
             Clear filter
           </button>
         )}
+        {/* Rider-experience OTP toggle (NOTES-143). RouteDetail-only — the
+            scorecard and system pages stay on the official WMATA -2/+7
+            window regardless of this control. */}
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            marginLeft: 'auto',
+          }}
+          title="Switch the OTP headline to the stricter rider-experience window (-1/+3 min)"
+        >
+          <input
+            type="checkbox"
+            checked={isRiderWindow}
+            onChange={(e) => setOtpWindow(e.target.checked ? 'rider' : 'official')}
+          />
+          <span style={{ opacity: 0.8 }}>Rider-experience OTP</span>
+        </label>
       </div>
 
       {(() => {
@@ -406,12 +517,21 @@ function RouteDetail() {
                 : 'N/A'}
             </div>
             <div className="stat-label">
-              On-Time Performance
-              <div>{renderServerDelta('otp', serverDeltas.otp, (d) => `${d.toFixed(1)} pp`)}</div>
+              {isRiderWindow ? 'Rider-experience OTP (−1/+3 min)' : 'On-Time Performance'}
+              <div>
+                {!otpDeltaMismatch &&
+                  renderServerDelta('otp', serverDeltas.otp, (d) => `${d.toFixed(1)} pp`)}
+              </div>
               <div>
                 <TargetIndicator
                   value={routeData.otp_all_pct}
-                  target={routeData.targets?.otp}
+                  // The configured OTP target is calibrated against the
+                  // official window — comparing a rider-window value
+                  // against it would read "below target" purely because
+                  // the window changed, not because performance did (PR
+                  // #242 review finding 3). Suppressed in rider mode
+                  // regardless of `showTargets`.
+                  target={showTargets && !isRiderWindow ? routeData.targets?.otp : null}
                   higherIsBetter
                   format={(t) => `${t.toFixed(0)}%`}
                 />
@@ -463,7 +583,7 @@ function RouteDetail() {
               <div>
                 <TargetIndicator
                   value={routeData.ewt_seconds}
-                  target={routeData.targets?.ewt}
+                  target={showTargets ? routeData.targets?.ewt : null}
                   higherIsBetter={false}
                   format={(t) => `${(t / 60).toFixed(1)} min`}
                 />
@@ -511,7 +631,7 @@ function RouteDetail() {
                         : null
                     }
                     target={
-                      routeData.targets?.service_delivered != null
+                      showTargets && routeData.targets?.service_delivered != null
                         ? routeData.targets.service_delivered * 100
                         : null
                     }
@@ -566,7 +686,7 @@ function RouteDetail() {
                         : null
                     }
                     target={
-                      routeData.targets?.bunching != null
+                      showTargets && routeData.targets?.bunching != null
                         ? routeData.targets.bunching * 100
                         : null
                     }
@@ -614,6 +734,33 @@ function RouteDetail() {
         )
       })()}
 
+      {/* Gated on `otpDeltaMismatch`, not `isRiderWindow` alone (PR #242
+          review finding 7) — this note specifically explains the hidden
+          delta arrow, so it should only render when the arrow is actually
+          hidden. */}
+      {otpDeltaMismatch && (
+        <p
+          className="rider-otp-note"
+          style={{ color: 'var(--color-muted)', fontSize: '0.8rem', margin: '0.5rem 0 0.75rem' }}
+        >
+          The Routes scorecard and system-wide pages still report the official
+          WMATA on-time window (−2/+7 min) — this route&apos;s OTP delta arrow
+          above is hidden because it isn&apos;t comparable to the
+          rider-experience value.
+        </p>
+      )}
+
+      {!showTargets && (
+        <p
+          className="agency-targets-note"
+          style={{ color: 'var(--color-muted)', fontSize: '0.8rem', margin: '0.5rem 0 0.75rem' }}
+        >
+          Frequent-route designation and per-route targets aren&apos;t
+          configured for {AGENCY_LABELS[agency] || agency} yet — the headline
+          KPI order and target indicators above are WMATA-only.
+        </p>
+      )}
+
       {trendRevalidateError && (
         <p
           className="stale-data-note"
@@ -631,8 +778,8 @@ function RouteDetail() {
           otpDelta={otpDelta}
           sdDelta={sdDelta}
           excessDelta={excessDelta}
-          otpTarget={routeData.targets?.otp ?? null}
-          sdTarget={routeData.targets?.service_delivered ?? null}
+          otpTarget={showTargets && !isRiderWindow ? routeData.targets?.otp ?? null : null}
+          sdTarget={showTargets ? routeData.targets?.service_delivered ?? null : null}
           otpCurrent={routeData.otp_all_pct ?? null}
           sdCurrent={
             routeData.service_delivered_ratio != null
@@ -646,7 +793,12 @@ function RouteDetail() {
       )}
 
       {hasMetrics && (
-        <StopDiagnostic routeId={routeId} dayType={dayType} period={period} />
+        <StopDiagnostic
+          routeId={routeId}
+          dayType={dayType}
+          period={period}
+          otpWindow={otpWindow}
+        />
       )}
 
       {hasMetrics && (

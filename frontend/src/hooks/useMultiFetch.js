@@ -27,10 +27,24 @@ function readCache(urls) {
  *   array of JSON responses before storing in state. Receives the array in the
  *   same order as `urls` and must return the value to store in `data`. When
  *   omitted the raw array is stored.
- * @returns {{ data: *, loading: boolean, error: string|null, revalidateError: string|null }}
+ * @returns {{ data: *, dataUrlKey: string|null, loading: boolean, error: string|null, revalidateError: string|null }}
  *   - `data`    – the resolved (and optionally transformed) fetch results, or
  *                 null until the first successful resolution (or the cached
  *                 value, instantly, on a cache hit).
+ *   - `dataUrlKey` – the `JSON.stringify(urls)` key that `data` actually
+ *                 came from (a cache hit or a settled fetch), or `null`
+ *                 before anything has loaded. Callers that must not show
+ *                 `data` across a `urls` change until the NEW url set has
+ *                 genuinely loaded (e.g. an agency switch, PR #242 round-2
+ *                 review finding 1) should compare this against the
+ *                 current url key instead of gating on `loading`: `loading`
+ *                 is set by this hook's own effect, which runs one render
+ *                 AFTER `urls` changes, so a caller deriving staleness from
+ *                 `loading` directly races that one-render lag and can
+ *                 read the OLD (not-yet-updated) `loading` value on the
+ *                 very render where `urls` changed. `dataUrlKey` has no
+ *                 such lag — it only ever changes in the same state update
+ *                 that changes `data`.
  *   - `loading` – true while a fetch is in flight AND no cached value is
  *                 available to show meanwhile. A cache hit never sets this —
  *                 the stale value is served immediately and the background
@@ -89,6 +103,16 @@ function readCache(urls) {
 function useMultiFetch(urls, transform) {
   const hasUrls = !!urls && urls.length > 0
 
+  // Serialize urls to a stable key so the effect only re-runs when the
+  // URL set actually changes, not merely because a caller passed a fresh
+  // array literal by reference. JSON.stringify is safe here because the
+  // values are plain strings. Callers should still memoize `urls` per the
+  // documented contract above — this key comparison is a safety net
+  // against the effect re-fetching, not a substitute for memoizing.
+  // Computed up front (not just below `data`'s useState) since the
+  // `dataUrlKey` lazy initializer needs it too.
+  const urlKey = JSON.stringify(urls)
+
   // Lazy useState initializers run exactly once, at mount — unlike a plain
   // `readCache(urls)` call inline in the render body (the pre-fix version),
   // which re-ran on every re-render just to feed these once-only values
@@ -100,17 +124,16 @@ function useMultiFetch(urls, transform) {
     const { cached, hit } = readCache(urls)
     return hit ? (transform ? transform(cached) : cached) : null
   })
+  // See the docstring above for why callers needing to detect a `urls`
+  // change should compare this instead of `loading`.
+  const [dataUrlKey, setDataUrlKey] = useState(() => {
+    if (!hasUrls) return urlKey
+    const { hit } = readCache(urls)
+    return hit ? urlKey : null
+  })
   const [loading, setLoading] = useState(() => hasUrls && !readCache(urls).hit)
   const [error, setError] = useState(null)
   const [revalidateError, setRevalidateError] = useState(null)
-
-  // Serialize urls to a stable key so the effect only re-runs when the
-  // URL set actually changes, not merely because a caller passed a fresh
-  // array literal by reference. JSON.stringify is safe here because the
-  // values are plain strings. Callers should still memoize `urls` per the
-  // documented contract above — this key comparison is a safety net
-  // against the effect re-fetching, not a substitute for memoizing.
-  const urlKey = JSON.stringify(urls)
 
   // True only while processing the very first effect run of this hook
   // instance. The lazy useState initializers above already computed the
@@ -128,6 +151,7 @@ function useMultiFetch(urls, transform) {
     if (!urls || urls.length === 0) {
       if (!firstRun) {
         setData(transform ? transform([]) : [])
+        setDataUrlKey(urlKey)
         setLoading(false)
         setError(null)
       }
@@ -145,6 +169,7 @@ function useMultiFetch(urls, transform) {
         // hook instance, the lazy useState initializers above already did
         // this synchronously for the first render.
         setData(transform ? transform(cached) : cached)
+        setDataUrlKey(urlKey)
         setLoading(false)
         setError(null)
       }
@@ -197,6 +222,7 @@ function useMultiFetch(urls, transform) {
 
       const results = settled.map((outcome) => outcome.value)
       setData(transform ? transform(results) : results)
+      setDataUrlKey(urlKey)
       setLoading(false)
       setError(null)
       setRevalidateError(null)
@@ -208,7 +234,7 @@ function useMultiFetch(urls, transform) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKey])
 
-  return { data, loading, error, revalidateError }
+  return { data, dataUrlKey, loading, error, revalidateError }
 }
 
 export default useMultiFetch

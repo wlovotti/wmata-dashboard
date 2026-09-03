@@ -139,6 +139,42 @@ def test_upsert_route_metrics_forwards_completeness_threshold(db_session, monkey
     assert seen_thresholds == [0.5333, MIN_COVERAGE_FOR_MATERIALIZATION]
 
 
+@pytest.mark.smoke
+def test_upsert_route_metrics_forwards_agency_to_ewt_gate_lookup(db_session, monkeypatch):
+    """PR #242 round-2 review finding 3: ``--agency`` reaches the EWT
+    cell-hour gate lookup, the other half of the daily batch alongside
+    ``src/system_metrics.py``'s equivalent (fixed in the same PR's round-1
+    finding 5). Before this fix, ``pipelines/upsert_route_metrics_overlay.py
+    --agency sfmta`` accepted the flag but silently dropped it once past
+    the completeness guard, so a same-numbered SFMTA route could inherit
+    WMATA's medium-freq 20-min EWT gate when materialized into
+    ``route_metrics_daily_overlay``.
+    """
+    import src.route_metrics_overlay as rmo
+
+    seen_agencies = []
+
+    def _fake_ewt_multi_date(db, service_dates, **kwargs):
+        seen_agencies.append(kwargs.get("agency"))
+        return {}
+
+    monkeypatch.setattr(rmo, "compute_ewt_headline_for_routes_multi_date", _fake_ewt_multi_date)
+    monkeypatch.setattr(
+        "src.data_completeness.coverage_pct_for_date",
+        lambda db, service_date, tz_name="America/New_York": 1.0,
+    )
+    monkeypatch.setattr(
+        "src.data_completeness.is_date_sufficiently_complete",
+        lambda db, service_date, threshold=0.80, tz_name="America/New_York": True,
+    )
+
+    target = date(2026, 5, 8)
+    upsert_route_metrics_for_date(db_session, target, agency="sfmta")
+    upsert_route_metrics_for_date(db_session, date(2026, 5, 9))
+
+    assert seen_agencies == ["sfmta", "wmata"]
+
+
 def test_hydrate_overlay_row_shape():
     """The hydrated bundle exposes both sufficient stats AND derived fields.
 

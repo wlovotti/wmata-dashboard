@@ -177,32 +177,41 @@ def get_system_target(metric: str) -> float | None:
     return value * multiplier
 
 
-def get_target(route_id: str, metric: str) -> float | None:
+def get_target(route_id: str, metric: str, agency: str = "wmata") -> float | None:
     """Return the target for `route_id` / `metric`, in canonical units.
 
     Lookup order: per-route override -> system default -> None.
     Per-route overrides may set a subset of metrics; missing entries
     inherit the system default.
+
+    `agency` gates the per-route override (NOTES-143): `config/
+    route_targets.yaml`'s `routes:` block is keyed by WMATA `route_id`,
+    and route_ids overlap across agencies, so applying an override to a
+    non-wmata agency would silently attach the wrong route's target.
+    Any `agency` other than `"wmata"` skips the per-route lookup
+    entirely and returns the (agency-agnostic) system default instead.
     """
     if metric not in _METRIC_KEY_MAP:
         return None
-    yaml_key, multiplier = _METRIC_KEY_MAP[metric]
-    payload = _CACHE.get_payload(_config_path_for_env())
-    route_block = payload.get("routes", {}).get(route_id) or {}
-    if isinstance(route_block, dict) and yaml_key in route_block:
-        value = _coerce_float(route_block.get(yaml_key))
-        if value is not None:
-            return value * multiplier
+    if agency == "wmata":
+        yaml_key, multiplier = _METRIC_KEY_MAP[metric]
+        payload = _CACHE.get_payload(_config_path_for_env())
+        route_block = payload.get("routes", {}).get(route_id) or {}
+        if isinstance(route_block, dict) and yaml_key in route_block:
+            value = _coerce_float(route_block.get(yaml_key))
+            if value is not None:
+                return value * multiplier
     return get_system_target(metric)
 
 
-def get_targets_for_route(route_id: str) -> dict[str, float | None]:
+def get_targets_for_route(route_id: str, agency: str = "wmata") -> dict[str, float | None]:
     """Return all four targets for one route, falling back to system defaults.
 
     Convenience for the API payload builders — emits the same key shape
     every route, so the frontend can render the field unconditionally.
+    See `get_target` for why `agency` gates the per-route override.
     """
-    return {metric: get_target(route_id, metric) for metric in VALID_METRICS}
+    return {metric: get_target(route_id, metric, agency) for metric in VALID_METRICS}
 
 
 def get_system_targets() -> dict[str, float | None]:
