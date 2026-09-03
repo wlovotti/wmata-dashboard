@@ -89,3 +89,99 @@ export function formatServiceLevel(serviceLevel) {
       : `${(serviceLevel.pct_at_most_15min * 100).toFixed(0)}% of scheduled service every ≤15 min`
   return { median, share }
 }
+
+// ── Route-level distributions (NOTES-141) ───────────────────────────────────
+//
+// The headline above is one window-mean per metric per agency, which hides
+// the spread -- two agencies with identical mean OTP can have very
+// different shares of bad routes. `/api/agency-comparison` additively
+// carries a `route_distribution` block per agency for these two metrics
+// (median/IQR/histogram/threshold-share, computed per-route with every
+// route weighted equally -- see the caveat the backend appends for why).
+
+/** Metrics that carry a `route_distribution` block. Mirrors
+ * `ROUTE_DISTRIBUTION_METRICS` in `api/aggregations.py`. */
+export const ROUTE_DISTRIBUTION_METRICS = ['otp', 'service_delivered']
+
+/** Fixed per-agency series colors for the distribution histogram, so a
+ * given agency always reads as the same color across every metric's
+ * chart. Keyed by the `agency` field from the API (`wmata` / `sfmta`), not
+ * display order -- an agency's color must not shift if the payload's
+ * agency array order ever changes. An agency key outside this map (a
+ * future third agency) falls back to a neutral gray via
+ * {@link agencySeriesColor} rather than an undefined color. */
+export const AGENCY_SERIES_COLORS = {
+  wmata: '#2a78d6',
+  sfmta: '#eb6834',
+}
+
+/**
+ * Resolve one agency's fixed series color, falling back to a neutral gray
+ * for an agency key not in {@link AGENCY_SERIES_COLORS}.
+ *
+ * @param {string} agencyKey
+ * @returns {string} hex color
+ */
+export function agencySeriesColor(agencyKey) {
+  return AGENCY_SERIES_COLORS[agencyKey] ?? '#64748b'
+}
+
+/**
+ * Format one agency/metric's `route_distribution` entry into display
+ * strings for the comparison table's distribution row. Returns null when
+ * the block is missing or has no scored routes, so the caller can render
+ * an em-dash row instead of "— routes, — – —".
+ *
+ * @param {'otp'|'service_delivered'} metric
+ * @param {{route_count: number, median: number|null, p25: number|null,
+ *   p75: number|null, threshold: number|null,
+ *   share_at_or_above_threshold: number|null}|null|undefined} distribution
+ * @returns {{median: string, iqr: string, share: string|null,
+ *   thresholdLabel: string|null, routeCount: number} | null}
+ */
+export function formatDistributionStats(metric, distribution) {
+  if (!distribution || !distribution.route_count) return null
+  const median = formatMetricValue(metric, distribution.median)
+  const p25 = formatMetricValue(metric, distribution.p25)
+  const p75 = formatMetricValue(metric, distribution.p75)
+  const thresholdLabel =
+    distribution.threshold == null ? null : formatMetricValue(metric, distribution.threshold)
+  const share =
+    distribution.share_at_or_above_threshold == null
+      ? null
+      : `${Math.round(distribution.share_at_or_above_threshold * 100)}%`
+  return {
+    median,
+    iqr: `${p25} – ${p75}`,
+    share,
+    thresholdLabel,
+    routeCount: distribution.route_count,
+  }
+}
+
+/**
+ * Build a recharts-ready dataset for the per-metric distribution
+ * histogram: one row per bucket label, with one numeric field per agency
+ * (keyed by `agency.agency`) holding that agency's route count in the
+ * bucket. Bucket labels/order come from whichever agency has a non-empty
+ * histogram first -- both agencies share the same fixed bucket edges (see
+ * the backend module comment), so any agency's label set is authoritative.
+ *
+ * @param {Array<{agency: string, route_distribution?: object}>} agencies
+ * @param {'otp'|'service_delivered'} metric
+ * @returns {Array<Record<string, string|number>>} e.g.
+ *   `[{label: '<60', wmata: 12, sfmta: 4}, ...]`
+ */
+export function buildDistributionHistogramData(agencies, metric) {
+  const reference = agencies.find(
+    (agency) => agency.route_distribution?.[metric]?.histogram?.length,
+  )
+  const buckets = reference?.route_distribution?.[metric]?.histogram ?? []
+  return buckets.map((bucket, i) => {
+    const row = { label: bucket.label }
+    for (const agency of agencies) {
+      row[agency.agency] = agency.route_distribution?.[metric]?.histogram?.[i]?.count ?? 0
+    }
+    return row
+  })
+}

@@ -1,5 +1,26 @@
-import { useEffect, useState } from 'react'
-import { METRIC_ORDER, METRIC_LABELS, formatMetricValue, formatDelta, formatServiceLevel } from '../utils/agencyComparison'
+import { Fragment, useCallback, useEffect, useState } from 'react'
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+import './AgencyComparison.css'
+import {
+  METRIC_ORDER,
+  METRIC_LABELS,
+  ROUTE_DISTRIBUTION_METRICS,
+  formatMetricValue,
+  formatDelta,
+  formatServiceLevel,
+  formatDistributionStats,
+  buildDistributionHistogramData,
+  agencySeriesColor,
+} from '../utils/agencyComparison'
 
 /**
  * One headline-KPI cell: big number, week-over-week delta pill, and a
@@ -48,6 +69,130 @@ function ServiceLevelCell({ serviceLevel }) {
 }
 
 /**
+ * One agency's route-level distribution stats for one metric: median,
+ * interquartile range, route count, and the share of routes at or above
+ * the configured system target (NOTES-141). Renders an em-dash cell when
+ * the agency has no scored routes in the window rather than a blank one,
+ * so a reader can tell "zero routes" from "not loaded."
+ */
+function RouteDistributionStatsCell({ metric, distribution }) {
+  const stats = formatDistributionStats(metric, distribution)
+  if (!stats) {
+    return (
+      <td className="agency-compare-cell">
+        <span className="agency-distribution-empty">No routes scored in this window</span>
+      </td>
+    )
+  }
+  return (
+    <td className="agency-compare-cell">
+      <div className="agency-distribution-stats">
+        <dl>
+          <dt>Median</dt>
+          <dd>{stats.median}</dd>
+          <dt>IQR (p25–p75)</dt>
+          <dd>{stats.iqr}</dd>
+          <dt>Routes</dt>
+          <dd>{stats.routeCount}</dd>
+          {stats.share != null && stats.thresholdLabel != null && (
+            <>
+              <dt>≥ {stats.thresholdLabel}</dt>
+              <dd>{stats.share} of routes</dd>
+            </>
+          )}
+        </dl>
+      </div>
+    </td>
+  )
+}
+
+/**
+ * Tooltip content for the distribution histogram — one line per agency
+ * present in the hovered bucket, using each agency's display name and
+ * fixed series color as a color swatch so the tooltip stays legible even
+ * though the legend below already names the series.
+ */
+function HistogramTooltip({ active, payload, label, agencies }) {
+  if (!active || !payload?.length) return null
+  const nameByKey = Object.fromEntries(agencies.map((a) => [a.agency, a.display_name]))
+  return (
+    <div className="agency-distribution-tooltip">
+      <div className="agency-distribution-tooltip-label">{label}%</div>
+      {payload.map((entry) => (
+        <div
+          key={entry.dataKey}
+          className="agency-distribution-tooltip-row"
+          style={{ color: entry.color }}
+        >
+          {nameByKey[entry.dataKey] ?? entry.dataKey}: {entry.value} route
+          {entry.value === 1 ? '' : 's'}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Compact side-by-side histogram of route counts per bucket for one
+ * metric, one grouped bar per agency so the two agencies' shapes read
+ * directly against each other rather than as two separate charts
+ * (NOTES-141). Bucket labels/edges come straight from the backend
+ * payload (`buildDistributionHistogramData`) and are fixed PER METRIC,
+ * identical for both agencies but NOT shared between OTP and
+ * service_delivered — service_delivered's real range clusters near
+ * 90-100%, so it gets its own tighter edges (`<85/85-90/90-92.5/
+ * 92.5-95/95+`) rather than reusing OTP's (`<60/60-70/70-80/80-90/90+`).
+ * Per the dataviz skill's "color follows the entity" rule, each agency
+ * keeps one fixed color across every chart on the page
+ * (`agencySeriesColor`).
+ */
+function RouteDistributionHistogram({ metric, agencies }) {
+  const data = buildDistributionHistogramData(agencies, metric)
+  if (data.length === 0 || data.every((row) => agencies.every((a) => !row[a.agency]))) {
+    return null
+  }
+  return (
+    <div className="agency-distribution-histogram">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} barGap={2}>
+          <CartesianGrid vertical={false} stroke="#e2e8f0" />
+          <XAxis
+            dataKey="label"
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            axisLine={{ stroke: '#cbd5e1' }}
+            tickLine={false}
+          />
+          <YAxis
+            allowDecimals={false}
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            axisLine={false}
+            tickLine={false}
+            width={24}
+          />
+          <Tooltip content={<HistogramTooltip agencies={agencies} />} cursor={{ fill: '#f1f5f9' }} />
+          <Legend
+            wrapperStyle={{ fontSize: '0.75rem' }}
+            formatter={(value) =>
+              agencies.find((a) => a.agency === value)?.display_name ?? value
+            }
+          />
+          {agencies.map((agency) => (
+            <Bar
+              key={agency.agency}
+              dataKey={agency.agency}
+              name={agency.agency}
+              fill={agencySeriesColor(agency.agency)}
+              radius={[2, 2, 0, 0]}
+              maxBarSize={22}
+            />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+/**
  * `/compare` page (PR #198 — "the north star"). One row per headline
  * metric (OTP, service-delivered, scheduled wait, EWT, bunching, plus
  * the daytime service-level row), one column per agency (WMATA vs
@@ -59,6 +204,16 @@ function ServiceLevelCell({ serviceLevel }) {
  * comparability caveats — this component is a plain renderer over that
  * payload.
  *
+ * OTP and service_delivered additionally carry a `route_distribution`
+ * block (NOTES-141, wave 1 of the 2026-09 UX program): the headline mean
+ * collapses each metric to one number, which hides the spread between
+ * routes. Two extra sub-rows per metric — stats (median/IQR/share/count)
+ * and a compact histogram — surface that spread using the same matched
+ * window and the same per-route data the mean is built from. Both
+ * sub-rows render only when at least one agency's payload carries the
+ * block, so an older cached payload (or a payload from before this
+ * change) degrades to exactly the pre-existing table.
+ *
  * Deliberately plain per the item's scope decision: reuse the app's
  * existing `routes-table` styling rather than a new palette, defer
  * further visual polish to NOTES-85. The comparability caveats are
@@ -69,9 +224,12 @@ function AgencyComparison() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [retryToken, setRetryToken] = useState(0)
 
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
+    setError(null)
     fetch('/api/agency-comparison')
       .then((res) => (res.ok ? res.json() : Promise.reject(`HTTP ${res.status}`)))
       .then((json) => {
@@ -89,7 +247,9 @@ function AgencyComparison() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [retryToken])
+
+  const handleRetry = useCallback(() => setRetryToken((t) => t + 1), [])
 
   if (loading) {
     return (
@@ -111,6 +271,11 @@ function AgencyComparison() {
         <div className="chart-container">
           <h2>Agency comparison</h2>
           <p style={{ color: '#64748b' }}>Unable to load agency comparison: {error}</p>
+          <div className="agency-comparison-error-actions">
+            <button onClick={handleRetry} className="retry-btn">
+              Try Again
+            </button>
+          </div>
         </div>
       </main>
     )
@@ -120,6 +285,7 @@ function AgencyComparison() {
   const caveats = data?.caveats ?? []
   const windowStart = data?.window_start
   const windowEnd = data?.window_end
+  const columnCount = agencies.length + 1
 
   return (
     <main>
@@ -148,18 +314,48 @@ function AgencyComparison() {
                 </tr>
               </thead>
               <tbody>
-                {METRIC_ORDER.map((metric) => (
-                  <tr key={metric}>
-                    <td className="agency-compare-metric-label">{METRIC_LABELS[metric]}</td>
-                    {agencies.map((agency) => (
-                      <MetricCell
-                        key={agency.agency}
-                        metric={metric}
-                        metricData={agency.metrics?.[metric]}
-                      />
-                    ))}
-                  </tr>
-                ))}
+                {METRIC_ORDER.map((metric) => {
+                  const hasDistribution =
+                    ROUTE_DISTRIBUTION_METRICS.includes(metric) &&
+                    agencies.some((agency) => agency.route_distribution?.[metric])
+                  return (
+                    <Fragment key={metric}>
+                      <tr>
+                        <td className="agency-compare-metric-label">{METRIC_LABELS[metric]}</td>
+                        {agencies.map((agency) => (
+                          <MetricCell
+                            key={agency.agency}
+                            metric={metric}
+                            metricData={agency.metrics?.[metric]}
+                          />
+                        ))}
+                      </tr>
+                      {hasDistribution && (
+                        <tr className="agency-distribution-row">
+                          <td className="agency-distribution-sublabel">Route distribution</td>
+                          {agencies.map((agency) => (
+                            <RouteDistributionStatsCell
+                              key={agency.agency}
+                              metric={metric}
+                              distribution={agency.route_distribution?.[metric]}
+                            />
+                          ))}
+                        </tr>
+                      )}
+                      {hasDistribution && (
+                        <tr className="agency-distribution-row">
+                          <td className="agency-distribution-sublabel">Distribution shape</td>
+                          <td
+                            className="agency-distribution-histogram-cell"
+                            colSpan={columnCount - 1}
+                          >
+                            <RouteDistributionHistogram metric={metric} agencies={agencies} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
                 <tr>
                   <td className="agency-compare-metric-label">Daytime service level</td>
                   {agencies.map((agency) => (
