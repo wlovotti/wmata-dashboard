@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getCacheEntry, setCacheEntry } from './fetchCache'
 
 // Look up every URL in the shared fetchCache and report whether all of
@@ -27,7 +27,7 @@ function readCache(urls) {
  *   array of JSON responses before storing in state. Receives the array in the
  *   same order as `urls` and must return the value to store in `data`. When
  *   omitted the raw array is stored.
- * @returns {{ data: *, dataUrlKey: string|null, loading: boolean, error: string|null, revalidateError: string|null }}
+ * @returns {{ data: *, dataUrlKey: string|null, loading: boolean, error: string|null, revalidateError: string|null, refetch: () => void }}
  *   - `data`    – the resolved (and optionally transformed) fetch results, or
  *                 null until the first successful resolution (or the cached
  *                 value, instantly, on a cache hit).
@@ -63,6 +63,14 @@ function readCache(urls) {
  *                 refreshing. Cleared on the next revalidate that
  *                 succeeds. Never set on the cold-load path (a fetch
  *                 failure there sets `error` instead).
+ *   - `refetch`  – stable callback that re-runs the fetch for the current
+ *                 `urls` (NOTES-85). Wires directly into `ErrorState`'s
+ *                 `onRetry` prop: `<ErrorState onRetry={refetch} />`.
+ *                 Bumps an internal counter that's part of the effect's
+ *                 dependency array, so it re-triggers the exact same
+ *                 cache-check-then-fetch flow a `urls` change would (a
+ *                 cache hit still revalidates in the background; a cold
+ *                 miss re-shows the loading state before fetching).
  *
  * Caching: every URL is looked up in the shared, module-level `fetchCache`
  * (keyed by URL, no TTL, LRU-capped — see fetchCache.js). If every URL in
@@ -134,6 +142,9 @@ function useMultiFetch(urls, transform) {
   const [loading, setLoading] = useState(() => hasUrls && !readCache(urls).hit)
   const [error, setError] = useState(null)
   const [revalidateError, setRevalidateError] = useState(null)
+  // Bumped by `refetch` below; included in the effect's dependency array
+  // purely to re-trigger it on demand — its value is never read otherwise.
+  const [retryTick, setRetryTick] = useState(0)
 
   // True only while processing the very first effect run of this hook
   // instance. The lazy useState initializers above already computed the
@@ -232,9 +243,11 @@ function useMultiFetch(urls, transform) {
       controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlKey])
+  }, [urlKey, retryTick])
 
-  return { data, dataUrlKey, loading, error, revalidateError }
+  const refetch = useCallback(() => setRetryTick((t) => t + 1), [])
+
+  return { data, dataUrlKey, loading, error, revalidateError, refetch }
 }
 
 export default useMultiFetch

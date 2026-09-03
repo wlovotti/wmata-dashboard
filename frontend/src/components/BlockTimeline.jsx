@@ -4,6 +4,7 @@ import ErrorState from './ErrorState.jsx'
 import { apiUrl } from '../utils/apiUrl'
 import useAgency from '../hooks/useAgency'
 import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import './BlockTimeline.css'
 
 // WMATA on-time band: -2 min early to +7 min late. Mirrors `src/otp_constants.py`
 // and the per-run chart in RunDetail. Same thresholds drive the card color
@@ -28,12 +29,12 @@ function devColor(deviationSec) {
    * - red:    > 14 min late
    * - gray:   no observation
    *
-   * Returns a hex string suitable for inline `borderLeftColor`.
+   * Returns a CSS color value suitable for inline `borderLeftColor`.
    */
-  if (deviationSec == null) return '#cbd5e1'
-  if (deviationSec <= ON_TIME_UPPER_SEC) return '#16a34a'
-  if (deviationSec <= ON_TIME_UPPER_SEC * 2) return '#ca8a04'
-  return '#dc2626'
+  if (deviationSec == null) return 'var(--border-strong)'
+  if (deviationSec <= ON_TIME_UPPER_SEC) return 'var(--color-good)'
+  if (deviationSec <= ON_TIME_UPPER_SEC * 2) return 'var(--color-warn)'
+  return 'var(--color-bad)'
 }
 
 function formatDeviation(deviationSec) {
@@ -178,7 +179,7 @@ function BlockTimeline() {
         </button>
         <div className="route-title">
           <h1>Block {data.block_id}</h1>
-          <p style={{ color: '#64748b', marginTop: '0.25rem' }}>
+          <p className="block-header-subtitle">
             Service date {data.service_date} · {trips.length} trip
             {trips.length === 1 ? '' : 's'} · {observedCount} observed ·
             Routes: {routeIds.join(', ') || '—'}
@@ -210,64 +211,27 @@ function BlockTimeline() {
         <p className="drilldown-anchor">
           Trips are shown in scheduled order. Origin / destination chips show
           the deviation against the WMATA −2 / +7 min on-time window. A
-          <span
-            style={{
-              display: 'inline-block',
-              padding: '0 0.4rem',
-              margin: '0 0.25rem',
-              border: '1px solid #64748b',
-              borderRadius: '3px',
-              fontSize: '0.75rem',
-            }}
-          >
-            swap
-          </span>
+          <span className="legend-badge legend-badge-swap">swap</span>
           badge between cards means the dispatcher changed buses. A
-          <span
-            style={{
-              display: 'inline-block',
-              padding: '0 0.4rem',
-              margin: '0 0.25rem',
-              border: '1px solid #dc2626',
-              color: '#dc2626',
-              borderRadius: '3px',
-              fontSize: '0.75rem',
-            }}
-          >
-            carry
-          </span>
+          <span className="legend-badge legend-badge-carry">carry</span>
           arrow means the leader's lateness propagated to the next trip
           without a vehicle change — a cascade signal.
         </p>
 
         {trips.length === 0 ? (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No trips found for this block.
           </p>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <div className="block-trip-list">
             {annotated.map((t, i) => (
               <div key={t.trip_id}>
                 {i > 0 && (t.swapFromPrev || t.carryFromPrev) && (
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '0.4rem',
-                      alignItems: 'center',
-                      paddingLeft: '0.75rem',
-                      margin: '0.25rem 0',
-                    }}
-                  >
-                    <span style={{ color: '#64748b' }}>↓</span>
+                  <div className="block-adornment-row">
+                    <span className="text-muted">↓</span>
                     {t.swapFromPrev && (
                       <span
-                        style={{
-                          padding: '0.15rem 0.5rem',
-                          border: '1px solid #64748b',
-                          color: '#475569',
-                          borderRadius: '3px',
-                          fontSize: '0.75rem',
-                        }}
+                        className="adornment-badge adornment-badge-swap"
                         title="Vehicle changed between these trips — dispatcher swap"
                       >
                         swap
@@ -275,13 +239,7 @@ function BlockTimeline() {
                     )}
                     {t.carryFromPrev && (
                       <span
-                        style={{
-                          padding: '0.15rem 0.5rem',
-                          border: '1px solid #dc2626',
-                          color: '#dc2626',
-                          borderRadius: '3px',
-                          fontSize: '0.75rem',
-                        }}
+                        className="adornment-badge adornment-badge-carry"
                         title="Previous trip ended ≥5 min late and this trip started ≥5 min late with no vehicle change — cascade carry"
                       >
                         carry
@@ -291,16 +249,11 @@ function BlockTimeline() {
                 )}
 
                 <div
-                  className="stat-card block-timeline-card"
+                  className="stat-card block-timeline-card block-trip-card"
                   style={{
-                    textAlign: 'left',
                     borderLeft: `6px solid ${devColor(
                       t.destination_deviation_seconds ?? t.origin_deviation_seconds,
                     )}`,
-                    padding: '0.75rem 1rem',
-                    display: 'grid',
-                    gridTemplateColumns: '1fr auto',
-                    gap: '0.5rem',
                     cursor: t.run_id ? 'pointer' : 'default',
                   }}
                   onClick={() => {
@@ -311,81 +264,53 @@ function BlockTimeline() {
                   title={t.run_id ? 'View per-run deviation chart' : ''}
                 >
                   <div>
-                    <div style={{ fontWeight: 600 }}>
+                    <div className="block-trip-title">
                       Route {t.route_id} ·{' '}
                       {t.direction_id === 0 ? 'Outbound' : 'Inbound'}
                       {t.trip_headsign && (
-                        <span
-                          style={{
-                            fontWeight: 400,
-                            color: '#475569',
-                            marginLeft: '0.5rem',
-                          }}
-                        >
+                        <span className="block-trip-headsign">
                           — {t.trip_headsign}
                         </span>
                       )}
                     </div>
-                    <div
-                      style={{
-                        color: '#64748b',
-                        fontSize: '0.85rem',
-                        marginTop: '0.15rem',
-                      }}
-                    >
+                    <div className="block-trip-sched">
                       Sched {formatTimeOnly(t.scheduled_start)} →{' '}
                       {formatTimeOnly(t.scheduled_end)} · Trip {t.trip_id}
                     </div>
-                    <div style={{ marginTop: '0.4rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: '0.85rem' }}>
-                        <span style={{ color: '#64748b' }}>Origin:</span>{' '}
+                    <div className="block-trip-meta-row">
+                      <span className="block-trip-meta-item">
+                        <span className="text-muted">Origin:</span>{' '}
                         <span
-                          style={{
-                            color: devColor(t.origin_deviation_seconds),
-                            fontWeight: 500,
-                          }}
+                          className="font-medium"
+                          style={{ color: devColor(t.origin_deviation_seconds) }}
                         >
                           {formatDeviation(t.origin_deviation_seconds)}
                         </span>
                       </span>
-                      <span style={{ fontSize: '0.85rem' }}>
-                        <span style={{ color: '#64748b' }}>Destination:</span>{' '}
+                      <span className="block-trip-meta-item">
+                        <span className="text-muted">Destination:</span>{' '}
                         <span
-                          style={{
-                            color: devColor(t.destination_deviation_seconds),
-                            fontWeight: 500,
-                          }}
+                          className="font-medium"
+                          style={{ color: devColor(t.destination_deviation_seconds) }}
                         >
                           {formatDeviation(t.destination_deviation_seconds)}
                         </span>
                       </span>
-                      <span style={{ fontSize: '0.85rem', color: '#64748b' }}>
+                      <span className="block-trip-meta-item text-muted">
                         Status: {t.trip_status.replace('_', ' ')}
                       </span>
                     </div>
                   </div>
-                  <div
-                    style={{
-                      textAlign: 'right',
-                      color: '#475569',
-                      fontSize: '0.8rem',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
+                  <div className="block-trip-vehicle">
                     {t.observed_vehicle_id ? (
                       <span
-                        style={{
-                          padding: '0.15rem 0.5rem',
-                          background: '#e2e8f0',
-                          borderRadius: '999px',
-                          fontWeight: 500,
-                        }}
+                        className="block-vehicle-badge"
                         title="Observed vehicle_id (from runs)"
                       >
                         Bus {t.observed_vehicle_id}
                       </span>
                     ) : (
-                      <span style={{ color: '#94a3b8' }}>no vehicle</span>
+                      <span className="text-neutral">no vehicle</span>
                     )}
                   </div>
                 </div>

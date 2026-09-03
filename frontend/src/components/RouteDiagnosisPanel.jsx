@@ -53,16 +53,27 @@ import {
 import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
 import { apiUrl } from '../utils/apiUrl'
 import AgencyUnavailable from './AgencyUnavailable'
+import { CHART_MARGIN, SERIES_COLOR } from '../charts/theme'
+import './RouteDiagnosisPanel.css'
+
+// Timepoint (WMATA schedule-checkpoint) marker color. Distinct blue, not one
+// of the six semantic tokens (it marks a stop's role, not a status), reused
+// across the slip chart and the "●" legend swatch below it.
+const TIMEPOINT_COLOR = '#3b82f6'
+
+// Deviation-table accent for "notably early" (below -30s) — distinct from
+// the ordinary early/late gray so a meaningfully-early median stands out.
+const DEV_EARLY_COLOR = '#2563eb'
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const CLASSIFICATION_STYLES = {
-  recovery: { bg: '#dcfce7', border: '#16a34a', text: '#14532d', label: 'Recovery' },
-  leaky: { bg: '#fef9c3', border: '#ca8a04', text: '#713f12', label: 'Leaky' },
-  underpowered: { bg: '#fee2e2', border: '#dc2626', text: '#7f1d1d', label: 'Underpowered' },
-  neutral: { bg: '#f1f5f9', border: '#94a3b8', text: '#334155', label: 'Neutral' },
+const CLASSIFICATION_LABELS = {
+  recovery: 'Recovery',
+  leaky: 'Leaky',
+  underpowered: 'Underpowered',
+  neutral: 'Neutral',
 }
 
 const CLASSIFICATION_TOOLTIPS = {
@@ -109,30 +120,26 @@ function fmtSec(sec) {
 }
 
 /**
+ * Color for a "median deviation" table cell — genuinely data-driven (three
+ * bands off the numeric value), so this stays a computed value rather than
+ * a CSS class.
+ * @param {number|null} sec
+ * @returns {string} CSS color value
+ */
+function deviationColor(sec) {
+  if (sec == null) return 'var(--text-secondary)'
+  if (sec > 0) return 'var(--color-bad)'
+  if (sec < -30) return DEV_EARLY_COLOR
+  return 'var(--text-secondary)'
+}
+
+/**
  * Inline tooltip anchor — renders a "?" superscript that shows `text` on hover.
  * @param {{ text: string }} props
  */
 function InfoTip({ text }) {
   return (
-    <span
-      title={text}
-      style={{
-        display: 'inline-block',
-        marginLeft: '0.3em',
-        width: '1em',
-        height: '1em',
-        lineHeight: '1em',
-        textAlign: 'center',
-        borderRadius: '50%',
-        background: '#e2e8f0',
-        color: '#475569',
-        fontSize: '0.65em',
-        cursor: 'help',
-        fontWeight: 700,
-        verticalAlign: 'super',
-        flexShrink: 0,
-      }}
-    >
+    <span title={text} className="info-tip">
       ?
     </span>
   )
@@ -143,25 +150,12 @@ function InfoTip({ text }) {
  * @param {{ classification: string }} props
  */
 function ClassificationBadge({ classification }) {
-  const style = CLASSIFICATION_STYLES[classification] || CLASSIFICATION_STYLES.neutral
-  const tip = CLASSIFICATION_TOOLTIPS[classification] || ''
+  const key = CLASSIFICATION_LABELS[classification] ? classification : 'neutral'
+  const label = CLASSIFICATION_LABELS[key]
+  const tip = CLASSIFICATION_TOOLTIPS[key] || ''
   return (
-    <span
-      title={tip}
-      style={{
-        display: 'inline-block',
-        padding: '0.15rem 0.5rem',
-        borderRadius: '999px',
-        border: `1px solid ${style.border}`,
-        background: style.bg,
-        color: style.text,
-        fontSize: '0.75rem',
-        fontWeight: 600,
-        whiteSpace: 'nowrap',
-        cursor: 'help',
-      }}
-    >
-      {style.label}
+    <span title={tip} className={`classification-badge classification-${key}`}>
+      {label}
     </span>
   )
 }
@@ -185,40 +179,17 @@ function SlipTooltip({ active, payload }) {
   const to = d.to_stop_name || d.to_stop_id || '?'
 
   return (
-    <div
-      style={{
-        background: 'white',
-        border: '1px solid #cbd5e1',
-        borderRadius: '6px',
-        padding: '0.5rem 0.75rem',
-        fontSize: '0.8rem',
-        maxWidth: '220px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-      }}
-    >
-      <div style={{ fontWeight: 600, marginBottom: '0.25rem', color: '#1e293b' }}>
+    <div className="slip-tooltip">
+      <div className="slip-tooltip-header">
         Seq {d.from_seq} → {d.to_seq}
-        {d.is_timepoint && (
-          <span
-            style={{
-              marginLeft: '0.4em',
-              fontSize: '0.7rem',
-              background: '#dbeafe',
-              color: '#1d4ed8',
-              padding: '0.1rem 0.35rem',
-              borderRadius: '4px',
-            }}
-          >
-            Timepoint
-          </span>
-        )}
+        {d.is_timepoint && <span className="slip-tooltip-timepoint-tag">Timepoint</span>}
       </div>
-      <div style={{ color: '#64748b', marginBottom: '0.25rem' }}>
+      <div className="slip-tooltip-stops">
         {from} → {to}
       </div>
       <div>
         Per-segment slip:{' '}
-        <strong style={{ color: d.mean_slip_sec > 0 ? '#dc2626' : '#16a34a' }}>
+        <strong style={{ color: d.mean_slip_sec > 0 ? 'var(--color-bad)' : 'var(--color-good)' }}>
           {fmtSec(d.mean_slip_sec)}
         </strong>
       </div>
@@ -226,9 +197,7 @@ function SlipTooltip({ active, payload }) {
         Cumulative slip:{' '}
         <strong>{fmtSec(d.cum_slip_sec)}</strong>
       </div>
-      <div style={{ color: '#94a3b8', marginTop: '0.25rem', fontSize: '0.7rem' }}>
-        {d.n_observations} observations
-      </div>
+      <div className="slip-tooltip-meta">{d.n_observations} observations</div>
     </div>
   )
 }
@@ -289,21 +258,9 @@ function SlipChart({ segments, directionLabel }) {
 
   return (
     <div>
-      <div
-        style={{
-          fontSize: '0.8rem',
-          fontWeight: 600,
-          color: '#475569',
-          marginBottom: '0.3rem',
-        }}
-      >
-        {directionLabel}
-      </div>
+      <div className="direction-label">{directionLabel}</div>
       <ResponsiveContainer width="100%" height={200}>
-        <ComposedChart
-          data={chartData}
-          margin={{ top: 8, right: 16, left: 0, bottom: 4 }}
-        >
+        <ComposedChart data={chartData} margin={CHART_MARGIN}>
           <XAxis
             dataKey="from_seq"
             tick={{ fontSize: 10 }}
@@ -313,7 +270,7 @@ function SlipChart({ segments, directionLabel }) {
               position: 'insideBottomRight',
               offset: -4,
               fontSize: 9,
-              fill: '#94a3b8',
+              fill: SERIES_COLOR.neutral,
             }}
           />
           <YAxis
@@ -323,12 +280,12 @@ function SlipChart({ segments, directionLabel }) {
             width={36}
           />
           <RechartsTooltip content={<SlipTooltip />} />
-          <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1} />
+          <ReferenceLine y={0} stroke={SERIES_COLOR.neutral} strokeWidth={1} />
           {timepointSeqs.map((seq) => (
             <ReferenceLine
               key={seq}
               x={seq}
-              stroke="#3b82f6"
+              stroke={TIMEPOINT_COLOR}
               strokeDasharray="3 3"
               strokeWidth={1}
             />
@@ -337,7 +294,7 @@ function SlipChart({ segments, directionLabel }) {
             {chartData.map((entry, idx) => (
               <Cell
                 key={idx}
-                fill={entry.mean_slip_sec > 0 ? '#ef4444' : '#22c55e'}
+                fill={entry.mean_slip_sec > 0 ? SERIES_COLOR.bad : SERIES_COLOR.good}
                 fillOpacity={0.75}
               />
             ))}
@@ -346,12 +303,20 @@ function SlipChart({ segments, directionLabel }) {
             data={lineData}
             type="monotone"
             dataKey="cum_slip_sec_min"
-            stroke="#1e293b"
+            stroke="var(--text-primary)"
             strokeWidth={2}
             dot={(props) => {
               const entry = props.payload
               if (!entry?.is_timepoint) {
-                return <circle key={props.key} cx={props.cx} cy={props.cy} r={2} fill="#1e293b" />
+                return (
+                  <circle
+                    key={props.key}
+                    cx={props.cx}
+                    cy={props.cy}
+                    r={2}
+                    fill="var(--text-primary)"
+                  />
+                )
               }
               return (
                 <circle
@@ -359,8 +324,8 @@ function SlipChart({ segments, directionLabel }) {
                   cx={props.cx}
                   cy={props.cy}
                   r={5}
-                  fill="#3b82f6"
-                  stroke="white"
+                  fill={TIMEPOINT_COLOR}
+                  stroke="var(--surface-card)"
                   strokeWidth={1.5}
                 />
               )
@@ -372,15 +337,8 @@ function SlipChart({ segments, directionLabel }) {
       </ResponsiveContainer>
       {/* Timepoint label strip below chart */}
       {lineData.some((d) => d.is_timepoint) && (
-        <div
-          style={{
-            fontSize: '0.65rem',
-            color: '#475569',
-            marginTop: '0.15rem',
-            paddingLeft: 36,
-          }}
-        >
-          <span style={{ color: '#3b82f6', fontWeight: 600 }}>● </span>
+        <div className="timepoint-label-strip">
+          <span style={{ color: TIMEPOINT_COLOR }} className="font-semibold">● </span>
           Timepoints:{' '}
           {lineData
             .filter((d) => d.is_timepoint)
@@ -406,37 +364,18 @@ function SlipChart({ segments, directionLabel }) {
  */
 function TimepointTable({ timepoints, directionLabel }) {
   if (!timepoints.length) {
-    return (
-      <div style={{ color: '#94a3b8', fontSize: '0.8rem', padding: '0.5rem 0' }}>
-        No timepoint data for this direction.
-      </div>
-    )
+    return <div className="panel-note-xs">No timepoint data for this direction.</div>
   }
 
   return (
-    <div style={{ marginBottom: '0.75rem' }}>
-      <div
-        style={{
-          fontSize: '0.8rem',
-          fontWeight: 600,
-          color: '#475569',
-          marginBottom: '0.4rem',
-        }}
-      >
-        {directionLabel}
-      </div>
-      <div style={{ overflowX: 'auto' }}>
-        <table
-          style={{
-            width: '100%',
-            borderCollapse: 'collapse',
-            fontSize: '0.8rem',
-          }}
-        >
+    <div className="timepoint-table-wrap">
+      <div className="direction-label">{directionLabel}</div>
+      <div className="table-scroll-x">
+        <table className="timepoint-table">
           <thead>
-            <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
-              <th style={thStyle}>Timepoint</th>
-              <th style={{ ...thStyle, textAlign: 'center' }}>
+            <tr>
+              <th>Timepoint</th>
+              <th className="text-center">
                 Classification
                 <InfoTip
                   text={
@@ -448,15 +387,15 @@ function TimepointTable({ timepoints, directionLabel }) {
                   }
                 />
               </th>
-              <th style={{ ...thStyle, textAlign: 'right' }}>
+              <th className="text-right">
                 Median entering
                 <InfoTip text="Median schedule deviation at the stop just before this timepoint." />
               </th>
-              <th style={{ ...thStyle, textAlign: 'right' }}>
+              <th className="text-right">
                 Median leaving
                 <InfoTip text="Median schedule deviation at the timepoint itself." />
               </th>
-              <th style={{ ...thStyle, textAlign: 'right' }}>
+              <th className="text-right">
                 p10 spread change
                 <InfoTip
                   text={
@@ -474,39 +413,33 @@ function TimepointTable({ timepoints, directionLabel }) {
                   ? tp.p10_dev_entering - tp.p10_dev_leaving
                   : null
               return (
-                <tr
-                  key={tp.timepoint_stop_id}
-                  style={{
-                    borderBottom: '1px solid #f1f5f9',
-                    background: i % 2 === 0 ? 'white' : '#f8fafc',
-                  }}
-                >
-                  <td style={tdStyle}>
-                    <span style={{ fontWeight: 500 }}>{tp.stop_name || tp.timepoint_stop_id}</span>
-                    <span style={{ color: '#94a3b8', marginLeft: '0.4em', fontSize: '0.7rem' }}>
-                      #{tp.timepoint_stop_id}
-                    </span>
+                <tr key={tp.timepoint_stop_id} className={i % 2 === 1 ? 'row-odd' : undefined}>
+                  <td>
+                    <span className="font-medium">{tp.stop_name || tp.timepoint_stop_id}</span>
+                    <span className="timepoint-stop-id">#{tp.timepoint_stop_id}</span>
                   </td>
-                  <td style={{ ...tdStyle, textAlign: 'center' }}>
+                  <td className="text-center">
                     <ClassificationBadge classification={tp.classification} />
                   </td>
-                  <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                    <span style={{ color: tp.median_dev_entering > 0 ? '#dc2626' : tp.median_dev_entering < -30 ? '#2563eb' : '#374151' }}>
+                  <td className="text-right nums">
+                    <span style={{ color: deviationColor(tp.median_dev_entering) }}>
                       {fmtSec(tp.median_dev_entering)}
                     </span>
                   </td>
-                  <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                    <span style={{ color: tp.median_dev_leaving > 0 ? '#dc2626' : tp.median_dev_leaving < -30 ? '#2563eb' : '#374151' }}>
+                  <td className="text-right nums">
+                    <span style={{ color: deviationColor(tp.median_dev_leaving) }}>
                       {fmtSec(tp.median_dev_leaving)}
                     </span>
                   </td>
-                  <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                  <td className="text-right nums">
                     {p10Change != null ? (
-                      <span style={{ color: p10Change > 60 ? '#b45309' : '#374151' }}>
+                      <span
+                        style={{ color: p10Change > 60 ? 'var(--color-warn)' : 'var(--text-secondary)' }}
+                      >
                         {fmtSec(p10Change)}
                       </span>
                     ) : (
-                      <span style={{ color: '#94a3b8' }}>N/A</span>
+                      <span className="text-muted">N/A</span>
                     )}
                   </td>
                 </tr>
@@ -517,19 +450,6 @@ function TimepointTable({ timepoints, directionLabel }) {
       </div>
     </div>
   )
-}
-
-const thStyle = {
-  padding: '0.3rem 0.5rem',
-  textAlign: 'left',
-  fontWeight: 600,
-  color: '#64748b',
-  whiteSpace: 'nowrap',
-}
-
-const tdStyle = {
-  padding: '0.35rem 0.5rem',
-  verticalAlign: 'middle',
 }
 
 // ---------------------------------------------------------------------------
@@ -585,45 +505,32 @@ function NarrativeSection({ routeId, period, agency }) {
     return () => { cancelled = true }
   }, [routeId, period, agency])
 
-  const headerStyle = {
-    fontSize: '0.95rem',
-    marginBottom: '0.4rem',
-    color: '#1e293b',
-  }
-
   if (loading) {
     return (
-      <div style={{ marginTop: '1.5rem' }}>
-        <h3 style={headerStyle}>Narrative</h3>
-        <p style={{ fontSize: '0.85rem', color: '#64748b' }}>Loading narrative…</p>
+      <div className="mt-6">
+        <h3 className="diagnosis-section-heading">Narrative</h3>
+        <p className="panel-loading-text">Loading narrative…</p>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div style={{ marginTop: '1.5rem' }}>
-        <h3 style={headerStyle}>Narrative</h3>
-        <p style={{ color: '#a00', fontSize: '0.85rem' }}>Error: {error}</p>
+      <div className="mt-6">
+        <h3 className="diagnosis-section-heading">Narrative</h3>
+        <p className="panel-error-text">Error: {error}</p>
       </div>
     )
   }
 
   if (notFound) {
     return (
-      <div style={{ marginTop: '1.5rem' }}>
-        <h3 style={headerStyle}>Narrative</h3>
-        <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+      <div className="mt-6">
+        <h3 className="diagnosis-section-heading">Narrative</h3>
+        <p className="panel-note-xs">
           No narrative generated yet for this route and period.
           Run:{' '}
-          <code
-            style={{
-              background: '#f1f5f9',
-              padding: '0.1rem 0.35rem',
-              borderRadius: '4px',
-              fontSize: '0.8rem',
-            }}
-          >
+          <code className="narrative-code">
             scripts/generate_route_diagnosis.py --route {routeId}
             {period && period !== 'all' ? ` --period ${period}` : ''}
           </code>
@@ -635,8 +542,8 @@ function NarrativeSection({ routeId, period, agency }) {
   if (!data) return null
 
   return (
-    <div style={{ marginTop: '1.5rem' }}>
-      <h3 style={headerStyle}>
+    <div className="mt-6">
+      <h3 className="diagnosis-section-heading">
         Narrative
         <InfoTip
           text={
@@ -648,45 +555,18 @@ function NarrativeSection({ routeId, period, agency }) {
       </h3>
 
       {data.is_stale && (
-        <div
-          style={{
-            background: '#fefce8',
-            border: '1px solid #facc15',
-            borderRadius: '6px',
-            padding: '0.5rem 0.75rem',
-            marginBottom: '0.75rem',
-            fontSize: '0.8rem',
-            color: '#713f12',
-          }}
-        >
+        <div className="narrative-stale-banner">
           <strong>Diagnosis is out of date.</strong> The diagnostic profile has changed
           since this narrative was generated. Re-run:{' '}
-          <code
-            style={{
-              background: '#fef9c3',
-              padding: '0.1rem 0.3rem',
-              borderRadius: '3px',
-              fontSize: '0.78rem',
-            }}
-          >
+          <code>
             scripts/generate_route_diagnosis.py --route {routeId}
             {period && period !== 'all' ? ` --period ${period}` : ''}
           </code>
         </div>
       )}
 
-      <p
-        style={{
-          fontSize: '0.85rem',
-          color: '#1e293b',
-          lineHeight: 1.65,
-          marginBottom: '0.5rem',
-          whiteSpace: 'pre-wrap',
-        }}
-      >
-        {data.narrative}
-      </p>
-      <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>
+      <p className="narrative-text">{data.narrative}</p>
+      <div className="narrative-meta">
         Generated {data.generated_at ? data.generated_at.slice(0, 10) : 'unknown'} ·{' '}
         {data.model_id} · prompt {data.prompt_version}
       </div>
@@ -842,7 +722,7 @@ function RouteDiagnosisPanel({ routeId, period }) {
           Diagnosis
           <InfoTip text="Slip trajectory and timepoint behavior — materialized from the last 30 days of stop_events." />
         </h2>
-        <p style={{ fontSize: '0.85rem', color: '#64748b' }}>Loading diagnostic profile…</p>
+        <p className="panel-loading-text">Loading diagnostic profile…</p>
       </div>
     )
   }
@@ -851,9 +731,7 @@ function RouteDiagnosisPanel({ routeId, period }) {
     return (
       <div className="chart-container">
         <h2>Diagnosis</h2>
-        <p style={{ color: '#a00', fontSize: '0.85rem' }}>
-          Error loading diagnostic profile: {error}
-        </p>
+        <p className="panel-error-text">Error loading diagnostic profile: {error}</p>
       </div>
     )
   }
@@ -862,7 +740,7 @@ function RouteDiagnosisPanel({ routeId, period }) {
     return (
       <div className="chart-container">
         <h2>Diagnosis</h2>
-        <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+        <p className="panel-note-xs">
           No diagnostic profile available for this route and period. The profile is
           materialized nightly by the batch pipeline — check back after the next run.
         </p>
@@ -879,34 +757,21 @@ function RouteDiagnosisPanel({ routeId, period }) {
 
       {/* Slip chart section */}
       <div>
-        <h3 style={{ fontSize: '0.95rem', marginBottom: '0.4rem', color: '#1e293b' }}>
+        <h3 className="diagnosis-section-heading">
           Slip
           <InfoTip text={SLIP_DEFINITION} />
           {' '}trajectory
         </h3>
-        <p
-          style={{
-            fontSize: '0.8rem',
-            color: '#64748b',
-            marginBottom: '0.75rem',
-            lineHeight: 1.5,
-          }}
-        >
+        <p className="diagnosis-section-note">
           Bars show per-segment slip (red = late, green = recovery). Line shows cumulative
           slip from origin — a rising line means the bus is accumulating lateness; a drop at
           a{' '}
-          <span title={TIMEPOINT_DEFINITION} style={{ textDecoration: 'underline dotted', cursor: 'help' }}>
+          <span title={TIMEPOINT_DEFINITION} className="diagnosis-glossary-term">
             timepoint
           </span>{' '}
           (blue dot) means the schedule is absorbing delay there.
         </p>
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: directions.length > 1 ? '1fr 1fr' : '1fr',
-            gap: '1.25rem',
-          }}
-        >
+        <div className={`slip-chart-grid ${directions.length > 1 ? 'slip-chart-grid-2up' : ''}`}>
           {directions.map((d) => {
             const val = byDirectionWithMinutes[d]
             if (!val.segments.length) return null
@@ -922,20 +787,13 @@ function RouteDiagnosisPanel({ routeId, period }) {
       </div>
 
       {/* Timepoint behavior section */}
-      <div style={{ marginTop: '1.5rem' }}>
-        <h3 style={{ fontSize: '0.95rem', marginBottom: '0.4rem', color: '#1e293b' }}>
+      <div className="mt-6">
+        <h3 className="diagnosis-section-heading">
           Timepoint
           <InfoTip text={TIMEPOINT_DEFINITION} />
           {' '}behavior
         </h3>
-        <p
-          style={{
-            fontSize: '0.8rem',
-            color: '#64748b',
-            marginBottom: '0.75rem',
-            lineHeight: 1.5,
-          }}
-        >
+        <p className="diagnosis-section-note">
           How each WMATA schedule checkpoint behaves in practice. Hover a badge
           for its definition. "Median entering" is the typical deviation arriving
           at the checkpoint; "median leaving" is after any hold.

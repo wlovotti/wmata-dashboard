@@ -134,12 +134,12 @@ function MoversPanel({ routes }) {
           {direction === 'worse' ? 'Getting better →' : '← Getting worse'}
         </button>
       </div>
-      <p className="drilldown-anchor" style={{ marginBottom: '0.75rem' }}>
+      <p className="drilldown-anchor mb-3">
         Routes whose {metricLabel} moved most vs the prior 7-day window.
       </p>
-      <div className="filters" style={{ marginBottom: '0.75rem' }}>
+      <div className="filters mb-3">
         <div>
-          <label htmlFor="movers-metric" style={{ marginRight: '0.5rem' }}>
+          <label htmlFor="movers-metric" className="mr-2">
             Metric:
           </label>
           <select id="movers-metric" value={metric} onChange={(e) => setMetric(e.target.value)}>
@@ -153,7 +153,7 @@ function MoversPanel({ routes }) {
       </div>
 
       {routes == null ? null : movers.length < MIN_VALID_MOVERS ? (
-        <p style={{ color: 'var(--color-muted)', padding: '0 1.5rem 1.5rem' }}>
+        <p className="card-section-note text-muted">
           Not enough history this week to rank {direction === 'worse' ? 'worsening' : 'improving'}{' '}
           routes — fewer than {MIN_VALID_MOVERS} routes moved meaningfully on {metricLabel}{' '}
           week-over-week.
@@ -173,7 +173,7 @@ function MoversPanel({ routes }) {
               <tr
                 key={r.routeId}
                 onClick={() => navigate(appendWindowParam(`/route/${r.routeId}`, days, agency))}
-                style={{ cursor: 'pointer' }}
+                className="cursor-pointer"
               >
                 <td className="route-id">
                   <span className="route-badge" style={{ backgroundColor: badgeColor(null, true) }}>

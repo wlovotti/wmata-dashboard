@@ -1,0 +1,21 @@
+/* Component-scoped styles for ScheduleAudit.jsx (NOTES-85 migration off
+   inline styles). The filter row reuses App.css's .filter-bar /
+   .filter-label-flex primitives; this just adds the page's specific
+   gap/margin/font-size on top of the shared flex layout. */
+
+.audit-filter-row {
+  gap: 0.75rem;
+  margin: 0.5rem 0 1rem;
+  font-size: var(--text-sm);
+}
+
+.audit-filter-unavailable {
+  color: var(--color-neutral);
+  font-size: 0.8rem;
+}
+
+.audit-summary-note {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-2);
+}

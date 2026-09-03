@@ -50,7 +50,7 @@ function SystemTrend({ trendData, loading, error, days = 30 }) {
     return (
       <div className="chart-container">
         <h2>System trend — 7-day rolling, daily points ghosted</h2>
-        <p style={{ color: '#64748b', fontSize: '0.85rem' }}>Loading…</p>
+        <p className="status-text">Loading…</p>
       </div>
     )
   }
@@ -58,7 +58,7 @@ function SystemTrend({ trendData, loading, error, days = 30 }) {
     return (
       <div className="chart-container">
         <h2>System trend — 7-day rolling, daily points ghosted</h2>
-        <p style={{ color: '#64748b', fontSize: '0.85rem' }}>
+        <p className="status-text">
           Trend unavailable: {error}
         </p>
       </div>

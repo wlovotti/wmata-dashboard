@@ -6,6 +6,7 @@ import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
 import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
 import AgencyUnavailable from './AgencyUnavailable'
+import './ScheduleAudit.css'
 
 /**
  * Format signed seconds as `±M:SS` (minutes:seconds). Used for the per-row
@@ -216,8 +217,8 @@ function ScheduleAudit() {
     return (
       <main>
         <div className="chart-container">
-          <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <p className="breadcrumb-link-row">
+            <Link to={diagnosticsLink} className="breadcrumb-link">
               ← Diagnostics
             </Link>
           </p>
@@ -234,8 +235,8 @@ function ScheduleAudit() {
   return (
     <main>
       <div className="chart-container">
-        <p style={{ margin: '0 0 0.5rem' }}>
-          <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+        <p className="breadcrumb-link-row">
+          <Link to={diagnosticsLink} className="breadcrumb-link">
             ← Diagnostics
           </Link>
         </p>
@@ -253,18 +254,9 @@ function ScheduleAudit() {
           large slip and high volume rise to the top.
         </p>
 
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '0.75rem',
-            alignItems: 'center',
-            margin: '0.5rem 0 1rem',
-            fontSize: '0.875rem',
-          }}
-        >
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Route:</span>
+        <div className="filter-bar audit-filter-row">
+          <label className="filter-label-flex">
+            <span className="opacity-80">Route:</span>
             <select
               value={routeId}
               onChange={(e) => setRouteId(e.target.value)}
@@ -282,19 +274,16 @@ function ScheduleAudit() {
               ))}
             </select>
             {routesLoading && (
-              <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>Loading routes…</span>
+              <span className="audit-filter-unavailable">Loading routes…</span>
             )}
             {!routesLoading && routesError && (
-              <span
-                style={{ color: '#94a3b8', fontSize: '0.8rem' }}
-                title={routesError}
-              >
+              <span className="audit-filter-unavailable" title={routesError}>
                 Route list unavailable — showing active filter only
               </span>
             )}
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Direction:</span>
+          <label className="filter-label-flex">
+            <span className="opacity-80">Direction:</span>
             <select
               value={direction}
               onChange={(e) => setDirection(e.target.value)}
@@ -307,8 +296,8 @@ function ScheduleAudit() {
               ))}
             </select>
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Period:</span>
+          <label className="filter-label-flex">
+            <span className="opacity-80">Period:</span>
             <select
               value={period}
               onChange={(e) => setPeriod(e.target.value)}
@@ -321,8 +310,8 @@ function ScheduleAudit() {
               ))}
             </select>
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Sign:</span>
+          <label className="filter-label-flex">
+            <span className="opacity-80">Sign:</span>
             <select
               value={sign}
               onChange={(e) => setSign(e.target.value)}
@@ -335,8 +324,8 @@ function ScheduleAudit() {
               ))}
             </select>
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Limit:</span>
+          <label className="filter-label-flex">
+            <span className="opacity-80">Limit:</span>
             <select
               value={limit}
               onChange={(e) => setLimit(Number(e.target.value))}
@@ -351,7 +340,7 @@ function ScheduleAudit() {
           </label>
         </div>
 
-        {loading && <p style={{ color: '#64748b' }}>Loading schedule audit…</p>}
+        {loading && <p className="panel-loading-text">Loading schedule audit…</p>}
         {error && (
           <ErrorState
             title="Unable to load schedule audit"
@@ -361,7 +350,7 @@ function ScheduleAudit() {
         )}
 
         {!loading && !error && segments.length === 0 && (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No segments match the current filters. The diagnostic
             pipeline materializes <code>route_diagnostic_segment</code>{' '}
             nightly — if this is a fresh install, the pipeline may not
@@ -371,13 +360,7 @@ function ScheduleAudit() {
 
         {!loading && !error && segments.length > 0 && (
           <>
-            <p
-              style={{
-                color: '#64748b',
-                fontSize: '0.875rem',
-                marginBottom: '0.5rem',
-              }}
-            >
+            <p className="audit-summary-note">
               Showing {segments.length} of {data.n_rows} matching
               segments. Total leverage across the displayed rows:{' '}
               <strong>{formatSignedMinutes(totalMinutesPerDay)}</strong>.
@@ -418,19 +401,15 @@ function ScheduleAudit() {
                       </td>
                       <td>{s.period}</td>
                       <td
-                        style={{
-                          color: s.mean_slip_sec >= 0 ? '#b91c1c' : '#15803d',
-                          fontWeight: 600,
-                        }}
+                        className="font-semibold"
+                        style={{ color: s.mean_slip_sec >= 0 ? 'var(--color-bad)' : 'var(--color-good)' }}
                       >
                         {formatSignedSeconds(s.mean_slip_sec)}
                       </td>
                       <td>{(s.daily_trip_count ?? 0).toFixed(1)}</td>
                       <td
-                        style={{
-                          color: s.minutes_per_day >= 0 ? '#b91c1c' : '#15803d',
-                          fontWeight: 600,
-                        }}
+                        className="font-semibold"
+                        style={{ color: s.minutes_per_day >= 0 ? 'var(--color-bad)' : 'var(--color-good)' }}
                       >
                         {formatSignedMinutes(s.minutes_per_day)}
                       </td>

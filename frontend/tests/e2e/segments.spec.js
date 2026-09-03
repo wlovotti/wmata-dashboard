@@ -39,8 +39,13 @@ test('Segments: Diagnostics nav link visible from the page', async ({ page }) =>
   // Overview's unrelated fetch set — those unstubbed requests fell through
   // to the dev-server proxy and sprayed ECONNREFUSED noise into CI's test
   // output.
+  // Scoped to the primary-nav landmark: since NOTES-85 the page also
+  // renders a "Diagnostics" breadcrumb link above its heading, so an
+  // unscoped role query resolves to two elements and trips strict mode.
   await page.goto('/segments')
-  await expect(page.getByRole('link', { name: 'Diagnostics' })).toBeVisible()
+  await expect(
+    page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Diagnostics' }),
+  ).toBeVisible()
 })
 
 test('Segments: page heading renders', async ({ page }) => {

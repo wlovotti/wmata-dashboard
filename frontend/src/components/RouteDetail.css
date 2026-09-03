@@ -1,0 +1,87 @@
+/* Component-scoped styles for RouteDetail.jsx (NOTES-85 migration off
+   inline styles). Several of these classNames (.route-filter-bar,
+   .filter-chip, .headline-kpi-tag, .rider-otp-note, .agency-targets-note,
+   .stale-data-note, .route-tab/.route-tab-active) already existed in the
+   JSX but had no matching CSS rule anywhere — all of their actual styling
+   came from an inline style object computed alongside them. This file
+   gives them real rules so the className carries the styling as intended. */
+
+.route-filter-bar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 0.5rem 0 1rem;
+  font-size: var(--text-sm);
+}
+
+.clear-filter-btn {
+  padding: 0.2rem 0.55rem;
+  font-size: var(--text-xs);
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: transparent;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.filter-chip {
+  margin-left: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  font-size: var(--text-xs);
+  border-radius: var(--radius-full);
+  background: rgba(0, 100, 200, 0.15);
+  color: #0a4a8c;
+  font-weight: var(--weight-medium);
+  vertical-align: middle;
+}
+
+.headline-kpi-tag {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: #dbeafe;
+  color: #1e40af;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: var(--weight-semibold);
+}
+
+/* Repeated "small caption under a stat value" footnote — trip counts,
+   median-vs-schedule detail, "(no qualifying trips)", etc. */
+.stat-footnote {
+  font-size: var(--text-xs);
+  margin-top: 0.25rem;
+  opacity: 0.7;
+}
+
+.rider-otp-note,
+.agency-targets-note {
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.route-tab-row {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.route-tab,
+.route-tab-active {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.route-tab {
+  background: var(--surface-card);
+  color: var(--text-primary);
+}
+
+.route-tab-active {
+  background: var(--color-brand);
+  color: white;
+}

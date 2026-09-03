@@ -48,7 +48,7 @@ function RecentRuns({ routeId }) {
     return (
       <div className="chart-container">
         <h2>Recent runs</h2>
-        <p style={{ color: '#64748b' }}>Loading…</p>
+        <p className="text-muted">Loading…</p>
       </div>
     )
   }
@@ -57,7 +57,7 @@ function RecentRuns({ routeId }) {
     return (
       <div className="chart-container">
         <h2>Recent runs</h2>
-        <p style={{ color: '#64748b' }}>Unable to load runs: {error}</p>
+        <p className="text-muted">Unable to load runs: {error}</p>
       </div>
     )
   }

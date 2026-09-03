@@ -94,7 +94,7 @@ function SystemMap({ scorecardRoutes }) {
     return (
       <div className="chart-container system-map-error">
         <h2>System map</h2>
-        <p style={{ color: 'var(--color-muted)', fontSize: '0.85rem' }}>
+        <p className="status-text">
           Map unavailable right now ({error}) — the movers list still tells
           you where to look.
         </p>
@@ -119,14 +119,14 @@ function SystemMap({ scorecardRoutes }) {
   return (
     <div className="chart-container system-map">
       <h2>System map</h2>
-      <p className="drilldown-anchor" style={{ marginBottom: '0.75rem' }}>
+      <p className="drilldown-anchor mb-3">
         Routes colored by on-time performance vs target — grey routes have
         no measured data this week. Click a route for detail.
       </p>
       <MapContainer
         center={defaultCenter}
         zoom={11}
-        style={{ height: '420px', width: '100%', borderRadius: '0.75rem' }}
+        className="map-canvas map-canvas--lg"
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'

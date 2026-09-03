@@ -21,6 +21,13 @@ import {
   buildDistributionHistogramData,
   agencySeriesColor,
 } from '../utils/agencyComparison'
+import {
+  AXIS_TICK_STYLE,
+  AXIS_LINE_PROPS,
+  CHART_TOOLTIP_CLASS,
+  GRID_PROPS,
+  TOOLTIP_CURSOR_PROPS,
+} from '../charts/theme'
 
 /**
  * One headline-KPI cell: big number, week-over-week delta pill, and a
@@ -116,14 +123,10 @@ function HistogramTooltip({ active, payload, label, agencies }) {
   if (!active || !payload?.length) return null
   const nameByKey = Object.fromEntries(agencies.map((a) => [a.agency, a.display_name]))
   return (
-    <div className="agency-distribution-tooltip">
-      <div className="agency-distribution-tooltip-label">{label}%</div>
+    <div className={CHART_TOOLTIP_CLASS}>
+      <div className="chart-tooltip-title">{label}%</div>
       {payload.map((entry) => (
-        <div
-          key={entry.dataKey}
-          className="agency-distribution-tooltip-row"
-          style={{ color: entry.color }}
-        >
+        <div key={entry.dataKey} style={{ color: entry.color }}>
           {nameByKey[entry.dataKey] ?? entry.dataKey}: {entry.value} route
           {entry.value === 1 ? '' : 's'}
         </div>
@@ -155,21 +158,21 @@ function RouteDistributionHistogram({ metric, agencies }) {
     <div className="agency-distribution-histogram">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} barGap={2}>
-          <CartesianGrid vertical={false} stroke="#e2e8f0" />
+          <CartesianGrid vertical={false} {...GRID_PROPS} />
           <XAxis
             dataKey="label"
-            tick={{ fontSize: 11, fill: '#64748b' }}
-            axisLine={{ stroke: '#cbd5e1' }}
+            tick={AXIS_TICK_STYLE}
+            axisLine={AXIS_LINE_PROPS}
             tickLine={false}
           />
           <YAxis
             allowDecimals={false}
-            tick={{ fontSize: 11, fill: '#64748b' }}
+            tick={AXIS_TICK_STYLE}
             axisLine={false}
             tickLine={false}
             width={24}
           />
-          <Tooltip content={<HistogramTooltip agencies={agencies} />} cursor={{ fill: '#f1f5f9' }} />
+          <Tooltip content={<HistogramTooltip agencies={agencies} />} cursor={TOOLTIP_CURSOR_PROPS} />
           <Legend
             wrapperStyle={{ fontSize: '0.75rem' }}
             formatter={(value) =>
@@ -270,7 +273,7 @@ function AgencyComparison() {
       <main>
         <div className="chart-container">
           <h2>Agency comparison</h2>
-          <p style={{ color: '#64748b' }}>Unable to load agency comparison: {error}</p>
+          <p className="text-muted">Unable to load agency comparison: {error}</p>
           <div className="agency-comparison-error-actions">
             <button onClick={handleRetry} className="retry-btn">
               Try Again
@@ -298,7 +301,7 @@ function AgencyComparison() {
         </p>
 
         {agencies.length === 0 ? (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No agency database is currently configured. Set{' '}
             <code>DATABASE_URL</code> / <code>SFMTA_DATABASE_URL</code> and reload.
           </p>

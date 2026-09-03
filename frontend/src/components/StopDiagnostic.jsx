@@ -3,6 +3,7 @@ import useUrlState from '../hooks/useUrlState'
 import useWindowDays from '../hooks/useWindowDays'
 import useAgency from '../hooks/useAgency'
 import { apiUrl } from '../utils/apiUrl'
+import './StopDiagnostic.css'
 
 // Stop-level diagnostic strip chart (NOTES-40).
 //
@@ -177,7 +178,7 @@ function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
     return (
       <div className="chart-container">
         <h2>Stop Diagnostic</h2>
-        <p style={{ color: '#a00' }}>Error loading stop diagnostic: {error}</p>
+        <p className="panel-error-text">Error loading stop diagnostic: {error}</p>
       </div>
     )
   }
@@ -193,29 +194,15 @@ function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
   return (
     <div className="chart-container">
       <h2>Stop Diagnostic</h2>
-      <div
-        style={{
-          fontSize: '0.85rem',
-          opacity: 0.75,
-          marginBottom: '0.75rem',
-        }}
-      >
+      <div className="stop-diag-intro">
         Per-stop metrics over the last {data.days} days. Each cell is one
         stop along the route, ordered origin → destination per direction.
         Hover for details.
       </div>
 
-      <div
-        style={{
-          display: 'flex',
-          gap: '0.75rem',
-          alignItems: 'center',
-          marginBottom: '0.75rem',
-          fontSize: '0.875rem',
-        }}
-      >
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span style={{ opacity: 0.8 }}>Metric:</span>
+      <div className="filter-bar stop-diag-filter-row">
+        <label className="filter-label-flex">
+          <span className="opacity-80">Metric:</span>
           <select
             value={metric}
             onChange={(e) => setMetric(e.target.value)}
@@ -228,8 +215,8 @@ function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
             ))}
           </select>
         </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span style={{ opacity: 0.8 }}>Direction:</span>
+        <label className="filter-label-flex">
+          <span className="opacity-80">Direction:</span>
           <select
             value={effectiveDirectionParam}
             onChange={(e) => setDirectionParam(e.target.value)}
@@ -247,26 +234,12 @@ function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
       {directions.map((dir) => {
         const stops = stopsByDirection[dir]
         return (
-          <div key={dir} style={{ marginBottom: '1rem' }}>
-            <div
-              style={{
-                fontSize: '0.85rem',
-                fontWeight: 500,
-                marginBottom: '0.35rem',
-                opacity: 0.85,
-              }}
-            >
+          <div key={dir} className="mb-4">
+            <div className="stop-diag-direction-label">
               Direction {dir} ({stops.length} stops)
             </div>
             <div
-              style={{
-                display: 'flex',
-                width: '100%',
-                height: '32px',
-                border: '1px solid #ccc',
-                borderRadius: '3px',
-                overflow: 'hidden',
-              }}
+              className="stop-diag-strip"
               role="img"
               aria-label={`Stop diagnostic strip for direction ${dir}`}
             >
@@ -283,14 +256,8 @@ function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
                     key={`${s.direction_id}-${s.stop_id}-${s.stop_sequence}-${i}`}
                     onMouseEnter={() => setHoveredStop(s)}
                     onMouseLeave={() => setHoveredStop(null)}
-                    style={{
-                      flex: 1,
-                      backgroundColor: bg,
-                      borderRight: i === stops.length - 1 ? 'none' : '1px solid rgba(0,0,0,0.05)',
-                      cursor: 'pointer',
-                      outline: isHovered ? '2px solid #002F6C' : 'none',
-                      outlineOffset: '-2px',
-                    }}
+                    className={`stop-diag-segment${isHovered ? ' is-hovered' : ''}`}
+                    style={{ backgroundColor: bg }}
                     title={`${s.stop_name} (#${s.stop_sequence}): ${formatValueForMetric(
                       metric,
                       value,
@@ -306,20 +273,11 @@ function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
       })}
 
       {hoveredStop && (
-        <div
-          style={{
-            marginTop: '0.5rem',
-            padding: '0.5rem 0.75rem',
-            background: '#f5f7fa',
-            border: '1px solid #d0d7de',
-            borderRadius: '4px',
-            fontSize: '0.85rem',
-          }}
-        >
-          <div style={{ fontWeight: 600 }}>
+        <div className="stop-diag-detail-box">
+          <div className="font-semibold">
             {hoveredStop.stop_name} (seq #{hoveredStop.stop_sequence}, dir {hoveredStop.direction_id})
           </div>
-          <div style={{ marginTop: '0.25rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+          <div className="stop-diag-detail-row">
             <span>
               Median dev:{' '}
               {formatValueForMetric('median_deviation_sec', hoveredStop.median_deviation_sec)}
@@ -329,7 +287,7 @@ function StopDiagnostic({ routeId, dayType, period, otpWindow = 'official' }) {
             </span>
             <span>OTP: {formatValueForMetric('otp_pct', hoveredStop.otp_pct)}</span>
             <span>Skip: {formatValueForMetric('skip_pct', hoveredStop.skip_pct)}</span>
-            <span style={{ opacity: 0.7 }}>
+            <span className="opacity-70">
               {hoveredStop.n_observations} obs / {hoveredStop.n_scheduled} TU rows
             </span>
           </div>

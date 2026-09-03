@@ -1,0 +1,62 @@
+/* Component-scoped styles for StopDiagnostic.jsx (NOTES-85 migration off
+   inline styles). Per-stop segment color (colorForMetric()) and the
+   hover outline stay data-driven; everything else moves here. */
+
+.stop-diag-intro {
+  font-size: 0.85rem;
+  opacity: 0.75;
+  margin-bottom: var(--space-3);
+}
+
+.stop-diag-filter-row {
+  gap: 0.75rem;
+  margin-bottom: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.stop-diag-direction-label {
+  font-size: 0.85rem;
+  font-weight: var(--weight-medium);
+  margin-bottom: 0.35rem;
+  opacity: 0.85;
+}
+
+.stop-diag-strip {
+  display: flex;
+  width: 100%;
+  height: 32px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.stop-diag-segment {
+  flex: 1;
+  cursor: pointer;
+  outline: none;
+  outline-offset: -2px;
+}
+
+.stop-diag-segment:not(:last-child) {
+  border-right: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.stop-diag-segment.is-hovered {
+  outline: 2px solid var(--color-brand);
+}
+
+.stop-diag-detail-box {
+  margin-top: var(--space-2);
+  padding: 0.5rem 0.75rem;
+  background: #f5f7fa;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.stop-diag-detail-row {
+  margin-top: 0.25rem;
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}

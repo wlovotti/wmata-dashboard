@@ -7,9 +7,10 @@ import {
   ResponsiveContainer,
   ReferenceDot,
 } from 'recharts'
+import { CHART_TOOLTIP_CLASS, SERIES_COLOR } from '../charts/theme'
 
-const OTP_LINE_COLOR = '#002F6C'
-const SD_LINE_COLOR = '#0E8A6F'
+const OTP_LINE_COLOR = SERIES_COLOR.brand
+const SD_LINE_COLOR = SERIES_COLOR.good
 // Warm amber for excess-trip-time — distinct from OTP/SD without colliding
 // with the EWT thin-data warning red elsewhere on the page.
 const EXCESS_LINE_COLOR = '#B45309'
@@ -48,12 +49,7 @@ function TargetIndicator({
   return (
     <span
       className="trend-target"
-      style={{
-        color,
-        fontSize: '0.7rem',
-        fontWeight: 600,
-        marginLeft: '0.4rem',
-      }}
+      style={{ color }}
       title={`Current vs ${label.toLowerCase()}`}
     >
       {arrow} {label} {format(target)}
@@ -96,12 +92,7 @@ function DeltaIndicator({
   return (
     <span
       className="trend-delta"
-      style={{
-        color,
-        fontSize: '0.75rem',
-        fontWeight: 600,
-        marginLeft: '0.4rem',
-      }}
+      style={{ color }}
       title={title || '7-day mean vs prior 7-day mean'}
     >
       {arrow} {sign}{format(delta)}
@@ -133,10 +124,10 @@ function SparklineDot({ cx, cy, payload, isSingle }) {
         cx={cx}
         cy={cy}
         r={3}
-        fill="#94a3b8"
-        stroke="white"
+        fill={SERIES_COLOR.neutral}
+        stroke="var(--surface-card)"
         strokeWidth={1}
-        style={{ cursor: 'default' }}
+        className="sparkline-dot-default-cursor"
       >
         <title>{`Partial collection — ${pct} coverage`}</title>
       </circle>
@@ -144,7 +135,7 @@ function SparklineDot({ cx, cy, payload, isSingle }) {
   }
   // Render a dot when it's the only complete data point in the series.
   if (isSingle) {
-    return <circle cx={cx} cy={cy} r={2} fill="#64748b" />
+    return <circle cx={cx} cy={cy} r={2} fill={SERIES_COLOR.muted} />
   }
   return null
 }
@@ -217,14 +208,7 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
     return (
       <div
         className="sparkline-empty"
-        style={{
-          height,
-          fontSize: '0.7rem',
-          color: '#94a3b8',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
+        style={{ height }}
       >
         no trend data
       </div>
@@ -279,15 +263,15 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
                 ? `${Math.round(row._coveragePct * 100)}%`
                 : 'unknown'
               return (
-                <div style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem', background: 'white', border: '1px solid #e2e8f0' }}>
+                <div className={`${CHART_TOOLTIP_CLASS} chart-tooltip-compact`}>
                   <div>{label}</div>
-                  <div style={{ color: '#64748b' }}>Partial collection — {pct} coverage</div>
+                  <div className="text-muted">Partial collection — {pct} coverage</div>
                 </div>
               )
             }
             const val = row?.value
             return (
-              <div style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem', background: 'white', border: '1px solid #e2e8f0' }}>
+              <div className={`${CHART_TOOLTIP_CLASS} chart-tooltip-compact`}>
                 <div>{label}</div>
                 {val != null && <div>{valueFormat(val)}</div>}
               </div>
@@ -309,8 +293,8 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
             x={row.date}
             y={row._partialValue}
             r={3}
-            fill="#94a3b8"
-            stroke="white"
+            fill={SERIES_COLOR.neutral}
+            stroke="var(--surface-card)"
             strokeWidth={1}
           />
         ))}
@@ -320,7 +304,7 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
             x={row.date}
             y={row.value}
             r={row.data_quality === 'partial' ? 3 : 1.75}
-            fill={row.data_quality === 'partial' ? '#94a3b8' : color}
+            fill={row.data_quality === 'partial' ? SERIES_COLOR.neutral : color}
             fillOpacity={row.data_quality === 'partial' ? 0.9 : 0.35}
             stroke="none"
             className="sparkline-ghost-dot"
@@ -376,7 +360,7 @@ function RouteTrend({
     return (
       <div className="chart-container">
         <h2>{heading}</h2>
-        <p style={{ color: '#64748b', fontSize: '0.85rem' }}>Loading…</p>
+        <p className="status-text">Loading…</p>
       </div>
     )
   }
@@ -384,7 +368,7 @@ function RouteTrend({
     return (
       <div className="chart-container">
         <h2>{heading}</h2>
-        <p style={{ color: '#64748b', fontSize: '0.85rem' }}>
+        <p className="status-text">
           Trend unavailable: {error}
         </p>
       </div>

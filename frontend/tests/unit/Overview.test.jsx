@@ -9,7 +9,7 @@
  * this test covers and not something any existing suite exercises in jsdom.
  * Mirrors the mock-fetch pattern in AgencyComparison.test.jsx.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { vi } from 'vitest'
 import Overview from '../../src/components/Overview'
@@ -87,5 +87,40 @@ describe('Overview partial-day disclosure', () => {
 
     await waitFor(() => expect(screen.getByText('D72')).toBeVisible())
     expect(screen.queryByText(/excluded for partial data collection/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Overview cold-load failure retry (NOTES-85)', () => {
+  test('clicking Retry re-fetches /api/routes and clears the error banner', async () => {
+    let routesCallCount = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url) => {
+        const u = String(url)
+        if (u.startsWith('/api/routes/contributors')) return jsonResponse(baseContributors)
+        if (u.startsWith('/api/routes')) {
+          routesCallCount += 1
+          if (routesCallCount === 1) {
+            return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
+          }
+          return jsonResponse({ routes: [] })
+        }
+        if (u.startsWith('/api/system/trend')) return jsonResponse({ trend_data: [] })
+        return jsonResponse({})
+      }),
+    )
+    renderOverview()
+
+    await waitFor(() =>
+      expect(screen.getByText(/Unable to load system data/)).toBeVisible(),
+    )
+    const retryBtn = screen.getByRole('button', { name: 'Retry' })
+
+    fireEvent.click(retryBtn)
+
+    await waitFor(() =>
+      expect(screen.queryByText(/Unable to load system data/)).not.toBeInTheDocument(),
+    )
+    expect(routesCallCount).toBe(2)
   })
 })
