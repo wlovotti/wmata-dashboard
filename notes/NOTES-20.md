@@ -1,6 +1,6 @@
 # NOTES-20. Tighter rider-experience OTP
 
-Backend shipped as the rider-OTP backend (PR #PR_NUMBER_PLACEHOLDER):
+Backend shipped as the rider-OTP backend (PR #241):
 `RIDER_OTP_EARLY_SEC` / `RIDER_OTP_LATE_SEC` (`src/otp_constants.py`) and
 an `otp_window=official|rider` query param on
 `/api/routes/{id}/trend` (metric=otp) and `/api/routes/{id}/stops`. UI

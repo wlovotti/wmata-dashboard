@@ -49,7 +49,7 @@ designed UI. The comparison sprint shipped with PR #198.
 - [NOTES-61](notes/NOTES-61.md) Hold-down policy / dispatching candidates page — sev low — unblocked
 - [NOTES-20](notes/NOTES-20.md) Tighter rider-experience OTP — sev low — deferred
 - [NOTES-126](notes/NOTES-126.md) Add an observed-departure timestamp to stop_events for a principled slip-origin exclusion — sev low / eff medium-high — unblocked; deferred from the segment-slip origin guard (PR #213)
-- [NOTES-143](notes/NOTES-143.md) Agency switch in the dashboard UI — sev low-medium / eff medium-high — wave 2 of the 2026-09 UX program; depends on the agency API param (PR #236), the window picker + URL state PR, and the rider-OTP backend (PR #PR_NUMBER_PLACEHOLDER)
+- [NOTES-143](notes/NOTES-143.md) Agency switch in the dashboard UI — sev low-medium / eff medium-high — wave 2 of the 2026-09 UX program; depends on the agency API param (PR #236), the window picker + URL state PR, and the rider-OTP backend (PR #241)
 
 ## Deferred / trigger-based
 

@@ -31,7 +31,7 @@ Work:
   UI state) rather than just removing the stub. "Not available for
   this agency" states, not crashes or silently-wrong headlines.
 - Fold in the rider-experience OTP toggle UI (backend landed in the
-  rider-OTP backend, PR #PR_NUMBER_PLACEHOLDER) on RouteDetail, so the
+  rider-OTP backend, PR #241) on RouteDetail, so the
   two changes share one Playwright baseline regen. The backend added
   `otp_window=official|rider` on `/api/routes/{id}/trend` (metric=otp)
   and `/api/routes/{id}/stops`.
@@ -43,4 +43,4 @@ be regenerated on both platforms by the user at PR time.
 
 The agency API param (NOTES-139, PR #236), the window picker + URL
 state PR (wave 1, in flight), and the rider-OTP backend (PR
-#PR_NUMBER_PLACEHOLDER) — all must be merged first.
+#241) — all must be merged first.
