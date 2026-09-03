@@ -17,15 +17,23 @@ import {
 
 // jsdom (the vitest test environment here) doesn't implement
 // ResizeObserver, which recharts' <ResponsiveContainer> requires to
-// measure its parent. Stub it locally (rather than in the shared
-// tests/setup.js) so only this file's chart-rendering tests are affected.
-// The chart itself renders at 0x0 under the stub -- these tests assert the
-// surrounding table structure (labels, stats, sub-rows), not pixel output.
-class ResizeObserverStub {
+// measure its parent. Polyfill it directly on `globalThis` -- the same
+// pattern `Sparkline.test.jsx` already uses for its own recharts-backed
+// component -- rather than `vi.stubGlobal` in a `beforeEach`: a stub
+// registered through vitest's mock registry can be torn down by
+// `vi.unstubAllGlobals()` before an in-flight async re-render (e.g. this
+// file's error-state retry test, which re-renders `ResponsiveContainer`
+// after a `waitFor`) gets to mount its chart, which is what made CI flaky
+// while local runs passed "by environment luck." A permanent assignment
+// has no teardown to race. The chart itself renders at 0x0 under the
+// polyfill -- these tests assert the surrounding table structure (labels,
+// stats, sub-rows), not pixel output.
+class ResizeObserver {
   observe() {}
   unobserve() {}
   disconnect() {}
 }
+globalThis.ResizeObserver = ResizeObserver
 
 const HISTOGRAM = [
   { label: '<60', count: 3 },
@@ -114,7 +122,6 @@ function mockFetch(impl) {
   vi.stubGlobal('fetch', vi.fn(impl))
 }
 
-beforeEach(() => vi.stubGlobal('ResizeObserver', ResizeObserverStub))
 afterEach(() => vi.unstubAllGlobals())
 
 describe('utils/agencyComparison — distribution helpers', () => {
