@@ -519,6 +519,7 @@ async def get_route(
     days: int = 7,
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
+    otp_window: str = Query("official", pattern="^(official|rider)$"),
     agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
@@ -533,12 +534,21 @@ async def get_route(
     doesn't change their values; `day_type` does, by anchoring on the
     latest matching service_date.
 
+    `otp_window` (NOTES-144) picks the on-time deviation bounds for the
+    OTP fields (`otp_all_pct` / `otp_origin_pct` / `otp_destination_pct`)
+    and therefore also `grade` (scored on `otp_all_pct`): `official`
+    (default, WMATA scorecard -2min/+7min) or `rider` (stricter
+    rider-experience -1min/+3min, see notes/NOTES-20.md). It does not
+    affect `deltas`, which is sourced from the precomputed daily overlay
+    and stays official-window regardless.
+
     Args:
         route_id: Route identifier (e.g., 'C51')
         days: Window for the excess-trip-time freshest-day lookup
         day_type: One of `all` (default), `weekday`, `saturday`, `sunday`
         period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
             `evening`, `late`
+        otp_window: One of `official` (default) or `rider`.
 
     Returns:
         Detailed route metrics — live OTP/EWT/bunching, service-delivered,
@@ -565,6 +575,7 @@ async def get_route(
             days=days,
             day_type_filter=day_type,
             period_key=period,
+            otp_window=otp_window,
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
@@ -587,6 +598,7 @@ async def get_route_trend(
     days: int = 30,
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
+    otp_window: str = Query("official", pattern="^(official|rider)$"),
     agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
@@ -601,6 +613,11 @@ async def get_route_trend(
     `service_delivered` and `excess_trip_time` are trip-level and ignore
     `period`.
 
+    `otp_window` (NOTES-144) picks the on-time deviation bounds for
+    `metric=otp`: `official` (default, WMATA scorecard -2min/+7min, keeps
+    today's numbers) or `rider` (stricter rider-experience -1min/+3min,
+    see notes/NOTES-20.md). Ignored for other metrics.
+
     Args:
         route_id: Route identifier (e.g., 'C51')
         metric: Metric to analyze ('otp', 'service_delivered',
@@ -609,6 +626,8 @@ async def get_route_trend(
         day_type: One of `all` (default), `weekday`, `saturday`, `sunday`
         period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
             `evening`, `late`. Only applies to `metric=otp`.
+        otp_window: One of `official` (default) or `rider`. Only applies
+            to `metric=otp`.
 
     Returns:
         Time-series data with daily values for the specified metric
@@ -642,6 +661,7 @@ async def get_route_trend(
             days=days,
             day_type_filter=day_type,
             period_key=period,
+            otp_window=otp_window,
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
@@ -904,6 +924,7 @@ async def get_route_stop_diagnostics_endpoint(
     day_type: str = ALL_DAY_TYPES,
     period: str = ALL_HOURS,
     direction_id: int | None = None,
+    otp_window: str = Query("official", pattern="^(official|rider)$"),
     agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
 ):
     """
@@ -928,6 +949,12 @@ async def get_route_stop_diagnostics_endpoint(
     count of trip_update rows for the stop — proximity never emits
     SKIPPED, so it doesn't contribute to either numerator or denominator.
 
+    `otp_window` (NOTES-144) picks the on-time deviation bounds for
+    `otp_pct`: `official` (default, WMATA scorecard -2min/+7min) or
+    `rider` (stricter rider-experience -1min/+3min, see
+    notes/NOTES-20.md). Only affects `otp_pct` — median/p95 deviation and
+    skip_pct are unchanged.
+
     Args:
         route_id: Route identifier (e.g., 'C51').
         days: Window length in days (default: 30).
@@ -935,10 +962,12 @@ async def get_route_stop_diagnostics_endpoint(
         period: One of `all` (default), `am_peak`, `midday`, `pm_peak`,
             `evening`, `late`.
         direction_id: Optional — restrict output to one direction (0 or 1).
+        otp_window: One of `official` (default) or `rider`.
 
     Returns:
-        Dict with `route_id`, `days`, `day_type`, `period`, and `stops`
-        (list ordered by direction_id ASC then stop_sequence ASC).
+        Dict with `route_id`, `days`, `day_type`, `period`, `otp_window`,
+        and `stops` (list ordered by direction_id ASC then stop_sequence
+        ASC).
     """
     if day_type not in VALID_DAY_TYPES:
         raise HTTPException(
@@ -969,6 +998,7 @@ async def get_route_stop_diagnostics_endpoint(
             day_type=day_type,
             period=period,
             direction_id=direction_id,
+            otp_window=otp_window,
         )
     finally:
         db.close()
