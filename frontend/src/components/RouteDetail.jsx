@@ -18,6 +18,7 @@ import useUrlState from '../hooks/useUrlState'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
 import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
 import { apiUrl } from '../utils/apiUrl'
+import './RouteDetail.css'
 
 // Day-type / time-period filter options (NOTES-41). Keys must match the API's
 // accepted values (src/time_periods.py: VALID_DAY_TYPES / VALID_PERIOD_KEYS).
@@ -383,16 +384,6 @@ function RouteDetail() {
             {filterChipText && (
               <span
                 className="filter-chip"
-                style={{
-                  marginLeft: '0.75rem',
-                  padding: '0.2rem 0.55rem',
-                  fontSize: '0.75rem',
-                  borderRadius: '999px',
-                  background: 'rgba(0, 100, 200, 0.15)',
-                  color: '#0a4a8c',
-                  fontWeight: 500,
-                  verticalAlign: 'middle',
-                }}
                 title="Active KPI filter — clear to see all data"
               >
                 {filterChipText}
@@ -402,18 +393,9 @@ function RouteDetail() {
         </div>
       </div>
 
-      <div
-        className="route-filter-bar"
-        style={{
-          display: 'flex',
-          gap: '0.75rem',
-          alignItems: 'center',
-          margin: '0.5rem 0 1rem',
-          fontSize: '0.875rem',
-        }}
-      >
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span style={{ opacity: 0.8 }}>Day:</span>
+      <div className="route-filter-bar">
+        <label className="route-filter-label">
+          <span className="opacity-80">Day:</span>
           <select
             value={dayType}
             onChange={(e) => setDayType(e.target.value)}
@@ -426,8 +408,8 @@ function RouteDetail() {
             ))}
           </select>
         </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span style={{ opacity: 0.8 }}>Time:</span>
+        <label className="route-filter-label">
+          <span className="opacity-80">Time:</span>
           <select
             value={period}
             onChange={(e) => setPeriod(e.target.value)}
@@ -444,14 +426,7 @@ function RouteDetail() {
           <button
             type="button"
             onClick={clearFilters}
-            style={{
-              padding: '0.2rem 0.55rem',
-              fontSize: '0.75rem',
-              border: '1px solid rgba(0,0,0,0.15)',
-              background: 'transparent',
-              cursor: 'pointer',
-              borderRadius: '4px',
-            }}
+            className="clear-filter-btn"
           >
             Clear filter
           </button>
@@ -460,12 +435,7 @@ function RouteDetail() {
             scorecard and system pages stay on the official WMATA -2/+7
             window regardless of this control. */}
         <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.4rem',
-            marginLeft: 'auto',
-          }}
+          className="route-filter-label route-filter-label-push"
           title="Switch the OTP headline to the stricter rider-experience window (-1/+3 min)"
         >
           <input
@@ -473,7 +443,7 @@ function RouteDetail() {
             checked={isRiderWindow}
             onChange={(e) => setOtpWindow(e.target.checked ? 'rider' : 'official')}
           />
-          <span style={{ opacity: 0.8 }}>Rider-experience OTP</span>
+          <span className="opacity-80">Rider-experience OTP</span>
         </label>
       </div>
 
@@ -545,9 +515,7 @@ function RouteDetail() {
               {routeData.ewt_seconds != null
                 ? `${Math.round(routeData.ewt_seconds)}`
                 : 'N/A'}
-              {routeData.ewt_seconds != null && (
-                <span style={{ fontSize: '1.5rem' }}> sec</span>
-              )}
+              {routeData.ewt_seconds != null && <span className="text-2xl"> sec</span>}
               {routeData.ewt_coverage_ratio != null && routeData.ewt_coverage_ratio < 0.5 && (
                 <span
                   className="data-thin-badge"
@@ -565,16 +533,6 @@ function RouteDetail() {
                   <span
                     className="headline-kpi-tag"
                     title="EWT is the rider-relevant headline for WMATA frequent-service routes (config/frequent_routes.yaml)"
-                    style={{
-                      fontSize: '0.65rem',
-                      padding: '0.1rem 0.35rem',
-                      borderRadius: '4px',
-                      background: '#dbeafe',
-                      color: '#1e40af',
-                      textTransform: 'none',
-                      letterSpacing: 0,
-                      fontWeight: 600,
-                    }}
                   >
                     Frequent service
                   </span>
@@ -590,7 +548,7 @@ function RouteDetail() {
               </div>
             </div>
             {routeData.ewt_seconds == null && (
-              <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+              <div className="stat-footnote">
                 (frequent service only)
               </div>
             )}
@@ -641,13 +599,13 @@ function RouteDetail() {
                 </div>
               </div>
               {routeData.service_delivered_scheduled != null && (
-                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                <div className="stat-footnote">
                   ({routeData.service_delivered_delivered} of {routeData.service_delivered_scheduled} trips)
                 </div>
               )}
             </div>
             <div className="stat-card">
-              <div className="stat-value" style={{ fontSize: '1.5rem' }}>
+              <div className="stat-value text-2xl">
                 {routeData.otp_origin_pct != null
                   ? `${Math.round(routeData.otp_origin_pct)}% / ${Math.round(routeData.otp_destination_pct ?? 0)}%`
                   : 'N/A'}
@@ -696,7 +654,7 @@ function RouteDetail() {
                 </div>
               </div>
               {routeData.bunching_total_headways != null && routeData.bunching_total_headways > 0 && (
-                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                <div className="stat-footnote">
                   ({routeData.bunching_count} of {routeData.bunching_total_headways} pairs)
                 </div>
               )}
@@ -719,13 +677,13 @@ function RouteDetail() {
                 </div>
               </div>
               {excessActualMin != null && excessSchedMin != null && (
-                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                <div className="stat-footnote">
                   median trip {excessActualMin} min, schedule {excessSchedMin} min
                   {excessOverSchedPct != null && ` (${excessOverSchedPct >= 0 ? '+' : ''}${excessOverSchedPct}%)`}
                 </div>
               )}
               {routeData.excess_trip_time_pct == null && (
-                <div style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7 }}>
+                <div className="stat-footnote">
                   (no qualifying trips)
                 </div>
               )}
@@ -739,10 +697,7 @@ function RouteDetail() {
           delta arrow, so it should only render when the arrow is actually
           hidden. */}
       {otpDeltaMismatch && (
-        <p
-          className="rider-otp-note"
-          style={{ color: 'var(--color-muted)', fontSize: '0.8rem', margin: '0.5rem 0 0.75rem' }}
-        >
+        <p className="rider-otp-note">
           The Routes scorecard and system-wide pages still report the official
           WMATA on-time window (−2/+7 min) — this route&apos;s OTP delta arrow
           above is hidden because it isn&apos;t comparable to the
@@ -751,10 +706,7 @@ function RouteDetail() {
       )}
 
       {!showTargets && (
-        <p
-          className="agency-targets-note"
-          style={{ color: 'var(--color-muted)', fontSize: '0.8rem', margin: '0.5rem 0 0.75rem' }}
-        >
+        <p className="agency-targets-note">
           Frequent-route designation and per-route targets aren&apos;t
           configured for {AGENCY_LABELS[agency] || agency} yet — the headline
           KPI order and target indicators above are WMATA-only.
@@ -762,10 +714,7 @@ function RouteDetail() {
       )}
 
       {trendRevalidateError && (
-        <p
-          className="stale-data-note"
-          style={{ color: 'var(--color-muted)', fontSize: '0.85rem', margin: '0 0 0.75rem' }}
-        >
+        <p className="stale-data-note">
           Showing cached trend data — last refresh failed. Retrying in the background.
         </p>
       )}
@@ -809,27 +758,11 @@ function RouteDetail() {
         <RouteDiagnosisPanel routeId={routeId} period={period} />
       )}
 
-      <div
-        style={{
-          display: 'flex',
-          gap: '0.5rem',
-          margin: '1rem 0 0.5rem',
-        }}
-      >
+      <div className="route-tab-row">
         <button
           type="button"
           onClick={() => setTrailingTab('runs')}
           className={trailingTab === 'runs' ? 'route-tab-active' : 'route-tab'}
-          style={{
-            padding: '0.4rem 0.9rem',
-            border: '1px solid #cbd5e1',
-            background: trailingTab === 'runs' ? '#002F6C' : 'white',
-            color: trailingTab === 'runs' ? 'white' : '#1e293b',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.875rem',
-            fontWeight: 500,
-          }}
         >
           Recent runs
         </button>
@@ -837,16 +770,6 @@ function RouteDetail() {
           type="button"
           onClick={() => setTrailingTab('blocks')}
           className={trailingTab === 'blocks' ? 'route-tab-active' : 'route-tab'}
-          style={{
-            padding: '0.4rem 0.9rem',
-            border: '1px solid #cbd5e1',
-            background: trailingTab === 'blocks' ? '#002F6C' : 'white',
-            color: trailingTab === 'blocks' ? 'white' : '#1e293b',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.875rem',
-            fontWeight: 500,
-          }}
         >
           Blocks
         </button>
