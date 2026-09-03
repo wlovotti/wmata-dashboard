@@ -14,6 +14,8 @@
  *     force an extra render before the background revalidate resolves
  *   - PR #218 finding 5: an empty `urls` array resolves to `data: []`
  *     synchronously on the very first render, not after an effect flush
+ *   - NOTES-85: `refetch()` re-runs a failed cold fetch and clears `error`
+ *     on success
  */
 import React from 'react'
 import { renderHook, act, waitFor, render } from '@testing-library/react'
@@ -491,5 +493,38 @@ describe('useMultiFetch: aborted run must not write stale state or repopulate ca
       await Promise.resolve()
       await Promise.resolve()
     })
+  })
+
+  test('refetch() re-runs a failed cold fetch and clears error on success (NOTES-85)', async () => {
+    let callCount = 0
+    const mockFetch = vi.fn(() => {
+      callCount += 1
+      if (callCount === 1) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) })
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useMultiFetch(['/api/flaky']))
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.error).toBe('HTTP 500')
+    expect(result.current.data).toBeNull()
+
+    act(() => {
+      result.current.refetch()
+    })
+
+    // refetch() re-enters the cold-load path (no cache entry from the
+    // failed first attempt), so loading flips back to true immediately —
+    // this is what lets an <ErrorState onRetry={refetch}> button show a
+    // spinner instead of leaving the old error banner on screen.
+    expect(result.current.loading).toBe(true)
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.error).toBeNull()
+    expect(result.current.data).toEqual([{ ok: true }])
+    expect(mockFetch).toHaveBeenCalledTimes(2)
   })
 })

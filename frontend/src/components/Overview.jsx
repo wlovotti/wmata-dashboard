@@ -99,6 +99,7 @@ function Overview() {
     dataUrlKey: scorecardDataUrlKey,
     error: scorecardError,
     revalidateError: scorecardRevalidateError,
+    refetch: refetchScorecard,
   } = useMultiFetch(scorecardUrls)
   // Hero and movers degrade gracefully while this is null (loading, or a
   // fetch failure — the raw-fetch predecessor of this effect silently
@@ -162,6 +163,7 @@ function Overview() {
     dataUrlKey: heroOtpDataUrlKey,
     error: heroOtpError,
     revalidateError: heroOtpRevalidateError,
+    refetch: refetchHeroOtp,
   } = useMultiFetch(heroOtpTrendUrls)
   const heroOtpTrend = heroOtpResults ? heroOtpResults[0] : null
 
@@ -291,11 +293,25 @@ function Overview() {
   // banner.
   const pageError = scorecardError || heroOtpError
 
+  // Retry both cold-load groups that feed `pageError` — either or both may
+  // be the one that actually failed, but re-firing a group that already
+  // succeeded is a harmless no-op (useMultiFetch's cache-hit path just
+  // revalidates in the background) and keeps this button correct without
+  // tracking which group is the culprit (NOTES-85).
+  const retryPageData = () => {
+    refetchScorecard()
+    refetchHeroOtp()
+  }
+
   return (
     <main>
       <SystemWeeklyNarrativeLede />
       {pageError && (
-        <ErrorState title="Unable to load system data" message={pageError} />
+        <ErrorState
+          title="Unable to load system data"
+          message={pageError}
+          onRetry={retryPageData}
+        />
       )}
       {staleData && (
         <p
