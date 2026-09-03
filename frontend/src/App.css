@@ -425,6 +425,8 @@ main {
 .text-sm { font-size: var(--text-sm); }
 .text-muted { color: var(--text-muted); }
 .text-primary-color { color: var(--text-primary); }
+.text-secondary-color { color: var(--text-secondary); }
+.m-0 { margin: 0; }
 .font-medium { font-weight: var(--weight-medium); }
 .font-semibold { font-weight: var(--weight-semibold); }
 .text-center { text-align: center; }
@@ -1476,6 +1478,10 @@ main {
   font-size: 0.75rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  /* Covers the pill's use as a <Link> (SegmentDiagnostic's per-route
+     drilldown tables) as well as a plain <span> badge — harmless no-op
+     on the span. */
+  text-decoration: none;
 }
 
 /* Magnitude bar — visual indicator of total weighted slip relative to the
