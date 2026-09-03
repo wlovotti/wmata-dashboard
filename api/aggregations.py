@@ -2634,7 +2634,10 @@ AGENCY_COMPARISON_CAVEATS = [
     "light-rail + cable-car feed), so a share figure (e.g. 'X% of routes "
     "at or above target') is a share of different denominators between "
     "columns -- read the accompanying route_count before comparing "
-    "shares directly.",
+    "shares directly. The >=75% OTP / >=95% service-delivered thresholds "
+    "are WMATA's own system-wide targets (config/route_targets.yaml), "
+    "applied to both agencies so the comparison uses one yardstick -- "
+    "they are not SFMTA's own published commitments.",
 ]
 
 
@@ -2643,9 +2646,23 @@ AGENCY_COMPARISON_CAVEATS = [
 # metric to one window-mean per agency, which hides the spread -- two
 # agencies with identical mean OTP can have very different shares of bad
 # routes. This block adds a per-agency, per-metric distribution over the
-# SAME matched window the headline already computes, built from each
-# agency's own route-level window means -- the same per-route figures
-# `_contributors_uncached` computes, summarized instead of ranked.
+# SAME matched window and the SAME day-set the headline already uses.
+#
+# Day-set (review finding 1): the headline `window_mean` above includes
+# `data_quality='partial'` days -- they're a confidence flag, not an
+# exclusion (see `get_agency_comparison_data`'s docstring and the
+# `AGENCY_COMPARISON_CAVEATS` entry on SFMTA's structural partial-quality
+# flag, NOTES-104). SFMTA's ENTIRE matched window is partial-flagged, so
+# any partial-day exclusion here zeroes SFMTA out completely -- verified
+# live: 39 of 41 SFMTA dates partial, 0 of 68 routes scored. Both
+# sub-metrics below are therefore computed with their own dedicated bulk
+# helpers (`_bulk_route_otp_daily_percentages`,
+# `_bulk_route_service_delivered_window`) that read `stop_events` /
+# `runs` directly rather than going through `_route_otp_window_mean` /
+# `get_live_metrics_for_window` -- both of which drop partial days by
+# design for their actual callers (contributors, the scorecard). Do not
+# swap either sub-metric back to those shared helpers without re-solving
+# this problem.
 #
 # Scope: OTP and service_delivered only. Both are computed for every
 # current route regardless of frequency; EWT/bunching/SWT are frequent-
@@ -2659,43 +2676,77 @@ AGENCY_COMPARISON_CAVEATS = [
 # per-route mean is the only available reading, and it is disclosed
 # rather than presented as ridership-representative.
 #
-# Threshold: `config/route_targets.yaml`'s `system_default` -- the same
-# system-wide OTP (75%) / service-delivered (95%) commitments the
-# contributors view and RouteDetail already treat as "the" targets
-# (NOTES-47) -- rather than inventing a second threshold just for this
-# view. Applied identically to both agencies' route sets.
+# Threshold: `config/route_targets.yaml`'s `system_default` -- WMATA's own
+# system-wide OTP (75%) / service-delivered (95%) commitments, the same
+# ones the contributors view and RouteDetail already treat as "the"
+# targets (NOTES-47) -- applied identically to both agencies' route sets
+# for one shared yardstick, rather than inventing a second threshold or
+# using SFMTA's own (there isn't a published one to use).
 #
-# Histogram: one fixed set of percentage-scale bucket edges
-# (<60/60-70/70-80/80-90/>=90) shared by both metrics -- service_delivered
-# is a 0-1 ratio, scaled onto the same 0-100 percentage axis as OTP before
-# bucketing, so a single set of cut points serves both metrics and both
-# agencies identically. The edges straddle the 75%/95% targets without
-# being defined by them, so the histogram reads as "the shape of the
-# distribution," not "pass/fail buckets."
+# Histogram buckets (review finding 4): buckets are identical for both
+# AGENCIES but NOT shared between the two metrics -- service_delivered
+# clusters tightly near 90-100% (WMATA's observed IQR is roughly
+# 0.90-0.94), so reusing OTP's <60/60-70/70-80/80-90/>=90 edges dumped
+# ~97% of routes into the single ">=90" bucket. Each metric gets its own
+# fixed percentage-scale edges (`_ROUTE_DISTRIBUTION_BUCKETS`), chosen so
+# the metric's own 75%/95% target sits ON a bucket boundary; both
+# agencies always bucket against the same edges for a given metric.
+#
+# Performance + caching (review finding 3): the OTP sub-metric used to
+# call `_route_otp_window_mean` once per route (~128 queries on WMATA,
+# ~58 on SFMTA), each re-scanning `stop_events` for its own route_id --
+# measured ~86s cold for one `/api/agency-comparison` request before this
+# fix. `_bulk_route_otp_daily_percentages` replaces that with one grouped
+# query per agency over the whole window. The finished `route_distribution`
+# block is additionally cached for `_ROUTE_DISTRIBUTION_TTL_SEC` per
+# `(agency_name, db identity, window_start, window_end)` via
+# `_get_route_distribution_cached` -- a dedicated cache, not a reuse of
+# `_live_metrics_cache` / `_window_metrics_cache`. Those two had a real
+# cross-agency collision bug (keyed only by date/window, no database-
+# identity component), fixed in PR #236; this feature never shared them
+# to begin with once the bulk rewrite above dropped its only call into
+# that machinery.
 # ---------------------------------------------------------------------------
 
 ROUTE_DISTRIBUTION_METRICS = ("otp", "service_delivered")
 
-_ROUTE_DISTRIBUTION_BUCKET_EDGES: tuple[float, ...] = (0.0, 60.0, 70.0, 80.0, 90.0, 100.0)
-_ROUTE_DISTRIBUTION_BUCKET_LABELS: tuple[str, ...] = ("<60", "60-70", "70-80", "80-90", "90+")
+# Per-metric fixed histogram edges, percentage scale (service_delivered's
+# 0-1 ratio is rescaled to 0-100 via `_route_distribution_to_pct` before
+# bucketing). Identical across agencies; NOT identical across metrics --
+# see the module comment above.
+_ROUTE_DISTRIBUTION_BUCKETS: dict[str, tuple[tuple[float, ...], tuple[str, ...]]] = {
+    "otp": (
+        (0.0, 60.0, 70.0, 80.0, 90.0, 100.0),
+        ("<60", "60-70", "70-80", "80-90", "90+"),
+    ),
+    "service_delivered": (
+        (0.0, 85.0, 90.0, 92.5, 95.0, 100.0),
+        ("<85", "85-90", "90-92.5", "92.5-95", "95+"),
+    ),
+}
+
+_ROUTE_DISTRIBUTION_TTL_SEC = 300.0
+_route_distribution_cache: dict[tuple[str, str, str, str], tuple[float, dict]] = {}
+_route_distribution_lock = Lock()
 
 
-def _route_distribution_bucket_index(pct: float) -> int:
-    """Index into `_ROUTE_DISTRIBUTION_BUCKET_LABELS` for a percentage-scale value.
+def _route_distribution_bucket_index(metric: str, pct: float) -> int:
+    """Index into `metric`'s bucket labels for a percentage-scale value.
 
     Buckets are right-open except the last, which catches everything from
     its lower edge up (including any value over 100 from a bad upstream
     read -- clamped into the top bucket rather than raising).
 
     Args:
-        pct: A value already on the shared 0-100 percentage scale (see
+        metric: One of `ROUTE_DISTRIBUTION_METRICS` -- selects which edge
+            set from `_ROUTE_DISTRIBUTION_BUCKETS` to use.
+        pct: A value already on the 0-100 percentage scale (see
             `_route_distribution_to_pct`).
 
     Returns:
-        The bucket index into `_ROUTE_DISTRIBUTION_BUCKET_EDGES` /
-        `_ROUTE_DISTRIBUTION_BUCKET_LABELS`.
+        The bucket index into that metric's edges/labels tuple.
     """
-    edges = _ROUTE_DISTRIBUTION_BUCKET_EDGES
+    edges, _labels = _ROUTE_DISTRIBUTION_BUCKETS[metric]
     last = len(edges) - 2
     for i in range(last):
         if pct < edges[i + 1]:
@@ -2704,11 +2755,11 @@ def _route_distribution_bucket_index(pct: float) -> int:
 
 
 def _route_distribution_to_pct(metric: str, value: float) -> float:
-    """Rescale one route's canonical-units value onto the shared 0-100 histogram axis.
+    """Rescale one route's canonical-units value onto the 0-100 histogram axis.
 
     OTP is already 0-100. `service_delivered` is a 0-1 ratio
     (`service_delivered_ratio` throughout this module) and is scaled up
-    by 100 so it lands on the same bucket edges as OTP.
+    by 100 so it lands on percentage-scale bucket edges.
 
     Args:
         metric: One of `ROUTE_DISTRIBUTION_METRICS`.
@@ -2720,44 +2771,24 @@ def _route_distribution_to_pct(metric: str, value: float) -> float:
     return value if metric == "otp" else value * 100.0
 
 
-def _percentile(sorted_values: list[float], pct: float) -> float:
-    """Linear-interpolated percentile of an already-sorted list.
-
-    Same interpolation as numpy's default `'linear'` method. Written by
-    hand rather than adding a dependency, since this view only ever needs
-    three percentiles (25/50/75) over a per-route list capped at a few
-    hundred routes.
-
-    Args:
-        sorted_values: Non-empty list, ascending order.
-        pct: Percentile to compute, 0-100.
-
-    Returns:
-        The interpolated value. A single-element list returns that
-        element regardless of `pct`.
-    """
-    n = len(sorted_values)
-    if n == 1:
-        return sorted_values[0]
-    rank = (pct / 100.0) * (n - 1)
-    lo = int(rank)
-    hi = min(lo + 1, n - 1)
-    frac = rank - lo
-    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
-
-
 def _summarize_route_distribution(
     route_values: dict[str, float | None], metric: str, threshold: float | None
 ) -> dict:
     """Median/IQR/histogram/threshold-share summary of one metric's per-route values.
 
     `route_values` -- one value per route, or `None` where the route has
-    no qualifying data in the window -- comes from the same per-route
-    window means `get_route_contributors` computes (`_route_otp_window_mean`
-    for OTP, `get_live_metrics_for_window` for service_delivered). Routes
+    no qualifying data in the window -- comes from this module's bulk
+    per-route window helpers (`_bulk_route_otp_daily_percentages` for OTP,
+    `_bulk_route_service_delivered_window` for service_delivered), which,
+    unlike the contributors view's per-route helpers, do NOT drop
+    `data_quality='partial'` days (see the module comment above). Routes
     with a `None` value are excluded from every statistic here, matching
     how the contributors view drops unscoreable routes rather than
     treating "no data" as zero.
+
+    Reuses the module's existing `_percentile` (linear interpolation,
+    same formula `compute_route_stop_diagnostics` uses for deviation
+    percentiles) rather than a second implementation.
 
     Args:
         route_values: `{route_id: value_or_None}` in the metric's
@@ -2769,29 +2800,33 @@ def _summarize_route_distribution(
 
     Returns:
         Dict with `route_count`, `median`, `p25`, `p75` (all in the
-        metric's own canonical units), `histogram` (a list of
-        `{label, count}` in `_ROUTE_DISTRIBUTION_BUCKET_LABELS` order),
-        `threshold`, and `share_at_or_above_threshold` (fraction 0-1, or
-        `None` when there are no routes with data or no threshold).
+        metric's own canonical units, `None` when `route_count` is 0),
+        `histogram` (a list of `{label, count}` in that metric's own
+        bucket order), `threshold`, and `share_at_or_above_threshold`
+        (fraction 0-1, or `None` when there are no routes with data or no
+        threshold).
     """
     values = sorted(v for v in route_values.values() if v is not None)
     n = len(values)
+    _edges, labels = _ROUTE_DISTRIBUTION_BUCKETS[metric]
 
-    histogram_counts = [0] * len(_ROUTE_DISTRIBUTION_BUCKET_LABELS)
+    histogram_counts = [0] * len(labels)
     for v in values:
-        idx = _route_distribution_bucket_index(_route_distribution_to_pct(metric, v))
+        idx = _route_distribution_bucket_index(metric, _route_distribution_to_pct(metric, v))
         histogram_counts[idx] += 1
 
     return {
         "route_count": n,
-        "median": _percentile(values, 50) if n else None,
-        "p25": _percentile(values, 25) if n else None,
-        "p75": _percentile(values, 75) if n else None,
+        # `_percentile` (defined below, shared with the stop-diagnostics
+        # deviation percentiles) already returns None for an empty list
+        # and mutates its argument via sort -- `values` is already sorted
+        # and safe to pass repeatedly (re-sorting a sorted list is a no-op).
+        "median": _percentile(values, 50),
+        "p25": _percentile(values, 25),
+        "p75": _percentile(values, 75),
         "histogram": [
             {"label": label, "count": count}
-            for label, count in zip(
-                _ROUTE_DISTRIBUTION_BUCKET_LABELS, histogram_counts, strict=True
-            )
+            for label, count in zip(labels, histogram_counts, strict=True)
         ],
         "threshold": threshold,
         "share_at_or_above_threshold": (
@@ -2800,17 +2835,138 @@ def _summarize_route_distribution(
     }
 
 
+def _bulk_route_otp_daily_percentages(
+    db: Session, start_date: date_type, end_date: date_type
+) -> dict[str, float | None]:
+    """Per-route OTP window mean, ONE grouped query for every route (NOTES-141 review finding 3).
+
+    Same on-time definition as `_compute_otp_per_day_with_filters` under
+    `ALL_HOURS` (the only period this view needs -- ALL_HOURS makes that
+    function's hour-of-day filter a no-op): source `proximity`,
+    `deviation_sec` and `observed_arrival_ts` both non-null, on-time iff
+    `OTP_EARLY_SEC <= deviation_sec <= OTP_LATE_SEC`. Equivalence with
+    that per-route helper is asserted directly, on the same fixture, by
+    `TestBulkRouteOtpMatchesPerRouteHelper` in
+    `tests/test_agency_comparison_route_distribution.py`.
+
+    Deliberately does NOT exclude `data_quality='partial'` dates -- see
+    the module comment above.
+
+    Mean-of-daily-percentages (not pooled), same as `_route_otp_window_mean`,
+    so this stays comparable to the system baseline in
+    `_system_baseline_for_window`.
+
+    Returns `{route_id: mean_pct_or_None}` for every route_id with at
+    least one qualifying stop_event anywhere in the window; a route
+    absent from the result had none (caller should default it to `None`).
+    """
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    on_time_expr = case(
+        (
+            (StopEvent.deviation_sec >= OTP_EARLY_SEC) & (StopEvent.deviation_sec <= OTP_LATE_SEC),
+            1,
+        ),
+        else_=0,
+    )
+    rows = (
+        db.query(
+            StopEvent.route_id,
+            StopEvent.service_date,
+            func.sum(on_time_expr).label("on_time"),
+            func.count(StopEvent.id).label("total"),
+        )
+        .filter(
+            StopEvent.service_date >= start_iso,
+            StopEvent.service_date <= end_iso,
+            StopEvent.source == "proximity",
+            StopEvent.deviation_sec.isnot(None),
+            StopEvent.observed_arrival_ts.isnot(None),
+        )
+        .group_by(StopEvent.route_id, StopEvent.service_date)
+        .all()
+    )
+    daily_pct_by_route: dict[str, list[float]] = defaultdict(list)
+    for route_id, _service_date, on_time, total in rows:
+        if total and total > 0:
+            daily_pct_by_route[route_id].append((float(on_time) / float(total)) * 100.0)
+    return {route_id: _mean_skip_null(pcts) for route_id, pcts in daily_pct_by_route.items()}
+
+
+def _bulk_route_service_delivered_window(
+    db: Session, start_date: date_type, end_date: date_type
+) -> dict[str, float | None]:
+    """Per-route service_delivered ratio pooled over the window, INCLUDING partial-quality dates.
+
+    Reads the SAME materialized `route_metrics_daily_overlay` table the
+    scorecard's warm path uses (`_read_overlay_for_dates`, one bulk query
+    for every date in the window) -- but WITHOUT
+    `_compute_live_metrics_for_window_uncached`'s partial-day
+    pre-filtering, which this function must not apply (see the module
+    comment above: SFMTA's entire matched window is partial-flagged, so
+    excluding those days would zero it out completely). Falls back to
+    `compute_service_delivered_for_routes` -- a live per-date, every-route
+    compute -- only for the handful of dates the nightly batch hasn't
+    materialized into the overlay yet (normally just today, since the
+    batch runs once per service day); those dates are never partial-
+    excluded either, live compute doesn't know or care about
+    `data_quality`.
+
+    An earlier version of this function called the live per-date compute
+    unconditionally for every date in the window -- correct, but it never
+    got to use the overlay's one-query-for-the-whole-window fast path, so
+    it paid the full ~route x date live-compute cost on every request
+    (measured ~318s cold vs. ~86s before this PR's OTP fix alone -- a
+    severe regression this rewrite fixes). Do not go back to a per-date
+    live-compute loop without re-solving that.
+
+    Pools with `_aggregate_service_delivered_window` (sum
+    scheduled/delivered, recompute the ratio -- the same formula used
+    everywhere else in this module). Returns `{route_id:
+    pooled_ratio_or_None}` for every route_id that appeared on any date
+    in the window.
+    """
+    all_dates: list[date_type] = []
+    current = start_date
+    while current <= end_date:
+        all_dates.append(current)
+        current = current + timedelta(days=1)
+
+    overlay_by_date = _read_overlay_for_dates(db, all_dates)
+
+    per_date: dict[str, dict[str, dict]] = {}
+    for d in all_dates:
+        ds = d.isoformat()
+        if ds in overlay_by_date:
+            per_date[ds] = {
+                route_id: bundle["service_delivered"]
+                for route_id, bundle in overlay_by_date[ds].items()
+            }
+        else:
+            rows = compute_service_delivered_for_routes(db, d)
+            per_date[ds] = {r["route_id"]: r for r in rows}
+
+    all_routes: set[str] = set()
+    for by_route in per_date.values():
+        all_routes |= set(by_route)
+
+    out: dict[str, float | None] = {}
+    for route_id in all_routes:
+        daily = [by_route.get(route_id) for by_route in per_date.values()]
+        pooled = _aggregate_service_delivered_window(daily)
+        out[route_id] = pooled["ratio"] if pooled else None
+    return out
+
+
 def _route_distribution_for_agency(db: Session, end_date: date_type, days: int) -> dict[str, dict]:
     """Per-route OTP and service_delivered distributions for one agency's matched window.
 
-    Mirrors the per-route computation `_contributors_uncached` already
-    does for these two metrics (`_route_otp_window_mean` for OTP,
-    `get_live_metrics_for_window` + `_live_metric_fields` for
-    service_delivered), scoped to every current route rather than ranked
-    -- this is a distribution view, not a leaderboard. Shares
-    `_partial_service_dates_in_window` with that code path so a
-    collection-outage day is excluded from both the headline mean and
-    this per-route spread the same way.
+    Uses this module's own bulk window helpers
+    (`_bulk_route_otp_daily_percentages`, `_bulk_route_service_delivered_window`)
+    rather than the shared per-route/windowed helpers the contributors
+    view uses -- both of those exclude `data_quality='partial'` dates,
+    which would zero out any agency whose whole window is partial-flagged
+    (SFMTA, structurally, per NOTES-104). See the module comment above.
 
     Args:
         db: One agency's own open session.
@@ -2822,24 +2978,15 @@ def _route_distribution_for_agency(db: Session, end_date: date_type, days: int) 
         Dict keyed by `ROUTE_DISTRIBUTION_METRICS`, each a
         `_summarize_route_distribution` result.
     """
-    from src.route_targets import get_system_targets
-
     system_targets = get_system_targets()
-    partial_dates = _partial_service_dates_in_window(db, end_date, days)
+    start_date = end_date - timedelta(days=days - 1)
     routes = db.query(Route).filter(Route.is_current).all()
 
-    otp_values: dict[str, float | None] = {
-        r.route_id: _route_otp_window_mean(
-            db, r.route_id, end_date, days, partial_dates=partial_dates
-        )
-        for r in routes
-    }
+    otp_by_route = _bulk_route_otp_daily_percentages(db, start_date, end_date)
+    otp_values: dict[str, float | None] = {r.route_id: otp_by_route.get(r.route_id) for r in routes}
 
-    windowed = get_live_metrics_for_window(db, end_date, days)
-    sd_values: dict[str, float | None] = {
-        r.route_id: _live_metric_fields(windowed.get(r.route_id)).get("service_delivered_ratio")
-        for r in routes
-    }
+    sd_by_route = _bulk_route_service_delivered_window(db, start_date, end_date)
+    sd_values: dict[str, float | None] = {r.route_id: sd_by_route.get(r.route_id) for r in routes}
 
     return {
         "otp": _summarize_route_distribution(otp_values, "otp", system_targets.get("otp")),
@@ -2858,13 +3005,68 @@ def _empty_route_distribution() -> dict[str, dict]:
     configured threshold per metric (rather than `None`) so the frontend
     can render "target: 75%" even with zero routes scored.
     """
-    from src.route_targets import get_system_targets
-
     system_targets = get_system_targets()
     return {
         metric: _summarize_route_distribution({}, metric, system_targets.get(metric))
         for metric in ROUTE_DISTRIBUTION_METRICS
     }
+
+
+def _get_route_distribution_cached(
+    db: Session, agency_name: str, window_start_iso: str, end_date: date_type, days: int
+) -> dict[str, dict]:
+    """TTL-cached wrapper around `_route_distribution_for_agency` (NOTES-141 review finding 3b).
+
+    Keyed by `(agency_name, db identity, window_start, window_end)` --
+    `db identity` via `src.ewt._db_identity` per the review's ask, PLUS
+    `agency_name` as an additional disambiguator. A NEW, dedicated cache
+    (`_route_distribution_cache`), not a reuse of `_live_metrics_cache` /
+    `_window_metrics_cache`. Those two were the subject of a real
+    cross-agency collision (two different database sessions sharing a
+    cache keyed only by date/window, with no database-identity
+    component), fixed in PR #236; this feature doesn't touch either of
+    those two shared caches anywhere in its call graph.
+
+    `agency_name` is not redundant with `db identity` in production --
+    two real agencies always point at two distinct Postgres URLs -- but
+    `_db_identity` renders EVERY SQLite `:memory:` engine as the literal
+    string `"sqlite:///:memory:"` (verified directly), so two independent
+    in-memory test databases standing in for "wmata" and "sfmta" collide
+    on `db identity` alone. This repo's own test suite already documents
+    that exact `_db_identity` limitation for other caches keyed the same
+    way (see `tests/conftest.py`'s `_reset_ewt_schedule_caches`); rather
+    than add a matching autouse reset fixture here, `agency_name` in the
+    key sidesteps the collision at the source and stays correct for a
+    hypothetical future misconfiguration where two real agencies
+    genuinely share one physical database.
+
+    Args:
+        db: One agency's own open session.
+        agency_name: The agency key (`"wmata"` / `"sfmta"`) this session
+            belongs to.
+        window_start_iso: ISO date string, the matched window's start
+            (fixed per `AGENCY_COMPARISON_WINDOW_START`, included in the
+            key mostly for clarity/future-proofing since it never
+            actually varies today).
+        end_date: The shared matched-window anchor.
+        days: Window length in days.
+
+    Returns:
+        The same shape `_route_distribution_for_agency` returns.
+    """
+    cache_key = (agency_name, _db_identity(db), window_start_iso, end_date.isoformat())
+    with _route_distribution_lock:
+        cached = _route_distribution_cache.get(cache_key)
+        if cached is not None:
+            ts, value = cached
+            if (time.monotonic() - ts) < _ROUTE_DISTRIBUTION_TTL_SEC:
+                return value
+
+    result = _route_distribution_for_agency(db, end_date, days)
+
+    with _route_distribution_lock:
+        _route_distribution_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
@@ -2900,13 +3102,17 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
         Dict with `window_start` (ISO date), `window_end` (ISO date of
         the shared anchor, or `None` if no agency has any data in the
         window), `agencies` (list of `{agency, display_name, metrics,
-        service_level}`, `metrics` keyed by `AGENCY_COMPARISON_METRICS`
-        with `{window_mean, wow_delta, days_included, partial_days}` each
-        -- including the `swt` key, the scheduled-wait counterpart to
-        `ewt` -- and `service_level` a
+        service_level, route_distribution}` -- `metrics` keyed by
+        `AGENCY_COMPARISON_METRICS` with `{window_mean, wow_delta,
+        days_included, partial_days}` each, including the `swt` key
+        (the scheduled-wait counterpart to `ewt`); `service_level` a
         `{median_headway_seconds, pct_at_most_15min, n_headways}` dict
         from `src.service_level.service_level_for_agency`, degraded to
-        all-null/zero on fetch failure), and `caveats` (list of caveat
+        all-null/zero on fetch failure; `route_distribution` (NOTES-141)
+        keyed by `ROUTE_DISTRIBUTION_METRICS` -- see that constant's
+        module comment for shape. Like `window_mean`, `route_distribution`
+        INCLUDES partial-quality days -- see the module comment above
+        `ROUTE_DISTRIBUTION_METRICS`), and `caveats` (list of caveat
         strings for the UI footnotes).
     """
     from src.agency_config import load_agency_config
@@ -3013,8 +3219,8 @@ def get_agency_comparison_data(sessions: dict[str, Session]) -> dict:
         # thresholds, zero routes) when there's no shared anchor at all.
         if anchor is not None:
             window_days = (anchor - start).days + 1
-            route_distribution = _route_distribution_for_agency(
-                sessions[agency_name], anchor, window_days
+            route_distribution = _get_route_distribution_cached(
+                sessions[agency_name], agency_name, start_iso, anchor, window_days
             )
         else:
             route_distribution = _empty_route_distribution()

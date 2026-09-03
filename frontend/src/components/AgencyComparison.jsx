@@ -151,16 +151,16 @@ function RouteDistributionHistogram({ metric, agencies }) {
     <div className="agency-distribution-histogram">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} barGap={2}>
-          <CartesianGrid vertical={false} stroke="#e1e0d9" />
+          <CartesianGrid vertical={false} stroke="#e2e8f0" />
           <XAxis
             dataKey="label"
-            tick={{ fontSize: 11, fill: '#898781' }}
-            axisLine={{ stroke: '#c3c2b7' }}
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            axisLine={{ stroke: '#cbd5e1' }}
             tickLine={false}
           />
           <YAxis
             allowDecimals={false}
-            tick={{ fontSize: 11, fill: '#898781' }}
+            tick={{ fontSize: 11, fill: '#64748b' }}
             axisLine={false}
             tickLine={false}
             width={24}
