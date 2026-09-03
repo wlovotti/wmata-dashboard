@@ -317,6 +317,19 @@ header h1 {
   text-decoration: underline;
 }
 
+/* Diagnostics-page breadcrumb ("← Diagnostics") link — shared by every
+   diagnostics sub-page (ScheduleAudit, Targets, SegmentDiagnostic) so the
+   back-link reads identically everywhere instead of each page picking its
+   own shade of navy. */
+.breadcrumb-link-row {
+  margin: 0 0 var(--space-2);
+}
+
+.breadcrumb-link {
+  font-size: var(--text-sm);
+  color: var(--color-brand);
+}
+
 main {
   max-width: 1400px;
   margin: 0 auto;

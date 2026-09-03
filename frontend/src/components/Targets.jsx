@@ -255,8 +255,8 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
-          <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <p className="breadcrumb-link-row">
+            <Link to={diagnosticsLink} className="breadcrumb-link">
               ← Diagnostics
             </Link>
           </p>
@@ -274,8 +274,8 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
-          <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <p className="breadcrumb-link-row">
+            <Link to={diagnosticsLink} className="breadcrumb-link">
               ← Diagnostics
             </Link>
           </p>
@@ -293,8 +293,8 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
-          <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <p className="breadcrumb-link-row">
+            <Link to={diagnosticsLink} className="breadcrumb-link">
               ← Diagnostics
             </Link>
           </p>
@@ -375,8 +375,8 @@ function Targets() {
   return (
     <main>
       <div className="chart-container">
-        <p style={{ margin: '0 0 0.5rem' }}>
-          <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+        <p className="breadcrumb-link-row">
+          <Link to={diagnosticsLink} className="breadcrumb-link">
             ← Diagnostics
           </Link>
         </p>

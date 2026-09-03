@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import CorridorMap from './CorridorMap.jsx'
 import ErrorState from './ErrorState.jsx'
 import useAgency from '../hooks/useAgency'
-import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
+import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
 
 /**
@@ -423,10 +423,16 @@ function SegmentDiagnostic() {
   const showPeakColumn = period === 'all'
   const segmentTotalCols = showPeakColumn ? 7 : 6
   const corridorTotalCols = showPeakColumn ? 7 : 6
+  const diagnosticsLink = appendWindowParam('/diagnostics', DEFAULT_WINDOW_DAYS, agency)
 
   return (
     <main>
       <div className="chart-container">
+        <p className="breadcrumb-link-row">
+          <Link to={diagnosticsLink} className="breadcrumb-link">
+            ← Diagnostics
+          </Link>
+        </p>
         <h2>Cross-route segment diagnostic</h2>
         {level === 'segment' ? (
           <p className="drilldown-anchor">
