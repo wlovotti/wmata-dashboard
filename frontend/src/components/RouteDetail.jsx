@@ -394,7 +394,7 @@ function RouteDetail() {
       </div>
 
       <div className="route-filter-bar">
-        <label className="route-filter-label">
+        <label className="filter-label-flex">
           <span className="opacity-80">Day:</span>
           <select
             value={dayType}
@@ -408,7 +408,7 @@ function RouteDetail() {
             ))}
           </select>
         </label>
-        <label className="route-filter-label">
+        <label className="filter-label-flex">
           <span className="opacity-80">Time:</span>
           <select
             value={period}
@@ -435,7 +435,7 @@ function RouteDetail() {
             scorecard and system pages stay on the official WMATA -2/+7
             window regardless of this control. */}
         <label
-          className="route-filter-label route-filter-label-push"
+          className="filter-label-flex filter-label-flex-push"
           title="Switch the OTP headline to the stricter rider-experience window (-1/+3 min)"
         >
           <input

@@ -14,16 +14,6 @@
   font-size: var(--text-sm);
 }
 
-.route-filter-label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.route-filter-label-push {
-  margin-left: auto;
-}
-
 .clear-filter-btn {
   padding: 0.2rem 0.55rem;
   font-size: var(--text-xs);
