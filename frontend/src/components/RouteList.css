@@ -1,0 +1,80 @@
+/* Component-scoped styles for RouteList.jsx (NOTES-85 migration off
+   inline styles). A few classNames already in the JSX (.mode-toggle,
+   .mode-active/.mode-inactive, .frequent-badge) had no matching CSS rule
+   anywhere — their styling came entirely from an inline style object;
+   this file gives them real rules. Per-value colors (target-met color,
+   spectrum-bar fill, contribution-bar color/width) stay inline in the
+   .jsx since they're genuinely data-driven. */
+
+.metric-target-subline {
+  font-size: 0.7rem;
+  margin-top: 0.1rem;
+}
+
+.spectrum-bar-track {
+  margin-top: 0.25rem;
+  width: 100%;
+  height: 5px;
+  background-color: #e5e7eb;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.spectrum-bar-fill {
+  height: 100%;
+  transition: width 0.2s ease;
+}
+
+/* Neutral-colored variant of App.css's .scorecard-window-note, for the
+   "targets aren't configured for this agency" caveat. */
+.scorecard-window-note-neutral {
+  color: var(--color-neutral);
+}
+
+.mode-toggle-btn {
+  padding: 0.4rem 0.9rem;
+}
+
+.mode-active {
+  font-weight: var(--weight-bold);
+}
+
+.mode-inactive {
+  font-weight: var(--weight-normal);
+}
+
+.reference-source-note {
+  font-size: 0.7rem;
+  color: var(--color-muted);
+  margin-top: 0.1rem;
+}
+
+.contrib-bar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.contrib-bar {
+  min-width: 2px;
+  max-width: 120px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.contrib-methodology-note {
+  margin-top: var(--space-4);
+  font-size: 0.85em;
+  color: var(--color-muted);
+}
+
+.frequent-badge {
+  margin-left: 0.4rem;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: #dbeafe;
+  color: #1e40af;
+  font-weight: var(--weight-semibold);
+  vertical-align: middle;
+}

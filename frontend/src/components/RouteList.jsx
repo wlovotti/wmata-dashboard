@@ -10,6 +10,7 @@ import useUrlState from '../hooks/useUrlState'
 import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
 import useAgency, { DEFAULT_AGENCY } from '../hooks/useAgency'
 import { apiUrl } from '../utils/apiUrl'
+import './RouteList.css'
 
 // Module-level cache so navigating back from RouteDetail doesn't show the
 // loading spinner — we render last-known data immediately while refetching
@@ -32,19 +33,15 @@ let _cachedAgency = null
 // is at/beyond target in the favorable direction, red otherwise.
 function TargetSubline({ current, target, format, higherIsBetter = true }) {
   if (target == null) return null
-  let color = '#94a3b8'
+  let color = 'var(--color-neutral)'
   if (current != null) {
     const meets = higherIsBetter ? current >= target : current <= target
-    color = meets ? '#0E8A6F' : '#C8102E'
+    color = meets ? 'var(--color-good)' : 'var(--color-bad)'
   }
   return (
     <div
       className="metric-target-subline"
-      style={{
-        fontSize: '0.7rem',
-        color,
-        marginTop: '0.1rem',
-      }}
+      style={{ color }}
       title="Per-route target (config/route_targets.yaml)"
     >
       tgt {format(target)}
@@ -66,26 +63,10 @@ function SpectrumBar({ current, target, higherIsBetter }) {
   if (result == null) return null
   const { color, fillPct } = result
   return (
-    <div
-      className="spectrum-bar-track"
-      style={{
-        marginTop: '0.25rem',
-        width: '100%',
-        height: '5px',
-        backgroundColor: '#e5e7eb',
-        borderRadius: '2px',
-        overflow: 'hidden',
-      }}
-      aria-hidden="true"
-    >
+    <div className="spectrum-bar-track" aria-hidden="true">
       <div
         className="spectrum-bar-fill"
-        style={{
-          width: `${fillPct}%`,
-          height: '100%',
-          backgroundColor: color,
-          transition: 'width 0.2s ease',
-        }}
+        style={{ width: `${fillPct}%`, backgroundColor: color }}
       />
     </div>
   )
@@ -497,7 +478,7 @@ function RouteList() {
           )
         })()}
         {!showTargets && (
-          <p className="scorecard-window-note" style={{ color: '#94a3b8' }}>
+          <p className="scorecard-window-note scorecard-window-note-neutral">
             Frequent-route designation and per-route targets aren&apos;t
             configured for this agency yet — no &quot;Freq&quot; badge and no
             target/spectrum indicators on the metric cells below.
@@ -507,7 +488,7 @@ function RouteList() {
         {/* NOTES-51: search lifted above both views so name lookup is one
             keystroke regardless of which mode is active. The same
             `searchTerm` filters the contributors panel and the full table. */}
-        <div className="filters" style={{ marginBottom: '1rem' }}>
+        <div className="filters mb-4">
           <div className="search-box">
             <input
               type="text"
@@ -519,16 +500,11 @@ function RouteList() {
           </div>
         </div>
 
-        <div className="mode-toggle" style={{ marginBottom: '1rem' }}>
+        <div className="mode-toggle mb-4">
           <button
             type="button"
             onClick={() => setViewMode('contributors')}
-            className={viewMode === 'contributors' ? 'mode-active' : 'mode-inactive'}
-            style={{
-              marginRight: '0.5rem',
-              padding: '0.4rem 0.9rem',
-              fontWeight: viewMode === 'contributors' ? 'bold' : 'normal',
-            }}
+            className={`mode-toggle-btn mr-2 ${viewMode === 'contributors' ? 'mode-active' : 'mode-inactive'}`}
             title="Rank routes by contribution to system underperformance instead of raw worst percentage"
           >
             Biggest contributors
@@ -536,11 +512,7 @@ function RouteList() {
           <button
             type="button"
             onClick={() => setViewMode('default')}
-            className={viewMode === 'default' ? 'mode-active' : 'mode-inactive'}
-            style={{
-              padding: '0.4rem 0.9rem',
-              fontWeight: viewMode === 'default' ? 'bold' : 'normal',
-            }}
+            className={`mode-toggle-btn ${viewMode === 'default' ? 'mode-active' : 'mode-inactive'}`}
             title="Alphabetic full-route table (collapses behind a disclosure when not active)"
           >
             All routes
@@ -549,9 +521,9 @@ function RouteList() {
 
         {viewMode === 'contributors' && (
           <div className="contributors-view">
-            <div className="filters" style={{ marginBottom: '0.75rem' }}>
+            <div className="filters mb-3">
               <div>
-                <label htmlFor="contrib-metric" style={{ marginRight: '0.5rem' }}>
+                <label htmlFor="contrib-metric" className="mr-2">
                   Metric:
                 </label>
                 <select
@@ -663,14 +635,15 @@ function RouteList() {
                         1
                       )
                       const barPct = (Math.abs(c.contribution_score || 0) / maxAbs) * 100
-                      const barColor = (c.contribution_score || 0) >= 0 ? '#d97706' : '#16a34a'
+                      const barColor =
+                        (c.contribution_score || 0) >= 0 ? 'var(--color-warn)' : 'var(--color-good)'
                       return (
                         <tr
                           key={c.route_id}
                           onClick={() =>
                             navigate(appendWindowParam(`/route/${c.route_id}`, days, agency))
                           }
-                          style={{ cursor: 'pointer' }}
+                          className="cursor-pointer"
                         >
                           <td>{idx + 1}</td>
                           <td className="route-id">
@@ -691,13 +664,7 @@ function RouteList() {
                               c.reference_value ?? c.baseline_value,
                             )}
                             {c.reference_source && (
-                              <div
-                                style={{
-                                  fontSize: '0.7rem',
-                                  color: '#64748b',
-                                  marginTop: '0.1rem',
-                                }}
-                              >
+                              <div className="reference-source-note">
                                 {c.reference_source === 'target'
                                   ? 'route target'
                                   : 'system baseline'}
@@ -706,16 +673,10 @@ function RouteList() {
                           </td>
                           <td className="metric">{c.scheduled_trips.toLocaleString('en-US')}</td>
                           <td className="metric">
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <div className="contrib-bar-row">
                               <div
-                                style={{
-                                  width: `${barPct}%`,
-                                  minWidth: '2px',
-                                  maxWidth: '120px',
-                                  height: '10px',
-                                  backgroundColor: barColor,
-                                  borderRadius: '2px',
-                                }}
+                                className="contrib-bar"
+                                style={{ width: `${barPct}%`, backgroundColor: barColor }}
                                 title={`Contribution magnitude: ${formatContribScore(
                                   c.contribution_score
                                 )}`}
@@ -729,7 +690,7 @@ function RouteList() {
                   </tbody>
                 </table>
                 {filteredContributors.length > CONTRIB_TOP_N && (
-                  <div style={{ marginTop: '0.75rem' }}>
+                  <div className="mt-3">
                     <button
                       type="button"
                       onClick={() => setShowAllContributors(v => !v)}
@@ -743,7 +704,7 @@ function RouteList() {
                 )}
               </>
             )}
-            <p style={{ marginTop: '1rem', fontSize: '0.85em', color: '#666' }}>
+            <p className="contrib-methodology-note">
               Contribution = (reference − route value) × scheduled trips, sign-flipped for
               lower-is-better metrics. Reference is the route&apos;s configured target when set
               (config/route_targets.yaml), otherwise the system {days}-day window mean.
@@ -756,15 +717,14 @@ function RouteList() {
             flips the disclosure open; the user can also expand it manually
             without switching modes. */}
         <details
-          className="all-routes-disclosure"
+          className="all-routes-disclosure mt-6"
           open={viewMode === 'default'}
-          style={{ marginTop: '1.5rem' }}
         >
           <summary>
             See all routes ({filteredAndSortedRoutes.length}
             {searchTerm ? ` of ${routes.length}` : ''})
           </summary>
-          <div style={{ marginTop: '1rem' }}>
+          <div className="mt-4">
             <table className="routes-table">
               <thead>
                 <tr>
@@ -808,9 +768,8 @@ function RouteList() {
                   filteredAndSortedRoutes.map(route => (
               <tr
                 key={route.route_id}
-                className={route.otp_all_pct == null ? 'no-data' : ''}
+                className={`cursor-pointer${route.otp_all_pct == null ? ' no-data' : ''}`}
                 onClick={() => handleRouteClick(route.route_id)}
-                style={{ cursor: 'pointer' }}
               >
                 <td className="route-id">
                   <span
@@ -830,16 +789,6 @@ function RouteList() {
                     <span
                       className="frequent-badge"
                       title="WMATA frequent-service route — EWT is the rider-relevant headline metric (config/frequent_routes.yaml)"
-                      style={{
-                        marginLeft: '0.4rem',
-                        fontSize: '0.65rem',
-                        padding: '0.1rem 0.35rem',
-                        borderRadius: '4px',
-                        background: '#dbeafe',
-                        color: '#1e40af',
-                        fontWeight: 600,
-                        verticalAlign: 'middle',
-                      }}
                     >
                       Freq
                     </span>
