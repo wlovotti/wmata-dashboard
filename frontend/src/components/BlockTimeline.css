@@ -1,0 +1,112 @@
+/* Component-scoped styles for BlockTimeline.jsx (NOTES-85 migration off
+   inline styles). Per-trip deviation coloring (devColor() in the .jsx)
+   stays a computed value passed as an inline style — it's genuinely
+   data-driven (three color bands off a numeric deviation) — but the
+   surrounding static layout/typography moves here. */
+
+.block-header-subtitle {
+  color: var(--color-muted);
+  margin-top: 0.25rem;
+}
+
+/* Inline legend badges inside the Timeline card's explanatory paragraph
+   ("A [swap] badge...", "A [carry] arrow..."). */
+.legend-badge {
+  display: inline-block;
+  padding: 0 0.4rem;
+  margin: 0 0.25rem;
+  border-radius: 3px;
+  font-size: var(--text-xs);
+}
+
+.legend-badge-swap {
+  border: 1px solid var(--color-muted);
+}
+
+.legend-badge-carry {
+  border: 1px solid var(--color-bad);
+  color: var(--color-bad);
+}
+
+.block-trip-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Between-card adornment row (swap/carry indicators) above a trip card. */
+.block-adornment-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  padding-left: 0.75rem;
+  margin: 0.25rem 0;
+}
+
+.adornment-badge {
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+  font-size: var(--text-xs);
+}
+
+.adornment-badge-swap {
+  border: 1px solid var(--color-muted);
+  color: var(--text-secondary);
+}
+
+.adornment-badge-carry {
+  border: 1px solid var(--color-bad);
+  color: var(--color-bad);
+}
+
+/* Per-trip card. borderLeftColor and cursor are set inline (data-driven:
+   devColor() by deviation, pointer only when the trip has a run to link
+   to) — everything else here is fixed. */
+.block-trip-card {
+  text-align: left;
+  padding: 0.75rem 1rem;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-2);
+}
+
+.block-trip-title {
+  font-weight: var(--weight-semibold);
+}
+
+.block-trip-headsign {
+  font-weight: var(--weight-normal);
+  color: var(--text-secondary);
+  margin-left: 0.5rem;
+}
+
+.block-trip-sched {
+  color: var(--color-muted);
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+}
+
+.block-trip-meta-row {
+  margin-top: 0.4rem;
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.block-trip-meta-item {
+  font-size: 0.85rem;
+}
+
+.block-trip-vehicle {
+  text-align: right;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.block-vehicle-badge {
+  padding: 0.15rem 0.5rem;
+  background: var(--border-default);
+  border-radius: var(--radius-full);
+  font-weight: var(--weight-medium);
+}
