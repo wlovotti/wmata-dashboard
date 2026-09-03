@@ -12,10 +12,12 @@ import {
   ResponsiveContainer,
   Cell,
 } from 'recharts'
+import { AXIS_TICK_STYLE, CHART_MARGIN, GRID_PROPS, SERIES_COLOR } from '../charts/theme'
 
-const EWT_BAR_COLOR = '#002F6C'
-const EWT_BAR_COLOR_THIN = '#94a3b8' // de-saturated for low-coverage periods
-const BUNCHING_BAR_COLOR = '#C8102E'
+const EWT_BAR_COLOR = SERIES_COLOR.brand
+const EWT_BAR_COLOR_THIN = SERIES_COLOR.neutral // de-saturated for low-coverage periods
+const BUNCHING_BAR_COLOR = SERIES_COLOR.bad
+const EWT_BAR_COLOR_MISSING = 'var(--border-strong)' // no data for the period
 
 // Below this observed/scheduled-headway ratio, EWT (and bunching, which
 // shares the trip_update observation source) is unreliable — surfaced as a
@@ -25,11 +27,11 @@ const COVERAGE_THIN_THRESHOLD = 0.5
 // NOTES-42: cause-decomposition stacked-bar segment colors. Distinct hues so
 // a glance at the bar gives the operator the dominant cause.
 const CAUSE_COLORS = {
-  leader_late_only: '#C8102E', // running-time / recovery problem (red — same hue as bunching)
-  trailer_early_only: '#F59E0B', // dispatch / departure-discipline problem (amber)
+  leader_late_only: SERIES_COLOR.bad, // running-time / recovery problem (red — same hue as bunching)
+  trailer_early_only: '#F59E0B', // dispatch / departure-discipline problem (amber) — distinct hue from --color-warn so the two stay visually separable
   both_off: '#7c3aed', // compounding — both interventions apply (violet)
-  neither_off: '#94a3b8', // OTP-window-internal (de-saturated gray)
-  unknown: '#cbd5e1', // missing schedule match (paler gray)
+  neither_off: SERIES_COLOR.neutral, // OTP-window-internal (de-saturated gray)
+  unknown: 'var(--border-strong)', // missing schedule match (paler gray)
 }
 
 const CAUSE_LABELS = {
@@ -311,16 +313,16 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
             </p>
           ) : (
             <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={ewtRows} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="_label" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 12 }} />
+              <BarChart data={ewtRows} margin={CHART_MARGIN}>
+                <CartesianGrid {...GRID_PROPS} />
+                <XAxis dataKey="_label" tick={AXIS_TICK_STYLE} />
+                <YAxis tick={AXIS_TICK_STYLE} />
                 <Tooltip content={ewtTooltip} />
                 <Bar dataKey="ewt_seconds" fill={EWT_BAR_COLOR}>
                   {ewtRows.map((row) => {
                     let fill = EWT_BAR_COLOR
                     if (row.ewt_seconds == null) {
-                      fill = '#cbd5e1'
+                      fill = EWT_BAR_COLOR_MISSING
                     } else if (isThin(row.coverage_ratio)) {
                       fill = EWT_BAR_COLOR_THIN
                     }
@@ -342,11 +344,11 @@ function PeriodDrilldown({ routeId, dayType = 'all', period = 'all' }) {
                   ...r,
                   bunching_pct: r.bunching_rate != null ? r.bunching_rate * 100 : null,
                 }))}
-                margin={{ top: 8, right: 8, left: 0, bottom: 8 }}
+                margin={CHART_MARGIN}
               >
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="_label" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 12 }} unit="%" />
+                <CartesianGrid {...GRID_PROPS} />
+                <XAxis dataKey="_label" tick={AXIS_TICK_STYLE} />
+                <YAxis tick={AXIS_TICK_STYLE} unit="%" />
                 <Tooltip content={bunchingTooltip} />
                 <Bar dataKey="bunching_pct" fill={BUNCHING_BAR_COLOR} />
               </BarChart>

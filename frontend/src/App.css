@@ -1068,6 +1068,21 @@ main {
   font-size: 0.75rem;
 }
 
+/* Compact variant of .chart-tooltip for small sparklines (RouteTrend),
+   where the full-size tooltip box reads oversized next to a ~120px chart. */
+.chart-tooltip-compact {
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  font-size: var(--text-xs);
+  padding: 0.25rem 0.5rem;
+}
+
+/* SVG dots that shouldn't show a pointer cursor on hover (they carry a
+   native <title> tooltip, not a click affordance). */
+.sparkline-dot-default-cursor {
+  cursor: default;
+}
+
 /* "Data thin" badge: shown next to EWT/bunching when observed-to-scheduled
    headway coverage falls below 50%. Signals the trip_update derivation
    missed enough arrivals that the metric is unreliable — the EWT clamp at 0

@@ -14,6 +14,7 @@ import {
   ReferenceArea,
   ResponsiveContainer,
 } from 'recharts'
+import { AXIS_TICK_STYLE, GRID_PROPS, SERIES_COLOR } from '../charts/theme'
 
 // WMATA on-time band: -2 min early to +7 min late. Mirrors `src/otp_constants.py`.
 const ON_TIME_LOWER_SEC = -120
@@ -234,12 +235,12 @@ function RunDetail() {
               data={chartData}
               margin={{ top: 16, right: 24, left: 0, bottom: 16 }}
             >
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <CartesianGrid {...GRID_PROPS} />
               <XAxis
                 dataKey="stop_sequence"
                 type="number"
                 domain={[seqMin, seqMax]}
-                tick={{ fontSize: 12 }}
+                tick={AXIS_TICK_STYLE}
                 label={{
                   value: 'stop_sequence',
                   position: 'insideBottomRight',
@@ -248,7 +249,7 @@ function RunDetail() {
                 }}
               />
               <YAxis
-                tick={{ fontSize: 12 }}
+                tick={AXIS_TICK_STYLE}
                 label={{
                   value: 'deviation (sec, +late / -early)',
                   angle: -90,
@@ -260,11 +261,11 @@ function RunDetail() {
               <ReferenceArea
                 y1={ON_TIME_LOWER_SEC}
                 y2={ON_TIME_UPPER_SEC}
-                fill="#16a34a"
+                fill={SERIES_COLOR.good}
                 fillOpacity={0.12}
                 stroke="none"
               />
-              <ReferenceLine y={0} stroke="#0f172a" strokeWidth={1} />
+              <ReferenceLine y={0} stroke="var(--text-primary)" strokeWidth={1} />
               <Line
                 type="monotone"
                 dataKey="deviation_sec"

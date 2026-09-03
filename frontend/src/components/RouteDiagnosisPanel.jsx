@@ -53,6 +53,12 @@ import {
 import useAgency, { AGENCY_LABELS, DEFAULT_AGENCY } from '../hooks/useAgency'
 import { apiUrl } from '../utils/apiUrl'
 import AgencyUnavailable from './AgencyUnavailable'
+import { CHART_MARGIN, SERIES_COLOR } from '../charts/theme'
+
+// Timepoint (WMATA schedule-checkpoint) marker color. Distinct blue, not one
+// of the six semantic tokens (it marks a stop's role, not a status), reused
+// across the slip chart and the "●" legend swatch below it.
+const TIMEPOINT_COLOR = '#3b82f6'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -300,10 +306,7 @@ function SlipChart({ segments, directionLabel }) {
         {directionLabel}
       </div>
       <ResponsiveContainer width="100%" height={200}>
-        <ComposedChart
-          data={chartData}
-          margin={{ top: 8, right: 16, left: 0, bottom: 4 }}
-        >
+        <ComposedChart data={chartData} margin={CHART_MARGIN}>
           <XAxis
             dataKey="from_seq"
             tick={{ fontSize: 10 }}
@@ -313,7 +316,7 @@ function SlipChart({ segments, directionLabel }) {
               position: 'insideBottomRight',
               offset: -4,
               fontSize: 9,
-              fill: '#94a3b8',
+              fill: SERIES_COLOR.neutral,
             }}
           />
           <YAxis
@@ -323,12 +326,12 @@ function SlipChart({ segments, directionLabel }) {
             width={36}
           />
           <RechartsTooltip content={<SlipTooltip />} />
-          <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1} />
+          <ReferenceLine y={0} stroke={SERIES_COLOR.neutral} strokeWidth={1} />
           {timepointSeqs.map((seq) => (
             <ReferenceLine
               key={seq}
               x={seq}
-              stroke="#3b82f6"
+              stroke={TIMEPOINT_COLOR}
               strokeDasharray="3 3"
               strokeWidth={1}
             />
@@ -337,7 +340,7 @@ function SlipChart({ segments, directionLabel }) {
             {chartData.map((entry, idx) => (
               <Cell
                 key={idx}
-                fill={entry.mean_slip_sec > 0 ? '#ef4444' : '#22c55e'}
+                fill={entry.mean_slip_sec > 0 ? SERIES_COLOR.bad : SERIES_COLOR.good}
                 fillOpacity={0.75}
               />
             ))}
@@ -346,12 +349,20 @@ function SlipChart({ segments, directionLabel }) {
             data={lineData}
             type="monotone"
             dataKey="cum_slip_sec_min"
-            stroke="#1e293b"
+            stroke="var(--text-primary)"
             strokeWidth={2}
             dot={(props) => {
               const entry = props.payload
               if (!entry?.is_timepoint) {
-                return <circle key={props.key} cx={props.cx} cy={props.cy} r={2} fill="#1e293b" />
+                return (
+                  <circle
+                    key={props.key}
+                    cx={props.cx}
+                    cy={props.cy}
+                    r={2}
+                    fill="var(--text-primary)"
+                  />
+                )
               }
               return (
                 <circle
@@ -359,8 +370,8 @@ function SlipChart({ segments, directionLabel }) {
                   cx={props.cx}
                   cy={props.cy}
                   r={5}
-                  fill="#3b82f6"
-                  stroke="white"
+                  fill={TIMEPOINT_COLOR}
+                  stroke="var(--surface-card)"
                   strokeWidth={1.5}
                 />
               )
@@ -380,7 +391,7 @@ function SlipChart({ segments, directionLabel }) {
             paddingLeft: 36,
           }}
         >
-          <span style={{ color: '#3b82f6', fontWeight: 600 }}>● </span>
+          <span style={{ color: TIMEPOINT_COLOR }} className="font-semibold">● </span>
           Timepoints:{' '}
           {lineData
             .filter((d) => d.is_timepoint)
