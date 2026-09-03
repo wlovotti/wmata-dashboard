@@ -1,0 +1,9 @@
+/* Component-scoped styles for ActiveBlocks.jsx (NOTES-85 migration off
+   inline styles). Layout reuses App.css's .filter-bar primitive; this
+   adds the page's specific gap/margin/font-size. */
+
+.active-blocks-filter-row {
+  gap: 0.75rem;
+  margin: 0.5rem 0 1rem;
+  font-size: var(--text-sm);
+}

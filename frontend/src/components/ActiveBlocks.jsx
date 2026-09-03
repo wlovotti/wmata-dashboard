@@ -5,6 +5,7 @@ import ErrorState from './ErrorState.jsx'
 import { apiUrl } from '../utils/apiUrl'
 import useAgency from '../hooks/useAgency'
 import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import './ActiveBlocks.css'
 
 const LIMIT_OPTIONS = [25, 50, 100, 200, 500]
 
@@ -81,10 +82,10 @@ function ActiveBlocks() {
   return (
     <main>
       <div className="chart-container">
-        <p style={{ margin: '0 0 0.5rem' }}>
+        <p className="breadcrumb-link-row">
           <Link
             to={appendWindowParam('/diagnostics', DEFAULT_WINDOW_DAYS, agency)}
-            style={{ fontSize: '0.85rem', color: '#0a4a8c' }}
+            className="breadcrumb-link"
           >
             ← Diagnostics
           </Link>
@@ -98,17 +99,9 @@ function ActiveBlocks() {
           chains land at the top.
         </p>
 
-        <div
-          style={{
-            display: 'flex',
-            gap: '0.75rem',
-            alignItems: 'center',
-            margin: '0.5rem 0 1rem',
-            fontSize: '0.875rem',
-          }}
-        >
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Service date:</span>
+        <div className="filter-bar active-blocks-filter-row">
+          <label className="filter-label-flex">
+            <span className="opacity-80">Service date:</span>
             <input
               type="date"
               value={serviceDate}
@@ -116,8 +109,8 @@ function ActiveBlocks() {
               aria-label="Service date for active blocks"
             />
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span style={{ opacity: 0.8 }}>Limit:</span>
+          <label className="filter-label-flex">
+            <span className="opacity-80">Limit:</span>
             <select
               value={limit}
               onChange={(e) => setLimit(Number(e.target.value))}
@@ -132,7 +125,7 @@ function ActiveBlocks() {
           </label>
         </div>
 
-        {loading && <p style={{ color: '#64748b' }}>Loading blocks…</p>}
+        {loading && <p className="panel-loading-text">Loading blocks…</p>}
         {error && (
           <ErrorState
             title="Unable to load blocks"
@@ -142,7 +135,7 @@ function ActiveBlocks() {
         )}
 
         {!loading && !error && blocks.length === 0 && (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No active blocks found for {serviceDate}.
           </p>
         )}
@@ -175,7 +168,6 @@ function ActiveBlocks() {
                         ),
                       )
                     }
-                    style={{ cursor: 'pointer' }}
                   >
                     <td>
                       <Link
