@@ -1,13 +1,95 @@
-/* Design tokens (NOTES-84 — seeded from the existing hardcoded palette;
-   NOTES-85 migrates the rest of this file onto them). New rules only —
-   do not rewrite existing rules to tokens in this PR. */
+/* Design tokens (NOTES-84 seeded the semantic six; NOTES-85 adds the rest
+   of the system — surfaces, borders, text, tints, spacing, type, radius,
+   shadow — and migrates App.css + component inline styles onto them.
+   Values are inventoried from the palette already in use across App.css
+   and the component inline styles it's replacing; near-duplicate hexes
+   (e.g. the half-dozen near-#e2e8f0 border grays) collapse onto one
+   token rather than each keeping its own shade. */
 :root {
+  /* Semantic colors — unchanged from NOTES-84; drive status coloring
+     (good/warn/bad), the WMATA brand navy, and the two neutral grays used
+     for de-emphasized text/icons vs. structural neutrals. */
   --color-good: #0E8A6F;
   --color-warn: #D97706;
   --color-bad: #C8102E;
   --color-brand: #002F6C;
   --color-muted: #64748b;
   --color-neutral: #94a3b8;
+
+  /* Semantic tints — light washes of each semantic color for badges,
+     banners, and delta chips. Derived from the base color via color-mix()
+     so components stop hand-computing rgba(...)/hex tints per call site. */
+  --color-good-tint: color-mix(in srgb, var(--color-good) 12%, white);
+  --color-warn-tint: color-mix(in srgb, var(--color-warn) 14%, white);
+  --color-bad-tint: color-mix(in srgb, var(--color-bad) 8%, white);
+  --color-brand-tint: color-mix(in srgb, var(--color-brand) 8%, white);
+  --color-neutral-tint: color-mix(in srgb, var(--color-neutral) 15%, white);
+
+  /* Surfaces — page background, card/panel background, and a subtle
+     surface for table headers, hover rows, and inset panels. */
+  --surface-page: #f8fafc;
+  --surface-card: #ffffff;
+  --surface-subtle: #f1f5f9;
+
+  /* Borders — default hairline (the vast majority of App.css's rules)
+     and a stronger variant for inputs/controls that need more contrast. */
+  --border-default: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  /* Text — primary (headings, body), secondary (sub-headings, labels),
+     and muted (captions, timestamps, disabled). --text-muted aliases
+     --color-muted so call sites can use either name for the same gray. */
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: var(--color-muted);
+
+  /* Spacing scale — 4px base, used for padding/margin/gap everywhere new
+     rules are added. Existing rem values are left as-is unless they
+     already line up with a step. */
+  --space-1: 0.25rem;  /* 4px */
+  --space-2: 0.5rem;   /* 8px */
+  --space-3: 0.75rem;  /* 12px */
+  --space-4: 1rem;     /* 16px */
+  --space-5: 1.25rem;  /* 20px */
+  --space-6: 1.5rem;   /* 24px */
+  --space-7: 1.75rem;  /* 28px */
+  --space-8: 2rem;     /* 32px */
+
+  /* Type scale — font sizes from caption (xs) to page-title (3xl). */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 2rem;
+
+  /* Line-heights and weights, named by intent rather than by number. */
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Font stacks — the sans stack already applied to .app, and the mono
+     stack used for tabular metric values. */
+  --font-sans: 'Helvetica Neue', Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
+
+  /* Radius scale, from small controls to full pills. */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-full: 999px;
+
+  /* Shadows — card elevation, a slightly stronger sticky-header shadow,
+     and the tooltip/popover shadow. */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --shadow-sticky: 0 2px 4px rgba(0, 0, 0, 0.1);
+  --shadow-popover: 0 2px 6px rgba(0, 0, 0, 0.08);
 }
 
 * {
@@ -18,15 +100,15 @@
 
 .app {
   min-height: 100vh;
-  background: #f8fafc;
-  font-family: 'Helvetica Neue', Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background: var(--surface-page);
+  font-family: var(--font-sans);
 }
 
 header {
-  background: linear-gradient(135deg, #002F6C 0%, #003594 100%);
+  background: linear-gradient(135deg, var(--color-brand) 0%, #003594 100%);
   color: white;
   padding: 2rem;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-sticky);
 }
 
 .header-content {
@@ -226,7 +308,7 @@ header h1 {
 }
 
 .see-all-link {
-  color: #002F6C;
+  color: var(--color-brand);
   font-weight: 600;
   text-decoration: none;
 }
@@ -241,6 +323,98 @@ main {
   padding: 2rem;
 }
 
+/* Shared primitives (NOTES-85). Common shapes that recurred as one-off
+   inline styles across components — pulled up here so every panel/card/
+   note/badge reads as the same component instead of a fresh set of
+   micro-decisions. Components should reach for these before writing a
+   new component-scoped rule. */
+
+/* Generic card: the background/radius/shadow recipe already used by
+   .stat-card, .table-container, .chart-container, .detail-info, etc. New
+   panels that don't need those classes' extra rules can use this alone. */
+.card {
+  background: var(--surface-card);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+  padding: var(--space-6);
+}
+
+/* Section heading inside a card/panel — mirrors .chart-container h2. */
+.section-heading {
+  margin: 0 0 var(--space-4);
+  color: var(--text-primary);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+}
+
+/* Small muted annotation under a heading or table (loading/empty/caveat
+   text) — the single most common inline-style pattern in the codebase. */
+.panel-note {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.panel-note-xs {
+  color: var(--color-neutral);
+  font-size: var(--text-xs);
+}
+
+/* Inline loading/error text inside a panel that already has its own
+   heading (contrast the full-page .loading-spinner / .error-banner). */
+.panel-loading-text {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.panel-error-text {
+  color: var(--color-bad);
+  font-size: var(--text-sm);
+}
+
+/* Generic pill badge — base for one-off status/count chips that don't
+   need a full .route-badge / .grade-badge treatment. */
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+}
+
+/* Filter/toolbar row — a lighter-weight sibling of .filters for panels
+   that need an inline row of controls without the bordered/padded chrome
+   .filters brings from the routes table. */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+/* Spacing utilities on the 4px scale, for the very common "just needs a
+   top/bottom gap" inline style. Prefer a semantic class when one exists
+   (e.g. .drilldown-anchor); reach for these for one-off spacing only. */
+.mt-1 { margin-top: var(--space-1); }
+.mt-2 { margin-top: var(--space-2); }
+.mt-3 { margin-top: var(--space-3); }
+.mt-4 { margin-top: var(--space-4); }
+.mt-6 { margin-top: var(--space-6); }
+.mt-8 { margin-top: var(--space-8); }
+.mb-1 { margin-bottom: var(--space-1); }
+.mb-2 { margin-bottom: var(--space-2); }
+.mb-3 { margin-bottom: var(--space-3); }
+.mb-4 { margin-bottom: var(--space-4); }
+.mb-6 { margin-bottom: var(--space-6); }
+.mb-8 { margin-bottom: var(--space-8); }
+
+/* Text-size/weight/color utilities for one-off inline text styling. */
+.text-xs { font-size: var(--text-xs); }
+.text-sm { font-size: var(--text-sm); }
+.text-muted { color: var(--text-muted); }
+.text-primary-color { color: var(--text-primary); }
+.font-medium { font-weight: var(--weight-medium); }
+.font-semibold { font-weight: var(--weight-semibold); }
+
 /* Loading and Error States */
 .loading-spinner {
   text-align: center;
@@ -251,15 +425,15 @@ main {
   display: inline-block;
   width: 40px;
   height: 40px;
-  border: 4px solid #e2e8f0;
-  border-top-color: #002F6C;
+  border: 4px solid var(--border-default);
+  border-top-color: var(--color-brand);
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin-bottom: 1rem;
 }
 
 .loading-spinner p {
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 1rem;
 }
 
@@ -315,7 +489,7 @@ main {
 }
 
 .skeleton-line {
-  background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
+  background: linear-gradient(90deg, var(--border-default) 25%, var(--surface-subtle) 50%, var(--border-default) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: 0.25rem;
@@ -340,40 +514,40 @@ main {
 }
 
 .stat-card {
-  background: white;
+  background: var(--surface-card);
   padding: 1.5rem;
   border-radius: 0.75rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-card);
   text-align: center;
 }
 
 .stat-value {
   font-size: 2.5rem;
   font-weight: 700;
-  color: #002F6C;
+  color: var(--color-brand);
   margin-bottom: 0.5rem;
 }
 
 .stat-label {
   font-size: 0.9rem;
-  color: #64748b;
+  color: var(--color-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
 /* Table Container */
 .table-container {
-  background: white;
+  background: var(--surface-card);
   border-radius: 0.75rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-card);
   overflow-x: auto;
   margin-bottom: 2rem;
 }
 
 .table-container h2 {
   padding: 1.5rem;
-  border-bottom: 1px solid #e2e8f0;
-  color: #1e293b;
+  border-bottom: 1px solid var(--border-default);
+  color: var(--text-primary);
   font-size: 1.5rem;
 }
 
@@ -407,8 +581,8 @@ main {
 .scorecard-window-note {
   margin: 0;
   padding: 0 1.5rem 1rem 1.5rem;
-  border-bottom: 1px solid #e2e8f0;
-  color: #64748b;
+  border-bottom: 1px solid var(--border-default);
+  color: var(--color-muted);
   font-size: 0.85rem;
 }
 
@@ -417,7 +591,7 @@ main {
   display: flex;
   gap: 1rem;
   padding: 1.5rem;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--border-default);
   align-items: center;
   flex-wrap: wrap;
 }
@@ -438,7 +612,7 @@ main {
 
 .search-input:focus {
   outline: none;
-  border-color: #002F6C;
+  border-color: var(--color-brand);
 }
 
 .filter-group {
@@ -450,7 +624,7 @@ main {
 .filter-group label {
   font-size: 0.875rem;
   font-weight: 500;
-  color: #64748b;
+  color: var(--color-muted);
 }
 
 .filter-select {
@@ -458,26 +632,26 @@ main {
   border: 1px solid #d1d5db;
   border-radius: 0.375rem;
   font-size: 0.875rem;
-  background-color: white;
+  background-color: var(--surface-card);
   cursor: pointer;
   transition: border-color 0.2s;
 }
 
 .filter-select:focus {
   outline: none;
-  border-color: #002F6C;
+  border-color: var(--color-brand);
 }
 
 .results-count {
   font-size: 0.875rem;
-  color: #64748b;
+  color: var(--color-muted);
   margin-left: auto;
 }
 
 /* NOTES-62: segment/corridor toggle on /segments */
 .level-toggle {
   display: inline-flex;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -492,15 +666,15 @@ main {
 }
 
 .level-toggle button + button {
-  border-left: 1px solid #cbd5e1;
+  border-left: 1px solid var(--border-strong);
 }
 
 .level-toggle button:hover {
-  background: #f1f5f9;
+  background: var(--surface-subtle);
 }
 
 .level-toggle button.active {
-  background: #002F6C;
+  background: var(--color-brand);
   color: white;
 }
 
@@ -526,7 +700,7 @@ main {
 }
 
 .corridor-expansion-map .corridor-map {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--border-default);
   border-radius: 0.5rem;
   overflow: hidden;
 }
@@ -547,7 +721,7 @@ main {
 
 .constituent-segments-table th,
 .constituent-segments-table td {
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--border-default);
   padding: 0.35rem 0.5rem;
   text-align: left;
 }
@@ -565,7 +739,7 @@ main {
 }
 
 .filter-group-slider .filter-value {
-  color: #002F6C;
+  color: var(--color-brand);
   font-weight: 600;
 }
 
@@ -576,18 +750,18 @@ main {
 }
 
 .routes-table thead {
-  background: #f1f5f9;
+  background: var(--surface-subtle);
   position: sticky;
   top: 0;
   z-index: 10;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-sticky);
 }
 
 .routes-table th {
   padding: 1rem;
   text-align: left;
   font-weight: 600;
-  color: #475569;
+  color: var(--text-secondary);
   font-size: 0.875rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -600,16 +774,16 @@ main {
 }
 
 .routes-table th.sortable:hover {
-  background-color: #e2e8f0;
+  background-color: var(--border-default);
 }
 
 .routes-table tbody tr {
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--border-default);
   transition: background-color 0.2s;
 }
 
 .routes-table tbody tr:hover {
-  background: #f8fafc;
+  background: var(--surface-page);
 }
 
 .routes-table tbody tr.no-data {
@@ -637,7 +811,7 @@ main {
 }
 
 .route-name {
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 0.875rem;
 }
 
@@ -653,13 +827,13 @@ main {
 }
 
 .metric {
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 0.875rem;
   text-align: right;
 }
 
 .timestamp {
-  color: #94a3b8;
+  color: var(--color-neutral);
   font-size: 0.8rem;
 }
 
@@ -682,14 +856,14 @@ main {
 }
 
 .empty-state-content p {
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 1.1rem;
   margin: 0;
 }
 
 .clear-filters-btn {
   padding: 0.5rem 1rem;
-  background-color: #002F6C;
+  background-color: var(--color-brand);
   color: white;
   border: none;
   border-radius: 0.375rem;
@@ -712,7 +886,7 @@ main {
   padding: 0.5rem 0;
   font-size: 1rem;
   font-weight: 600;
-  color: #002F6C;
+  color: var(--color-brand);
   user-select: none;
 }
 
@@ -723,9 +897,9 @@ main {
 /* NOTES-51: top-10 / show-all toggle below the contributors table. */
 .show-all-contributors {
   padding: 0.4rem 0.9rem;
-  background-color: white;
-  color: #002F6C;
-  border: 1px solid #002F6C;
+  background-color: var(--surface-card);
+  color: var(--color-brand);
+  border: 1px solid var(--color-brand);
   border-radius: 0.375rem;
   font-size: 0.875rem;
   font-weight: 500;
@@ -734,7 +908,7 @@ main {
 }
 
 .show-all-contributors:hover {
-  background-color: #002F6C;
+  background-color: var(--color-brand);
   color: white;
 }
 
@@ -745,9 +919,9 @@ main {
 
 .back-btn {
   padding: 0.625rem 1.25rem;
-  background-color: white;
-  color: #002F6C;
-  border: 1px solid #002F6C;
+  background-color: var(--surface-card);
+  color: var(--color-brand);
+  border: 1px solid var(--color-brand);
   border-radius: 0.375rem;
   font-size: 0.875rem;
   font-weight: 500;
@@ -757,7 +931,7 @@ main {
 }
 
 .back-btn:hover {
-  background-color: #002F6C;
+  background-color: var(--color-brand);
   color: white;
 }
 
@@ -766,7 +940,7 @@ main {
   align-items: center;
   gap: 1rem;
   font-size: 2rem;
-  color: #1e293b;
+  color: var(--text-primary);
   margin: 0;
 }
 
@@ -791,9 +965,9 @@ main {
 }
 
 .chart-container {
-  background: white;
+  background: var(--surface-card);
   border-radius: 0.75rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-card);
   padding: 1.5rem;
   margin-bottom: 2rem;
 }
@@ -801,13 +975,13 @@ main {
 .chart-container h2 {
   margin-top: 0;
   margin-bottom: 1.5rem;
-  color: #1e293b;
+  color: var(--text-primary);
   font-size: 1.25rem;
 }
 
 .drilldown-anchor {
   margin: -0.5rem 0 1rem;
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 0.85rem;
 }
 
@@ -819,13 +993,13 @@ main {
 
 .drilldown-chart h3 {
   margin: 0 0 0.75rem;
-  color: #1e293b;
+  color: var(--text-primary);
   font-size: 1rem;
   font-weight: 600;
 }
 
 .drilldown-empty {
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 0.9rem;
   padding: 2rem 0;
   text-align: center;
@@ -841,8 +1015,8 @@ main {
 }
 
 .route-trend-card {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: var(--surface-page);
+  border: 1px solid var(--border-default);
   border-radius: 0.5rem;
   padding: 0.75rem 1rem;
 }
@@ -857,13 +1031,13 @@ main {
 .route-trend-label {
   font-size: 0.85rem;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--text-primary);
 }
 
 .route-trend-meta {
   margin-top: 0.4rem;
   font-size: 0.7rem;
-  color: #64748b;
+  color: var(--color-muted);
 }
 
 .trend-delta {
@@ -874,13 +1048,13 @@ main {
 }
 
 .chart-tooltip {
-  background: white;
-  border: 1px solid #e2e8f0;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
   border-radius: 0.5rem;
   padding: 0.5rem 0.75rem;
   font-size: 0.85rem;
-  color: #1e293b;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-popover);
 }
 
 .chart-tooltip-title {
@@ -890,7 +1064,7 @@ main {
 
 .chart-tooltip-meta {
   margin-top: 0.25rem;
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 0.75rem;
 }
 
@@ -930,19 +1104,19 @@ main {
 .bunching-cause-block {
   margin-top: 1.5rem;
   padding-top: 1.25rem;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--border-default);
 }
 
 .bunching-cause-block h3 {
   margin: 0 0 0.5rem;
-  color: #1e293b;
+  color: var(--text-primary);
   font-size: 1rem;
   font-weight: 600;
 }
 
 .bunching-cause-disclaimer {
   margin: 0 0 0.75rem;
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 0.7rem;
   font-style: italic;
   line-height: 1.4;
@@ -954,8 +1128,8 @@ main {
   height: 1.5rem;
   border-radius: 0.25rem;
   overflow: hidden;
-  background: #f1f5f9;
-  border: 1px solid #e2e8f0;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-default);
 }
 
 .bunching-cause-segment {
@@ -977,7 +1151,7 @@ main {
   display: flex;
   align-items: center;
   font-size: 0.75rem;
-  color: #1e293b;
+  color: var(--text-primary);
   gap: 0.4rem;
 }
 
@@ -994,20 +1168,20 @@ main {
 }
 
 .bunching-cause-legend-value {
-  color: #64748b;
+  color: var(--color-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .bunching-cause-meta {
   margin: 0.5rem 0 0;
   font-size: 0.7rem;
-  color: #64748b;
+  color: var(--color-muted);
 }
 
 .detail-info {
-  background: white;
+  background: var(--surface-card);
   border-radius: 0.75rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-card);
   padding: 1.5rem;
   margin-bottom: 2rem;
 }
@@ -1015,7 +1189,7 @@ main {
 .detail-info h3 {
   margin-top: 0;
   margin-bottom: 1rem;
-  color: #1e293b;
+  color: var(--text-primary);
   font-size: 1.125rem;
 }
 
@@ -1033,19 +1207,19 @@ main {
 
 .info-label {
   font-size: 0.875rem;
-  color: #64748b;
+  color: var(--color-muted);
   font-weight: 600;
 }
 
 .info-value {
   font-size: 1rem;
-  color: #1e293b;
+  color: var(--text-primary);
 }
 
 .no-data-message {
-  background: white;
+  background: var(--surface-card);
   border-radius: 0.75rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-card);
   padding: 4rem 2rem;
   text-align: center;
   margin-bottom: 2rem;
@@ -1058,12 +1232,12 @@ main {
 }
 
 .no-data-message h2 {
-  color: #1e293b;
+  color: var(--text-primary);
   margin-bottom: 1rem;
 }
 
 .no-data-message p {
-  color: #64748b;
+  color: var(--color-muted);
   margin: 0.5rem 0;
 }
 
@@ -1073,8 +1247,8 @@ main {
   padding: 0.75rem 0;
   text-align: center;
   font-size: 0.8125rem;
-  color: #94a3b8;
-  border-top: 1px solid #e2e8f0;
+  color: var(--color-neutral);
+  border-top: 1px solid var(--border-default);
 }
 
 /* Responsive Design */
@@ -1103,11 +1277,11 @@ main {
 .recent-runs-table td {
   padding: 0.5rem 0.75rem;
   text-align: left;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--border-default);
 }
 
 .recent-runs-table th {
-  color: #64748b;
+  color: var(--color-muted);
   font-weight: 600;
   font-size: 0.8rem;
   text-transform: uppercase;
@@ -1120,7 +1294,7 @@ main {
 }
 
 .recent-runs-row:hover {
-  background-color: #f1f5f9;
+  background-color: var(--surface-subtle);
 }
 
 @media (max-width: 768px) {
@@ -1184,7 +1358,7 @@ main {
 /* Segments page (NOTES-59) — cross-route segment diagnostic. */
 .segments-table .col-rank {
   width: 2.5rem;
-  color: #94a3b8;
+  color: var(--color-neutral);
   font-size: 0.85rem;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -1208,7 +1382,7 @@ main {
 
 .segments-table .col-peak {
   white-space: nowrap;
-  color: #64748b;
+  color: var(--color-muted);
   font-size: 0.85rem;
 }
 
@@ -1217,34 +1391,34 @@ main {
 }
 
 .segments-table tbody tr.expand-row.is-expanded {
-  background: #f1f5f9;
+  background: var(--surface-subtle);
 }
 
 .segments-table tbody tr.expand-row.is-expanded:hover {
-  background: #e2e8f0;
+  background: var(--border-default);
 }
 
 .segments-table .chevron {
   display: inline-block;
   width: 0.9rem;
-  color: #94a3b8;
+  color: var(--color-neutral);
   margin-right: 0.4rem;
   transition: transform 0.15s ease;
 }
 
 .segments-table tbody tr.is-expanded .chevron {
-  color: #002F6C;
+  color: var(--color-brand);
   transform: rotate(90deg);
 }
 
 .segment-from-to {
   font-weight: 500;
-  color: #1e293b;
+  color: var(--text-primary);
   line-height: 1.4;
 }
 
 .segment-arrow {
-  color: #94a3b8;
+  color: var(--color-neutral);
   margin: 0 0.4rem;
 }
 
@@ -1277,7 +1451,7 @@ main {
 .impact-bar-track {
   flex: 1;
   height: 0.4rem;
-  background: #f1f5f9;
+  background: var(--surface-subtle);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -1290,7 +1464,7 @@ main {
 
 .impact-bar-label {
   font-size: 0.85rem;
-  color: #1e293b;
+  color: var(--text-primary);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   min-width: 3.2rem;
@@ -1313,8 +1487,8 @@ main {
 }
 
 .segment-drilldown-card {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: var(--surface-page);
+  border: 1px solid var(--border-default);
   border-radius: 0.5rem;
   padding: 0.75rem 1rem 1rem;
   margin: 0 1rem 0.25rem;
@@ -1326,7 +1500,7 @@ main {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #475569;
+  color: var(--text-secondary);
 }
 
 .segment-drilldown-table {
@@ -1342,14 +1516,14 @@ main {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: #64748b;
-  border-bottom: 1px solid #e2e8f0;
+  color: var(--color-muted);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .segment-drilldown-table td {
   padding: 0.45rem 0.6rem;
-  color: #1e293b;
-  border-bottom: 1px solid #e2e8f0;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .segment-drilldown-table tr:last-child td {
@@ -1392,7 +1566,7 @@ main {
 
 .agency-compare-metric-label {
   font-weight: 600;
-  color: #1e293b;
+  color: var(--text-primary);
   white-space: nowrap;
 }
 
@@ -1403,7 +1577,7 @@ main {
 .agency-metric-value {
   font-size: 1.3rem;
   font-weight: 700;
-  color: #1e293b;
+  color: var(--text-primary);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1427,8 +1601,8 @@ main {
 }
 
 .agency-metric-delta-neutral {
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
 }
 
 .agency-metric-partial {
@@ -1440,19 +1614,19 @@ main {
 .agency-comparison-caveats {
   margin-top: 1.75rem;
   padding-top: 1.25rem;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--border-default);
 }
 
 .agency-comparison-caveats h3 {
   margin: 0 0 0.6rem;
-  color: #1e293b;
+  color: var(--text-primary);
   font-size: 0.95rem;
 }
 
 .agency-comparison-caveats ul {
   margin: 0;
   padding-left: 1.25rem;
-  color: #475569;
+  color: var(--text-secondary);
   font-size: 0.85rem;
   line-height: 1.5;
 }
@@ -1472,7 +1646,7 @@ main {
 .diagnostics-card {
   display: block;
   padding: 1.25rem 1.5rem;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--border-default);
   border-radius: 0.75rem;
   text-decoration: none;
   color: inherit;
@@ -1480,7 +1654,7 @@ main {
 }
 
 .diagnostics-card:hover {
-  border-color: #94a3b8;
+  border-color: var(--color-neutral);
 }
 
 .diagnostics-card h3 {
@@ -1491,7 +1665,7 @@ main {
 .diagnostics-card p {
   margin: 0;
   font-size: 0.85rem;
-  color: #64748b;
+  color: var(--color-muted);
 }
 
 /* System weekly narrative lede (PR #219). SystemWeeklyNarrativeLede.jsx
@@ -1502,7 +1676,7 @@ main {
   border-radius: 0.75rem;
   padding: 1.25rem 1.5rem;
   margin-bottom: 1.5rem;
-  background: #ffffff;
+  background: var(--surface-card);
   border-left: 6px solid var(--color-brand);
 }
 
@@ -1543,9 +1717,9 @@ main {
   padding: 1.75rem 2rem;
   margin-bottom: 1.5rem;
   border-left: 6px solid var(--color-neutral);
-  /* #f8fafc is the page background — using it here renders the hero as a
+  /* var(--surface-page) is the page background — using it here renders the hero as a
      bare left border rather than a card, so it's white instead. */
-  background: #ffffff;
+  background: var(--surface-card);
 }
 
 /* Overview map+movers fold (NOTES-84). Single column by default; the
