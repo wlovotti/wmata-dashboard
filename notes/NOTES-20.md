@@ -5,7 +5,8 @@ Backend shipped in PR #241: `RIDER_OTP_EARLY_SEC` / `RIDER_OTP_LATE_SEC`
 on every route-level endpoint that computes OTP live from `stop_events`
 — `/api/routes/{id}` (detail header KPI, which also drives the letter
 grade), `/api/routes/{id}/trend` (metric=otp), and
-`/api/routes/{id}/stops`. UI toggle ships with NOTES-143.
+`/api/routes/{id}/stops`. UI toggle shipped in the agency switch UI
+(PR #242).
 
 **Severity: low (deferred).**
 
