@@ -1,0 +1,8 @@
+/* Component-scoped styles for Targets.jsx (NOTES-85 migration off inline
+   styles). */
+
+/* Empty-state paragraphs under the Off-target table header, which sits
+   directly under a bordered <h2> with no default padding of its own. */
+.targets-padded-note {
+  padding: 0 1.5rem 1.5rem;
+}
