@@ -130,7 +130,7 @@ class TestGetAgencyComparisonData:
         `collector_heartbeats` rows never reach the laptop database for
         SFMTA, leaving `vehicle_positions` as the only completeness-check
         numerator -- a ~33% ceiling regardless of collection health
-        (NOTES-104, closed by PR #244) -- so at the time every SFMTA row was flagged 'partial' even though
+        (NOTES-104, closed by PR #244) -- so every SFMTA row in this fixture is flagged 'partial' even though
         the underlying metric is computed from real observations;
         excluding partial rows from the mean would zero out SFMTA entirely.
         """

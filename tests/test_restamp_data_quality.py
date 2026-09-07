@@ -133,8 +133,23 @@ def test_plan_keeps_earned_complete_when_tu_signal_pruned(pg_session):
 
     assert row.kept and not row.changed
     assert (row.new_quality, row.new_coverage) == ("complete", 0.99)
-    apply_restamp(pg_session, [row])
+    assert apply_restamp(pg_session, [row]) == 0  # kept dates are not written
     assert _stamps(pg_session, iso) == (("complete", 0.99), {("complete", 0.99)})
+
+
+def test_kept_row_with_null_coverage_is_left_null(pg_session):
+    """Rows that predate the coverage_pct column store NULL. A kept stamp
+    must not have a freshly measured (signal-less) number written over
+    that NULL — PR #244 review round 2."""
+    iso = TEST_DATE.isoformat()
+    pg_session.add(SystemMetricsDaily(service_date=iso, data_quality="complete", coverage_pct=None))
+    pg_session.flush()
+
+    (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
+
+    assert row.kept and row.new_coverage is None
+    assert apply_restamp(pg_session, [row]) == 0
+    assert pg_session.get(SystemMetricsDaily, iso).coverage_pct is None
 
 
 def test_plan_and_apply_handle_overlay_only_dates(pg_session):
@@ -164,7 +179,7 @@ def test_plan_and_apply_handle_overlay_only_dates(pg_session):
 
 
 def test_plan_keeps_partial_when_coverage_stays_low(pg_session):
-    """A genuinely thin day (VP-only ceiling, no trip-update signal) stays
+    """A genuinely thin day (trip-update rows present but sparse) stays
     partial -- the tool re-evaluates, it does not blanket-promote."""
     _seed_partial_day(pg_session, TEST_DATE, overlay_routes=1)
     _seed_trip_update_minutes(pg_session, TEST_DATE, 200, SFMTA.timezone)  # ~14% < 53%

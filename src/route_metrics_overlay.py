@@ -221,11 +221,12 @@ def upsert_route_metrics_for_date(
         .filter(RouteMetricsDailyOverlay.service_date == service_date_iso)
         .all()
     }
-    # Every overlay row for a date carries the same date-level stamp, so
-    # any one of them is the prior. It lets resolve_data_quality keep an
-    # earned 'complete' when the trip-update signal has since been pruned
-    # by retention (NOTES-104) instead of misreporting an outage.
-    prior_row = next(iter(existing_by_route.values()), None)
+    # Every overlay row for a date carries the same date-level stamp
+    # (this function writes them all in one pass), so the lowest route_id
+    # is a deterministic representative. It lets resolve_data_quality keep
+    # an earned 'complete' when the trip-update signal has since been
+    # pruned by retention (NOTES-104) instead of misreporting an outage.
+    prior_row = existing_by_route[min(existing_by_route)] if existing_by_route else None
     prior = (prior_row.data_quality, prior_row.coverage_pct) if prior_row else None
     data_quality, pct, kept = resolve_data_quality(
         db, service_date, threshold=threshold, tz_name=tz_name, prior=prior
@@ -233,9 +234,12 @@ def upsert_route_metrics_for_date(
     is_complete = data_quality == "complete"
 
     if kept:
+        # See the matching note in src/system_metrics.py: the stamp is
+        # preserved, the metrics are still re-derived from current rows.
         print(
-            f"  ℹ Route metrics overlay for {service_date_iso}: trip-update signal no "
-            f"longer retained; keeping prior 'complete' stamp (coverage {pct:.1%})"
+            f"  ⚠ Route metrics overlay for {service_date_iso}: trip-update signal no "
+            f"longer retained; keeping prior 'complete' stamp and its stored coverage, "
+            f"but re-deriving metrics from current stop_events — check they are non-null"
         )
     elif not is_complete:
         print(
@@ -260,7 +264,9 @@ def upsert_route_metrics_for_date(
                     continue
                 setattr(existing, key, value)
             existing.data_quality = data_quality
-            existing.coverage_pct = pct
+            if not kept:
+                # A kept stamp's coverage is deliberately not re-measured.
+                existing.coverage_pct = pct
             existing.computed_at = now
         else:
             db.add(

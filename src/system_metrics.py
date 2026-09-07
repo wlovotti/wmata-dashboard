@@ -167,9 +167,16 @@ def upsert_system_metrics_for_date(
     is_complete = data_quality == "complete"
 
     if kept:
+        # The stamp is preserved but the metrics below are still
+        # re-derived from whatever stop_events/runs exist now. If this
+        # re-run follows a runs-delete recovery past the trip-update
+        # retention window, those rows are gone and the metrics will be
+        # NULL under a 'complete' stamp (the API's null guards keep them
+        # out of windowed means) — hence a warning, not a notice.
         print(
-            f"  ℹ System metrics for {service_date_iso}: trip-update signal no longer "
-            f"retained; keeping prior 'complete' stamp (coverage {pct:.1%})"
+            f"  ⚠ System metrics for {service_date_iso}: trip-update signal no longer "
+            f"retained; keeping prior 'complete' stamp and its stored coverage, but "
+            f"re-deriving metrics from current stop_events — check they are non-null"
         )
     elif not is_complete:
         print(
@@ -192,7 +199,9 @@ def upsert_system_metrics_for_date(
         existing.swt_seconds = metrics["swt_seconds"]
         existing.bunching_rate = metrics["bunching_rate"]
         existing.data_quality = data_quality
-        existing.coverage_pct = pct
+        if not kept:
+            # A kept stamp's coverage is deliberately not re-measured.
+            existing.coverage_pct = pct
         existing.computed_at = utcnow_naive()
     else:
         db.add(

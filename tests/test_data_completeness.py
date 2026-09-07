@@ -216,6 +216,16 @@ def test_resolve_keeps_earned_complete_when_tu_signal_pruned(pg_session):
     )
     assert (quality, pct, kept) == ("complete", 0.731, True)
 
+    # A prior with NULL stored coverage stays NULL: the keep path never
+    # substitutes a freshly measured, signal-less number.
+    assert resolve_data_quality(
+        pg_session,
+        TEST_DATE,
+        threshold=agency_coverage_threshold(cfg),
+        tz_name=tz,
+        prior=("complete", None),
+    ) == ("complete", None, True)
+
 
 def test_resolve_demotes_when_tu_signal_present_but_thin(pg_session):
     """A genuine outage: trip_update_state rows exist but cover little of

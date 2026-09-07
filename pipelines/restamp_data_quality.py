@@ -19,8 +19,10 @@ What it can and cannot change:
   earlier, weaker check missed. It will NOT demote a date whose
   trip-update rows have been pruned by retention or that predates
   trip-update collection: ``resolve_data_quality`` keeps the earned
-  stamp and reports it as ``kept``. A wide ``--start`` over old history
-  is therefore safe, but every kept date is listed so the decision is
+  stamp, reports it as ``kept``, and writes nothing for that date (its
+  stored coverage — possibly NULL on rows that predate the column — is
+  left exactly as it is). A wide ``--start`` over old history is
+  therefore safe, and every kept date is listed so the decision is
   visible.
 
 Dry-run by default: prints one line per date with the current and
@@ -42,7 +44,8 @@ materialized. A date with overlay rows but no system row (the system
 pipeline failed while the overlay one succeeded) is still re-stamped on
 the overlay side.
 
-Cost: one coverage query per date (~0.2–0.5 s on the retained windows).
+Cost: one coverage query per non-absent date (~0.2 s on SFMTA's retained
+window, ~0.45 s on WMATA's).
 """
 
 import argparse
@@ -115,7 +118,13 @@ def plan_restamp(db: Session, cfg: AgencyConfig, start: date, end: date) -> list
             RouteMetricsDailyOverlay.service_date == iso
         )
         overlay_count = overlay_q.count()
-        prior_row = system_row if system_row is not None else overlay_q.first()
+        # All overlay rows for a date carry the same stamp (the overlay
+        # pipeline writes them in one pass); order for determinism anyway.
+        prior_row = (
+            system_row
+            if system_row is not None
+            else overlay_q.order_by(RouteMetricsDailyOverlay.route_id).first()
+        )
         if prior_row is None:
             rows.append(RestampRow(d, False, 0, None, None, None, None, False))
         else:
@@ -140,12 +149,14 @@ def plan_restamp(db: Session, cfg: AgencyConfig, start: date, end: date) -> list
 
 
 def apply_restamp(db: Session, rows: list[RestampRow]) -> int:
-    """Write the proposed stamps for every non-absent row in one transaction.
+    """Write the proposed stamps for every row that needs one, in one transaction.
 
     Updates ``data_quality`` and ``coverage_pct`` on ``system_metrics_daily``
     (when the date has a row) and on every ``route_metrics_daily_overlay``
-    row for the date. Commits once at the end; rolls everything back on
-    error.
+    row for the date. Absent dates and ``kept`` dates are skipped entirely:
+    a kept stamp is by definition the stored one, and its stored coverage
+    (possibly NULL on rows that predate the column) must not be touched.
+    Commits once at the end; rolls everything back on error.
 
     Args:
         db: Session bound to the target database.
@@ -157,7 +168,7 @@ def apply_restamp(db: Session, rows: list[RestampRow]) -> int:
     written = 0
     try:
         for row in rows:
-            if row.absent:
+            if row.absent or row.kept:
                 continue
             iso = row.service_date.isoformat()
             values = {"data_quality": row.new_quality, "coverage_pct": row.new_coverage}
@@ -185,14 +196,16 @@ def _format_row(row: RestampRow) -> str:
     """Render one plan row for the console."""
     if row.absent:
         return f"{row.service_date}  absent (no system or overlay rows)"
-    old_cov = f" {row.old_coverage:.3f}" if row.old_coverage is not None else ""
+    old_cov = f" {row.old_coverage:.3f}" if row.old_coverage is not None else " (null)"
     old = f"{row.old_quality}{old_cov}"
+    new_cov = f" {row.new_coverage:.3f}" if row.new_coverage is not None else " (null)"
     tables = ("sys+" if row.has_system_row else "sys-") + f"overlay={row.overlay_rows}"
-    flag = "  FLIP" if row.changed else ("  kept (TU signal not retained)" if row.kept else "")
-    return (
-        f"{row.service_date}  old={old:<17} new={row.new_quality} {row.new_coverage:.3f}"
-        f"  {tables}{flag}"
+    flag = (
+        "  FLIP"
+        if row.changed
+        else ("  kept (TU signal not retained; no write)" if row.kept else "")
     )
+    return f"{row.service_date}  old={old:<17} new={row.new_quality}{new_cov}  {tables}{flag}"
 
 
 def main() -> int:

@@ -295,12 +295,12 @@ def resolve_data_quality(
     threshold: float = MIN_COVERAGE_FOR_MATERIALIZATION,
     tz_name: str = "America/New_York",
     prior: tuple[str, float | None] | None = None,
-) -> tuple[str, float, bool]:
+) -> tuple[str, float | None, bool]:
     """Decide the ``data_quality`` stamp for a date, honoring an earned prior.
 
     The rule:
 
-    1. Measure coverage; if it meets ``threshold`` the date is
+    1. Measure coverage once; if it meets ``threshold`` the date is
        ``complete``.
     2. Otherwise, if the date already carries a ``complete`` stamp AND
        the trip-update leg has no rows at all for the date, keep the
@@ -322,16 +322,20 @@ def resolve_data_quality(
             re-stamped, or None when the date has never been materialized.
 
     Returns:
-        ``(data_quality, coverage_pct, kept)`` where ``kept`` is True iff
-        rule 2 fired and the returned values are the prior's.
+        ``(data_quality, coverage_pct, kept)``. When ``kept`` is True the
+        returned coverage is the prior's stored value — possibly ``None``
+        for rows that predate the column — and callers must NOT overwrite
+        the stored coverage with anything else: a kept stamp is
+        deliberately not re-measured, so a fresh (signal-less) number
+        would be a fabrication.
     """
     pct = coverage_pct_for_date(db, service_date, tz_name)
-    if is_date_sufficiently_complete(db, service_date, threshold=threshold, tz_name=tz_name):
+    if pct >= threshold:
         return "complete", pct, False
     if (
         prior is not None
         and prior[0] == "complete"
         and not has_trip_update_signal(db, service_date, tz_name)
     ):
-        return "complete", prior[1] if prior[1] is not None else pct, True
+        return "complete", prior[1], True
     return "partial", pct, False
