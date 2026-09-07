@@ -19,13 +19,32 @@ the period-over-period delta code in ``api/aggregations.py`` already
 treats absent days as ``None`` and skips them.
 
 Coverage is measured as the union of distinct minute-buckets across
-the two ingest tables: ``collector_heartbeats`` (primary, every 30 s)
-and ``vehicle_positions`` (secondary, every 60 s). The heartbeat table
-was introduced in Phase E.2 of NOTES-72 to replace
-``trip_update_snapshots`` as the coverage signal once the collector
-stopped dual-writing snapshots. The two-source union means a brief
-heartbeat gap (e.g., API error on one tick) is covered by the position
-signal and vice versa.
+three ingest signals (NOTES-104):
+
+- ``collector_heartbeats.ts`` — written by the *live* collector on
+  every TripUpdates poll. Only present on a database the collector
+  writes to directly; since the stateless-collector cutover (NOTES-95)
+  the laptop system of record receives none for either agency.
+- ``vehicle_positions.timestamp`` — one row per vehicle per
+  VehiclePositions poll, loaded from the S3 archive. Present in every
+  regime, but alone it caps at the agency's VP cadence: ~100% for WMATA
+  (every 60 s tick) and ~33% for SFMTA (every 3rd 60 s tick).
+- ``trip_update_state.final_snapshot_ts`` — the feed timestamp of the
+  poll on which each (trip, stop) was last seen. Written by both the
+  live collector and ``pipelines/replay_archive_to_state.py``, so it is
+  the one poll-time signal available in all three data-arrival regimes
+  the NOTES-104 addendum identified: live (heartbeats + VP + TU),
+  replayed-only (TU), and archive-loaded-to-laptop (VP + TU). A
+  collector outage shows up as a gap in it exactly as it did in
+  heartbeats: no poll, no snapshot timestamps; the first poll after the
+  outage finalizes every stop passed during it with that single poll's
+  timestamp, so it can't back-fill the gap.
+
+The union means a brief gap in one signal (e.g. an API error on one
+VP tick) is covered by the others. Measured on real SFMTA dates the
+union reaches 0.62–0.81 against a cadence-aware threshold of 0.53
+(``agency_coverage_threshold``); VP alone sat at 0.33, which is why
+every SFMTA date was stamped ``partial`` before this signal was added.
 
 Note: ``trip_update_snapshots`` has been retired — its ORM model was
 removed and the table is dropped via the manual runbook in
@@ -34,6 +53,7 @@ written to or used for completeness accounting.
 """
 
 from datetime import date as date_type
+from datetime import timedelta
 from math import lcm
 
 from sqlalchemy import text
@@ -84,6 +104,13 @@ def agency_coverage_threshold(cfg: AgencyConfig) -> float:
     a non-trivial cadence would need tick-to-minute deduplication logic
     not implemented here, since no configured agency needs it yet.
 
+    With ``trip_update_state.final_snapshot_ts`` in the numerator union
+    (NOTES-104) the *measured* ceiling can exceed this tick-derived one,
+    because feed timestamps land at sub-minute offsets and so spread
+    across more clock-minutes than the poll cadence alone implies. The
+    threshold stays anchored to the conservative tick-derived ceiling;
+    exceeding it is headroom, not an error.
+
     Args:
         cfg: The agency's ``AgencyConfig`` (uses ``tick_sec`` only for
             documentation context; the ceiling itself depends on the
@@ -125,12 +152,20 @@ def _coverage_minutes(
 ) -> int:
     """Count distinct minute-buckets that have at least one ingest row.
 
-    Unions ``collector_heartbeats.ts`` and ``vehicle_positions.timestamp``
-    so both the collector's 30-second heartbeat and the 60-second position
-    signal contribute. Both columns are naive-UTC per the project's storage
-    convention. Uses Postgres ``date_trunc``; the SQLite fallback uses
-    ``strftime`` so the function still returns a sensible value when
-    unit tests run against in-memory SQLite.
+    Unions ``collector_heartbeats.ts``, ``vehicle_positions.timestamp``,
+    and ``trip_update_state.final_snapshot_ts`` (see the module docstring
+    for why each exists and which regimes it covers). All three columns
+    are naive-UTC per the project's storage convention. Uses Postgres
+    ``date_trunc``; the SQLite fallback uses ``strftime`` so the function
+    still returns a sensible value when unit tests run against in-memory
+    SQLite.
+
+    The ``trip_update_state`` leg also filters ``service_date IN
+    (service_date - 1, service_date)``: a snapshot that lands inside the
+    local clock-day belongs to a trip on that service date or, past
+    midnight, the previous one. The predicate lets Postgres use
+    ``idx_tus_service_date`` instead of scanning the full retention
+    window (WMATA keeps ~30 days, ~4M rows) once per stamped date.
 
     Args:
         db: SQLAlchemy session.
@@ -147,9 +182,11 @@ def _coverage_minutes(
     if dialect == "sqlite":
         bucket_expr_hb = "strftime('%Y-%m-%d %H:%M:00', ts)"
         bucket_expr_pos = "strftime('%Y-%m-%d %H:%M:00', timestamp)"
+        bucket_expr_tus = "strftime('%Y-%m-%d %H:%M:00', final_snapshot_ts)"
     else:
         bucket_expr_hb = "date_trunc('minute', ts)"
         bucket_expr_pos = "date_trunc('minute', timestamp)"
+        bucket_expr_tus = "date_trunc('minute', final_snapshot_ts)"
 
     row = db.execute(
         text(
@@ -162,10 +199,20 @@ def _coverage_minutes(
                 SELECT {bucket_expr_pos} AS bucket
                 FROM vehicle_positions
                 WHERE timestamp >= :start AND timestamp < :end
+                UNION
+                SELECT {bucket_expr_tus} AS bucket
+                FROM trip_update_state
+                WHERE service_date IN (:sd_prev, :sd)
+                  AND final_snapshot_ts >= :start AND final_snapshot_ts < :end
             ) AS buckets
             """
         ),
-        {"start": start_utc, "end": end_utc},
+        {
+            "start": start_utc,
+            "end": end_utc,
+            "sd_prev": service_date - timedelta(days=1),
+            "sd": service_date,
+        },
     ).first()
     return int(row[0]) if row and row[0] is not None else 0
 
@@ -175,10 +222,11 @@ def coverage_pct_for_date(
 ) -> float:
     """Return the fraction of in-day minute-buckets with ingest coverage.
 
-    A full healthy day scores ≥ 0.99 in observed history (the collector
-    writes a heartbeat every 30 s, so even hours with no active vehicles
-    still produce ``collector_heartbeats`` rows). The 2026-05-24 power-loss
-    incident scored ~0.51 (AM-only).
+    A full healthy WMATA day scores ≥ 0.99 in observed history (positions
+    every 60 s tick plus trip-update snapshots fill every clock-minute;
+    under the old live collector, heartbeats alone did). The 2026-05-24
+    power-loss incident scored ~0.51 (AM-only). Healthy SFMTA days score
+    0.62–0.81 against their cadence-aware threshold of ~0.53.
 
     Args:
         db: SQLAlchemy session.

@@ -36,7 +36,6 @@ serves this or is explicitly parked.
 - [NOTES-131](notes/NOTES-131.md) Full local test suite reads the production database — sev low / eff medium — unblocked
 - [NOTES-132](notes/NOTES-132.md) Dead-man ping can false-positive on an empty-but-healthy feed — sev low / eff low-medium — unblocked
 - [NOTES-102](notes/NOTES-102.md) Backfill June recovery-window trip_update truncation — sev low / eff low — unblocked; needs S3 pull for 6/14–16 + snapshot-12 GTFS pin
-- [NOTES-104](notes/NOTES-104.md) Replay-aware data-completeness signal — sev low-medium / eff medium — unblocked; replayed dates stamped 'partial' regardless of threshold, accepted for now (PR #189); the agency comparison page (PR #198) now annotates this via its caveats list; 2026-08-11 addendum: laptop VP-only numerator caps ~33%, so ALL laptop SFMTA dates flag partial
 - [NOTES-112](notes/NOTES-112.md) Proximity fallback matcher emits +20–24h false matches (~3.5/day SFMTA, mostly rail/cable routes) — sev low / eff low-medium — unblocked
 
 ## WMATA depth & UX

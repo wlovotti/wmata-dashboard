@@ -2752,15 +2752,14 @@ AGENCY_COMPARISON_CAVEATS = [
     "known duplicate stop_sequence artifact (PR #180) that can affect "
     "per-stop matching; treat SFMTA figures as directionally reliable "
     "rather than exact.",
-    "SFMTA has its own collector (a systemd unit on the VM against its own "
-    "sfmta_dashboard database, see docs/DEPLOYMENT.md) and these metrics "
-    "are trip_update-sourced like WMATA's, but collector_heartbeats rows "
-    "never reach this (laptop) database for SFMTA, leaving "
-    "vehicle_positions as the only completeness-check numerator -- a "
-    "~33% ceiling regardless of how healthy collection actually is. So "
-    "every SFMTA day here is flagged data_quality='partial' (NOTES-104) "
-    "even though the metric itself is computed from real observations -- "
-    "'partial' means lower confidence, not missing data.",
+    "Both agencies' metrics are trip_update-sourced and share one "
+    "completeness check (src/data_completeness.py). Until 2026-09 that "
+    "check's numerator could not see SFMTA's trip-update polls, so every "
+    "SFMTA day was stamped data_quality='partial' (NOTES-104) regardless "
+    "of collection health; the check now counts trip_update_state poll "
+    "timestamps too, and SFMTA dates were re-stamped. A residual 'partial' "
+    "flag on either agency means lower confidence for that day, not "
+    "missing data -- partial days are included here, not excluded.",
     "The daytime service-level tile is computed from each agency's "
     "current GTFS weekday schedule, 7:00-19:00 agency-local: per "
     "route-direction, the stop with the most scheduled arrivals serves "
