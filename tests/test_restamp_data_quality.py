@@ -112,6 +112,57 @@ def test_apply_rewrites_both_tables_and_skips_absent(pg_session):
     assert pg_session.get(SystemMetricsDaily, (TEST_DATE + timedelta(days=1)).isoformat()) is None
 
 
+def test_plan_keeps_earned_complete_when_tu_signal_pruned(pg_session):
+    """Retention rule: a complete-stamped date whose trip_update_state rows
+    are gone measures VP-only (or zero) but is reported ``kept``, not
+    demoted, and apply leaves it untouched."""
+    iso = TEST_DATE.isoformat()
+    pg_session.add(SystemMetricsDaily(service_date=iso, data_quality="complete", coverage_pct=0.99))
+    pg_session.add(
+        RouteMetricsDailyOverlay(
+            route_id="R0",
+            service_date=iso,
+            day_type="weekday",
+            data_quality="complete",
+            coverage_pct=0.99,
+        )
+    )
+    pg_session.flush()
+
+    (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
+
+    assert row.kept and not row.changed
+    assert (row.new_quality, row.new_coverage) == ("complete", 0.99)
+    apply_restamp(pg_session, [row])
+    assert _stamps(pg_session, iso) == (("complete", 0.99), {("complete", 0.99)})
+
+
+def test_plan_and_apply_handle_overlay_only_dates(pg_session):
+    """A date with overlay rows but no system row (system pipeline failed,
+    overlay succeeded) is not 'absent': its overlay rows are re-stamped."""
+    iso = TEST_DATE.isoformat()
+    pg_session.add(
+        RouteMetricsDailyOverlay(
+            route_id="R0",
+            service_date=iso,
+            day_type="weekday",
+            data_quality="partial",
+            coverage_pct=0.33,
+        )
+    )
+    pg_session.flush()
+    _seed_trip_update_minutes(pg_session, TEST_DATE, 1440, SFMTA.timezone)
+
+    (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
+
+    assert not row.absent and not row.has_system_row and row.overlay_rows == 1
+    assert row.changed and row.new_quality == "complete"
+    assert apply_restamp(pg_session, [row]) == 1
+    overlay = pg_session.query(RouteMetricsDailyOverlay).filter_by(service_date=iso).one()
+    assert overlay.data_quality == "complete"
+    assert pg_session.get(SystemMetricsDaily, iso) is None
+
+
 def test_plan_keeps_partial_when_coverage_stays_low(pg_session):
     """A genuinely thin day (VP-only ceiling, no trip-update signal) stays
     partial -- the tool re-evaluates, it does not blanket-promote."""

@@ -2755,11 +2755,12 @@ AGENCY_COMPARISON_CAVEATS = [
     "Both agencies' metrics are trip_update-sourced and share one "
     "completeness check (src/data_completeness.py). Until 2026-09 that "
     "check's numerator could not see SFMTA's trip-update polls, so every "
-    "SFMTA day was stamped data_quality='partial' (NOTES-104) regardless "
-    "of collection health; the check now counts trip_update_state poll "
-    "timestamps too, and SFMTA dates were re-stamped. A residual 'partial' "
-    "flag on either agency means lower confidence for that day, not "
-    "missing data -- partial days are included here, not excluded.",
+    "SFMTA day was stamped data_quality='partial' regardless of "
+    "collection health; the check now counts trip-update poll timestamps "
+    "too, and dates stamped before that change are corrected by "
+    "pipelines/restamp_data_quality.py. A 'partial' flag on either agency "
+    "means lower confidence for that day, not missing data -- partial "
+    "days are included here, not excluded.",
     "The daytime service-level tile is computed from each agency's "
     "current GTFS weekday schedule, 7:00-19:00 agency-local: per "
     "route-direction, the stop with the most scheduled arrivals serves "
@@ -2815,10 +2816,13 @@ AGENCY_COMPARISON_CAVEATS = [
 # Day-set (review finding 1): the headline `window_mean` above includes
 # `data_quality='partial'` days -- they're a confidence flag, not an
 # exclusion (see `get_agency_comparison_data`'s docstring and the
-# `AGENCY_COMPARISON_CAVEATS` entry on SFMTA's structural partial-quality
-# flag, NOTES-104). SFMTA's ENTIRE matched window is partial-flagged, so
-# any partial-day exclusion here zeroes SFMTA out completely -- verified
-# live: 39 of 41 SFMTA dates partial, 0 of 68 routes scored. Both
+# `AGENCY_COMPARISON_CAVEATS` entry on the partial-quality flag). Until
+# the completeness signal learned to see trip-update polls (PR #244),
+# SFMTA's ENTIRE matched window was partial-flagged, so any partial-day
+# exclusion here zeroed SFMTA out completely -- verified live at the
+# time: 39 of 41 SFMTA dates partial, 0 of 68 routes scored. The
+# include-partial policy stays regardless: it is the honest-comparability
+# floor for any agency whose data arrives by replay. Both
 # sub-metrics below are therefore computed with their own dedicated bulk
 # helpers (`_bulk_route_otp_daily_percentages`,
 # `_bulk_route_service_delivered_window`) rather than going through
@@ -3202,7 +3206,8 @@ def _route_distribution_for_agency(db: Session, end_date: date_type, days: int) 
     rather than the shared per-route/windowed helpers the contributors
     view uses -- both of those exclude `data_quality='partial'` dates,
     which would zero out any agency whose whole window is partial-flagged
-    (SFMTA, structurally, per NOTES-104). See the module comment above.
+    (as SFMTA's was before PR #244 fixed the completeness signal). See
+    the module comment above.
 
     Args:
         db: One agency's own open session.

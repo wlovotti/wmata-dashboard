@@ -18,7 +18,9 @@ from src.data_completeness import (
     agency_coverage_threshold,
     coverage_pct_for_date,
     expected_minutes_for_date,
+    has_trip_update_signal,
     is_date_sufficiently_complete,
+    resolve_data_quality,
 )
 from src.timezones import eastern_day_bounds_utc, local_day_bounds_utc
 
@@ -86,8 +88,8 @@ def _insert_trip_update_state_minutes(
     step_minutes`` after local midnight in ``tz_name`` (NOTES-104: the
     poll-time signal available in every data-arrival regime).
     ``state_service_date`` overrides the row's ``service_date`` column
-    (default: ``service_date``) so tests can probe the adjacent-service-
-    date predicate the coverage query uses to stay on the index.
+    (default: ``service_date``) so tests can show the coverage query keys
+    on the snapshot timestamp alone, not the row's service date.
     """
     start_utc, _ = local_day_bounds_utc(service_date, tz_name)
     sd = state_service_date or service_date
@@ -172,28 +174,85 @@ def test_coverage_unions_all_three_signals(pg_session):
     assert coverage_pct_for_date(pg_session, TEST_DATE) == pytest.approx(1.0)
 
 
-def test_trip_update_state_leg_counts_only_adjacent_service_dates(pg_session):
-    """The trip_update_state leg filters ``service_date IN (D-1, D)`` so it
-    can use ``idx_tus_service_date``. A snapshot inside the clock-day window
-    but stamped two service dates back is not counted; one stamped the
-    previous service date (a past-midnight owl trip) is.
+def test_trip_update_state_leg_keys_on_snapshot_time_not_service_date(pg_session):
+    """The leg is a plain range scan on ``final_snapshot_ts`` (indexed): a
+    past-midnight owl snapshot stamped with the previous service date still
+    counts toward the clock-day it landed in, and the row's ``service_date``
+    column is not consulted at all.
     """
     _insert_trip_update_state_minutes(
         pg_session,
         TEST_DATE,
         minute_count=100,
-        state_service_date=TEST_DATE - timedelta(days=2),
-    )
-    assert coverage_pct_for_date(pg_session, TEST_DATE) == 0.0
-
-    _insert_trip_update_state_minutes(
-        pg_session,
-        TEST_DATE,
-        minute_count=100,
-        offset_minutes=200,
         state_service_date=TEST_DATE - timedelta(days=1),
     )
     assert coverage_pct_for_date(pg_session, TEST_DATE) == pytest.approx(100 / 1440)
+    assert has_trip_update_signal(pg_session, TEST_DATE) is True
+
+
+def test_has_trip_update_signal_false_when_no_rows_in_window(pg_session):
+    """No trip_update_state rows inside the local day → no signal, even if
+    heartbeats / positions are present."""
+    _insert_heartbeat_minutes(pg_session, TEST_DATE, minute_count=1440)
+    assert has_trip_update_signal(pg_session, TEST_DATE) is False
+
+
+def test_resolve_keeps_earned_complete_when_tu_signal_pruned(pg_session):
+    """Retention rule (NOTES-104): a date previously stamped complete, now
+    measuring below threshold ONLY because its trip_update_state rows are
+    gone, keeps the prior stamp and prior coverage and reports ``kept``."""
+    cfg = load_agency_config("sfmta")
+    tz = "America/Los_Angeles"
+    _insert_vehicle_position_minutes(
+        pg_session, TEST_DATE, minute_count=480, step_minutes=3, tz_name=tz
+    )
+
+    quality, pct, kept = resolve_data_quality(
+        pg_session,
+        TEST_DATE,
+        threshold=agency_coverage_threshold(cfg),
+        tz_name=tz,
+        prior=("complete", 0.731),
+    )
+    assert (quality, pct, kept) == ("complete", 0.731, True)
+
+
+def test_resolve_demotes_when_tu_signal_present_but_thin(pg_session):
+    """A genuine outage: trip_update_state rows exist but cover little of
+    the day. The prior 'complete' does not protect it."""
+    cfg = load_agency_config("sfmta")
+    tz = "America/Los_Angeles"
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=120, tz_name=tz)
+
+    quality, pct, kept = resolve_data_quality(
+        pg_session,
+        TEST_DATE,
+        threshold=agency_coverage_threshold(cfg),
+        tz_name=tz,
+        prior=("complete", 0.731),
+    )
+    assert quality == "partial" and kept is False
+    assert pct == pytest.approx(120 / 1440)
+
+
+def test_resolve_never_promotes_via_prior_and_ignores_prior_when_complete(pg_session):
+    """A prior 'partial' cannot rescue a thin day; a day that clears the
+    threshold is complete regardless of any prior."""
+    cfg = load_agency_config("sfmta")
+    tz = "America/Los_Angeles"
+    thr = agency_coverage_threshold(cfg)
+    assert resolve_data_quality(pg_session, TEST_DATE, thr, tz, prior=("partial", 0.3)) == (
+        "partial",
+        0.0,
+        False,
+    )
+
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440, tz_name=tz)
+    quality, pct, kept = resolve_data_quality(
+        pg_session, TEST_DATE, thr, tz, prior=("partial", 0.3)
+    )
+    assert (quality, kept) == ("complete", False)
+    assert pct == pytest.approx(1.0)
 
 
 def test_sfmta_cadence_day_clears_threshold_only_with_trip_update_signal(pg_session):

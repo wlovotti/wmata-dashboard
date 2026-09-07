@@ -206,8 +206,7 @@ def upsert_route_metrics_for_date(
     """
     from src.data_completeness import (
         MIN_COVERAGE_FOR_MATERIALIZATION,
-        coverage_pct_for_date,
-        is_date_sufficiently_complete,
+        resolve_data_quality,
     )
 
     threshold = (
@@ -215,15 +214,32 @@ def upsert_route_metrics_for_date(
         if completeness_threshold is not None
         else MIN_COVERAGE_FOR_MATERIALIZATION
     )
-    pct = coverage_pct_for_date(db, service_date, tz_name=tz_name)
-    is_complete = is_date_sufficiently_complete(
-        db, service_date, threshold=threshold, tz_name=tz_name
+    service_date_iso = service_date.isoformat()
+    existing_by_route = {
+        row.route_id: row
+        for row in db.query(RouteMetricsDailyOverlay)
+        .filter(RouteMetricsDailyOverlay.service_date == service_date_iso)
+        .all()
+    }
+    # Every overlay row for a date carries the same date-level stamp, so
+    # any one of them is the prior. It lets resolve_data_quality keep an
+    # earned 'complete' when the trip-update signal has since been pruned
+    # by retention (NOTES-104) instead of misreporting an outage.
+    prior_row = next(iter(existing_by_route.values()), None)
+    prior = (prior_row.data_quality, prior_row.coverage_pct) if prior_row else None
+    data_quality, pct, kept = resolve_data_quality(
+        db, service_date, threshold=threshold, tz_name=tz_name, prior=prior
     )
-    data_quality = "complete" if is_complete else "partial"
+    is_complete = data_quality == "complete"
 
-    if not is_complete:
+    if kept:
         print(
-            f"  ⚠ Route metrics overlay for {service_date.isoformat()}: "
+            f"  ℹ Route metrics overlay for {service_date_iso}: trip-update signal no "
+            f"longer retained; keeping prior 'complete' stamp (coverage {pct:.1%})"
+        )
+    elif not is_complete:
+        print(
+            f"  ⚠ Route metrics overlay for {service_date_iso}: "
             f"ingest coverage {pct:.1%} below threshold — flagging as partial"
         )
 
@@ -234,14 +250,6 @@ def upsert_route_metrics_for_date(
     except Exception as exc:
         print(f"  ✗ Route metrics overlay compute failed for {service_date.isoformat()}: {exc}")
         return None
-
-    service_date_iso = service_date.isoformat()
-    existing_by_route = {
-        row.route_id: row
-        for row in db.query(RouteMetricsDailyOverlay)
-        .filter(RouteMetricsDailyOverlay.service_date == service_date_iso)
-        .all()
-    }
 
     now = utcnow_naive()
     for r in rows:
