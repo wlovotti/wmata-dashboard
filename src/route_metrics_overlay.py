@@ -206,8 +206,7 @@ def upsert_route_metrics_for_date(
     """
     from src.data_completeness import (
         MIN_COVERAGE_FOR_MATERIALIZATION,
-        coverage_pct_for_date,
-        is_date_sufficiently_complete,
+        resolve_data_quality,
     )
 
     threshold = (
@@ -215,15 +214,36 @@ def upsert_route_metrics_for_date(
         if completeness_threshold is not None
         else MIN_COVERAGE_FOR_MATERIALIZATION
     )
-    pct = coverage_pct_for_date(db, service_date, tz_name=tz_name)
-    is_complete = is_date_sufficiently_complete(
-        db, service_date, threshold=threshold, tz_name=tz_name
+    service_date_iso = service_date.isoformat()
+    existing_by_route = {
+        row.route_id: row
+        for row in db.query(RouteMetricsDailyOverlay)
+        .filter(RouteMetricsDailyOverlay.service_date == service_date_iso)
+        .all()
+    }
+    # Every overlay row for a date carries the same date-level stamp
+    # (this function writes them all in one pass), so the lowest route_id
+    # is a deterministic representative. It lets resolve_data_quality keep
+    # an earned 'complete' when the trip-update signal has since been
+    # pruned by retention (NOTES-104) instead of misreporting an outage.
+    prior_row = existing_by_route[min(existing_by_route)] if existing_by_route else None
+    prior = (prior_row.data_quality, prior_row.coverage_pct) if prior_row else None
+    data_quality, pct, kept = resolve_data_quality(
+        db, service_date, threshold=threshold, tz_name=tz_name, prior=prior
     )
-    data_quality = "complete" if is_complete else "partial"
+    is_complete = data_quality == "complete"
 
-    if not is_complete:
+    if kept:
+        # See the matching note in src/system_metrics.py: the stamp is
+        # preserved, the metrics are still re-derived from current rows.
         print(
-            f"  ⚠ Route metrics overlay for {service_date.isoformat()}: "
+            f"  ⚠ Route metrics overlay for {service_date_iso}: trip-update signal no "
+            f"longer retained; keeping prior 'complete' stamp and its stored coverage, "
+            f"but re-deriving metrics from current stop_events — check they are non-null"
+        )
+    elif not is_complete:
+        print(
+            f"  ⚠ Route metrics overlay for {service_date_iso}: "
             f"ingest coverage {pct:.1%} below threshold — flagging as partial"
         )
 
@@ -235,14 +255,6 @@ def upsert_route_metrics_for_date(
         print(f"  ✗ Route metrics overlay compute failed for {service_date.isoformat()}: {exc}")
         return None
 
-    service_date_iso = service_date.isoformat()
-    existing_by_route = {
-        row.route_id: row
-        for row in db.query(RouteMetricsDailyOverlay)
-        .filter(RouteMetricsDailyOverlay.service_date == service_date_iso)
-        .all()
-    }
-
     now = utcnow_naive()
     for r in rows:
         existing = existing_by_route.get(r["route_id"])
@@ -252,7 +264,9 @@ def upsert_route_metrics_for_date(
                     continue
                 setattr(existing, key, value)
             existing.data_quality = data_quality
-            existing.coverage_pct = pct
+            if not kept:
+                # A kept stamp's coverage is deliberately not re-measured.
+                existing.coverage_pct = pct
             existing.computed_at = now
         else:
             db.add(

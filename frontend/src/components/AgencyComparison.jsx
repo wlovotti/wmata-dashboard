@@ -32,7 +32,7 @@ import {
 /**
  * One headline-KPI cell: big number, week-over-week delta pill, and a
  * small partial-day disclosure when any of the window's days for this
- * metric were flagged `data_quality='partial'` (NOTES-104). Rendered as
+ * metric were flagged `data_quality='partial'` (NOTES-104, closed by PR #244). Rendered as
  * a `<td>` so a metric's values line up across agencies on one table
  * row (the comparison-table reformat, PR #211).
  */

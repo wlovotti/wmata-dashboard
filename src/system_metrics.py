@@ -143,8 +143,7 @@ def upsert_system_metrics_for_date(
     """
     from src.data_completeness import (
         MIN_COVERAGE_FOR_MATERIALIZATION,
-        coverage_pct_for_date,
-        is_date_sufficiently_complete,
+        resolve_data_quality,
     )
 
     threshold = (
@@ -152,15 +151,36 @@ def upsert_system_metrics_for_date(
         if completeness_threshold is not None
         else MIN_COVERAGE_FOR_MATERIALIZATION
     )
-    pct = coverage_pct_for_date(db, service_date, tz_name=tz_name)
-    is_complete = is_date_sufficiently_complete(
-        db, service_date, threshold=threshold, tz_name=tz_name
+    service_date_iso = service_date.isoformat()
+    existing = (
+        db.query(SystemMetricsDaily)
+        .filter(SystemMetricsDaily.service_date == service_date_iso)
+        .first()
     )
-    data_quality = "complete" if is_complete else "partial"
+    # The prior stamp lets resolve_data_quality keep an earned 'complete'
+    # when the trip-update signal has since been pruned by retention
+    # (NOTES-104) instead of misreporting the re-derive as an outage.
+    prior = (existing.data_quality, existing.coverage_pct) if existing else None
+    data_quality, pct, kept = resolve_data_quality(
+        db, service_date, threshold=threshold, tz_name=tz_name, prior=prior
+    )
+    is_complete = data_quality == "complete"
 
-    if not is_complete:
+    if kept:
+        # The stamp is preserved but the metrics below are still
+        # re-derived from whatever stop_events/runs exist now. If this
+        # re-run follows a runs-delete recovery past the trip-update
+        # retention window, those rows are gone and the metrics will be
+        # NULL under a 'complete' stamp (the API's null guards keep them
+        # out of windowed means) — hence a warning, not a notice.
         print(
-            f"  ⚠ System metrics for {service_date.isoformat()}: "
+            f"  ⚠ System metrics for {service_date_iso}: trip-update signal no longer "
+            f"retained; keeping prior 'complete' stamp and its stored coverage, but "
+            f"re-deriving metrics from current stop_events — check they are non-null"
+        )
+    elif not is_complete:
+        print(
+            f"  ⚠ System metrics for {service_date_iso}: "
             f"ingest coverage {pct:.1%} below threshold — flagging as partial"
         )
 
@@ -172,12 +192,6 @@ def upsert_system_metrics_for_date(
         print(f"  ✗ System metrics compute failed for {service_date.isoformat()}: {exc}")
         return None
 
-    service_date_iso = service_date.isoformat()
-    existing = (
-        db.query(SystemMetricsDaily)
-        .filter(SystemMetricsDaily.service_date == service_date_iso)
-        .first()
-    )
     if existing:
         existing.otp_percentage = metrics["otp_percentage"]
         existing.service_delivered_ratio = metrics["service_delivered_ratio"]
@@ -185,7 +199,9 @@ def upsert_system_metrics_for_date(
         existing.swt_seconds = metrics["swt_seconds"]
         existing.bunching_rate = metrics["bunching_rate"]
         existing.data_quality = data_quality
-        existing.coverage_pct = pct
+        if not kept:
+            # A kept stamp's coverage is deliberately not re-measured.
+            existing.coverage_pct = pct
         existing.computed_at = utcnow_naive()
     else:
         db.add(

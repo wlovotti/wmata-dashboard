@@ -130,7 +130,7 @@ class TestGetAgencyComparisonData:
         `collector_heartbeats` rows never reach the laptop database for
         SFMTA, leaving `vehicle_positions` as the only completeness-check
         numerator -- a ~33% ceiling regardless of collection health
-        (NOTES-104) -- so every SFMTA row is flagged 'partial' even though
+        (NOTES-104, closed by PR #244) -- so every SFMTA row in this fixture is flagged 'partial' even though
         the underlying metric is computed from real observations;
         excluding partial rows from the mean would zero out SFMTA entirely.
         """
@@ -304,7 +304,7 @@ class TestGetAgencyComparisonData:
         """Caveat footnotes cover the honest-comparability points from the item (PR #198):
         frequent-route designation, the OTP window, the 511.org duplicate
         stop_sequence artifact, and SFMTA's structurally-partial coverage
-        (NOTES-104).
+        (NOTES-104, closed by PR #244).
         """
         wmata_db = _make_session()
         try:

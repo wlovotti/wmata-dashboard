@@ -18,9 +18,11 @@ from src.data_completeness import (
     agency_coverage_threshold,
     coverage_pct_for_date,
     expected_minutes_for_date,
+    has_trip_update_signal,
     is_date_sufficiently_complete,
+    resolve_data_quality,
 )
-from src.timezones import eastern_day_bounds_utc
+from src.timezones import eastern_day_bounds_utc, local_day_bounds_utc
 
 TEST_DATE = date(2099, 1, 15)
 
@@ -44,12 +46,22 @@ def _insert_heartbeat_minutes(db, service_date: date, minute_count: int, offset_
 
 
 def _insert_vehicle_position_minutes(
-    db, service_date: date, minute_count: int, offset_minutes: int = 0
+    db,
+    service_date: date,
+    minute_count: int,
+    offset_minutes: int = 0,
+    step_minutes: int = 1,
+    tz_name: str = "America/New_York",
 ):
-    """Insert one vehicle_positions row per consecutive minute, like the helper above."""
-    start_utc, _ = eastern_day_bounds_utc(service_date)
+    """Insert one vehicle_positions row every ``step_minutes`` minutes.
+
+    ``minute_count`` rows land at ``offset_minutes + i * step_minutes``
+    after local midnight in ``tz_name``; ``step_minutes=3`` models SFMTA's
+    VehiclePositions cadence (every 3rd 60 s tick).
+    """
+    start_utc, _ = local_day_bounds_utc(service_date, tz_name)
     for i in range(minute_count):
-        ts = start_utc + timedelta(minutes=offset_minutes + i)
+        ts = start_utc + timedelta(minutes=offset_minutes + i * step_minutes)
         db.execute(
             text(
                 "INSERT INTO vehicle_positions "
@@ -57,6 +69,39 @@ def _insert_vehicle_position_minutes(
                 "VALUES (:v, :lat, :lon, :ts)"
             ),
             {"v": f"v-{i}", "lat": 38.9, "lon": -77.0, "ts": ts},
+        )
+    db.flush()
+
+
+def _insert_trip_update_state_minutes(
+    db,
+    service_date: date,
+    minute_count: int,
+    offset_minutes: int = 0,
+    step_minutes: int = 1,
+    tz_name: str = "America/New_York",
+    state_service_date: date | None = None,
+):
+    """Insert one trip_update_state row every ``step_minutes`` minutes.
+
+    Each row's ``final_snapshot_ts`` lands at ``offset_minutes + i *
+    step_minutes`` after local midnight in ``tz_name`` (NOTES-104: the
+    poll-time signal available in every data-arrival regime).
+    ``state_service_date`` overrides the row's ``service_date`` column
+    (default: ``service_date``) so tests can show the coverage query keys
+    on the snapshot timestamp alone, not the row's service date.
+    """
+    start_utc, _ = local_day_bounds_utc(service_date, tz_name)
+    sd = state_service_date or service_date
+    for i in range(minute_count):
+        ts = start_utc + timedelta(minutes=offset_minutes + i * step_minutes)
+        db.execute(
+            text(
+                "INSERT INTO trip_update_state "
+                "(trip_id, stop_sequence, service_date, stop_id, final_snapshot_ts) "
+                "VALUES (:t, 1, :sd, 's-1', :ts)"
+            ),
+            {"t": f"t-{sd.isoformat()}-{offset_minutes}-{i}", "sd": sd, "ts": ts},
         )
     db.flush()
 
@@ -108,6 +153,146 @@ def test_coverage_unions_heartbeats_and_positions(pg_session):
     pct = coverage_pct_for_date(pg_session, TEST_DATE)
     assert pct == pytest.approx(1200 / 1440)
     assert is_date_sufficiently_complete(pg_session, TEST_DATE) is True
+
+
+def test_coverage_full_day_from_trip_update_state_alone(pg_session):
+    """NOTES-104 replayed-only regime: a date that arrived purely via
+    ``replay_archive_to_state.py`` has no heartbeats and no positions, only
+    ``trip_update_state`` rows. Their ``final_snapshot_ts`` minute-buckets
+    alone must be able to certify the day complete.
+    """
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440)
+    assert coverage_pct_for_date(pg_session, TEST_DATE) == pytest.approx(1.0)
+    assert is_date_sufficiently_complete(pg_session, TEST_DATE) is True
+
+
+def test_coverage_unions_all_three_signals(pg_session):
+    """Three disjoint 480-minute stretches, one per signal, union to a full day."""
+    _insert_heartbeat_minutes(pg_session, TEST_DATE, minute_count=480, offset_minutes=0)
+    _insert_vehicle_position_minutes(pg_session, TEST_DATE, minute_count=480, offset_minutes=480)
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=480, offset_minutes=960)
+    assert coverage_pct_for_date(pg_session, TEST_DATE) == pytest.approx(1.0)
+
+
+def test_trip_update_state_leg_keys_on_snapshot_time_not_service_date(pg_session):
+    """The leg is a plain range scan on ``final_snapshot_ts`` (indexed): a
+    past-midnight owl snapshot stamped with the previous service date still
+    counts toward the clock-day it landed in, and the row's ``service_date``
+    column is not consulted at all.
+    """
+    _insert_trip_update_state_minutes(
+        pg_session,
+        TEST_DATE,
+        minute_count=100,
+        state_service_date=TEST_DATE - timedelta(days=1),
+    )
+    assert coverage_pct_for_date(pg_session, TEST_DATE) == pytest.approx(100 / 1440)
+    assert has_trip_update_signal(pg_session, TEST_DATE) is True
+
+
+def test_has_trip_update_signal_false_when_no_rows_in_window(pg_session):
+    """No trip_update_state rows inside the local day → no signal, even if
+    heartbeats / positions are present."""
+    _insert_heartbeat_minutes(pg_session, TEST_DATE, minute_count=1440)
+    assert has_trip_update_signal(pg_session, TEST_DATE) is False
+
+
+def test_resolve_keeps_earned_complete_when_tu_signal_pruned(pg_session):
+    """Retention rule (NOTES-104): a date previously stamped complete, now
+    measuring below threshold ONLY because its trip_update_state rows are
+    gone, keeps the prior stamp and prior coverage and reports ``kept``."""
+    cfg = load_agency_config("sfmta")
+    tz = "America/Los_Angeles"
+    _insert_vehicle_position_minutes(
+        pg_session, TEST_DATE, minute_count=480, step_minutes=3, tz_name=tz
+    )
+
+    quality, pct, kept = resolve_data_quality(
+        pg_session,
+        TEST_DATE,
+        threshold=agency_coverage_threshold(cfg),
+        tz_name=tz,
+        prior=("complete", 0.731),
+    )
+    assert (quality, pct, kept) == ("complete", 0.731, True)
+
+    # A prior with NULL stored coverage stays NULL: the keep path never
+    # substitutes a freshly measured, signal-less number.
+    assert resolve_data_quality(
+        pg_session,
+        TEST_DATE,
+        threshold=agency_coverage_threshold(cfg),
+        tz_name=tz,
+        prior=("complete", None),
+    ) == ("complete", None, True)
+
+
+def test_resolve_demotes_when_tu_signal_present_but_thin(pg_session):
+    """A genuine outage: trip_update_state rows exist but cover little of
+    the day. The prior 'complete' does not protect it."""
+    cfg = load_agency_config("sfmta")
+    tz = "America/Los_Angeles"
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=120, tz_name=tz)
+
+    quality, pct, kept = resolve_data_quality(
+        pg_session,
+        TEST_DATE,
+        threshold=agency_coverage_threshold(cfg),
+        tz_name=tz,
+        prior=("complete", 0.731),
+    )
+    assert quality == "partial" and kept is False
+    assert pct == pytest.approx(120 / 1440)
+
+
+def test_resolve_never_promotes_via_prior_and_ignores_prior_when_complete(pg_session):
+    """A prior 'partial' cannot rescue a thin day; a day that clears the
+    threshold is complete regardless of any prior."""
+    cfg = load_agency_config("sfmta")
+    tz = "America/Los_Angeles"
+    thr = agency_coverage_threshold(cfg)
+    assert resolve_data_quality(pg_session, TEST_DATE, thr, tz, prior=("partial", 0.3)) == (
+        "partial",
+        0.0,
+        False,
+    )
+
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440, tz_name=tz)
+    quality, pct, kept = resolve_data_quality(
+        pg_session, TEST_DATE, thr, tz, prior=("partial", 0.3)
+    )
+    assert (quality, kept) == ("complete", False)
+    assert pct == pytest.approx(1.0)
+
+
+def test_sfmta_cadence_day_clears_threshold_only_with_trip_update_signal(pg_session):
+    """The NOTES-104 addendum case: a healthy SFMTA day on the laptop.
+
+    VehiclePositions every 3rd minute alone covers exactly 1/3 of the day,
+    below SFMTA's cadence-aware threshold (0.8 × 4/6 ≈ 0.533) — which is
+    why every SFMTA date was stamped 'partial' before the trip_update_state
+    leg existed. Adding TripUpdates every 2nd minute lifts the union to the
+    minutes divisible by 2 or 3 → 2/3, clearing the threshold. Uses the
+    Pacific day window so the test exercises the same tz path production
+    does.
+    """
+    cfg = load_agency_config("sfmta")
+    threshold = agency_coverage_threshold(cfg)
+    tz = "America/Los_Angeles"
+
+    _insert_vehicle_position_minutes(
+        pg_session, TEST_DATE, minute_count=480, step_minutes=3, tz_name=tz
+    )
+    vp_only = coverage_pct_for_date(pg_session, TEST_DATE, tz_name=tz)
+    assert vp_only == pytest.approx(1 / 3)
+    assert is_date_sufficiently_complete(pg_session, TEST_DATE, threshold, tz_name=tz) is False
+
+    _insert_trip_update_state_minutes(
+        pg_session, TEST_DATE, minute_count=720, step_minutes=2, tz_name=tz
+    )
+    with_tu = coverage_pct_for_date(pg_session, TEST_DATE, tz_name=tz)
+    assert with_tu == pytest.approx(2 / 3)
+    assert is_date_sufficiently_complete(pg_session, TEST_DATE, threshold, tz_name=tz) is True
 
 
 def test_threshold_override(pg_session):

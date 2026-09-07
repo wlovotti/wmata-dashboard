@@ -9,7 +9,7 @@ per-metric `route_distribution` block (median/IQR/histogram/threshold-share)
 computed from each agency's own route-level window means, over the SAME
 matched window AND the SAME day-set the headline already uses -- including
 `data_quality='partial'` days (review finding 1: SFMTA's entire matched
-window is partial-flagged by design, NOTES-104, so excluding those days
+window was partial-flagged (NOTES-104, fixed in PR #244), so excluding those days
 here would zero SFMTA out completely).
 
 Following `tests/test_agency_comparison.py`'s pattern: `get_agency_comparison_data`
@@ -791,7 +791,7 @@ class TestAgencyComparisonRouteDistributionEnvelope:
 
 class TestAgencyComparisonRouteDistributionIncludesPartialDays:
     """NOTES-141 review finding 1 -- the concrete repro: SFMTA's entire
-    matched window is `data_quality='partial'` by design (NOTES-104: the
+    matched window is `data_quality='partial'` by design before PR #244 (NOTES-104: the
     laptop-side vehicle_positions-only completeness ceiling). Before this
     fix, every date being partial meant `_partial_service_dates_in_window`
     excluded the whole window from the OTP sub-metric, leaving
