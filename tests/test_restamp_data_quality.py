@@ -104,7 +104,10 @@ def test_apply_rewrites_both_tables_and_skips_absent(pg_session):
     assert written == 1
     system_stamp, overlay_stamps = _stamps(pg_session, TEST_DATE.isoformat())
     assert system_stamp == ("complete", pytest.approx(1.0))
-    assert overlay_stamps == {("complete", pytest.approx(1.0))}
+    assert len(overlay_stamps) == 1
+    ((overlay_quality, overlay_coverage),) = overlay_stamps
+    assert overlay_quality == "complete"
+    assert overlay_coverage == pytest.approx(1.0)
     assert pg_session.get(SystemMetricsDaily, TEST_DATE.isoformat()).otp_percentage == 70.0
     assert pg_session.get(SystemMetricsDaily, (TEST_DATE + timedelta(days=1)).isoformat()) is None
 
