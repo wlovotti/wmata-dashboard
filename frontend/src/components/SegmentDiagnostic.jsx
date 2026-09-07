@@ -4,8 +4,9 @@ import { Link, useSearchParams } from 'react-router-dom'
 import CorridorMap from './CorridorMap.jsx'
 import ErrorState from './ErrorState.jsx'
 import useAgency from '../hooks/useAgency'
-import useWindowDays, { appendWindowParam } from '../hooks/useWindowDays'
+import useWindowDays, { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
 import { apiUrl } from '../utils/apiUrl'
+import './SegmentDiagnostic.css'
 
 /**
  * Format a signed seconds value as `±M:SS` for slip display.
@@ -83,7 +84,7 @@ function ContributingRoutesPanel({ routes }) {
   if (!routes || routes.length === 0) {
     return (
       <div className="segment-drilldown-card">
-        <p style={{ margin: 0, color: '#64748b', fontSize: '0.85rem' }}>
+        <p className="panel-note m-0">
           No per-route breakdown available.
         </p>
       </div>
@@ -96,7 +97,7 @@ function ContributingRoutesPanel({ routes }) {
         <thead>
           <tr>
             <th className="col-route">Route</th>
-            <th className="num" style={{ width: '4rem' }}>Dir</th>
+            <th className="num col-dir">Dir</th>
             <th className="num">Mean slip</th>
             <th className="num">Trips</th>
           </tr>
@@ -108,12 +109,11 @@ function ContributingRoutesPanel({ routes }) {
                 <Link
                   to={appendWindowParam(`/route/${r.route_id}`, days, agency)}
                   className="segment-route-pill"
-                  style={{ textDecoration: 'none' }}
                 >
                   {r.route_short_name || r.route_id}
                 </Link>
               </td>
-              <td className="num" style={{ color: '#64748b' }}>
+              <td className="num text-muted">
                 {r.direction_id}
               </td>
               <td
@@ -121,7 +121,7 @@ function ContributingRoutesPanel({ routes }) {
               >
                 {formatSignedSeconds(r.mean_slip_sec)}
               </td>
-              <td className="num" style={{ color: '#475569' }}>
+              <td className="num text-secondary-color">
                 {r.n_observations.toLocaleString()}
               </td>
             </tr>
@@ -150,7 +150,7 @@ function CorridorMembershipPanel({ routes }) {
   if (!routes || routes.length === 0) {
     return (
       <div className="segment-drilldown-card">
-        <p style={{ margin: 0, color: '#64748b', fontSize: '0.85rem' }}>
+        <p className="panel-note m-0">
           No per-route membership available.
         </p>
       </div>
@@ -163,9 +163,7 @@ function CorridorMembershipPanel({ routes }) {
         <thead>
           <tr>
             <th className="col-route">Route</th>
-            <th className="num" style={{ width: '4rem' }}>
-              Dir
-            </th>
+            <th className="num col-dir">Dir</th>
             <th className="num">Stop range</th>
           </tr>
         </thead>
@@ -176,15 +174,14 @@ function CorridorMembershipPanel({ routes }) {
                 <Link
                   to={appendWindowParam(`/route/${r.route_id}`, days, agency)}
                   className="segment-route-pill"
-                  style={{ textDecoration: 'none' }}
                 >
                   {r.route_id}
                 </Link>
               </td>
-              <td className="num" style={{ color: '#64748b' }}>
+              <td className="num text-muted">
                 {r.direction_id}
               </td>
-              <td className="num" style={{ color: '#475569' }}>
+              <td className="num text-secondary-color">
                 {r.start_stop_sequence}–{r.end_stop_sequence}
               </td>
             </tr>
@@ -232,8 +229,8 @@ function CorridorExpansion({ corridor, period }) {
   return (
     <div className="corridor-expansion">
       <div className="corridor-expansion-header">
-        <h4 style={{ margin: 0 }}>{corridor.display_name}</h4>
-        <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.875rem' }}>
+        <h4 className="m-0">{corridor.display_name}</h4>
+        <p className="corridor-header-meta">
           {Math.round(corridor.length_m)} m · {corridor.direction_cardinal} ·{' '}
           {routeShortNames.join(', ')}
         </p>
@@ -273,15 +270,15 @@ function CorridorConstituentSegments({ segments, error }) {
     <div className="corridor-constituent-segments">
       <h4>Constituent stop-pairs</h4>
       {error && (
-        <p style={{ color: '#991b1b', fontSize: '0.85rem', margin: 0 }}>
+        <p className="panel-error-text m-0">
           Unable to load constituent segments: {error}
         </p>
       )}
       {!error && segments === null && (
-        <p style={{ color: '#64748b', fontSize: '0.85rem', margin: 0 }}>Loading…</p>
+        <p className="panel-note m-0">Loading…</p>
       )}
       {!error && segments && segments.length === 0 && (
-        <p style={{ color: '#64748b', fontSize: '0.85rem', margin: 0 }}>
+        <p className="panel-note m-0">
           No stop-pair segments observed inside this corridor for the period.
         </p>
       )}
@@ -306,12 +303,11 @@ function CorridorConstituentSegments({ segments, error }) {
                   <Link
                     to={appendWindowParam(`/route/${s.route_id}`, days, agency)}
                     className="segment-route-pill"
-                    style={{ textDecoration: 'none' }}
                   >
                     {s.route_id}
                   </Link>
                 </td>
-                <td className="num" style={{ color: '#64748b' }}>
+                <td className="num text-muted">
                   {s.direction_id}
                 </td>
                 <td>{s.from_stop_name || s.from_stop_id}</td>
@@ -323,7 +319,7 @@ function CorridorConstituentSegments({ segments, error }) {
                 >
                   {formatSignedSeconds(s.mean_slip_sec)}
                 </td>
-                <td className="num" style={{ color: '#475569' }}>
+                <td className="num text-secondary-color">
                   {s.n_observations.toLocaleString()}
                 </td>
               </tr>
@@ -423,10 +419,16 @@ function SegmentDiagnostic() {
   const showPeakColumn = period === 'all'
   const segmentTotalCols = showPeakColumn ? 7 : 6
   const corridorTotalCols = showPeakColumn ? 7 : 6
+  const diagnosticsLink = appendWindowParam('/diagnostics', DEFAULT_WINDOW_DAYS, agency)
 
   return (
     <main>
       <div className="chart-container">
+        <p className="breadcrumb-link-row">
+          <Link to={diagnosticsLink} className="breadcrumb-link">
+            ← Diagnostics
+          </Link>
+        </p>
         <h2>Cross-route segment diagnostic</h2>
         {level === 'segment' ? (
           <p className="drilldown-anchor">
@@ -449,15 +451,7 @@ function SegmentDiagnostic() {
           </p>
         )}
 
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '1rem',
-            alignItems: 'center',
-            margin: '0.5rem 0 1.25rem',
-          }}
-        >
+        <div className="filter-bar segment-level-filter-row">
           <div className="level-toggle" role="tablist" aria-label="Diagnostic level">
             <button
               type="button"
@@ -535,7 +529,7 @@ function SegmentDiagnostic() {
           )}
         </div>
 
-        {loading && <p style={{ color: '#64748b' }}>Loading segment diagnostic…</p>}
+        {loading && <p className="panel-loading-text">Loading segment diagnostic…</p>}
         {error && (
           <ErrorState
             title="Unable to load segments"
@@ -545,7 +539,7 @@ function SegmentDiagnostic() {
         )}
 
         {!loading && !error && level === 'segment' && segments.length === 0 && (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No cross-route stop-pairs found for this period. The diagnostic
             pipeline materializes <code>cross_route_segment_rollup</code>{' '}
             nightly via{' '}
@@ -556,7 +550,7 @@ function SegmentDiagnostic() {
         )}
 
         {!loading && !error && level === 'corridor' && corridors.length === 0 && (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No shape-anchored corridors found for this period. Corridors are
             identified once per GTFS reload via{' '}
             <code>pipelines/refresh_corridors.py</code> (run automatically by{' '}
@@ -572,12 +566,12 @@ function SegmentDiagnostic() {
                 <tr>
                   <th className="col-rank" title="Rank by total delay">#</th>
                   <th className="col-segment">Segment</th>
-                  <th className="col-routes" style={{ textAlign: 'right' }}>Routes</th>
+                  <th className="col-routes text-right">Routes</th>
                   <th className="col-impact">Impact (total delay)</th>
-                  <th className="col-slip" style={{ textAlign: 'right' }}>
+                  <th className="col-slip text-right">
                     Slip/trip
                   </th>
-                  <th className="col-obs" style={{ textAlign: 'right' }}>
+                  <th className="col-obs text-right">
                     Trips
                   </th>
                   {showPeakColumn && <th className="col-peak">Peak period</th>}
@@ -634,7 +628,7 @@ function SegmentDiagnostic() {
                         >
                           {formatMinPerTrip(seg.slip_min_per_trip)}
                         </td>
-                        <td className="col-obs" style={{ color: '#475569' }}>
+                        <td className="col-obs text-secondary-color">
                           {seg.n_total_observations.toLocaleString()}
                         </td>
                         {showPeakColumn && (
@@ -672,14 +666,14 @@ function SegmentDiagnostic() {
                     #
                   </th>
                   <th className="col-segment">Corridor</th>
-                  <th className="col-routes" style={{ textAlign: 'right' }}>
+                  <th className="col-routes text-right">
                     Routes
                   </th>
                   <th className="col-impact">Impact (total delay)</th>
-                  <th className="col-slip" style={{ textAlign: 'right' }}>
+                  <th className="col-slip text-right">
                     Slip/obs
                   </th>
-                  <th className="col-obs" style={{ textAlign: 'right' }}>
+                  <th className="col-obs text-right">
                     Observations
                   </th>
                   {showPeakColumn && <th className="col-peak">Peak period</th>}
@@ -737,7 +731,7 @@ function SegmentDiagnostic() {
                         >
                           {formatSignedSeconds(corr.mean_slip_per_observation_sec)}
                         </td>
-                        <td className="col-obs" style={{ color: '#475569' }}>
+                        <td className="col-obs text-secondary-color">
                           {(corr.n_total_observations || 0).toLocaleString()}
                         </td>
                         {showPeakColumn && (

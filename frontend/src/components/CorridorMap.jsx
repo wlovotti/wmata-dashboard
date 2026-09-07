@@ -37,7 +37,7 @@ function CorridorMap({ geometryWkt, displayName }) {
   const points = parseLineStringWkt(geometryWkt)
   if (points.length < 2) {
     return (
-      <div className="corridor-map-placeholder" style={{ color: '#64748b', fontSize: '0.85rem' }}>
+      <div className="corridor-map-placeholder status-text">
         Corridor geometry unavailable.
       </div>
     )
@@ -50,7 +50,7 @@ function CorridorMap({ geometryWkt, displayName }) {
       <MapContainer
         center={center}
         zoom={14}
-        style={{ height: '240px', width: '100%', borderRadius: '0.5rem' }}
+        className="map-canvas map-canvas--sm"
         aria-label={displayName ? `Map: ${displayName}` : 'Corridor map'}
       >
         <TileLayer

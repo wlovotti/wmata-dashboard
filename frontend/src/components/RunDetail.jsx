@@ -14,6 +14,7 @@ import {
   ReferenceArea,
   ResponsiveContainer,
 } from 'recharts'
+import { AXIS_TICK_STYLE, GRID_PROPS, SERIES_COLOR } from '../charts/theme'
 
 // WMATA on-time band: -2 min early to +7 min late. Mirrors `src/otp_constants.py`.
 const ON_TIME_LOWER_SEC = -120
@@ -154,12 +155,12 @@ function RunDetail() {
           <h1>
             Run on Route {data.route_id}
             {data.trip_headsign && (
-              <span style={{ fontWeight: 400, color: '#475569' }}>
+              <span className="run-title-headsign">
                 {' '}— {data.trip_headsign}
               </span>
             )}
           </h1>
-          <p style={{ color: '#64748b', marginTop: '0.25rem' }}>
+          <p className="text-muted mt-1">
             Service date {data.service_date} · Trip {data.trip_id} ·{' '}
             {directionLabel} · Source {data.source}
             {data.vehicle_id && ` · Vehicle ${data.vehicle_id}`}
@@ -173,15 +174,7 @@ function RunDetail() {
                       `/blocks/${encodeURIComponent(data.block_id)}?service_date=${encodeURIComponent(data.service_date)}`,
                     )
                   }
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    padding: 0,
-                    color: '#0a4a8c',
-                    cursor: 'pointer',
-                    textDecoration: 'underline',
-                    font: 'inherit',
-                  }}
+                  className="link-button"
                   title="View block timeline — chained trips on the same vehicle"
                 >
                   {data.block_id}
@@ -194,7 +187,7 @@ function RunDetail() {
 
       <div className="stats-summary">
         <div className="stat-card">
-          <div className="stat-value">{data.stops_observed ?? 0}<span style={{ fontSize: '1.5rem' }}> / {data.stops_scheduled ?? 0}</span></div>
+          <div className="stat-value">{data.stops_observed ?? 0}<span className="text-2xl"> / {data.stops_scheduled ?? 0}</span></div>
           <div className="stat-label">Stops observed</div>
         </div>
         <div className="stat-card">
@@ -234,12 +227,12 @@ function RunDetail() {
               data={chartData}
               margin={{ top: 16, right: 24, left: 0, bottom: 16 }}
             >
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <CartesianGrid {...GRID_PROPS} />
               <XAxis
                 dataKey="stop_sequence"
                 type="number"
                 domain={[seqMin, seqMax]}
-                tick={{ fontSize: 12 }}
+                tick={AXIS_TICK_STYLE}
                 label={{
                   value: 'stop_sequence',
                   position: 'insideBottomRight',
@@ -248,7 +241,7 @@ function RunDetail() {
                 }}
               />
               <YAxis
-                tick={{ fontSize: 12 }}
+                tick={AXIS_TICK_STYLE}
                 label={{
                   value: 'deviation (sec, +late / -early)',
                   angle: -90,
@@ -260,11 +253,11 @@ function RunDetail() {
               <ReferenceArea
                 y1={ON_TIME_LOWER_SEC}
                 y2={ON_TIME_UPPER_SEC}
-                fill="#16a34a"
+                fill={SERIES_COLOR.good}
                 fillOpacity={0.12}
                 stroke="none"
               />
-              <ReferenceLine y={0} stroke="#0f172a" strokeWidth={1} />
+              <ReferenceLine y={0} stroke="var(--text-primary)" strokeWidth={1} />
               <Line
                 type="monotone"
                 dataKey="deviation_sec"

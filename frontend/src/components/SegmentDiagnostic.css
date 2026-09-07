@@ -1,0 +1,21 @@
+/* Component-scoped styles for SegmentDiagnostic.jsx (NOTES-85 migration
+   off inline styles). Most of the page's static styling already lived in
+   App.css's .segments-table / .segment-* / .corridor-* rules; this file
+   holds the handful of small additions the inline-style migration needed. */
+
+.col-dir {
+  width: 4rem;
+}
+
+.corridor-header-meta {
+  margin: 0.25rem 0 0;
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+
+/* Level/period/limit filter row above the segments/corridors table —
+   .filter-bar (App.css) provides the flex/gap/wrap; this adds the
+   top/bottom spacing specific to this page. */
+.segment-level-filter-row {
+  margin: 0.5rem 0 1.25rem;
+}

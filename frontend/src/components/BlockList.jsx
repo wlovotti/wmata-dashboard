@@ -4,6 +4,7 @@ import { formatDeviationMmSs, todayEasternIso } from '../utils/formatters'
 import { apiUrl } from '../utils/apiUrl'
 import useAgency from '../hooks/useAgency'
 import { DEFAULT_WINDOW_DAYS, appendWindowParam } from '../hooks/useWindowDays'
+import './BlockList.css'
 
 function BlockList({ routeId }) {
   /**
@@ -56,17 +57,9 @@ function BlockList({ routeId }) {
         the lateness — picking a block surfaces that cascade.
       </p>
 
-      <div
-        style={{
-          display: 'flex',
-          gap: '0.75rem',
-          alignItems: 'center',
-          margin: '0.5rem 0 1rem',
-          fontSize: '0.875rem',
-        }}
-      >
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span style={{ opacity: 0.8 }}>Service date:</span>
+      <div className="filter-bar block-list-filter-row">
+        <label className="filter-label-flex">
+          <span className="opacity-80">Service date:</span>
           <input
             type="date"
             value={serviceDate}
@@ -76,11 +69,11 @@ function BlockList({ routeId }) {
         </label>
       </div>
 
-      {loading && <p style={{ color: '#64748b' }}>Loading blocks…</p>}
-      {error && <p style={{ color: '#64748b' }}>Unable to load blocks: {error}</p>}
+      {loading && <p className="panel-loading-text">Loading blocks…</p>}
+      {error && <p className="text-muted">Unable to load blocks: {error}</p>}
 
       {!loading && !error && blocks.length === 0 && (
-        <p style={{ color: '#64748b' }}>
+        <p className="text-muted">
           No blocks found for this route on {serviceDate}.
         </p>
       )}

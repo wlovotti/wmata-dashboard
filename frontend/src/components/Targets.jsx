@@ -138,7 +138,7 @@ function formatGap(metric, current, target) {
 export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabel }) {
   if (!targetsLoaded) {
     return (
-      <p style={{ padding: '0 1.5rem 1.5rem' }}>
+      <p className="card-section-note">
         Per-route target configuration isn't available right now, so this
         panel can't say whether any overrides are configured.
       </p>
@@ -146,7 +146,7 @@ export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabe
   }
   if (!hasAnyOverrides) {
     return (
-      <p style={{ padding: '0 1.5rem 1.5rem' }}>
+      <p className="card-section-note">
         This panel is empty because no route has a per-route target — the
         default <code>config/route_targets.yaml</code> ships with an empty{' '}
         <code>routes:</code> block, so every route currently just inherits
@@ -157,7 +157,7 @@ export function OffTargetEmptyState({ hasAnyOverrides, targetsLoaded, metricLabe
     )
   }
   return (
-    <p style={{ padding: '0 1.5rem 1.5rem' }}>
+    <p className="card-section-note">
       No per-route overrides configured for {metricLabel}.
     </p>
   )
@@ -255,8 +255,8 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
-          <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <p className="breadcrumb-link-row">
+            <Link to={diagnosticsLink} className="breadcrumb-link">
               ← Diagnostics
             </Link>
           </p>
@@ -274,8 +274,8 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
-          <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <p className="breadcrumb-link-row">
+            <Link to={diagnosticsLink} className="breadcrumb-link">
               ← Diagnostics
             </Link>
           </p>
@@ -293,8 +293,8 @@ function Targets() {
     return (
       <main>
         <div className="chart-container">
-          <p style={{ margin: '0 0 0.5rem' }}>
-            <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+          <p className="breadcrumb-link-row">
+            <Link to={diagnosticsLink} className="breadcrumb-link">
               ← Diagnostics
             </Link>
           </p>
@@ -375,8 +375,8 @@ function Targets() {
   return (
     <main>
       <div className="chart-container">
-        <p style={{ margin: '0 0 0.5rem' }}>
-          <Link to={diagnosticsLink} style={{ fontSize: '0.85rem', color: '#0a4a8c' }}>
+        <p className="breadcrumb-link-row">
+          <Link to={diagnosticsLink} className="breadcrumb-link">
             ← Diagnostics
           </Link>
         </p>
@@ -388,8 +388,8 @@ function Targets() {
           missing entries inherit the system default.
         </p>
 
-        <h3 style={{ marginTop: '1.5rem' }}>System defaults</h3>
-        <table className="routes-table" style={{ marginTop: '0.5rem' }}>
+        <h3 className="mt-6">System defaults</h3>
+        <table className="routes-table mt-2">
           <thead>
             <tr>
               {METRIC_ORDER.map((m) => (
@@ -408,8 +408,8 @@ function Targets() {
           </tbody>
         </table>
 
-        <h3 style={{ marginTop: '1.5rem' }}>Off target</h3>
-        <p className="drilldown-anchor" style={{ marginBottom: '0.75rem' }}>
+        <h3 className="mt-6">Off target</h3>
+        <p className="drilldown-anchor mb-3">
           Routes with a configured per-route target in{' '}
           <code>config/route_targets.yaml</code> (listed under Per-route
           overrides below), ranked by gap to that target on the metric
@@ -417,9 +417,9 @@ function Targets() {
           drags" table — a small-volume route can be far off target without
           showing up as a big system contributor.
         </p>
-        <div className="filters" style={{ marginBottom: '0.75rem' }}>
+        <div className="filters mb-3">
           <div>
-            <label htmlFor="off-target-metric" style={{ marginRight: '0.5rem' }}>
+            <label htmlFor="off-target-metric" className="mr-2">
               Metric:
             </label>
             <select
@@ -443,7 +443,7 @@ function Targets() {
             metricLabel={METRIC_LABELS[offTargetMetric] ?? offTargetMetric}
           />
         ) : (
-          <table className="routes-table" style={{ marginTop: '0.5rem' }}>
+          <table className="routes-table mt-2">
             <thead>
               <tr>
                 <th>Route</th>
@@ -460,7 +460,7 @@ function Targets() {
                   onClick={() =>
                     navigate(appendWindowParam(`/route/${r.routeId}`, days, agency))
                   }
-                  style={{ cursor: 'pointer' }}
+                  className="cursor-pointer"
                 >
                   <td className="route-id">
                     <span
@@ -477,7 +477,10 @@ function Targets() {
                   <td className="metric">
                     {formatContribMetricValue(offTargetMetric, r.target)}
                   </td>
-                  <td className="metric" style={{ color: r.isBelow ? '#b91c1c' : '#15803d' }}>
+                  <td
+                    className="metric"
+                    style={{ color: r.isBelow ? 'var(--color-bad)' : 'var(--color-good)' }}
+                  >
                     {r.gapText}
                   </td>
                 </tr>
@@ -486,15 +489,15 @@ function Targets() {
           </table>
         )}
 
-        <h3 style={{ marginTop: '1.5rem' }}>Per-route overrides</h3>
+        <h3 className="mt-6">Per-route overrides</h3>
         {sortedRouteIds.length === 0 ? (
-          <p style={{ color: '#64748b' }}>
+          <p className="text-muted">
             No per-route overrides configured. Every route inherits the system
             defaults above. Add overrides by editing{' '}
             <code>config/route_targets.yaml</code>.
           </p>
         ) : (
-          <table className="routes-table" style={{ marginTop: '0.5rem' }}>
+          <table className="routes-table mt-2">
             <thead>
               <tr>
                 <th>Route</th>
@@ -518,7 +521,7 @@ function Targets() {
                         {block[m] != null ? (
                           formatTarget(m, block[m])
                         ) : (
-                          <span style={{ color: '#94a3b8' }} title="Inherits system default">
+                          <span className="text-neutral" title="Inherits system default">
                             {formatTarget(m, systemDefault[m])}
                           </span>
                         )}
