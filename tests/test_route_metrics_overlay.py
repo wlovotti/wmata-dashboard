@@ -40,9 +40,10 @@ def test_overlay_compute_empty_db_returns_no_rows(db_session):
 def test_overlay_upsert_partial_day_writes_zero_rows(db_session):
     """Upsert on an empty DB (zero ingest coverage) persists zero overlay rows.
 
-    An empty test DB has zero ingest rows in ``collector_heartbeats`` and
-    ``vehicle_positions``, so :func:`is_date_sufficiently_complete` returns
-    False. Under NOTES-76 the guard is now a *flagger*: the upsert proceeds
+    An empty test DB has zero ingest rows in ``collector_heartbeats``,
+    ``vehicle_positions``, and ``trip_update_state``, so
+    :func:`resolve_data_quality` measures 0.0 coverage and stamps
+    ``partial``. Under NOTES-76 the guard is a *flagger*: the upsert proceeds
     but flags each written row as ``data_quality='partial'``. When there are
     no source rows (empty DB → zero routes with data), the function returns
     ``0`` (computed empty) rather than ``None`` (computation raised).
@@ -156,10 +157,6 @@ def test_upsert_route_metrics_forwards_agency_to_ewt_gate_lookup(db_session, mon
     monkeypatch.setattr(
         "src.data_completeness.coverage_pct_for_date",
         lambda db, service_date, tz_name="America/New_York": 1.0,
-    )
-    monkeypatch.setattr(
-        "src.data_completeness.is_date_sufficiently_complete",
-        lambda db, service_date, threshold=0.80, tz_name="America/New_York": True,
     )
 
     target = date(2026, 5, 8)

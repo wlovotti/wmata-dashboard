@@ -192,8 +192,8 @@ def test_pipeline_upserts_system_metrics_row(db_session, sample_routes, monkeypa
     minimum useful setup for testing the upsert path.
     """
     monkeypatch.setattr(
-        "src.data_completeness.is_date_sufficiently_complete",
-        lambda *args, **kwargs: True,
+        "src.data_completeness.resolve_data_quality",
+        lambda *args, **kwargs: ("complete", 1.0, False),
     )
     target_date = eastern_today() - timedelta(days=4)
     target_iso = target_date.isoformat()
@@ -345,10 +345,6 @@ def test_upsert_system_metrics_forwards_agency_to_ewt_gate_lookup(
     monkeypatch.setattr(
         "src.data_completeness.coverage_pct_for_date",
         lambda db, service_date, tz_name="America/New_York": 1.0,
-    )
-    monkeypatch.setattr(
-        "src.data_completeness.is_date_sufficiently_complete",
-        lambda db, service_date, threshold=0.80, tz_name="America/New_York": True,
     )
 
     target_date = eastern_today() - timedelta(days=7)
@@ -559,10 +555,6 @@ def test_upsert_persists_swt_seconds(db_session, monkeypatch):
     monkeypatch.setattr(
         "src.data_completeness.coverage_pct_for_date",
         lambda db, service_date, tz_name="America/New_York": 1.0,
-    )
-    monkeypatch.setattr(
-        "src.data_completeness.is_date_sufficiently_complete",
-        lambda db, service_date, threshold=0.80, tz_name="America/New_York": True,
     )
 
     upsert_system_metrics_for_date(db_session, datetime(2026, 8, 10).date())
