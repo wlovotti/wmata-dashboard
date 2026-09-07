@@ -7,7 +7,7 @@ import {
   ResponsiveContainer,
   ReferenceDot,
 } from 'recharts'
-import { CHART_TOOLTIP_CLASS, SERIES_COLOR } from '../charts/theme'
+import { CHART_TOOLTIP_COMPACT_CLASS, SERIES_COLOR } from '../charts/theme'
 
 const OTP_LINE_COLOR = SERIES_COLOR.brand
 const SD_LINE_COLOR = SERIES_COLOR.good
@@ -263,7 +263,7 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
                 ? `${Math.round(row._coveragePct * 100)}%`
                 : 'unknown'
               return (
-                <div className={`${CHART_TOOLTIP_CLASS} chart-tooltip-compact`}>
+                <div className={CHART_TOOLTIP_COMPACT_CLASS}>
                   <div>{label}</div>
                   <div className="text-muted">Partial collection — {pct} coverage</div>
                 </div>
@@ -271,7 +271,7 @@ function Sparkline({ data, color, valueFormat, height = 60, ghostData = null }) 
             }
             const val = row?.value
             return (
-              <div className={`${CHART_TOOLTIP_CLASS} chart-tooltip-compact`}>
+              <div className={CHART_TOOLTIP_COMPACT_CLASS}>
                 <div>{label}</div>
                 {val != null && <div>{valueFormat(val)}</div>}
               </div>

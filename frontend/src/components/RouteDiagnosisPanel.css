@@ -143,14 +143,20 @@
   color: var(--color-timepoint);
 }
 
-/* Header cells default to left; numeric columns opt in via th.text-center /
-   th.text-right (App.css utilities, element-qualified so they win). */
+/* No text-align on the shared th rule: this file loads AFTER App.css, so
+   it would beat the th.text-center / th.text-right utilities the numeric
+   columns use. The UA default for <th> is center, so the one column that
+   wants left (the timepoint name) opts in below. */
 .timepoint-table th {
   padding: 0.3rem 0.5rem;
-  text-align: left;
   font-weight: var(--weight-semibold);
   color: var(--color-muted);
   white-space: nowrap;
+}
+
+/* The timepoint-name column is the only left-aligned header. */
+.timepoint-table th:first-child {
+  text-align: left;
 }
 
 .timepoint-table td {
