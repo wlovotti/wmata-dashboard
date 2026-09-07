@@ -859,7 +859,7 @@ function RouteList() {
                 <td className="metric">
                   {/* NOTES-56: bold the EWT value for WMATA-frequent routes
                       so the eye lands on the headline metric for those rows. */}
-                  <span style={{ fontWeight: route.is_frequent ? 700 : 'inherit' }}>
+                  <span className={route.is_frequent ? 'font-bold' : undefined}>
                     {route.ewt_seconds != null
                       ? `${Math.round(route.ewt_seconds)}s`
                       : '—'}

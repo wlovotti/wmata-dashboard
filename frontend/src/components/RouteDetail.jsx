@@ -605,7 +605,7 @@ function RouteDetail() {
               )}
             </div>
             <div className="stat-card">
-              <div className="stat-value text-2xl">
+              <div className="stat-value stat-value--compact">
                 {routeData.otp_origin_pct != null
                   ? `${Math.round(routeData.otp_origin_pct)}% / ${Math.round(routeData.otp_destination_pct ?? 0)}%`
                   : 'N/A'}

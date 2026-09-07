@@ -139,6 +139,12 @@
   border-bottom: 1px solid var(--border-default);
 }
 
+.timepoint-legend-dot {
+  color: var(--color-timepoint);
+}
+
+/* Header cells default to left; numeric columns opt in via th.text-center /
+   th.text-right (App.css utilities, element-qualified so they win). */
 .timepoint-table th {
   padding: 0.3rem 0.5rem;
   text-align: left;

@@ -8,16 +8,15 @@
  *
  * Colors are exported as CSS custom-property references (e.g.
  * `'var(--color-brand)'`) rather than read at render time via
- * `getComputedStyle`. SVG presentation attributes (`stroke`, `fill`) are
- * styleable properties, so the browser resolves `var()` inside them
- * against the ancestor's computed style exactly as it would inside a
- * `style` attribute — no DOM read, no mount-time flash of an unstyled
- * color, and no behavior difference under jsdom in unit tests (the
- * string is just passed through as an SVG attribute either way). If the
- * app ever needs a color as a plain JS value (e.g. to compute a
- * gradient stop), read the matching constant from `App.css`'s `:root`
- * token block via `getComputedStyle(document.documentElement)` at that
- * call site rather than adding a second source of truth here.
+ * `getComputedStyle`. recharts emits them as SVG presentation attributes
+ * (`stroke`, `fill`); `var()` resolution there is verified in Chromium
+ * (the Playwright baseline browser) and works in current Firefox, but
+ * WebKit has historically NOT resolved `var()` inside presentation
+ * attributes, and the failure is silent (gridlines vanish, bars render
+ * black). If Safari support ever matters, switch these to plain values
+ * read once from `getComputedStyle(document.documentElement)` — do not
+ * add a second hardcoded palette here. Under jsdom the string is passed
+ * through untouched, so unit tests are unaffected either way.
  */
 
 /** Default margin for a standalone chart with axis labels on all sides. */
@@ -32,6 +31,13 @@ export const GRID_PROPS = {
 /** Tick label style for XAxis/YAxis. */
 export const AXIS_TICK_STYLE = { fontSize: 12, fill: 'var(--text-secondary)' }
 
+/**
+ * Tick label style for compact charts (≤150px tall, e.g. the compare
+ * page's distribution histograms), where the default 12px ticks crowd
+ * the plot.
+ */
+export const AXIS_TICK_STYLE_COMPACT = { fontSize: 11, fill: 'var(--text-muted)' }
+
 /** Axis line style, for charts that draw one explicitly. */
 export const AXIS_LINE_PROPS = { stroke: 'var(--border-strong)' }
 
@@ -44,6 +50,9 @@ export const TOOLTIP_CURSOR_PROPS = { fill: 'var(--surface-subtle)' }
  * `.chart-tooltip` in App.css) instead of each chart defining its own.
  */
 export const CHART_TOOLTIP_CLASS = 'chart-tooltip'
+
+/** Compact tooltip className for the small charts that use AXIS_TICK_STYLE_COMPACT. */
+export const CHART_TOOLTIP_COMPACT_CLASS = 'chart-tooltip chart-tooltip--compact'
 
 /**
  * Semantic series colors, mirroring the six App.css color tokens, for

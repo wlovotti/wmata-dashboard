@@ -17,7 +17,8 @@ import useWindowDays, { appendWindowParam } from './hooks/useWindowDays'
 import useAgency, { DEFAULT_AGENCY } from './hooks/useAgency'
 import WindowPicker from './components/WindowPicker'
 import AgencyToggle from './components/AgencyToggle'
-import './App.css'
+// App.css is imported by main.jsx (before this module) so shared rules
+// precede component-scoped stylesheets in the bundle.
 
 // Format a raw GTFS YYYYMMDD string (e.g. `feed_end_date`) as a
 // human-readable date, mirroring RouteList's `formatSnapshotDate` (which

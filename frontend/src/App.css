@@ -1,5 +1,5 @@
 /* Design tokens (NOTES-84 seeded the semantic six; NOTES-85 adds the rest
-   of the system — surfaces, borders, text, tints, spacing, type, radius,
+   of the system — surfaces, borders, text, spacing, type, radius,
    shadow — and migrates App.css + component inline styles onto them.
    Values are inventoried from the palette already in use across App.css
    and the component inline styles it's replacing; near-duplicate hexes
@@ -16,14 +16,13 @@
   --color-muted: #64748b;
   --color-neutral: #94a3b8;
 
-  /* Semantic tints — light washes of each semantic color for badges,
-     banners, and delta chips. Derived from the base color via color-mix()
-     so components stop hand-computing rgba(...)/hex tints per call site. */
-  --color-good-tint: color-mix(in srgb, var(--color-good) 12%, white);
-  --color-warn-tint: color-mix(in srgb, var(--color-warn) 14%, white);
-  --color-bad-tint: color-mix(in srgb, var(--color-bad) 8%, white);
-  --color-brand-tint: color-mix(in srgb, var(--color-brand) 8%, white);
-  --color-neutral-tint: color-mix(in srgb, var(--color-neutral) 15%, white);
+  /* Link color for in-page text links and link-styled buttons (breadcrumbs,
+     RunDetail's block link, RouteDetail's filter chips). Deliberately not
+     --color-brand: that navy is the header/stat accent and reads darker. */
+  --color-link: #0a4a8c;
+  /* Timepoint marker color (RouteDiagnosisPanel's line-chart reference
+     dots + the legend dot); shared by the SVG stroke/fill and the CSS. */
+  --color-timepoint: #3b82f6;
 
   /* Surfaces — page background, card/panel background, and a subtle
      surface for table headers, hover rows, and inset panels. */
@@ -327,7 +326,7 @@ header h1 {
 
 .breadcrumb-link {
   font-size: var(--text-sm);
-  color: var(--color-brand);
+  color: var(--color-link);
 }
 
 main {
@@ -404,35 +403,8 @@ main {
   flex-wrap: wrap;
 }
 
-/* Spacing utilities on the 4px scale, for the very common "just needs a
-   top/bottom gap" inline style. Prefer a semantic class when one exists
-   (e.g. .drilldown-anchor); reach for these for one-off spacing only. */
-.mt-1 { margin-top: var(--space-1); }
-.mt-2 { margin-top: var(--space-2); }
-.mt-3 { margin-top: var(--space-3); }
-.mt-4 { margin-top: var(--space-4); }
-.mt-6 { margin-top: var(--space-6); }
-.mt-8 { margin-top: var(--space-8); }
-.mb-1 { margin-bottom: var(--space-1); }
-.mb-2 { margin-bottom: var(--space-2); }
-.mb-3 { margin-bottom: var(--space-3); }
-.mb-4 { margin-bottom: var(--space-4); }
-.mb-6 { margin-bottom: var(--space-6); }
-.mb-8 { margin-bottom: var(--space-8); }
-
-/* Text-size/weight/color utilities for one-off inline text styling. */
-.text-xs { font-size: var(--text-xs); }
-.text-sm { font-size: var(--text-sm); }
-.text-2xl { font-size: var(--text-2xl); }
-.opacity-70 { opacity: 0.7; }
-.opacity-80 { opacity: 0.8; }
-.text-muted { color: var(--text-muted); }
-.text-primary-color { color: var(--text-primary); }
-.text-secondary-color { color: var(--text-secondary); }
-.m-0 { margin: 0; }
-.mr-2 { margin-right: var(--space-2); }
-.text-neutral { color: var(--color-neutral); }
-.cursor-pointer { cursor: pointer; }
+/* Spacing / text utilities live at the END of this file — see the
+   "Utilities" block — so they win ties against the primitives above. */
 
 /* Filter-row label ("Route:" / "Day:" / "Time:" ... + control), reused
    across RouteDetail, ScheduleAudit, StopDiagnostic, and similar
@@ -462,12 +434,6 @@ main {
 .card-section-note {
   padding: 0 1.5rem 1.5rem;
 }
-.font-medium { font-weight: var(--weight-medium); }
-.font-semibold { font-weight: var(--weight-semibold); }
-.text-center { text-align: center; }
-.text-right { text-align: right; }
-.text-left { text-align: left; }
-.nums { font-variant-numeric: tabular-nums; }
 
 /* Horizontal scroll wrapper for a table that isn't already inside
    .table-container (which provides this itself). */
@@ -586,6 +552,12 @@ main {
   font-weight: 700;
   color: var(--color-brand);
   margin-bottom: 0.5rem;
+}
+
+/* Two-number stat ("62% / 71%") that would overflow the card at the
+   default 2.5rem. Compound selector so it outranks .stat-value. */
+.stat-value.stat-value--compact {
+  font-size: var(--text-2xl);
 }
 
 .stat-label {
@@ -1115,6 +1087,14 @@ main {
   font-size: 0.85rem;
   color: var(--text-primary);
   box-shadow: var(--shadow-popover);
+}
+
+/* Compact variant for small (≤150px) charts such as the compare page's
+   distribution histograms, where the full-size box would cover the plot. */
+.chart-tooltip.chart-tooltip--compact {
+  font-size: var(--text-xs);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
 }
 
 .chart-tooltip-title {
@@ -1949,7 +1929,7 @@ main {
   background: none;
   border: none;
   padding: 0;
-  color: var(--color-brand);
+  color: var(--color-link);
   cursor: pointer;
   text-decoration: underline;
   font: inherit;
@@ -1990,3 +1970,62 @@ main {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
 }
+
+/* ── Utilities ────────────────────────────────────────────────────────
+   Kept LAST on purpose: a utility on an element must beat any primitive
+   rule at equal specificity (e.g. `.drilldown-anchor mb-3`, `.stat-card
+   text-left`). The `td.`/`th.` forms exist because table primitives set
+   color/alignment via element-qualified selectors (`.routes-table td`,
+   `.timepoint-table th`), which outrank a bare single-class utility. */
+
+/* Spacing on the 4px scale, for the very common "just needs a top/bottom
+   gap" case. Prefer a semantic class when one exists. */
+.mt-1 { margin-top: var(--space-1); }
+.mt-2 { margin-top: var(--space-2); }
+.mt-3 { margin-top: var(--space-3); }
+.mt-4 { margin-top: var(--space-4); }
+.mt-6 { margin-top: var(--space-6); }
+.mt-8 { margin-top: var(--space-8); }
+.mb-1 { margin-bottom: var(--space-1); }
+.mb-2 { margin-bottom: var(--space-2); }
+.mb-3 { margin-bottom: var(--space-3); }
+.mb-4 { margin-bottom: var(--space-4); }
+.mb-6 { margin-bottom: var(--space-6); }
+.mb-8 { margin-bottom: var(--space-8); }
+.m-0 { margin: 0; }
+.mr-2 { margin-right: var(--space-2); }
+
+/* Text size / weight / color / alignment. */
+.text-xs { font-size: var(--text-xs); }
+.text-sm { font-size: var(--text-sm); }
+.text-2xl { font-size: var(--text-2xl); }
+.font-medium { font-weight: var(--weight-medium); }
+.font-semibold { font-weight: var(--weight-semibold); }
+.font-bold { font-weight: var(--weight-bold); }
+.nums { font-variant-numeric: tabular-nums; }
+.opacity-70 { opacity: 0.7; }
+.opacity-80 { opacity: 0.8; }
+.cursor-pointer { cursor: pointer; }
+
+.text-muted,
+td.text-muted,
+th.text-muted { color: var(--text-muted); }
+.text-primary-color,
+td.text-primary-color,
+th.text-primary-color { color: var(--text-primary); }
+.text-secondary-color,
+td.text-secondary-color,
+th.text-secondary-color { color: var(--text-secondary); }
+.text-neutral,
+td.text-neutral,
+th.text-neutral { color: var(--color-neutral); }
+
+.text-center,
+td.text-center,
+th.text-center { text-align: center; }
+.text-right,
+td.text-right,
+th.text-right { text-align: right; }
+.text-left,
+td.text-left,
+th.text-left { text-align: left; }

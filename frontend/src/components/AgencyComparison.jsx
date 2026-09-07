@@ -22,9 +22,9 @@ import {
   agencySeriesColor,
 } from '../utils/agencyComparison'
 import {
-  AXIS_TICK_STYLE,
+  AXIS_TICK_STYLE_COMPACT,
   AXIS_LINE_PROPS,
-  CHART_TOOLTIP_CLASS,
+  CHART_TOOLTIP_COMPACT_CLASS,
   GRID_PROPS,
   TOOLTIP_CURSOR_PROPS,
 } from '../charts/theme'
@@ -123,7 +123,7 @@ function HistogramTooltip({ active, payload, label, agencies }) {
   if (!active || !payload?.length) return null
   const nameByKey = Object.fromEntries(agencies.map((a) => [a.agency, a.display_name]))
   return (
-    <div className={CHART_TOOLTIP_CLASS}>
+    <div className={CHART_TOOLTIP_COMPACT_CLASS}>
       <div className="chart-tooltip-title">{label}%</div>
       {payload.map((entry) => (
         <div key={entry.dataKey} style={{ color: entry.color }}>
@@ -161,13 +161,13 @@ function RouteDistributionHistogram({ metric, agencies }) {
           <CartesianGrid vertical={false} {...GRID_PROPS} />
           <XAxis
             dataKey="label"
-            tick={AXIS_TICK_STYLE}
+            tick={AXIS_TICK_STYLE_COMPACT}
             axisLine={AXIS_LINE_PROPS}
             tickLine={false}
           />
           <YAxis
             allowDecimals={false}
-            tick={AXIS_TICK_STYLE}
+            tick={AXIS_TICK_STYLE_COMPACT}
             axisLine={false}
             tickLine={false}
             width={24}

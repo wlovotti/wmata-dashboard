@@ -62,7 +62,8 @@
 /* Per-trip card. borderLeftColor and cursor are set inline (data-driven:
    devColor() by deviation, pointer only when the trip has a run to link
    to) — everything else here is fixed. */
-.block-trip-card {
+/* Compound with .stat-card so this wins regardless of stylesheet order. */
+.stat-card.block-trip-card {
   text-align: left;
   padding: 0.75rem 1rem;
   display: grid;

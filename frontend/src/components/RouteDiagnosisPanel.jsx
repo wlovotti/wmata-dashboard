@@ -59,7 +59,9 @@ import './RouteDiagnosisPanel.css'
 // Timepoint (WMATA schedule-checkpoint) marker color. Distinct blue, not one
 // of the six semantic tokens (it marks a stop's role, not a status), reused
 // across the slip chart and the "●" legend swatch below it.
-const TIMEPOINT_COLOR = '#3b82f6'
+// Resolves against the `--color-timepoint` token in App.css; works as an
+// SVG stroke/fill the same way charts/theme.js's var() colors do.
+const TIMEPOINT_COLOR = 'var(--color-timepoint)'
 
 // Deviation-table accent for "notably early" (below -30s) — distinct from
 // the ordinary early/late gray so a meaningfully-early median stands out.
@@ -338,7 +340,7 @@ function SlipChart({ segments, directionLabel }) {
       {/* Timepoint label strip below chart */}
       {lineData.some((d) => d.is_timepoint) && (
         <div className="timepoint-label-strip">
-          <span style={{ color: TIMEPOINT_COLOR }} className="font-semibold">● </span>
+          <span className="timepoint-legend-dot font-semibold">● </span>
           Timepoints:{' '}
           {lineData
             .filter((d) => d.is_timepoint)
@@ -439,7 +441,7 @@ function TimepointTable({ timepoints, directionLabel }) {
                         {fmtSec(p10Change)}
                       </span>
                     ) : (
-                      <span className="text-muted">N/A</span>
+                      <span className="text-neutral">N/A</span>
                     )}
                   </td>
                 </tr>

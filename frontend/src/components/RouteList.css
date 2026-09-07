@@ -15,7 +15,7 @@
   margin-top: 0.25rem;
   width: 100%;
   height: 5px;
-  background-color: #e5e7eb;
+  background-color: var(--border-default);
   border-radius: 2px;
   overflow: hidden;
 }

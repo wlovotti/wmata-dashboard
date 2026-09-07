@@ -29,7 +29,7 @@
   font-size: var(--text-xs);
   border-radius: var(--radius-full);
   background: rgba(0, 100, 200, 0.15);
-  color: #0a4a8c;
+  color: var(--color-link);
   font-weight: var(--weight-medium);
   vertical-align: middle;
 }

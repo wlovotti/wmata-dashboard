@@ -249,7 +249,7 @@ function BlockTimeline() {
                 )}
 
                 <div
-                  className="stat-card block-timeline-card block-trip-card"
+                  className="stat-card block-trip-card"
                   style={{
                     borderLeft: `6px solid ${devColor(
                       t.destination_deviation_seconds ?? t.origin_deviation_seconds,
