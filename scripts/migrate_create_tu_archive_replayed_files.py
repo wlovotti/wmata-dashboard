@@ -1,6 +1,8 @@
 """Create the ``tu_archive_replayed_files`` manifest table (TU archive replay, PR #245).
 
-Idempotent (CREATE TABLE IF NOT EXISTS). Run once per database:
+Idempotent (CREATE TABLE IF NOT EXISTS + ADD COLUMN IF NOT EXISTS). Run once
+per database — migrate_all.py only reaches the WMATA DB, so the SFMTA
+invocation is always manual:
 
     uv run python scripts/migrate_create_tu_archive_replayed_files.py
     uv run python scripts/migrate_create_tu_archive_replayed_files.py --agency sfmta
@@ -20,9 +22,17 @@ CREATE TABLE IF NOT EXISTS tu_archive_replayed_files (
     filename             VARCHAR    NOT NULL,
     target_service_date  DATE       NOT NULL,
     row_count            INTEGER    NOT NULL,
+    max_snapshot_ts      TIMESTAMP  NULL,
     replayed_at          TIMESTAMP  NOT NULL,
     PRIMARY KEY (filename, target_service_date)
 );
+"""
+
+# The table shipped briefly without max_snapshot_ts (review round 1 of
+# PR #245 added it); bring an early copy up to the model.
+ADD_COLUMN_SQL = """
+ALTER TABLE tu_archive_replayed_files
+    ADD COLUMN IF NOT EXISTS max_snapshot_ts TIMESTAMP NULL;
 """
 
 
@@ -34,10 +44,11 @@ def run_migration(engine) -> None:
     """
     with engine.begin() as conn:
         conn.execute(text(CREATE_TABLE_SQL))
+        conn.execute(text(ADD_COLUMN_SQL))
 
 
 def main(argv=None) -> int:
-    """CLI entry point; ``argv`` is explicit so migrate_all.py can pass []."""
+    """CLI entry point; ``argv`` is explicit so tests can pass a list (migrate_all.py resets ``sys.argv``)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agency", default="wmata", choices=("wmata", "sfmta"))
     args = parser.parse_args(argv)

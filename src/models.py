@@ -462,6 +462,14 @@ class TuArchiveReplayedFile(Base):
     row_count = Column(
         Integer, nullable=False
     )  # snapshot rows folded from this file for this target
+    # Greatest snapshot_ts among the rows this file contributed to the
+    # target (NULL when row_count is 0). The ordering guard in
+    # ``_plan_replay`` compares a new file's open epoch against the max
+    # of these for the date — a file opened at epoch E holds only polls
+    # at or after E, so E >= max(folded snapshot_ts) proves the new
+    # file cannot carry anything older than what the always-overwrite
+    # upsert already holds.
+    max_snapshot_ts = Column(DateTime, nullable=True)
     replayed_at = Column(DateTime, nullable=False, default=utcnow_naive)
 
 

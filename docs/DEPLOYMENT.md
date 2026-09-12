@@ -833,12 +833,7 @@ couldn't run: unset `<AGENCY>_DATABASE_URL`, an unknown `--agency`, a
 transient DB failure). `bin/pull-and-derive.sh` replays and derives
 *both* agencies (SFMTA pull-and-derive automation) — the replay loop
 runs `pipelines/replay_archive_to_state.py` for WMATA and SFMTA every
-lookback date — cheaply, since the replay manifest (PR #245): each `(archive file,
-target service date)` pair is folded once and recorded in
-`tu_archive_replayed_files`, so a lookback date whose files are all
-manifested is a no-op and widening `LOOKBACK_DAYS` costs only
-not-yet-folded files (an out-of-order arrival re-folds that one date in
-full) — (SFMTA's replay passes `--allow-empty`, since its S3
+lookback date (SFMTA's replay passes `--allow-empty`, since its S3
 archive prefix only starts 2026-07-22 and a missing/empty day there is
 expected, not an error — WMATA keeps the strict, no-`--allow-empty`
 behavior), and derive calls `run_daily_batch.py` once with no
@@ -882,6 +877,44 @@ date, and match rate are in the canary's error output):
 
 ---
 
+### 12.2 Replay manifest (`tu_archive_replayed_files`, PR #245)
+
+The replay leg is manifest-idempotent: each `(archive file, target
+service date)` pair is folded into `trip_update_state` once and
+recorded in `tu_archive_replayed_files` (same transaction as the
+upsert). A lookback date whose files are all manifested is a no-op, so
+the 14-day `LOOKBACK_DAYS` costs only not-yet-folded files instead of
+re-folding ~1.8B snapshot rows per run (the 2026-09-07 run took ~9 h
+before this). The key includes the target date because the UTC-next-day
+supplement file is also the next date's first primary file.
+
+Three cases re-fold a date in full from its archive files:
+
+- a not-yet-folded file whose open epoch precedes the newest snapshot
+  already folded for the date (restart-overlap sibling that missed a
+  sync, or a legacy epoch-less name) — the always-overwrite upsert can't
+  fold it alone safely;
+- a fully manifested date with no `trip_update_state` rows *and* no
+  `runs` rows — its state was pruned by the 7-day retention before it
+  was ever derived, and the 14-day catch-up would otherwise derive
+  against empty state forever;
+- `--force`, the operator escape hatch for deliberate re-replays
+  (`scripts/local_recovery_2026_07.sh`, a `runs`-DELETE-then-re-derive).
+
+**Prerequisite, per database.** `scripts/migrate_all.py` only reaches
+the WMATA DB; without the SFMTA invocation every SFMTA replay date fails
+with `relation "tu_archive_replayed_files" does not exist`, which skips
+SFMTA derive and retention for the whole run:
+
+```sh
+uv run python scripts/migrate_create_tu_archive_replayed_files.py
+uv run python scripts/migrate_create_tu_archive_replayed_files.py --agency sfmta
+```
+
+The first run after the migration re-folds the lookback window once to
+seed the manifest. `bin/refresh-dev-db.sh` TOC-excludes the manifest
+alongside `trip_update_state` so a scratch restore can still replay.
+
 ## 13. Stateless collector (nano) — live topology
 
 **Status:** this section documents the stateless-collector rewrite, shipped
@@ -899,6 +932,7 @@ DB-free poll → zstd JSONL → S3 loop — no Postgres, no timers beyond the
 loop itself. One process per agency, run under the templated unit
 `deployment/systemd/collector@.service` as `collector@wmata.service` /
 `collector@sfmta.service`.
+
 
 ### 13.1 Provision the instance
 

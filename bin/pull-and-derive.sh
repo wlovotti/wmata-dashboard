@@ -9,6 +9,9 @@
 # The replay leg is manifest-idempotent (tu_archive_replayed_files, PR #245):
 # widening LOOKBACK_DAYS only costs the files not yet folded, so the
 # default 14-day window is a catch-up safety net, not a per-run re-fold.
+# A manifested date whose state was pruned by retention before it was
+# ever derived (no trip_update_state rows AND no runs rows) re-folds
+# itself; an operator re-replaying a date on purpose passes --force.
 #
 # Requires: AWS credentials with read access to the four
 # raw-jsonl-archive S3 prefixes (root, sfmta/, vp/, sfmta_vp/), and
@@ -293,8 +296,10 @@ if [ "$overall_failure" -eq 1 ]; then
     echo "  step above prunes anything older than its retention window (default" >&2
     echo "  7 days), so a re-derive of an SFMTA date older than that window will" >&2
     echo "  find no state left and produce nothing — recover from the raw" >&2
-    echo "  archive replay instead (pipelines/replay_archive_to_state.py) for" >&2
-    echo "  dates past the window." >&2
+    echo "  archive replay instead (pipelines/replay_archive_to_state.py" >&2
+    echo "  --date D --force — --force bypasses the tu_archive_replayed_files" >&2
+    echo "  manifest, which otherwise treats an already-folded date as done)" >&2
+    echo "  for dates past the window." >&2
   fi
   echo "Done (with errors — see summary above)." >&2
   exit 1

@@ -26,7 +26,7 @@ TUNNEL_PORT="${REFRESH_TUNNEL_PORT:-5433}"   # a manual `ssh -N -L 5433:localhos
 VM_DB_USER="${REFRESH_VM_DB_USER:-wmata}"
 
 # Raw-feed tables the read-only API never queries (verified: no inbound FKs).
-EXCLUDE_TABLES=(vehicle_positions trip_update_state timepoint_times collector_heartbeats)
+EXCLUDE_TABLES=(vehicle_positions trip_update_state tu_archive_replayed_files timepoint_times collector_heartbeats)
 
 MODE_FULL=0; MODE_SCRATCH=0; MODE_PRUNE_GTFS=0; MODE_FROM_VM=0; MODE_CLOBBER=0
 for arg in "$@"; do
