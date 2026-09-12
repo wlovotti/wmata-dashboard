@@ -1,0 +1,87 @@
+"""Create the ``tu_archive_replayed_files`` manifest table (TU archive replay, PR #245).
+
+Idempotent (CREATE TABLE IF NOT EXISTS + ADD COLUMN IF NOT EXISTS). Run once
+per database — migrate_all.py only reaches the WMATA DB, so the SFMTA
+invocation is always manual:
+
+    uv run python scripts/migrate_create_tu_archive_replayed_files.py
+    uv run python scripts/migrate_create_tu_archive_replayed_files.py --agency sfmta
+"""
+
+import argparse
+import sys
+
+from dotenv import load_dotenv
+from sqlalchemy import text
+
+from src.agency_config import load_agency_config, resolve_agency_db_url
+from src.database import get_engine
+
+CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS tu_archive_replayed_files (
+    filename             VARCHAR    NOT NULL,
+    target_service_date  DATE       NOT NULL,
+    row_count            INTEGER    NOT NULL,
+    max_snapshot_ts      TIMESTAMP  NULL,
+    replayed_at          TIMESTAMP  NOT NULL,
+    PRIMARY KEY (filename, target_service_date)
+);
+"""
+
+# The table shipped briefly without max_snapshot_ts (review round 1 of
+# PR #245 added it); bring an early copy up to the model.
+ADD_COLUMN_SQL = """
+ALTER TABLE tu_archive_replayed_files
+    ADD COLUMN IF NOT EXISTS max_snapshot_ts TIMESTAMP NULL;
+"""
+
+# A row folded before the column existed would carry NULL max_snapshot_ts
+# with row_count > 0 — indistinguishable from "folded zero rows", which
+# would silently disable the ordering guard for that date. Drop such rows
+# so their files simply fold again (idempotent; both live tables had 0
+# rows when the column landed, so this is defensive).
+PURGE_PRE_COLUMN_ROWS_SQL = """
+DELETE FROM tu_archive_replayed_files
+    WHERE max_snapshot_ts IS NULL AND row_count > 0;
+"""
+
+
+def run_migration(engine) -> None:
+    """Apply the migration. Safe to re-run.
+
+    Three statements in one transaction: create ``tu_archive_replayed_files``
+    with ``(filename, target_service_date)`` as its primary key (matching
+    ``TuArchiveReplayedFile`` in ``src/models.py``); add ``max_snapshot_ts``
+    to a copy created before that column existed; purge any row that was
+    folded without it (NULL ``max_snapshot_ts`` with ``row_count > 0``).
+    """
+    with engine.begin() as conn:
+        conn.execute(text(CREATE_TABLE_SQL))
+        conn.execute(text(ADD_COLUMN_SQL))
+        conn.execute(text(PURGE_PRE_COLUMN_ROWS_SQL))
+
+
+def main(argv=None) -> int:
+    """CLI entry point; ``argv`` is explicit so tests can pass a list (migrate_all.py resets ``sys.argv``)."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--agency", default="wmata", choices=("wmata", "sfmta"))
+    args = parser.parse_args(argv)
+    load_dotenv()
+    cfg = load_agency_config(args.agency)
+    engine = get_engine(resolve_agency_db_url(cfg))
+    # Print the resolved host/dbname (never the password, via the URL
+    # object's own .host/.database attrs rather than stringifying the
+    # whole URL) so a per-agency invocation is self-verifying — the reader
+    # can confirm this is really about to hit the database they intended
+    # before it runs.
+    print(
+        f"Creating tu_archive_replayed_files in the {args.agency} database "
+        f"({engine.url.host or 'local'}/{engine.url.database})..."
+    )
+    run_migration(engine)
+    print("Done.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

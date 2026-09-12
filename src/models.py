@@ -443,6 +443,36 @@ class VpArchiveLoadedFile(Base):
     loaded_at = Column(DateTime, nullable=False, default=utcnow_naive)
 
 
+class TuArchiveReplayedFile(Base):
+    """One row per (raw TU archive file, target service date) already folded into trip_update_state.
+
+    The replay tool's idempotency key (replay manifest, PR #245). Unlike
+    ``VpArchiveLoadedFile``, the key includes ``target_service_date``:
+    the UTC-next-day *supplement* file for date D is the same physical
+    file as D+1's first primary file, and it is legitimately folded once
+    per target date (once for D's late-evening rows, once for D+1's).
+    """
+
+    __tablename__ = "tu_archive_replayed_files"
+
+    filename = Column(
+        String, primary_key=True
+    )  # basename, e.g. 2026-08-24.25710.1787529633.jsonl.zst
+    target_service_date = Column(Date, primary_key=True)
+    row_count = Column(
+        Integer, nullable=False
+    )  # snapshot rows folded from this file for this target
+    # Greatest snapshot_ts among the rows this file contributed to the
+    # target (NULL when row_count is 0). The ordering guard in
+    # ``_plan_replay`` compares a new file's open epoch against the max
+    # of these for the date — a file opened at epoch E holds only polls
+    # at or after E, so E >= max(folded snapshot_ts) proves the new
+    # file cannot carry anything older than what the always-overwrite
+    # upsert already holds.
+    max_snapshot_ts = Column(DateTime, nullable=True)
+    replayed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+
 class TripUpdateState(Base):
     """Final-state-only mirror of WMATA TripUpdate predictions per (trip, stop).
 

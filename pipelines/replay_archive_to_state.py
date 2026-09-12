@@ -26,6 +26,7 @@ Usage:
         --archive-root /path/to/archive/raw_snapshots
     uv run python pipelines/replay_archive_to_state.py --date 2026-05-18 \\
         --agency sfmta
+    uv run python pipelines/replay_archive_to_state.py --date 2026-05-18 --force
 """
 
 import argparse
@@ -44,6 +45,8 @@ from sqlalchemy.orm import Session
 from src.agency_config import MissingAgencyDatabaseUrlError, load_agency_config
 from src.agency_config import resolve_agency_db_url as _resolve_agency_db_url
 from src.database import get_session
+from src.models import Run, TripUpdateState, TuArchiveReplayedFile
+from src.timezones import from_epoch_naive_utc, utcnow_naive
 from src.upsert_helpers import upsert_trip_update_state
 from src.wmata_collector import dedupe_trip_update_rows
 
@@ -188,11 +191,15 @@ def _fold_archive_file(
     advances the streak.
 
     Mutates ``folded`` in place (so multiple files, primary and
-    supplement, accumulate into one shared fold) and returns the number
-    of rows counted (post same-poll dedup, pre-fold-collapse) from this
-    file alone.
+    supplement, accumulate into one shared fold) and returns
+    ``(rows, max_snapshot_ts)``: the number of rows counted (post
+    same-poll dedup, pre-fold-collapse) from this file alone, and the
+    greatest ``snapshot_ts`` among them (``None`` when zero rows matched)
+    — recorded on the file's manifest row for ``_plan_replay``'s
+    ordering guard.
     """
     total = 0
+    max_ts: datetime | None = None
     consecutive_past_target_polls = 0
     for _snapshot_key, poll_lines in itertools.groupby(
         _iter_jsonl_zst(path), key=lambda r: r.get("snapshot_ts")
@@ -255,8 +262,103 @@ def _fold_archive_file(
                 cur["predicted_arrival_ts"] = predicted_arrival_ts
                 cur["last_pred_snapshot_ts"] = snapshot_ts
             total += 1
+            if max_ts is None or snapshot_ts > max_ts:
+                max_ts = snapshot_ts
 
-    return total
+    return total, max_ts
+
+
+def _file_epoch(path: Path) -> int | None:
+    """Return the rotation epoch encoded in a per-process archive filename.
+
+    Filenames are ``{date}.{pid}.{epoch}.jsonl.zst`` (PR #132 onward);
+    the legacy single-file form ``{date}.jsonl.zst`` carries no epoch and
+    returns ``None``. The epoch is a lower bound on the polls the file
+    holds (a writer never records a snapshot older than its own open
+    time) — it is NOT a total order across files: the old-VM era baked
+    one epoch per writer process, so dozens of files share an epoch, and
+    two overlapping processes can open in either order.
+    """
+    parts = path.name.split(".")
+    if len(parts) == 5 and parts[2].isdigit():
+        return int(parts[2])
+    return None
+
+
+def _plan_replay(
+    candidates: list[Path], manifested: set[str], manifested_max_ts: datetime | None
+) -> tuple[list[Path], bool]:
+    """Decide which archive files to fold for one target date, and whether to start over.
+
+    ``candidates`` is every file that *could* contribute rows to the
+    target date (its primary files plus the UTC-next-day supplement),
+    sorted by name. ``manifested`` holds the basenames already folded
+    for this target (``tu_archive_replayed_files``) and
+    ``manifested_max_ts`` the greatest ``snapshot_ts`` any of them
+    contributed to it (``None`` when nothing has been folded, or every
+    folded file matched zero rows).
+
+    Returns ``(files_to_fold, refold_all)``:
+
+    - ``files_to_fold``: the subset of ``candidates`` to read this run.
+    - ``refold_all``: when ``True`` the caller discards this target
+      date's manifest rows first and ``files_to_fold`` is *all*
+      candidates, so the whole date is re-folded in one ordered in-memory
+      pass (the fold itself is order-safe; only the DB upsert is not).
+
+    Why this decision matters (replay manifest, PR #245):
+    ``upsert_trip_update_state`` is always-overwrite for
+    ``final_snapshot_ts`` / ``stop_id`` / ``final_schedule_relationship``.
+    Folding only the *new* files is correct exactly when every row they
+    hold is at least as new as every row already folded. A file opened
+    at epoch E holds only polls at or after E, so ``E >=
+    manifested_max_ts`` proves that; anything else — an older epoch, a
+    later-opened file from a restart-overlap sibling whose epoch still
+    precedes the newest folded poll, or a legacy name with no epoch at
+    all — cannot be bounded and triggers policy (a): re-fold the whole
+    date. Self-healing at the cost of one full pass over that single
+    date, versus clobbering newer state (fold the stale file alone) or
+    silently dropping its polls (skip it).
+    """
+    new = [p for p in candidates if p.name not in manifested]
+    if manifested_max_ts is None or not new:
+        return new, False
+    unbounded = []
+    for p in new:
+        epoch = _file_epoch(p)
+        if epoch is None or from_epoch_naive_utc(epoch) < manifested_max_ts:
+            unbounded.append(p.name)
+    if unbounded:
+        print(
+            f"Archive file(s) {unbounded} may hold polls older than the newest already-replayed "
+            f"snapshot ({manifested_max_ts}); re-folding the whole date so the ordered fold wins."
+        )
+        return list(candidates), True
+    return new, False
+
+
+def _state_pruned_before_derive(db: Session, target_date: date_type) -> bool:
+    """Return whether ``target_date`` has neither ``trip_update_state`` nor ``runs`` rows.
+
+    Both empty means the date's folded state was pruned by retention
+    before derive ever consumed it — the one case where a fully
+    manifested date must be re-folded from the archive (see
+    ``replay_archive_for_date``). ``runs.service_date`` is a
+    ``YYYY-MM-DD`` string column; ``trip_update_state.service_date`` is a
+    ``DATE``.
+    """
+    has_state = (
+        db.query(TripUpdateState.trip_id)
+        .filter(TripUpdateState.service_date == target_date)
+        .first()
+        is not None
+    )
+    if has_state:
+        return False
+    has_runs = (
+        db.query(Run.id).filter(Run.service_date == target_date.isoformat()).first() is not None
+    )
+    return not has_runs
 
 
 def replay_archive_for_date(
@@ -266,6 +368,7 @@ def replay_archive_for_date(
     chunk_size: int = 5000,
     allow_empty: bool = False,
     agency: str = DEFAULT_AGENCY,
+    force: bool = False,
 ) -> int:
     """Replay all archive files for ``target_date`` into trip_update_state.
 
@@ -299,6 +402,35 @@ def replay_archive_for_date(
     Rows whose computed service_date doesn't match ``target_date`` are
     silently skipped — defensive against midnight-crossing files that
     might contain a few rows belonging to the adjacent service-day.
+
+    **File manifest (replay manifest, PR #245):** every file folded for ``target_date``
+    is recorded in ``tu_archive_replayed_files`` keyed by
+    ``(filename, target_service_date)``, in the same transaction as the
+    state upsert (the caller commits both or neither). Later runs fold
+    only files not yet manifested for this target — so
+    ``bin/pull-and-derive.sh``'s 14-day lookback costs only the new
+    files, not a re-fold of ~100M rows/day. The key includes the target
+    date because the UTC-next-day supplement file is D+1's first primary
+    file too and is folded once per target. Which not-yet-manifested
+    files to fold, and whether a stale-arriving file forces a full
+    re-fold of the date, is ``_plan_replay``'s decision.
+
+    Two situations bypass the manifest and re-fold the date in full:
+
+    - ``force=True`` (CLI ``--force``): the operator's escape hatch for a
+      deliberate re-replay of a date that still has ``runs`` (a
+      ``runs``-DELETE-then-re-derive lands in the pruned-state case
+      below on its own).
+    - **Pruned state:** every file is manifested but ``trip_update_state``
+      holds no rows for the date *and* ``runs`` holds none either.
+      ``cleanup_trip_update_state`` retains ~7 days of state while
+      ``bin/pull-and-derive.sh`` re-targets zero-``runs`` dates up to 14
+      days back; a date whose derive was skipped (canary collapse,
+      replay failure) and then aged past retention used to heal because
+      the next run re-folded it. Without this check the manifest would
+      turn that into an exit-0 no-op and derive would run on empty
+      state forever. A date that *has* runs and pruned state is the
+      normal post-derive shape and is left alone.
 
     **Agency-aware service date (NOTES-96):** ``agency`` selects the
     IANA timezone (via ``config/agencies/<agency>.yaml``,
@@ -398,11 +530,72 @@ def replay_archive_for_date(
 
     paths = sorted(primary_paths)
     supplement_paths = sorted(supplement_paths)
-    print(f"Replaying {len(paths) + len(supplement_paths)} archive file(s) for {target_date}:")
+
+    # Column-only query (no ORM instances) so the refold path's bulk
+    # DELETE + re-add of the same primary keys never collides with a
+    # persistent instance in the session's identity map.
+    manifest_rows = db.query(
+        TuArchiveReplayedFile.filename,
+        TuArchiveReplayedFile.max_snapshot_ts,
+        TuArchiveReplayedFile.row_count,
+    ).filter(TuArchiveReplayedFile.target_service_date == target_date)
+    manifested: set[str] = set()
+    manifested_max_ts: datetime | None = None
+    manifested_rows_total = 0
+    for filename, max_ts, row_count in manifest_rows:
+        manifested.add(filename)
+        manifested_rows_total += row_count
+        if max_ts is not None and (manifested_max_ts is None or max_ts > manifested_max_ts):
+            manifested_max_ts = max_ts
+
+    candidates = paths + supplement_paths
+    refold_reason: str | None = None
+    if manifested:
+        if force:
+            refold_reason = "--force"
+        # A date whose manifested files contributed zero rows (full-day
+        # outage with files still rotated, or a UTC file whose rows all
+        # belong to the adjacent date) has no state to restore — without
+        # this guard it would match the pruned-state branch and re-read
+        # every file on every run, forever.
+        elif manifested_rows_total > 0 and _state_pruned_before_derive(db, target_date):
+            refold_reason = (
+                "trip_update_state holds no rows for the date and runs holds none either "
+                "(state pruned by retention before the date was ever derived)"
+            )
+    if refold_reason is not None:
+        to_fold, refold_all = list(candidates), True
+    else:
+        to_fold, refold_all = _plan_replay(candidates, manifested, manifested_max_ts)
+    if refold_all and manifested:
+        print(
+            f"Re-folding all {len(to_fold)} file(s) for {target_date} "
+            f"(discarding {len(manifested)} manifest row(s)"
+            + (f": {refold_reason}" if refold_reason else "")
+            + ")"
+        )
+        db.query(TuArchiveReplayedFile).filter(
+            TuArchiveReplayedFile.target_service_date == target_date
+        ).delete(synchronize_session=False)
+    to_fold_set = set(to_fold)
+    skipped = len(paths) + len(supplement_paths) - len(to_fold_set)
+    if not to_fold_set:
+        print(
+            f"All {skipped} archive file(s) for {target_date} already replayed "
+            "(tu_archive_replayed_files); nothing to fold."
+        )
+        return 0
+
+    print(
+        f"Replaying {len(to_fold_set)} archive file(s) for {target_date} "
+        f"({skipped} already replayed, skipped):"
+    )
     for p in paths:
-        print(f"  - {p.name}")
+        if p in to_fold_set:
+            print(f"  - {p.name}")
     for p in supplement_paths:
-        print(f"  - {p.name} (UTC-next-day supplement)")
+        if p in to_fold_set:
+            print(f"  - {p.name} (UTC-next-day supplement)")
 
     # Fold state per (trip_id, stop_sequence); service_date is fixed to
     # target_date by the filter inside _fold_archive_file. "_vehicle_ts"
@@ -410,11 +603,18 @@ def replay_archive_for_date(
     # from so ordering is by snapshot_ts, not file iteration order.
     folded: dict[tuple[str, int], dict] = {}
     total = 0
+    per_file: list[tuple[Path, int, datetime | None]] = []
     for p in paths:
-        total += _fold_archive_file(
+        if p not in to_fold_set:
+            continue
+        n, max_ts = _fold_archive_file(
             p, tz_name=tz_name, target_date=target_date, folded=folded, early_exit=False
         )
+        per_file.append((p, n, max_ts))
+        total += n
     for p in supplement_paths:
+        if p not in to_fold_set:
+            continue
         # Rows are chronological within a file (the collector writes
         # each poll in real time), so once a whole poll's rows have all
         # moved past target_date, every later poll in this same
@@ -423,13 +623,31 @@ def replay_archive_for_date(
         # multi-hundred-MB file for rows that will only be filtered out.
         # Only ever applied to the D+1 supplement, never the primary
         # date's own file(s), which are always read in full.
-        total += _fold_archive_file(
+        n, max_ts = _fold_archive_file(
             p, tz_name=tz_name, target_date=target_date, folded=folded, early_exit=True
         )
+        per_file.append((p, n, max_ts))
+        total += n
 
     rows_out = [{k: v for k, v in cur.items() if not k.startswith("_")} for cur in folded.values()]
     for i in range(0, len(rows_out), chunk_size):
         upsert_trip_update_state(db, rows_out[i : i + chunk_size])
+
+    # Manifest rows ride in the same session as the upsert: the caller's
+    # commit lands both, a crash mid-date rolls back both, and the files
+    # simply fold again next run.
+    now = utcnow_naive()
+    db.add_all(
+        TuArchiveReplayedFile(
+            filename=p.name,
+            target_service_date=target_date,
+            row_count=n,
+            max_snapshot_ts=max_ts,
+            replayed_at=now,
+        )
+        for p, n, max_ts in per_file
+    )
+    db.flush()
 
     print(f"Replayed {total} snapshot rows for {target_date} ({len(rows_out)} state rows).")
     return total
@@ -468,6 +686,14 @@ def main() -> int:
             "(NOTES-93)."
         ),
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Ignore tu_archive_replayed_files for --date and re-fold every archive "
+            "file for it (recovery escape hatch; the manifest is rebuilt)."
+        ),
+    )
     args = parser.parse_args()
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     cfg = load_agency_config(args.agency)
@@ -482,7 +708,12 @@ def main() -> int:
     db = get_session(db_url=db_url)
     try:
         replay_archive_for_date(
-            db, target_date, archive_root, allow_empty=args.allow_empty, agency=args.agency
+            db,
+            target_date,
+            archive_root,
+            allow_empty=args.allow_empty,
+            agency=args.agency,
+            force=args.force,
         )
         db.commit()
     except NoArchiveFilesFoundError as e:

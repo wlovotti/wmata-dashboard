@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import zstandard as zstd
 
-from src.models import TripUpdateState
+from src.models import Run, TripUpdateState
 
 
 def _write_jsonl_zst(path: Path, rows: list[dict]) -> Path:
@@ -822,3 +822,428 @@ def test_assert_west_of_utc_accepts_year_round_utc_zone():
     from pipelines.replay_archive_to_state import _assert_west_of_utc
 
     _assert_west_of_utc("Atlantic/Reykjavik")
+
+
+# --- Replay manifest (PR #245): per-(file, target date) --------------------
+
+
+def test_file_epoch_parses_per_process_name_and_rejects_legacy():
+    """``_file_epoch`` reads the rotation epoch from ``{date}.{pid}.{epoch}.jsonl.zst``.
+
+    The legacy single-file form (and the tests' ``{date}.0.jsonl.zst``
+    shorthand, which has no epoch segment) yields ``None``.
+    """
+    from pipelines.replay_archive_to_state import _file_epoch
+
+    assert _file_epoch(Path("2026-08-24.25710.1787529633.jsonl.zst")) == 1787529633
+    assert _file_epoch(Path("2026-08-24.jsonl.zst")) is None
+    assert _file_epoch(Path("2026-08-24.0.jsonl.zst")) is None
+
+
+@pytest.mark.integration
+def test_replay_manifests_each_file_and_skips_it_next_run(tmp_path, pg_session):
+    """A second run folds only files not yet in ``tu_archive_replayed_files``.
+
+    Run 1 folds file A and records it. Between runs a newer file B lands
+    (the normal freshness-pull shape). Run 2 must fold B only — its
+    return value counts B's rows alone — and state must reflect B's
+    later snapshot. Manifest rows are keyed by (filename, target date)
+    and carry the per-file row count.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    file_a = archive_dir / "2026-05-18.1.1779104800.jsonl.zst"  # opened 11:46:40 UTC
+    _write_jsonl_zst(file_a, [_row("2026-05-18 12:00:00", "T_MANIFEST", 1, "2026-05-18 12:05:00")])
+
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_MANIFEST")
+    )
+    pg_session.commit()
+
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 1
+    )
+    pg_session.commit()
+    rows = (
+        pg_session.query(TuArchiveReplayedFile)
+        .filter_by(target_service_date=date(2026, 5, 18))
+        .all()
+    )
+    assert {(r.filename, r.row_count) for r in rows} == {(file_a.name, 1)}
+
+    # Nothing new: no files folded, state untouched.
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )
+
+    # A newer file arrives; only it is folded, and its later snapshot wins.
+    file_b = archive_dir / "2026-05-18.1.1779107200.jsonl.zst"  # opened 12:26:40 UTC (newer)
+    _write_jsonl_zst(
+        file_b,
+        [
+            _row("2026-05-18 12:30:00", "T_MANIFEST", 1, "2026-05-18 12:06:00"),
+            _row("2026-05-18 12:30:30", "T_MANIFEST", 1, "2026-05-18 12:07:00"),
+        ],
+    )
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 2
+    )
+    pg_session.commit()
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_MANIFEST").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 12, 30, 30)
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 12, 7, 0)
+    rows = (
+        pg_session.query(TuArchiveReplayedFile)
+        .filter_by(target_service_date=date(2026, 5, 18))
+        .all()
+    )
+    assert {(r.filename, r.row_count) for r in rows} == {(file_a.name, 1), (file_b.name, 2)}
+
+
+@pytest.mark.integration
+def test_replay_manifest_key_includes_target_date_for_supplement_file(tmp_path, pg_session):
+    """The UTC-next-day supplement file is folded once per target date.
+
+    ``2026-05-19.0.jsonl.zst`` holds a late-ET row for service date
+    2026-05-18 AND is 2026-05-19's own primary file. Replaying 5/18 must
+    not stop 5/19 from reading the same file, so the manifest key is
+    (filename, target_service_date) — one row per target, not per file.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",
+        [_row("2026-05-18 12:00:00", "T_SUPP_18", 1, trip_start_date="20260518")],
+    )
+    shared = archive_dir / "2026-05-19.0.jsonl.zst"
+    _write_jsonl_zst(
+        shared,
+        [
+            _row("2026-05-19 02:30:00", "T_SUPP_18_LATE", 1, trip_start_date=None),  # 5/18 ET
+            _row("2026-05-19 12:00:00", "T_SUPP_19", 1, trip_start_date="20260519"),
+        ],
+    )
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(
+            TripUpdateState.trip_id.in_(["T_SUPP_18", "T_SUPP_18_LATE", "T_SUPP_19"])
+        )
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 19), archive_root=archive_dir)
+    pg_session.commit()
+
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_SUPP_18_LATE").one()
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_SUPP_19").one()
+    keys = {
+        (r.filename, r.target_service_date)
+        for r in pg_session.query(TuArchiveReplayedFile).filter(
+            TuArchiveReplayedFile.filename == shared.name
+        )
+    }
+    assert keys == {(shared.name, date(2026, 5, 18)), (shared.name, date(2026, 5, 19))}
+
+
+@pytest.mark.integration
+def test_replay_manifest_rows_roll_back_with_the_state_upsert(tmp_path, pg_session):
+    """Manifest rows share the caller's transaction with the state rows.
+
+    If the caller rolls back (crash mid-date), neither the state nor the
+    manifest survives, so the file folds again next run instead of being
+    marked done with no state behind it.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    f = archive_dir / "2026-05-18.1.1779104800.jsonl.zst"
+    _write_jsonl_zst(f, [_row("2026-05-18 12:00:00", "T_MANIFEST_RB", 1)])
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_MANIFEST_RB")
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    # Both rows are visible inside the transaction before the rollback...
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_MANIFEST_RB").count() == 1
+    assert pg_session.query(TuArchiveReplayedFile).filter_by(filename=f.name).count() == 1
+    pg_session.rollback()
+
+    # ...and both are gone after it.
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_MANIFEST_RB").count() == 0
+    assert pg_session.query(TuArchiveReplayedFile).filter_by(filename=f.name).count() == 0
+
+    # So the next run folds the file again instead of treating it as done.
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 1
+    )
+    pg_session.commit()
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_MANIFEST_RB").count() == 1
+
+
+@pytest.mark.integration
+def test_replay_refolds_whole_date_when_older_file_arrives_late(tmp_path, pg_session):
+    """A stale-arriving file triggers a full re-fold of that date (PR #245 policy a).
+
+    Run 1 folds the newer file B (epoch 1900). Then A (epoch 1000, an
+    older collector-restart sibling the S3 sync missed) appears. Folding
+    A alone would overwrite B's later ``final_snapshot_ts`` with A's
+    older one, because the DB upsert is always-overwrite. Instead the
+    planner returns every candidate with ``refold_all=True``: the
+    manifest rows for the date are discarded, both files fold in one
+    snapshot_ts-ordered pass, B's state still wins, and the manifest
+    ends up holding both files.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    file_b = archive_dir / "2026-05-18.2.1779107200.jsonl.zst"  # opened 2026-05-18 12:26:40 UTC
+    _write_jsonl_zst(file_b, [_row("2026-05-18 12:30:00", "T_OOO", 1, "2026-05-18 12:35:00")])
+    pg_session.execute(TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_OOO"))
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+
+    file_a = archive_dir / "2026-05-18.1.1779104800.jsonl.zst"  # opened 2026-05-18 11:46:40 UTC
+    _write_jsonl_zst(file_a, [_row("2026-05-18 12:00:00", "T_OOO", 1, "2026-05-18 12:05:00")])
+    count = replay_archive_for_date(
+        pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir
+    )
+    pg_session.commit()
+
+    assert count == 2  # both files re-folded, not just the stale one
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_OOO").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 12, 30, 0)
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 12, 35, 0)
+    rows = (
+        pg_session.query(TuArchiveReplayedFile)
+        .filter_by(target_service_date=date(2026, 5, 18))
+        .all()
+    )
+    assert {(r.filename, r.row_count) for r in rows} == {(file_a.name, 1), (file_b.name, 1)}
+
+
+def test_plan_replay_policy_edges():
+    """Pure-function edges of the ordering guard (PR #245 policy a).
+
+    The guard compares a new file's *open epoch* against the greatest
+    snapshot_ts already folded for the date, not against other files'
+    epochs: a later-opened restart-overlap sibling whose epoch still
+    precedes the newest folded poll, or a legacy name with no epoch,
+    can't be bounded and forces a full re-fold; a file opened at or
+    after that poll folds alone.
+    """
+    from pipelines.replay_archive_to_state import _plan_replay
+
+    old = Path("2026-05-18.111.1779104800.jsonl.zst")  # 11:46:40 UTC
+    new = Path("2026-05-18.222.1779107200.jsonl.zst")  # 12:26:40 UTC
+    legacy = Path("2026-05-18.jsonl.zst")
+    noon = datetime(2026, 5, 18, 12, 0, 0)
+    half_past = datetime(2026, 5, 18, 12, 30, 0)
+
+    # Nothing manifested: fold everything, no refold.
+    assert _plan_replay([old, new], set(), None) == ([old, new], False)
+    # All manifested: nothing to do.
+    assert _plan_replay([old, new], {old.name, new.name}, half_past) == ([], False)
+    # Newer file opened after the newest folded poll: fold it alone.
+    assert _plan_replay([old, new], {old.name}, noon) == ([new], False)
+    # Overlap sibling: opened later than `old` but before old's newest poll -> refold.
+    assert _plan_replay([old, new], {old.name}, half_past) == ([old, new], True)
+    # Legacy name after a per-process file: no epoch to bound -> refold.
+    assert _plan_replay([legacy, old], {old.name}, noon) == ([legacy, old], True)
+    # Manifest holding only a legacy file still carries its max_ts -> guard active.
+    assert _plan_replay([legacy, old], {legacy.name}, half_past) == ([legacy, old], True)
+    assert _plan_replay([legacy, new], {legacy.name}, noon) == ([new], False)
+    # Manifested files that matched zero rows leave max_ts None -> nothing to protect.
+    assert _plan_replay([old, new], {old.name}, None) == ([new], False)
+
+
+@pytest.mark.integration
+def test_replay_refolds_overlap_sibling_opened_later_but_covering_earlier_polls(
+    tmp_path, pg_session
+):
+    """Restart-overlap: pidB opens *after* pidA but its polls predate pidA's newest.
+
+    Review round 1 of PR #245 reproduced this regressing final_snapshot_ts
+    12:30 -> 12:20 under an epoch-vs-epoch guard. With the guard keyed on
+    the newest folded snapshot_ts, pidB (epoch 12:26:40 < 12:30 folded)
+    forces a full re-fold and pidA's later poll still wins.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    pid_a = archive_dir / "2026-05-18.111.1779104800.jsonl.zst"  # 11:46:40 UTC
+    _write_jsonl_zst(
+        pid_a,
+        [
+            _row("2026-05-18 12:00:00", "T_OVERLAP", 1, "2026-05-18 12:40:00"),
+            _row("2026-05-18 12:30:00", "T_OVERLAP", 1, "2026-05-18 12:45:00"),
+        ],
+    )
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_OVERLAP")
+    )
+    pg_session.commit()
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+
+    pid_b = archive_dir / "2026-05-18.222.1779107200.jsonl.zst"  # 12:26:40 UTC
+    _write_jsonl_zst(
+        pid_b,
+        [
+            _row("2026-05-18 12:10:00", "T_OVERLAP", 1, "2026-05-18 12:41:00"),
+            _row("2026-05-18 12:20:00", "T_OVERLAP", 1, "2026-05-18 12:42:00"),
+        ],
+    )
+    count = replay_archive_for_date(
+        pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir
+    )
+    pg_session.commit()
+
+    assert count == 4  # full re-fold, both files
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_OVERLAP").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 12, 30, 0)
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 12, 45, 0)
+
+
+@pytest.mark.integration
+def test_replay_refolds_manifested_date_whose_state_was_pruned_before_derive(tmp_path, pg_session):
+    """Retention (7 d) < catch-up lookback (14 d): a never-derived date must re-fold.
+
+    Simulates: date folded and manifested, derive skipped, state pruned
+    by ``cleanup_trip_update_state``. The next run sees every file
+    manifested but no state and no ``runs`` for the date, so it re-folds
+    from the archive instead of returning 0 and letting derive run on
+    nothing forever (PR #245 review blocker).
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    f = archive_dir / "2026-05-18.1.1779104800.jsonl.zst"
+    _write_jsonl_zst(f, [_row("2026-05-18 12:00:00", "T_PRUNED", 1, "2026-05-18 12:05:00")])
+    # Isolate the date: the pruned-state check looks at the whole service date.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.service_date == date(2026, 5, 18))
+    )
+    pg_session.execute(Run.__table__.delete().where(Run.service_date == "2026-05-18"))
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+    assert pg_session.query(TuArchiveReplayedFile).filter_by(filename=f.name).count() == 1
+
+    # Retention prunes the state; the manifest row survives.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.service_date == date(2026, 5, 18))
+    )
+    pg_session.commit()
+
+    count = replay_archive_for_date(
+        pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir
+    )
+    pg_session.commit()
+    assert count == 1
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_PRUNED").count() == 1
+
+    # Once the date has runs, pruned state is the normal post-derive shape: no re-fold.
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.service_date == date(2026, 5, 18))
+    )
+    pg_session.add(
+        Run(
+            trip_id="T_PRUNED",
+            route_id="TEST_ROUTE",
+            direction_id=0,
+            service_date="2026-05-18",
+            source="trip_update",
+            stops_observed=0,
+            stops_skipped=0,
+            derived_at=datetime(2026, 5, 19, 8, 0, 0),
+        )
+    )
+    pg_session.commit()
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )
+
+
+@pytest.mark.integration
+def test_replay_force_refolds_manifested_date(tmp_path, pg_session):
+    """``force=True`` ignores the manifest and re-folds the date (recovery escape hatch)."""
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    f = archive_dir / "2026-05-18.1.1779104800.jsonl.zst"
+    _write_jsonl_zst(f, [_row("2026-05-18 12:00:00", "T_FORCE", 1)])
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_FORCE")
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )
+    assert (
+        replay_archive_for_date(
+            pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir, force=True
+        )
+        == 1
+    )
+
+
+@pytest.mark.integration
+def test_replay_does_not_refold_manifested_date_that_folded_zero_rows(tmp_path, pg_session):
+    """Files that contributed zero rows leave no state to restore -> no perpetual re-fold.
+
+    Round 2 of PR #245: a date whose files exist but hold no rows for it
+    (outage day, or rows all on the adjacent service date) matched the
+    pruned-state branch (no state, no runs) and re-read every file on
+    every run. The guard requires at least one folded row.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    f = archive_dir / "2026-05-18.1.1779104800.jsonl.zst"
+    # Row belongs to 5/17 (trip_start_date), so it folds nothing for 5/18.
+    _write_jsonl_zst(f, [_row("2026-05-18 12:00:00", "T_ZERO", 1, trip_start_date="20260517")])
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.service_date == date(2026, 5, 18))
+    )
+    pg_session.execute(Run.__table__.delete().where(Run.service_date == "2026-05-18"))
+    pg_session.commit()
+
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )
+    pg_session.commit()
+    # Second run: manifested, no state, no runs — but nothing was ever folded.
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )
