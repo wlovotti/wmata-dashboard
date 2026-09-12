@@ -6,6 +6,10 @@
 #   bin/pull-and-derive.sh          # replay+derive lookback of 14 days
 #   bin/pull-and-derive.sh 35       # wider catch-up
 #
+# The replay leg is manifest-idempotent (tu_archive_replayed_files, NOTES-145):
+# widening LOOKBACK_DAYS only costs the files not yet folded, so the
+# default 14-day window is a catch-up safety net, not a per-run re-fold.
+#
 # Requires: AWS credentials with read access to the four
 # raw-jsonl-archive S3 prefixes (root, sfmta/, vp/, sfmta_vp/), and
 # local DATABASE_URL + SFMTA_DATABASE_URL (.env) for the loader/replay/
@@ -90,7 +94,7 @@ PYTHONUNBUFFERED=1 uv run python pipelines/load_vp_archive.py --agency wmata --a
 vp_sfmta_rc=0
 PYTHONUNBUFFERED=1 uv run python pipelines/load_vp_archive.py --agency sfmta --archive-root "$LOCAL_ARCHIVE_SFMTA_VP" || vp_sfmta_rc=$?
 
-echo "== replay TU archive for the lookback window (idempotent), per agency =="
+echo "== replay TU archive for the lookback window (manifest-idempotent: only not-yet-folded files, NOTES-145), per agency =="
 # replay_archive_to_state.py fails loudly on a zero-file match for a
 # date; derivation must never run past a replay failure (the NOTES-93
 # incident) — that protection stays as-is for WMATA. Both agencies'

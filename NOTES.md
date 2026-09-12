@@ -14,7 +14,7 @@ git log --all -p -- NOTES.md notes/ | grep -oE 'NOTES-[0-9]+' | sort -t- -k2 -n 
 Numbers can also be consumed by items created and closed within a
 single session without ever being committed under `NOTES.md` or
 `notes/` — the command above won't see those. The highest number used
-to date is NOTES-144 (PR #236); update this anchor if you mint a higher
+to date is NOTES-146 (NOTES-145 PR); update this anchor if you mint a higher
 one.
 
 Punch-list edits ride on substantive PRs; standalone reconciliation
@@ -33,6 +33,8 @@ serves this or is explicitly parked.
 
 ## Ops & reliability
 
+- [NOTES-145](notes/NOTES-145.md) Replay re-folds the full lookback window every freshness run (~9 h/run) — sev medium / eff medium — unblocked; in progress
+- [NOTES-146](notes/NOTES-146.md) Freshness pull is manually triggered — sev low / eff low-medium — blocked on NOTES-145
 - [NOTES-131](notes/NOTES-131.md) Full local test suite reads the production database — sev low / eff medium — unblocked
 - [NOTES-132](notes/NOTES-132.md) Dead-man ping can false-positive on an empty-but-healthy feed — sev low / eff low-medium — unblocked
 - [NOTES-102](notes/NOTES-102.md) Backfill June recovery-window trip_update truncation — sev low / eff low — unblocked; needs S3 pull for 6/14–16 + snapshot-12 GTFS pin

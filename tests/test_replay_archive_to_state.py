@@ -822,3 +822,161 @@ def test_assert_west_of_utc_accepts_year_round_utc_zone():
     from pipelines.replay_archive_to_state import _assert_west_of_utc
 
     _assert_west_of_utc("Atlantic/Reykjavik")
+
+
+# --- NOTES-145: per-(file, target date) replay manifest --------------------
+
+
+def test_file_epoch_parses_per_process_name_and_rejects_legacy():
+    """``_file_epoch`` reads the rotation epoch from ``{date}.{pid}.{epoch}.jsonl.zst``.
+
+    The legacy single-file form (and the tests' ``{date}.0.jsonl.zst``
+    shorthand, which has no epoch segment) yields ``None``.
+    """
+    from pipelines.replay_archive_to_state import _file_epoch
+
+    assert _file_epoch(Path("2026-08-24.25710.1787529633.jsonl.zst")) == 1787529633
+    assert _file_epoch(Path("2026-08-24.jsonl.zst")) is None
+    assert _file_epoch(Path("2026-08-24.0.jsonl.zst")) is None
+
+
+@pytest.mark.integration
+def test_replay_manifests_each_file_and_skips_it_next_run(tmp_path, pg_session):
+    """A second run folds only files not yet in ``tu_archive_replayed_files``.
+
+    Run 1 folds file A and records it. Between runs a newer file B lands
+    (the normal freshness-pull shape). Run 2 must fold B only — its
+    return value counts B's rows alone — and state must reflect B's
+    later snapshot. Manifest rows are keyed by (filename, target date)
+    and carry the per-file row count.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    file_a = archive_dir / "2026-05-18.1.1000.jsonl.zst"
+    _write_jsonl_zst(file_a, [_row("2026-05-18 12:00:00", "T_MANIFEST", 1, "2026-05-18 12:05:00")])
+
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_MANIFEST")
+    )
+    pg_session.commit()
+
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 1
+    )
+    pg_session.commit()
+    rows = (
+        pg_session.query(TuArchiveReplayedFile)
+        .filter_by(target_service_date=date(2026, 5, 18))
+        .all()
+    )
+    assert {(r.filename, r.row_count) for r in rows} == {(file_a.name, 1)}
+
+    # Nothing new: no files folded, state untouched.
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )
+
+    # A newer file arrives; only it is folded, and its later snapshot wins.
+    file_b = archive_dir / "2026-05-18.1.1900.jsonl.zst"
+    _write_jsonl_zst(
+        file_b,
+        [
+            _row("2026-05-18 12:15:00", "T_MANIFEST", 1, "2026-05-18 12:06:00"),
+            _row("2026-05-18 12:15:30", "T_MANIFEST", 1, "2026-05-18 12:07:00"),
+        ],
+    )
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 2
+    )
+    pg_session.commit()
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_MANIFEST").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 12, 15, 30)
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 12, 7, 0)
+    rows = (
+        pg_session.query(TuArchiveReplayedFile)
+        .filter_by(target_service_date=date(2026, 5, 18))
+        .all()
+    )
+    assert {(r.filename, r.row_count) for r in rows} == {(file_a.name, 1), (file_b.name, 2)}
+
+
+@pytest.mark.integration
+def test_replay_manifest_key_includes_target_date_for_supplement_file(tmp_path, pg_session):
+    """The UTC-next-day supplement file is folded once per target date.
+
+    ``2026-05-19.0.jsonl.zst`` holds a late-ET row for service date
+    2026-05-18 AND is 2026-05-19's own primary file. Replaying 5/18 must
+    not stop 5/19 from reading the same file, so the manifest key is
+    (filename, target_service_date) — one row per target, not per file.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    _write_jsonl_zst(
+        archive_dir / "2026-05-18.0.jsonl.zst",
+        [_row("2026-05-18 12:00:00", "T_SUPP_18", 1, trip_start_date="20260518")],
+    )
+    shared = archive_dir / "2026-05-19.0.jsonl.zst"
+    _write_jsonl_zst(
+        shared,
+        [
+            _row("2026-05-19 02:30:00", "T_SUPP_18_LATE", 1, trip_start_date=None),  # 5/18 ET
+            _row("2026-05-19 12:00:00", "T_SUPP_19", 1, trip_start_date="20260519"),
+        ],
+    )
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(
+            TripUpdateState.trip_id.in_(["T_SUPP_18", "T_SUPP_18_LATE", "T_SUPP_19"])
+        )
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 19), archive_root=archive_dir)
+    pg_session.commit()
+
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_SUPP_18_LATE").one()
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_SUPP_19").one()
+    keys = {
+        (r.filename, r.target_service_date)
+        for r in pg_session.query(TuArchiveReplayedFile).filter(
+            TuArchiveReplayedFile.filename == shared.name
+        )
+    }
+    assert keys == {(shared.name, date(2026, 5, 18)), (shared.name, date(2026, 5, 19))}
+
+
+@pytest.mark.integration
+def test_replay_manifest_rows_roll_back_with_the_state_upsert(tmp_path, pg_session):
+    """Manifest rows share the caller's transaction with the state rows.
+
+    If the caller rolls back (crash mid-date), neither the state nor the
+    manifest survives, so the file folds again next run instead of being
+    marked done with no state behind it.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    f = archive_dir / "2026-05-18.1.1000.jsonl.zst"
+    _write_jsonl_zst(f, [_row("2026-05-18 12:00:00", "T_MANIFEST_RB", 1)])
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_MANIFEST_RB")
+    )
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.rollback()
+
+    assert pg_session.query(TripUpdateState).filter_by(trip_id="T_MANIFEST_RB").count() == 0
+    assert pg_session.query(TuArchiveReplayedFile).filter_by(filename=f.name).count() == 0

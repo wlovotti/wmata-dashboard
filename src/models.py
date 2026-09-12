@@ -443,6 +443,28 @@ class VpArchiveLoadedFile(Base):
     loaded_at = Column(DateTime, nullable=False, default=utcnow_naive)
 
 
+class TuArchiveReplayedFile(Base):
+    """One row per (raw TU archive file, target service date) already folded into trip_update_state.
+
+    The replay tool's idempotency key (NOTES-145). Unlike
+    ``VpArchiveLoadedFile``, the key includes ``target_service_date``:
+    the UTC-next-day *supplement* file for date D is the same physical
+    file as D+1's first primary file, and it is legitimately folded once
+    per target date (once for D's late-evening rows, once for D+1's).
+    """
+
+    __tablename__ = "tu_archive_replayed_files"
+
+    filename = Column(
+        String, primary_key=True
+    )  # basename, e.g. 2026-08-24.25710.1787529633.jsonl.zst
+    target_service_date = Column(Date, primary_key=True)
+    row_count = Column(
+        Integer, nullable=False
+    )  # snapshot rows folded from this file for this target
+    replayed_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+
 class TripUpdateState(Base):
     """Final-state-only mirror of WMATA TripUpdate predictions per (trip, stop).
 
