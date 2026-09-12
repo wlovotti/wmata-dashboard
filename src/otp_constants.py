@@ -4,7 +4,7 @@ On-time performance window constants.
 Centralizes the early/late thresholds used to classify schedule
 deviations across OTP calculations, for two windows: the official WMATA
 scorecard window (comparability with WMATA's published numbers) and a
-stricter rider-experience window (NOTES-20, NOTES-144) available as an
+stricter rider-experience window (issue #252, PR #241) available as an
 opt-in on the request-time OTP endpoints. See "Two OTP windows" below
 for the full picture and `otp_window_bounds()` for resolving either by
 name.
@@ -64,7 +64,7 @@ There are two related-but-distinct OTP windows; do not conflate them.
 2. Rider-experience (`RIDER_OTP_EARLY_SEC` / `RIDER_OTP_LATE_SEC`,
    -1min/+3min). A stricter, tighter window matching how a waiting rider
    actually experiences lateness rather than WMATA's scorecard standard
-   (see notes/NOTES-20.md). Available as an opt-in `otp_window=rider`
+   (see issue #252). Available as an opt-in `otp_window=rider`
    request-time parameter on the route-level endpoints that compute OTP
    live from `stop_events` — route detail (`/api/routes/{id}`, which
    also feeds the letter grade), trend, and stop diagnostics; it does
@@ -87,7 +87,7 @@ def otp_window_bounds(name: str) -> tuple[int, int]:
 
     Args:
         name: `"official"` (WMATA scorecard -2min/+7min) or `"rider"`
-            (rider-experience -1min/+3min, NOTES-20).
+            (rider-experience -1min/+3min, issue #252).
 
     Returns:
         `(early_sec, late_sec)` — a deviation `dev_sec` is on-time when

@@ -546,7 +546,7 @@ async def get_route(
     OTP fields (`otp_all_pct` / `otp_origin_pct` / `otp_destination_pct`)
     and therefore also `grade` (scored on `otp_all_pct`): `official`
     (default, WMATA scorecard -2min/+7min) or `rider` (stricter
-    rider-experience -1min/+3min, see notes/NOTES-20.md). It does not
+    rider-experience -1min/+3min, see issue #252). It does not
     affect `deltas`, which is sourced from the precomputed daily overlay
     and stays official-window regardless.
 
@@ -621,7 +621,7 @@ async def get_route_trend(
     `otp_window` (NOTES-144) picks the on-time deviation bounds for
     `metric=otp`: `official` (default, WMATA scorecard -2min/+7min, keeps
     today's numbers) or `rider` (stricter rider-experience -1min/+3min,
-    see notes/NOTES-20.md). Ignored for other metrics.
+    see issue #252). Ignored for other metrics.
 
     Args:
         route_id: Route identifier (e.g., 'C51')
@@ -968,7 +968,7 @@ async def get_route_stop_diagnostics_endpoint(
     `otp_window` (NOTES-144) picks the on-time deviation bounds for
     `otp_pct`: `official` (default, WMATA scorecard -2min/+7min) or
     `rider` (stricter rider-experience -1min/+3min, see
-    notes/NOTES-20.md). Only affects `otp_pct` — median/p95 deviation and
+    issue #252). Only affects `otp_pct` — median/p95 deviation and
     skip_pct are unchanged.
 
     Args:

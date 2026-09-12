@@ -20,7 +20,7 @@ runs. See the Run model docstring for the full source-asymmetry write-up.
 All-timepoints OTP uses `proximity` stop_events (position-derived, every
 observed stop) — comparable to what WMATA publishes. `compute_otp_split`
 takes an optional `early_sec`/`late_sec` on-time window (NOTES-144,
-NOTES-20) so callers can switch between the official WMATA scorecard
+issue #252) so callers can switch between the official WMATA scorecard
 window and the stricter rider-experience window without a second code
 path; EWT for frequent routes (see `src/ewt.py`) layers on the same
 per-stop deviation data separately.

@@ -407,7 +407,7 @@ def _db_identity(db: Session) -> str:
 # + 3 queries per sampled representative-weekday date (~12/day_type on
 # WMATA's typical window) — unmemoized, that's ~40 queries × ~128 routes
 # ≈ 5,100 extra round-trips per day_type per pass, which multiplies badly
-# over the SSH tunnel (NOTES-88).
+# over the SSH tunnel (issue #254).
 _service_id_resolution_cache: dict[tuple[str, str, int], frozenset[str]] = {}
 _service_id_resolution_cache_lock = Lock()
 

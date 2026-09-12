@@ -503,7 +503,7 @@ below was run on that date.
   enabling. **Actual first run (2026-06-10):** 10,030,782 rows across 16 UTC
   dates — the expected 2026-05-03 → 2026-05-12 backlog *plus six phantom dates
   from October 2025* (~2.26M rows with bogus vehicle-reported timestamps
-  predating collection; see the phantom-timestamp NOTES item). Run time ~1¾ h,
+  predating collection; tracked in a since-closed punch-list item). Run time ~1¾ h,
   dominated by the post-DELETE VACUUM; steady-state nightly runs handle one
   ~1M-row day and are far shorter. A day already partially past the cutoff is
   archived **whole** (the script expires whole UTC days), so rows can leave
@@ -695,7 +695,7 @@ du -sh /mnt/pgdata/main    # Postgres data dir
 - **AWS Lightsail docs:** <https://docs.aws.amazon.com/lightsail/>
 - **Systemd units:** `deployment/systemd/`
 - **Backup script:** `deployment/scripts/backup_db.sh`
-- **NOTES-50** (deploy API + frontend + hosted DB; Phase 1 / NOTES-48 closed 2026-06-13; the phase-2 managed-Postgres item was closed as superseded 2026-08-12 and folded into NOTES-50)
+- **Issue #255** (deploy API + frontend + hosted DB; Phase 1 closed 2026-06-13; the phase-2 managed-Postgres item was closed as superseded 2026-08-12 and folded into #255)
 
 ---
 
@@ -1077,7 +1077,7 @@ WMATA collector check tied to the old VM in §1–§11), each configured with
   never rotates a file and the upload cycle has nothing to ship, which
   means no ping and, once the grace elapses, a page even though the
   collector is working correctly. Accepted for now; tracked as
-  [NOTES-132](../notes/NOTES-132.md).
+  [issue #248](https://github.com/wlovotti/wmata-dashboard/issues/248).
 
 Set each check's ping URL into `COLLECTOR_HEALTHCHECK_URL` /
 `SFMTA_COLLECTOR_HEALTHCHECK_URL` in the matching `.env.<agency>` file,

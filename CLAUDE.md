@@ -8,8 +8,19 @@ database on the collector box). API + frontend run locally against the
 local DB. Freshness: run `bin/pull-and-derive.sh` (syncs the S3
 archives, loads + replays, derives, then prunes SFMTA's
 trip_update_state retention window — no tunnel or VM access needed).
-Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: `NOTES.md`
-(index; item bodies in `notes/NOTES-N.md`).
+Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: GitHub Issues
+(`gh issue list`; labels `track:*`, `sev:*`, `effort:*`, `blocked`).
+Historical `NOTES-N` numbers in old PRs and docs refer to the retired
+`NOTES.md` file; migrated issues say "Migrated from NOTES-N" in their
+body, so `gh issue list --state all --search NOTES-N` finds them.
+
+## North star
+
+An easily digestible display of bus performance metrics comparing
+agencies — WMATA vs SFMTA (Muni) first: a few headline KPIs computed
+identically per agency, shown side by side with honest comparability
+caveats. Audience for now: personal. Every open issue either serves
+this or is explicitly parked (`track:deferred`).
 
 ## Commands
 
@@ -101,6 +112,12 @@ cd frontend && npm run lint && npm test && npm run build         # frontend gate
   RouteList / RouteDetail-D72 / Segments) requires regenerating BOTH
   the darwin and linux sets (commands in `frontend/README.md`); regen
   is user-run.
+- A PR that closes an issue puts `Closes #N` in its body, and the
+  body explains *why* the change was scoped that way — the PR is the
+  durable record of the decision, the issue of the problem. Reference
+  issues as `#N` / `issue #N`, never `NOTES-N`.
 - Project Claude tooling: auto-triggering skills in
-  `.claude/skills/<name>/SKILL.md`, explicit slash commands in
-  `.claude/commands/<name>.md` — both checked in.
+  `.claude/skills/<name>/SKILL.md` (`file-issue`), explicit slash
+  commands in `.claude/commands/<name>.md` (`/issue-cycle`,
+  `/issue-batch`, `/collector-status`), review agent in
+  `.claude/agents/pr-reviewer.md` — all checked in.
