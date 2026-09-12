@@ -32,6 +32,21 @@ from src.models import (
     VehiclePosition,
 )
 from src.timezones import utcnow_naive
+from tests._prod_db_guard import check_collection, guard_message, is_production_db_url
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Fail fast if a non-smoke, non-overridden run points at a production DB.
+
+    Runs after pytest's own `-m` deselection (``trylast=True``), so `items`
+    reflects what will actually execute. The decision itself lives in
+    `tests/_prod_db_guard.py:check_collection` (issue #247 / NOTES-131) --
+    this hookimpl just wires that pure function into pytest's exit.
+    """
+    message = check_collection(items)
+    if message is not None:
+        pytest.exit(message, returncode=1)
 
 
 @pytest.fixture(scope="session")
@@ -79,11 +94,17 @@ def pg_engine():
     need Postgres-specific SQL (pg_insert / ON CONFLICT / DDL features
     SQLite can't represent).
 
-    Reads ``PG_TEST_DATABASE_URL`` if set, otherwise falls back to
-    the local dev DB ``postgresql:///wmata_dashboard``. The dev DB is
-    safe because per-test transactions roll back.
+    Reads ``PG_TEST_DATABASE_URL`` if set, otherwise falls back to the
+    scratch DB ``postgresql:///wmata_test_local``. Refuses to bind to a
+    production DB name (``wmata_dashboard`` / ``sfmta_dashboard``) unless
+    ``PYTEST_ALLOW_PROD_DB=1`` is set — defense in depth for the case where
+    a single pg test runs under ``-m smoke`` (bypassing the
+    `pytest_collection_modifyitems` guard above) or the hook is otherwise
+    skipped (issue #247 / NOTES-131).
     """
-    url = os.environ.get("PG_TEST_DATABASE_URL", "postgresql:///wmata_dashboard")
+    url = os.environ.get("PG_TEST_DATABASE_URL", "postgresql:///wmata_test_local")
+    if is_production_db_url(url) and os.environ.get("PYTEST_ALLOW_PROD_DB") != "1":
+        pytest.exit(guard_message([("PG_TEST_DATABASE_URL", url)]), returncode=1)
     engine = create_engine(url, echo=False)
     yield engine
     engine.dispose()

@@ -32,7 +32,12 @@ bin/pull-and-derive.sh                       # freshness: sync S3 raw archives +
 uv run python pipelines/run_daily_batch.py   # derive + aggregate + rollup (--agency sfmta for Muni)
 psql -d wmata_dashboard                      # ad-hoc queries (Muni sidecar DB: sfmta_dashboard)
 uv run pytest -m smoke                       # fast tests
-bin/test-with-pg                             # full suite vs Postgres (mirrors CI)
+bin/test-with-pg                             # full suite vs Postgres (mirrors CI); points DATABASE_URL/PG_TEST_DATABASE_URL/SFMTA_DATABASE_URL at a scratch DB for you
+# any pytest run whose selection isn't entirely smoke-marked refuses to
+# proceed against the production DB (wmata_dashboard/sfmta_dashboard);
+# use bin/test-with-pg, or set DATABASE_URL, PG_TEST_DATABASE_URL, AND
+# SFMTA_DATABASE_URL to a scratch DB yourself, or override with
+# PYTEST_ALLOW_PROD_DB=1 (issue #247)
 uv run ruff check src/ scripts/ api/ pipelines/ tests/           # lint — CI gate
 uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format — separate CI gate
 cd frontend && npm run lint && npm test && npm run build         # frontend gates (CI runs all three)
