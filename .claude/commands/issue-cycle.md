@@ -197,7 +197,7 @@ completes; never end the turn instead.
 5. REFERENCE SWEEP. Prose elsewhere in the repo may describe #{{N}} as
    still open ("tracked as #{{N}}", "see #{{N}}", "deferred to #{{N}}"):
      grep -rn '#{{N}}\b' --include='*.md' --include='*.py' \
-       --include='*.tsx' --include='*.ts' --include='*.sh'
+       --include='*.tsx' --include='*.ts' --include='*.sh' --include='*.yml'
    Reword those to point at the fix ("fixed in PR #M" — use the PR
    number once known). Leave `docs/superpowers/` and
    `docs/POSTMORTEM_*.md` untouched (frozen artifacts). The issue itself

@@ -4,7 +4,7 @@ On-time performance window constants.
 Centralizes the early/late thresholds used to classify schedule
 deviations across OTP calculations, for two windows: the official WMATA
 scorecard window (comparability with WMATA's published numbers) and a
-stricter rider-experience window (issue #252; backend shipped in PR #241) available as an
+stricter rider-experience window (issue #252, PR #241) available as an
 opt-in on the request-time OTP endpoints. See "Two OTP windows" below
 for the full picture and `otp_window_bounds()` for resolving either by
 name.

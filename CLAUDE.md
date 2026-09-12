@@ -12,7 +12,7 @@ Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: GitHub Issues
 (`gh issue list`; labels `track:*`, `sev:*`, `effort:*`, `blocked`).
 Historical `NOTES-N` numbers in old PRs and docs refer to the retired
 `NOTES.md` file; migrated issues say "Migrated from NOTES-N" in their
-body, so `gh issue list --search NOTES-N` finds them.
+body, so `gh issue list --state all --search NOTES-N` finds them.
 
 ## North star
 

@@ -71,8 +71,8 @@ named in the issue body's work section, widened by convention — for
 each named file under `src/`, `api/`, or `pipelines/`, also include
 `tests/test_<name>.py`. Add any file whose prose the reference sweep
 would reword (`grep -rln '#N\b' --include='*.md' --include='*.py'
---include='*.tsx' --include='*.ts' | grep -v '^\./docs/superpowers/'
-| grep -v 'docs/POSTMORTEM_'`).
+--include='*.tsx' --include='*.ts' --include='*.sh' --include='*.yml'
+| grep -v '^\./docs/superpowers/' | grep -v 'docs/POSTMORTEM_'`).
 
 If two touch-sets intersect, drop the lower-priority issue and name
 it in the announcement, e.g. "#250 dropped: overlaps #247 on
