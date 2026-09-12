@@ -417,10 +417,10 @@ def replay_archive_for_date(
 
     Two situations bypass the manifest and re-fold the date in full:
 
-    - ``force=True`` (CLI ``--force``): the operator's escape hatch for
-      recovery flows that replay a date on purpose
-      (``scripts/local_recovery_2026_07.sh``, a ``runs``-DELETE-then-
-      re-derive).
+    - ``force=True`` (CLI ``--force``): the operator's escape hatch for a
+      deliberate re-replay of a date that still has ``runs`` (a
+      ``runs``-DELETE-then-re-derive lands in the pruned-state case
+      below on its own).
     - **Pruned state:** every file is manifested but ``trip_update_state``
       holds no rows for the date *and* ``runs`` holds none either.
       ``cleanup_trip_update_state`` retains ~7 days of state while
@@ -535,12 +535,16 @@ def replay_archive_for_date(
     # DELETE + re-add of the same primary keys never collides with a
     # persistent instance in the session's identity map.
     manifest_rows = db.query(
-        TuArchiveReplayedFile.filename, TuArchiveReplayedFile.max_snapshot_ts
+        TuArchiveReplayedFile.filename,
+        TuArchiveReplayedFile.max_snapshot_ts,
+        TuArchiveReplayedFile.row_count,
     ).filter(TuArchiveReplayedFile.target_service_date == target_date)
     manifested: set[str] = set()
     manifested_max_ts: datetime | None = None
-    for filename, max_ts in manifest_rows:
+    manifested_rows_total = 0
+    for filename, max_ts, row_count in manifest_rows:
         manifested.add(filename)
+        manifested_rows_total += row_count
         if max_ts is not None and (manifested_max_ts is None or max_ts > manifested_max_ts):
             manifested_max_ts = max_ts
 
@@ -549,7 +553,12 @@ def replay_archive_for_date(
     if manifested:
         if force:
             refold_reason = "--force"
-        elif _state_pruned_before_derive(db, target_date):
+        # A date whose manifested files contributed zero rows (full-day
+        # outage with files still rotated, or a UTC file whose rows all
+        # belong to the adjacent date) has no state to restore — without
+        # this guard it would match the pruned-state branch and re-read
+        # every file on every run, forever.
+        elif manifested_rows_total > 0 and _state_pruned_before_derive(db, target_date):
             refold_reason = (
                 "trip_update_state holds no rows for the date and runs holds none either "
                 "(state pruned by retention before the date was ever derived)"

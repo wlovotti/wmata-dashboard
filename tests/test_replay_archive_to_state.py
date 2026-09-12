@@ -1213,3 +1213,37 @@ def test_replay_force_refolds_manifested_date(tmp_path, pg_session):
         )
         == 1
     )
+
+
+@pytest.mark.integration
+def test_replay_does_not_refold_manifested_date_that_folded_zero_rows(tmp_path, pg_session):
+    """Files that contributed zero rows leave no state to restore -> no perpetual re-fold.
+
+    Round 2 of PR #245: a date whose files exist but hold no rows for it
+    (outage day, or rows all on the adjacent service date) matched the
+    pruned-state branch (no state, no runs) and re-read every file on
+    every run. The guard requires at least one folded row.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    f = archive_dir / "2026-05-18.1.1779104800.jsonl.zst"
+    # Row belongs to 5/17 (trip_start_date), so it folds nothing for 5/18.
+    _write_jsonl_zst(f, [_row("2026-05-18 12:00:00", "T_ZERO", 1, trip_start_date="20260517")])
+    pg_session.execute(
+        TripUpdateState.__table__.delete().where(TripUpdateState.service_date == date(2026, 5, 18))
+    )
+    pg_session.execute(Run.__table__.delete().where(Run.service_date == "2026-05-18"))
+    pg_session.commit()
+
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )
+    pg_session.commit()
+    # Second run: manifested, no state, no runs — but nothing was ever folded.
+    assert (
+        replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+        == 0
+    )

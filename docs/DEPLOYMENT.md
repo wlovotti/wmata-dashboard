@@ -898,8 +898,10 @@ Three cases re-fold a date in full from its archive files:
   `runs` rows — its state was pruned by the 7-day retention before it
   was ever derived, and the 14-day catch-up would otherwise derive
   against empty state forever;
-- `--force`, the operator escape hatch for deliberate re-replays
-  (`scripts/local_recovery_2026_07.sh`, a `runs`-DELETE-then-re-derive).
+- `--force`, the operator escape hatch for a deliberate re-replay of a
+  date that still has `runs` (a `runs`-DELETE-then-re-derive, or the
+  dated `scripts/local_recovery_2026_07.sh` driver, lands in the
+  pruned-state case above on its own and needs no flag).
 
 **Prerequisite, per database.** `scripts/migrate_all.py` only reaches
 the WMATA DB; without the SFMTA invocation every SFMTA replay date fails
@@ -932,7 +934,6 @@ DB-free poll → zstd JSONL → S3 loop — no Postgres, no timers beyond the
 loop itself. One process per agency, run under the templated unit
 `deployment/systemd/collector@.service` as `collector@wmata.service` /
 `collector@sfmta.service`.
-
 
 ### 13.1 Provision the instance
 

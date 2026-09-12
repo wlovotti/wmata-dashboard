@@ -35,16 +35,30 @@ ALTER TABLE tu_archive_replayed_files
     ADD COLUMN IF NOT EXISTS max_snapshot_ts TIMESTAMP NULL;
 """
 
+# A row folded before the column existed would carry NULL max_snapshot_ts
+# with row_count > 0 — indistinguishable from "folded zero rows", which
+# would silently disable the ordering guard for that date. Drop such rows
+# so their files simply fold again (idempotent; both live tables had 0
+# rows when the column landed, so this is defensive).
+PURGE_PRE_COLUMN_ROWS_SQL = """
+DELETE FROM tu_archive_replayed_files
+    WHERE max_snapshot_ts IS NULL AND row_count > 0;
+"""
+
 
 def run_migration(engine) -> None:
     """Apply the migration. Safe to re-run.
 
-    Creates the ``tu_archive_replayed_files`` table with ``(filename,
-    target_service_date)`` as its primary key, matching ``TuArchiveReplayedFile`` in ``src/models.py``.
+    Three statements in one transaction: create ``tu_archive_replayed_files``
+    with ``(filename, target_service_date)`` as its primary key (matching
+    ``TuArchiveReplayedFile`` in ``src/models.py``); add ``max_snapshot_ts``
+    to a copy created before that column existed; purge any row that was
+    folded without it (NULL ``max_snapshot_ts`` with ``row_count > 0``).
     """
     with engine.begin() as conn:
         conn.execute(text(CREATE_TABLE_SQL))
         conn.execute(text(ADD_COLUMN_SQL))
+        conn.execute(text(PURGE_PRE_COLUMN_ROWS_SQL))
 
 
 def main(argv=None) -> int:
