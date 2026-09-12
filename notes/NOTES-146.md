@@ -3,7 +3,7 @@
 **Severity: low (personal audience; staleness is an annoyance, not a
 correctness problem — the dashboard is simply days behind until someone
 runs `bin/pull-and-derive.sh`).**
-**Effort: low-medium once [NOTES-145](NOTES-145.md) lands (launchd wrapper +
+**Effort: low-medium once the replay manifest (PR #245) lands (launchd wrapper +
 healthchecks ping + API cache invalidation); not worth doing before it.**
 
 Since the stateless-collector cutover (Path 2a, PR #222–#225) the laptop
@@ -23,5 +23,5 @@ showed). Retire or fold in the two stale plists and update §12.
 
 ## Dependencies
 
-Blocked on [NOTES-145](NOTES-145.md): with the full-window re-fold a
+Blocked on PR #245 (replay manifest): before it, with the full-window re-fold a
 nightly job is a multi-hour DB writer competing with interactive use.

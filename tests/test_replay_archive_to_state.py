@@ -824,7 +824,7 @@ def test_assert_west_of_utc_accepts_year_round_utc_zone():
     _assert_west_of_utc("Atlantic/Reykjavik")
 
 
-# --- NOTES-145: per-(file, target date) replay manifest --------------------
+# --- Replay manifest (PR #245): per-(file, target date) --------------------
 
 
 def test_file_epoch_parses_per_process_name_and_rejects_legacy():
@@ -980,3 +980,48 @@ def test_replay_manifest_rows_roll_back_with_the_state_upsert(tmp_path, pg_sessi
 
     assert pg_session.query(TripUpdateState).filter_by(trip_id="T_MANIFEST_RB").count() == 0
     assert pg_session.query(TuArchiveReplayedFile).filter_by(filename=f.name).count() == 0
+
+
+@pytest.mark.integration
+def test_replay_refolds_whole_date_when_older_file_arrives_late(tmp_path, pg_session):
+    """A stale-arriving file triggers a full re-fold of that date (PR #245 policy a).
+
+    Run 1 folds the newer file B (epoch 1900). Then A (epoch 1000, an
+    older collector-restart sibling the S3 sync missed) appears. Folding
+    A alone would overwrite B's later ``final_snapshot_ts`` with A's
+    older one, because the DB upsert is always-overwrite. Instead the
+    planner returns every candidate with ``refold_all=True``: the
+    manifest rows for the date are discarded, both files fold in one
+    snapshot_ts-ordered pass, B's state still wins, and the manifest
+    ends up holding both files.
+    """
+    from pipelines.replay_archive_to_state import replay_archive_for_date
+    from src.models import TuArchiveReplayedFile
+
+    archive_dir = tmp_path / "raw_snapshots"
+    archive_dir.mkdir()
+    file_b = archive_dir / "2026-05-18.2.1900.jsonl.zst"
+    _write_jsonl_zst(file_b, [_row("2026-05-18 12:30:00", "T_OOO", 1, "2026-05-18 12:35:00")])
+    pg_session.execute(TripUpdateState.__table__.delete().where(TripUpdateState.trip_id == "T_OOO"))
+    pg_session.commit()
+
+    replay_archive_for_date(pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir)
+    pg_session.commit()
+
+    file_a = archive_dir / "2026-05-18.1.1000.jsonl.zst"
+    _write_jsonl_zst(file_a, [_row("2026-05-18 12:00:00", "T_OOO", 1, "2026-05-18 12:05:00")])
+    count = replay_archive_for_date(
+        pg_session, target_date=date(2026, 5, 18), archive_root=archive_dir
+    )
+    pg_session.commit()
+
+    assert count == 2  # both files re-folded, not just the stale one
+    state = pg_session.query(TripUpdateState).filter_by(trip_id="T_OOO").one()
+    assert state.final_snapshot_ts == datetime(2026, 5, 18, 12, 30, 0)
+    assert state.last_predicted_arrival_ts == datetime(2026, 5, 18, 12, 35, 0)
+    rows = (
+        pg_session.query(TuArchiveReplayedFile)
+        .filter_by(target_service_date=date(2026, 5, 18))
+        .all()
+    )
+    assert {(r.filename, r.row_count) for r in rows} == {(file_a.name, 1), (file_b.name, 1)}

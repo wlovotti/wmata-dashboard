@@ -446,7 +446,7 @@ class VpArchiveLoadedFile(Base):
 class TuArchiveReplayedFile(Base):
     """One row per (raw TU archive file, target service date) already folded into trip_update_state.
 
-    The replay tool's idempotency key (NOTES-145). Unlike
+    The replay tool's idempotency key (replay manifest, PR #245). Unlike
     ``VpArchiveLoadedFile``, the key includes ``target_service_date``:
     the UTC-next-day *supplement* file for date D is the same physical
     file as D+1's first primary file, and it is legitimately folded once

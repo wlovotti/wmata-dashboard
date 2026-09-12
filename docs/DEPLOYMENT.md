@@ -833,7 +833,12 @@ couldn't run: unset `<AGENCY>_DATABASE_URL`, an unknown `--agency`, a
 transient DB failure). `bin/pull-and-derive.sh` replays and derives
 *both* agencies (SFMTA pull-and-derive automation) — the replay loop
 runs `pipelines/replay_archive_to_state.py` for WMATA and SFMTA every
-lookback date (SFMTA's replay passes `--allow-empty`, since its S3
+lookback date — cheaply, since the replay manifest (PR #245): each `(archive file,
+target service date)` pair is folded once and recorded in
+`tu_archive_replayed_files`, so a lookback date whose files are all
+manifested is a no-op and widening `LOOKBACK_DAYS` costs only
+not-yet-folded files (an out-of-order arrival re-folds that one date in
+full) — (SFMTA's replay passes `--allow-empty`, since its S3
 archive prefix only starts 2026-07-22 and a missing/empty day there is
 expected, not an error — WMATA keeps the strict, no-`--allow-empty`
 behavior), and derive calls `run_daily_batch.py` once with no

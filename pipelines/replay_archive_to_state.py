@@ -294,7 +294,7 @@ def _plan_replay(
       candidates, so the whole date is re-folded in one ordered in-memory
       pass (the fold itself is order-safe; only the DB upsert is not).
 
-    Why this decision matters (NOTES-145): ``upsert_trip_update_state``
+    Why this decision matters (replay manifest, PR #245): ``upsert_trip_update_state``
     is always-overwrite for ``final_snapshot_ts`` / ``stop_id`` /
     ``final_schedule_relationship``. Folding only the *new* files is
     correct as long as every new file is newer than everything already
@@ -307,17 +307,25 @@ def _plan_replay(
     later. Folding that older file on its own would clobber newer
     state with stale values.
     """
-    # TODO(user): choose the policy. Inputs available: each candidate's
-    # ``_file_epoch(p)`` (None for legacy names — treat as oldest) and
-    # ``manifested_epochs``. Return (new files, False) in the normal case.
-    # For the out-of-order case pick one of:
-    #   (a) refold everything: return (candidates, True) — self-healing,
-    #       costs one full re-fold of that single date;
-    #   (b) fold only the new files anyway and print a warning — cheap
-    #       but can overwrite newer state with older values;
-    #   (c) skip the stale file(s) and print a loud notice — never
-    #       corrupts, but silently drops the polls those files hold.
-    raise NotImplementedError("_plan_replay policy not chosen yet — see NOTES-145")
+    # Policy (a), chosen 2026-09-12: on any out-of-order arrival, re-fold
+    # the whole date. Self-healing (the in-memory fold sorts by
+    # snapshot_ts, so a full pass yields the correct final state
+    # regardless of which run each file arrived in) at the cost of one
+    # full re-fold of that single date — rare enough that paying ~100M
+    # rows once beats the alternatives of clobbering newer state (fold
+    # the stale file alone) or silently dropping its polls (skip it).
+    # Legacy names carry no epoch and sort as oldest, so a legacy file
+    # showing up after any per-process file also triggers the re-fold.
+    new = [p for p in candidates if p.name not in manifested_epochs]
+    newest_done = max((e for e in manifested_epochs.values() if e is not None), default=None)
+    if newest_done is not None and any((_file_epoch(p) or 0) < newest_done for p in new):
+        stale = [p.name for p in new if (_file_epoch(p) or 0) < newest_done]
+        print(
+            f"Out-of-order archive file(s) {stale} are older than the newest already-replayed "
+            f"file (epoch {newest_done}); re-folding the whole date so the ordered fold wins."
+        )
+        return list(candidates), True
+    return new, False
 
 
 def replay_archive_for_date(
@@ -361,7 +369,7 @@ def replay_archive_for_date(
     silently skipped — defensive against midnight-crossing files that
     might contain a few rows belonging to the adjacent service-day.
 
-    **File manifest (NOTES-145):** every file folded for ``target_date``
+    **File manifest (replay manifest, PR #245):** every file folded for ``target_date``
     is recorded in ``tu_archive_replayed_files`` keyed by
     ``(filename, target_service_date)``, in the same transaction as the
     state upsert (the caller commits both or neither). Later runs fold

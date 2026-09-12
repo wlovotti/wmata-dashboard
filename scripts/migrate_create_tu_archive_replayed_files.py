@@ -1,4 +1,4 @@
-"""Create the ``tu_archive_replayed_files`` manifest table (TU archive replay, NOTES-145).
+"""Create the ``tu_archive_replayed_files`` manifest table (TU archive replay, PR #245).
 
 Idempotent (CREATE TABLE IF NOT EXISTS). Run once per database:
 
