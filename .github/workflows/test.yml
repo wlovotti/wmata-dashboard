@@ -12,7 +12,7 @@ jobs:
 
     services:
       postgres:
-        # Pinned to 16 to match the production Lightsail VM (NOTES-48 cutover).
+        # Pinned to 16 to match the production Lightsail VM (2026-06 cloud cutover).
         # CI is the prod-parity gate; local dev runs 14 for fast logic iteration.
         image: postgres:16
         env:

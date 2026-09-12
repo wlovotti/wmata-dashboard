@@ -996,7 +996,7 @@ class RouteMetricsDailyOverlay(Base):
 #
 #   route_diagnostic_timepoint — per-timepoint behavior classification
 #                                drives timepoint behavior table (PR #124),
-#                                hold-down candidates (NOTES-61)
+#                                hold-down candidates (issue #251)
 #
 #   route_diagnostic_direction — per-direction early%/late%/signature
 #                                drives direction-asymmetry summary (PR #124)
@@ -1110,7 +1110,7 @@ class RouteDiagnosticTimepoint(Base):
     treats missing rows as "no data" rather than emitting a row with a
     null classification.
 
-    The hold-down candidates page (NOTES-61) reads
+    The hold-down candidates page (issue #251) reads
     `classification = 'leaky'` over all routes and ranks by p10 drop;
     the timepoint behavior table on RouteDetail (PR #124) reads one
     `route_id` at a time.
@@ -1152,7 +1152,7 @@ class RouteDiagnosticTimepoint(Base):
             "period",
             "direction_id",
         ),
-        # NOTES-61 hold-down candidates read: scan by classification.
+        # issue #251 hold-down candidates read: scan by classification.
         Index(
             "idx_route_diag_timepoint_classification",
             "classification",
