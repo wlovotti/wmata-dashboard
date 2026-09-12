@@ -10,7 +10,11 @@
 #   2. Running init_db() to create the schema from models.
 #   3. Running migrate_all.py to apply every migration.
 #   4. Running check_schema_drift.py to assert model/DB parity.
-#   5. Running the full pytest suite with both SQLite and Postgres lanes.
+#   5. Running the full pytest suite with both SQLite and Postgres lanes,
+#      pointing DATABASE_URL, PG_TEST_DATABASE_URL, AND SFMTA_DATABASE_URL
+#      at the scratch DB so tests/conftest.py's production-DB guard
+#      (issue #247) doesn't see a real DATABASE_URL/SFMTA_DATABASE_URL
+#      leaking in from .env and abort the run.
 #
 # This matches the CI steps in .github/workflows/test.yml ("Verify schema"
 # + "Run full test suite with coverage"), so a green local run is a strong
@@ -77,9 +81,14 @@ echo "--> Running schema drift check..."
 DATABASE_URL="$DATABASE_URL" uv run python scripts/check_schema_drift.py
 
 # ── Step 5: full test suite ──────────────────────────────────────────────────
+# SFMTA_DATABASE_URL must also point at the scratch DB here: src/database.py
+# calls load_dotenv() at import time, which (if this var is unset) pulls the
+# real SFMTA_DATABASE_URL out of .env — the production sfmta_dashboard — and
+# the tests/conftest.py prod-DB guard (issue #247) would then abort the run.
 echo "--> Running full pytest suite..."
 DATABASE_URL="sqlite:///:memory:" \
     PG_TEST_DATABASE_URL="$PG_TEST_DATABASE_URL" \
+    SFMTA_DATABASE_URL="$PG_TEST_DATABASE_URL" \
     WMATA_API_KEY="$WMATA_API_KEY" \
     uv run pytest -v --tb=short "$@"
 

@@ -192,7 +192,12 @@ completes; never end the turn instead.
    If the change touches more than one small surface, also run the
    full suite against a scratch DB, never the default `.env` one:
      PG_TEST_DATABASE_URL=postgresql:///wmata_test_local \
-       DATABASE_URL=postgresql:///wmata_test_local uv run pytest
+       DATABASE_URL=postgresql:///wmata_test_local \
+       SFMTA_DATABASE_URL=postgresql:///wmata_test_local uv run pytest
+   (all three — DATABASE_URL and SFMTA_DATABASE_URL both need pointing
+   at the scratch DB, or the production-DB guard in tests/conftest.py
+   aborts the run; see issue #247.) `bin/test-with-pg` does this for
+   you and is the preferred one-shot.
 
 5. REFERENCE SWEEP. Prose elsewhere in the repo may describe #{{N}} as
    still open ("tracked as #{{N}}", "see #{{N}}", "deferred to #{{N}}"):

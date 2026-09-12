@@ -12,7 +12,6 @@ Provides fixtures for:
 import os
 from collections.abc import Generator
 from datetime import timedelta
-from urllib.parse import urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,50 +32,7 @@ from src.models import (
     VehiclePosition,
 )
 from src.timezones import utcnow_naive
-
-# Database names that are the real system of record (issue #247 / NOTES-131).
-# A non-smoke test run pointed at either of these risks reading/writing
-# production data or getting non-deterministic results from whatever
-# happens to be in the DB that day.
-_PRODUCTION_DB_NAMES = {"wmata_dashboard", "sfmta_dashboard"}
-
-# Env vars that can carry a Postgres URL into a test run.
-_DB_URL_ENV_VARS = ("DATABASE_URL", "SFMTA_DATABASE_URL", "PG_TEST_DATABASE_URL")
-
-
-def _is_production_db_url(url: str | None) -> bool:
-    """Return True when `url` names a real system-of-record Postgres DB.
-
-    Handles ``postgresql:///name`` (no host), ``postgresql://user:pw@host:port/name``,
-    and URLs with a trailing query string. Non-Postgres URLs (e.g. sqlite) are
-    never production, and a missing/empty URL is never production.
-    """
-    if not url:
-        return False
-    parsed = urlparse(url)
-    if not parsed.scheme.startswith("postgresql") and not parsed.scheme.startswith("postgres"):
-        return False
-    db_name = parsed.path.lstrip("/")
-    return db_name in _PRODUCTION_DB_NAMES
-
-
-def _prod_db_guard_message(offending: list[tuple[str, str]]) -> str:
-    """Build the abort message naming every offending env var and DB.
-
-    `offending` is a list of (env_var_name, url) pairs pointed at production.
-    """
-    lines = ["Refusing to run non-smoke tests against a production database:"]
-    for var_name, url in offending:
-        lines.append(f"  {var_name}={url}")
-    lines.append("")
-    lines.append("Safe options:")
-    lines.append(
-        "  PG_TEST_DATABASE_URL=postgresql:///wmata_test_local "
-        "DATABASE_URL=postgresql:///wmata_test_local uv run pytest"
-    )
-    lines.append("  bin/test-with-pg")
-    lines.append("  PYTEST_ALLOW_PROD_DB=1 uv run pytest   # deliberate override")
-    return "\n".join(lines)
+from tests._prod_db_guard import check_collection, guard_message, is_production_db_url
 
 
 @pytest.hookimpl(trylast=True)
@@ -84,30 +40,13 @@ def pytest_collection_modifyitems(config, items):
     """Fail fast if a non-smoke, non-overridden run points at a production DB.
 
     Runs after pytest's own `-m` deselection (``trylast=True``), so `items`
-    reflects what will actually execute. If at least one item remains and
-    every remaining item carries the `smoke` marker, the run is
-    fast/DB-light by convention and is not blocked. An empty `items` list
-    (e.g. every test in the target got deselected by `-m 'not smoke'`) is
-    NOT treated as smoke-only -- it's still checked, since that's exactly
-    the shape of an accidental non-smoke invocation against an all-smoke
-    file. Otherwise, any of `DATABASE_URL`, `SFMTA_DATABASE_URL`, or
-    `PG_TEST_DATABASE_URL` pointing at `wmata_dashboard` or
-    `sfmta_dashboard` aborts the session unless `PYTEST_ALLOW_PROD_DB=1` is
-    set (see issue #247 / NOTES-131).
+    reflects what will actually execute. The decision itself lives in
+    `tests/_prod_db_guard.py:check_collection` (issue #247 / NOTES-131) --
+    this hookimpl just wires that pure function into pytest's exit.
     """
-    if items and all(item.get_closest_marker("smoke") for item in items):
-        return
-
-    if os.environ.get("PYTEST_ALLOW_PROD_DB") == "1":
-        return
-
-    offending = [
-        (var_name, url)
-        for var_name in _DB_URL_ENV_VARS
-        if (url := os.environ.get(var_name)) and _is_production_db_url(url)
-    ]
-    if offending:
-        pytest.exit(_prod_db_guard_message(offending), returncode=1)
+    message = check_collection(items)
+    if message is not None:
+        pytest.exit(message, returncode=1)
 
 
 @pytest.fixture(scope="session")
@@ -164,8 +103,8 @@ def pg_engine():
     skipped (issue #247 / NOTES-131).
     """
     url = os.environ.get("PG_TEST_DATABASE_URL", "postgresql:///wmata_test_local")
-    if _is_production_db_url(url) and os.environ.get("PYTEST_ALLOW_PROD_DB") != "1":
-        pytest.exit(_prod_db_guard_message([("PG_TEST_DATABASE_URL", url)]), returncode=1)
+    if is_production_db_url(url) and os.environ.get("PYTEST_ALLOW_PROD_DB") != "1":
+        pytest.exit(guard_message([("PG_TEST_DATABASE_URL", url)]), returncode=1)
     engine = create_engine(url, echo=False)
     yield engine
     engine.dispose()
