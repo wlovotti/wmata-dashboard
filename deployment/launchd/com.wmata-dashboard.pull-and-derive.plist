@@ -8,14 +8,26 @@
 
     <!--
         Run bin/pull-and-derive-nightly.sh (which wraps
-        bin/pull-and-derive.sh) once daily at 03:30 local time (Eastern,
-        on the user's machine) — after WMATA's/SFMTA's service rolls over
-        for the day, so "yesterday's service date" is complete, and after
-        the retired com.wmata-dashboard.daily-batch's old 03:00 slot
-        (this job now supersedes it — see docs/DEPLOYMENT.md §12).
+        bin/pull-and-derive.sh) once daily at 06:30 local time (Eastern,
+        on the user's machine) — after the retired
+        com.wmata-dashboard.daily-batch's old 03:00 slot (this job now
+        supersedes it — see docs/DEPLOYMENT.md §12).
+
+        06:30 ET, not 03:30 (review finding, PR #259): the fire time must
+        be after BOTH agencies' owl service has actually ended in their
+        own timezone, plus S3 upload lag — not just after WMATA's day
+        rolls over in Eastern. SFMTA's owl service runs to ~03:00
+        Pacific = 06:00 Eastern, the later of the two agencies' cutoffs
+        and so the binding constraint. run_daily_batch.py only re-derives
+        a service_date with zero `runs` rows, so firing before that
+        (e.g. the original 03:30 ET = 00:30 PT) would derive Muni's
+        service date while owl trips were still in flight, permanently
+        lose them (no zero-`runs` re-derive on a later run), and then
+        have the trip_update_state cleanup step prune the still-relevant
+        state out from under them.
 
         launchd's StartCalendarInterval fires a missed run on the next
-        wake if the laptop was asleep at 03:30 (unlike a cron-style fixed
+        wake if the laptop was asleep at 06:30 (unlike a cron-style fixed
         interval, it doesn't just skip the missed occurrence) — so a
         sleeping laptop yields "fresh within the hour of opening it,"
         rather than "fresh only on nights the laptop happened to be
@@ -25,7 +37,7 @@
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>3</integer>
+        <integer>6</integer>
         <key>Minute</key>
         <integer>30</integer>
     </dict>
@@ -63,9 +75,12 @@
     </array>
 
     <!--
-        launchd's stdout/stderr capture is the outermost safety net --
-        catches anything too early to reach logs/pull-and-derive.log
-        (e.g. the wrapper script itself failing to exec).
+        The wrapper writes nothing of its own to a separate file — this
+        IS the log. logs/ must exist before launchd execs the job (it
+        opens this path before running ProgramArguments and fails the
+        spawn silently if the directory is missing) — `mkdir -p logs` is
+        part of the install runbook (docs/DEPLOYMENT.md §12) and the
+        wrapper script also creates it defensively on every run.
     -->
     <key>StandardOutPath</key>
     <string>/Users/wlovotti/repos/wmata-dashboard/logs/pull-and-derive.log</string>

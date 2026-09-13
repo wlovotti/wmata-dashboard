@@ -126,10 +126,13 @@ _live_metrics_lock = Lock()
 def _current_data_version(db: Session) -> str:
     """Cheap once-per-request marker for "has new derived data landed".
 
-    Reads `MAX(system_metrics_daily.computed_at)` -- a single-row
-    aggregate over an indexed primary-key-adjacent column, not a scan of
-    `stop_events` -- and returns its ISO string, or `"none"` if the table
-    is empty for this database. `pipelines/upsert_system_metrics_daily.py`
+    Reads `MAX(system_metrics_daily.computed_at)` -- cheap not because
+    the column is indexed (it isn't) but because the table itself is
+    tiny, one row per service_date (a few hundred rows even months in),
+    so the aggregate is a full-table scan of a handful of rows rather
+    than anything close to a `stop_events`-scale scan -- and returns its
+    ISO string, or `"none"` if the table is empty for this database.
+    `pipelines/upsert_system_metrics_daily.py`
     (dispatched per-date from `run_daily_batch.py`, which
     `bin/pull-and-derive.sh` runs every night) stamps a fresh `computed_at`
     on every derive, including a same-date re-derive, so this advances
@@ -1133,7 +1136,7 @@ def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
 
     Anchors on the latest service_date that has stop_events (today's data may
     not yet be derived — see `_latest_service_date_with_stop_events`). Reuses
-    the cached result if computed within `_LIVE_METRICS_TTL_SEC` (default 60s)
+    the cached result if computed within `_LIVE_METRICS_TTL_SEC` (3600s)
     AND the data version (`_current_data_version`, issue #246) hasn't moved —
     a nightly `bin/pull-and-derive.sh` run landing fresh data invalidates the
     entry immediately rather than waiting out the rest of the TTL.

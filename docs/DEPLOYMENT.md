@@ -798,7 +798,7 @@ launchctl list | grep wmata
 | `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired** (stateless-collector cutover) — the weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. |
 | `com.wmata-dashboard.daily-batch` | ~~daily, 03:00 local~~ | **retired** (issue #246) — was installed-but-never-loaded; `pipelines/run_daily_batch.py` is now one step inside `bin/pull-and-derive.sh`, run by the job below. |
 | `com.wmata-dashboard.retain-trip-update-state` | ~~daily, 04:30 local~~ | **retired** (issue #246) — was installed-but-never-loaded; its `trip_update_state`-pruning job is superseded now the nightly job below runs `cleanup_trip_update_state.py` (both agencies) every night instead of on an occasional manual cadence — see `scripts/launchd/README.md` for the detail. |
-| `com.wmata-dashboard.pull-and-derive` | daily, 03:30 local | **live once installed per "Install" below** — runs `bin/pull-and-derive-nightly.sh`, a thin wrapper around `bin/pull-and-derive.sh` (§0 banner), with a healthchecks.io dead-man ping on success/failure. |
+| `com.wmata-dashboard.pull-and-derive` | daily, 06:30 local | **live once installed per "Install" below** — runs `bin/pull-and-derive-nightly.sh`, a thin wrapper around `bin/pull-and-derive.sh` (§0 banner), with a healthchecks.io dead-man ping on success/failure. |
 
 Check GTFS freshness at any time without waiting for the nightly job:
 `curl -s localhost:8000/api/gtfs/freshness` (requires the API running
@@ -828,9 +828,34 @@ window, and a much-more-frequent recompute cost the rest of the day)
 or a restart hook (nothing to hook, since the API isn't a managed
 process).
 
+**Fire time is 06:30 ET, not right after WMATA's day-roll (review
+finding, PR #259):** the job must fire after BOTH agencies' owl service
+has ended in their own timezone, plus S3 upload lag — `run_daily_batch.py`
+only re-derives a service_date with zero `runs` rows, so firing too
+early derives a date while trips are still in flight and permanently
+loses them (a later run sees non-zero `runs` and never revisits it), and
+the trip_update_state cleanup step then prunes their still-relevant
+state. SFMTA's owl service runs to ~03:00 Pacific = 06:00 Eastern — later
+than WMATA's cutoff — so it's the binding constraint, not WMATA's own
+Eastern day-roll.
+
+**Single-instance lock (review finding, PR #259):** launchd's
+catch-up-on-wake behavior means a missed 06:30 fire can run hours later,
+which could otherwise land in the middle of a manual
+`bin/pull-and-derive.sh` run or overlap a second catch-up fire.
+`bin/pull-and-derive-nightly.sh` takes an exclusive lock before running
+(`flock` on Linux/newer macOS, an atomic `mkdir` lock as a fallback where
+`flock(1)` isn't installed) and exits 0 without running if the lock is
+already held. **`bin/pull-and-derive.sh` itself does not take this
+lock** — only the nightly wrapper does, so it stays usable standalone
+the way it always has. Avoid running it manually while the nightly job
+might fire (or take `logs/.pull-and-derive.lock` yourself first).
+
 **Install:**
 
 ```sh
+mkdir -p logs   # launchd opens StandardOutPath before exec and fails
+                # the spawn silently if this directory doesn't exist yet
 cp deployment/launchd/com.wmata-dashboard.pull-and-derive.plist \
    ~/Library/LaunchAgents/com.wmata-dashboard.pull-and-derive.plist
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.wmata-dashboard.pull-and-derive.plist

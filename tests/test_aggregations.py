@@ -1104,6 +1104,63 @@ class TestLiveMetricsCacheDataVersionInvalidation:
         api_aggregations.get_live_metrics_for_today(db_session)
         assert call_count["n"] == 2
 
+    def test_same_date_re_derive_advancing_computed_at_invalidates_warm_cache(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """The real nightly case: a `system_metrics_daily` row for a date
+        ALREADY has a row (yesterday's derive), and a same-date re-derive
+        (e.g. a catch-up re-run, or NOTES-123-style late-arriving data)
+        just advances that row's `computed_at` in place rather than
+        inserting a new row. `_current_data_version` must still see this
+        as a version change and invalidate the warm cache -- an UPDATE
+        with no new row is exactly the case a naive "did a new row
+        appear" check would miss.
+        """
+        from src.models import SystemMetricsDaily
+        from src.timezones import utcnow_naive
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+
+        first_computed_at = utcnow_naive()
+        db_session.add(
+            SystemMetricsDaily(
+                service_date="2026-08-07",
+                otp_percentage=80.0,
+                computed_at=first_computed_at,
+            )
+        )
+        db_session.commit()
+
+        call_count = {"n": 0}
+        real_compute = api_aggregations._compute_live_metrics_uncached
+
+        def _counting_compute(db, service_date, agency="wmata"):
+            call_count["n"] += 1
+            return real_compute(db, service_date, agency=agency)
+
+        monkeypatch.setattr(api_aggregations, "_compute_live_metrics_uncached", _counting_compute)
+
+        api_aggregations.get_live_metrics_for_today(db_session)
+        assert call_count["n"] == 1
+
+        # Warm-cache re-read, row and computed_at unchanged: no recompute.
+        api_aggregations.get_live_metrics_for_today(db_session)
+        assert call_count["n"] == 1
+
+        # Same-date re-derive: the EXISTING row's computed_at advances in
+        # place (an UPDATE, not an INSERT) -- the actual nightly-batch
+        # upsert shape, not a new row appearing.
+        row = (
+            db_session.query(SystemMetricsDaily)
+            .filter(SystemMetricsDaily.service_date == "2026-08-07")
+            .one()
+        )
+        row.computed_at = first_computed_at + timedelta(seconds=1)
+        db_session.commit()
+
+        api_aggregations.get_live_metrics_for_today(db_session)
+        assert call_count["n"] == 2
+
 
 class TestGetRouteTrendData:
     """Tests for get_route_trend_data function"""

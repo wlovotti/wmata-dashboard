@@ -10,8 +10,9 @@ loads + replays, derives, then prunes SFMTA's trip_update_state
 retention window — no tunnel or VM access needed) runs nightly via the
 `com.wmata-dashboard.pull-and-derive` launchd job once installed
 (`deployment/launchd/`, `docs/DEPLOYMENT.md` §12); run it manually any
-time for an on-demand refresh. Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: GitHub Issues
-(`gh issue list`; labels `track:*`, `sev:*`, `effort:*`, `blocked`).
+time for an on-demand refresh. Topology/ops detail: `docs/DEPLOYMENT.md`.
+Punch list: GitHub Issues (`gh issue list`; labels `track:*`, `sev:*`,
+`effort:*`, `blocked`).
 Historical `NOTES-N` numbers in old PRs and docs refer to the retired
 `NOTES.md` file; migrated issues say "Migrated from NOTES-N" in their
 body, so `gh issue list --state all --search NOTES-N` finds them.
