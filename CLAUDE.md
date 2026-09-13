@@ -5,11 +5,14 @@ backend, React/Vite frontend. **The laptop's local PostgreSQL 16
 (`wmata_dashboard`) is the system of record**; a stateless nano
 collector polls WMATA + SFMTA GTFS-RT and uploads raw JSONL to S3 (no
 database on the collector box). API + frontend run locally against the
-local DB. Freshness: run `bin/pull-and-derive.sh` (syncs the S3
-archives, loads + replays, derives, then prunes SFMTA's
-trip_update_state retention window — no tunnel or VM access needed).
-Topology/ops detail: `docs/DEPLOYMENT.md`. Punch list: GitHub Issues
-(`gh issue list`; labels `track:*`, `sev:*`, `effort:*`, `blocked`).
+local DB. Freshness: `bin/pull-and-derive.sh` (syncs the S3 archives,
+loads + replays, derives, then prunes SFMTA's trip_update_state
+retention window — no tunnel or VM access needed) runs nightly via the
+`com.wmata-dashboard.pull-and-derive` launchd job once installed
+(`deployment/launchd/`, `docs/DEPLOYMENT.md` §12); run it manually any
+time for an on-demand refresh. Topology/ops detail: `docs/DEPLOYMENT.md`.
+Punch list: GitHub Issues (`gh issue list`; labels `track:*`, `sev:*`,
+`effort:*`, `blocked`).
 Historical `NOTES-N` numbers in old PRs and docs refer to the retired
 `NOTES.md` file; migrated issues say "Migrated from NOTES-N" in their
 body, so `gh issue list --state all --search NOTES-N` finds them.

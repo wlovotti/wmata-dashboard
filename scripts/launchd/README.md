@@ -1,53 +1,37 @@
-# launchd jobs
+# launchd jobs (retired location)
 
-Per-user launchd plists for scheduled background work on the developer's
-Mac. Single-user repo, so paths are concrete (no templating).
+This directory held the laptop's per-user launchd plists before issue #246
+consolidated the scheduled-job plists under `deployment/launchd/` (mirroring
+`deployment/systemd/` for the nano collector). **The live plist is now
+`deployment/launchd/com.wmata-dashboard.pull-and-derive.plist`** — see
+`docs/DEPLOYMENT.md` §12 for the full install/verify/uninstall runbook.
 
-## com.wmata-dashboard.daily-batch.plist
+## com.wmata-dashboard.daily-batch.plist — retired
 
-Runs `pipelines/run_daily_batch.py` daily at 03:00 local time. The
-wrapper covers yesterday's service date plus any service date in the
-prior week with zero rows in `runs` (catch-up after launchd outages or
-suspended laptops). Closes NOTES-28.
+Retired by PR #259 (issue #246): installed-but-never-loaded in production
+(`launchctl list | grep wmata` showed nothing as of 2026-08-11), and its
+job — `pipelines/run_daily_batch.py` — is now one step inside
+`bin/pull-and-derive.sh`, which the new
+`com.wmata-dashboard.pull-and-derive` job runs nightly. If a copy is still
+sitting in `~/Library/LaunchAgents/` from an earlier install attempt,
+`launchctl bootout gui/$UID/com.wmata-dashboard.daily-batch` it (or
+`launchctl unload -w ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist`
+on an older launchd) and delete the file.
 
-### Install
+## com.wmata-dashboard.retain-trip-update-state.plist — retired
 
-```sh
-cp scripts/launchd/com.wmata-dashboard.daily-batch.plist \
-   ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist
-launchctl load -w ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist
-```
-
-`-w` flips the `Disabled` bit so the job actually runs at the next
-calendar fire. `RunAtLoad` is `false`, so loading does not trigger an
-immediate run — kick it manually with `launchctl start
-com.wmata-dashboard.daily-batch` if you want to validate end-to-end.
-
-### Status / logs
-
-```sh
-launchctl list | grep wmata-dashboard
-tail -f logs/daily_batch_$(date +%Y-%m-%d).log    # structured per-day log
-tail -f logs/launchd_daily_batch.{out,err}.log    # launchd's capture (early-failure net)
-```
-
-### Uninstall
-
-```sh
-launchctl unload -w ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist
-rm ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist
-```
-
-### Updating
-
-After editing the plist in this repo, copy it over again and reload:
-
-```sh
-launchctl unload -w ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist
-cp scripts/launchd/com.wmata-dashboard.daily-batch.plist \
-   ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist
-launchctl load -w ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist
-```
+Retired by PR #259 (issue #246): also installed-but-never-loaded. Its job —
+pruning `trip_update_state` so the table stays bounded even if the nightly
+batch is paused — is superseded now that the batch itself (via
+`pipelines/cleanup_trip_update_state.py`, both agencies) runs nightly
+through `bin/pull-and-derive.sh` rather than being an occasionally-run
+manual step: WMATA's cleanup happens inside `run_daily_batch.py`'s
+housekeeping loop, and `bin/pull-and-derive.sh` calls
+`cleanup_trip_update_state.py --agency sfmta` directly after a successful
+SFMTA derive. `pipelines/retain_trip_update_state.py` itself (the
+standalone 14-day safety-net script) is left in the repo as a manual
+escape hatch, just no longer scheduled. Uninstall the same way as
+daily-batch above if a stray copy is still loaded.
 
 ## com.wmata-dashboard.gtfs-reload.plist — retired
 

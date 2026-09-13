@@ -776,33 +776,125 @@ the feed-header snapshot, which can lag further).
 Since Path 2a (2026-07-18, §0 banner above) the laptop's local
 PostgreSQL 16 is the system of record, so some recurring jobs that
 would naturally be VM systemd units instead run as laptop `launchd`
-jobs against the laptop DB. Full install/verify runbooks live in
-`scripts/launchd/README.md`; this section is the pointer so the
-existence of these jobs is discoverable from the topology doc, not
-just the scripts directory.
+jobs against the laptop DB. Plists live in `deployment/launchd/`
+(consolidated there by issue #246, alongside `deployment/systemd/` for
+the nano collector — `scripts/launchd/` is retired, see its `README.md`
+for what moved where). This section is the pointer so the existence of
+these jobs is discoverable from the topology doc, not just the
+`deployment/` directory.
 
-**Status column is load-bearing — check it, don't assume.** The two
-still-live jobs below have a `.plist` in both `scripts/launchd/` and
-`~/Library/LaunchAgents/`, but a plist sitting in `LaunchAgents/`
-proves nothing by itself; only `launchctl load -w` activates it.
-Verify live/actual state with:
+**Status column is load-bearing — check it, don't assume.** A plist
+sitting in this repo, or even in `~/Library/LaunchAgents/`, proves
+nothing by itself; only `launchctl bootstrap` (or the older
+`launchctl load -w`) actually activates it. Verify live/actual state
+with:
 
 ```sh
 launchctl list | grep wmata
 ```
 
-As of 2026-08-11, this returns **nothing** — both jobs below are
-installed-but-unloaded, not running on any schedule.
+| Job | Schedule (when loaded) | Purpose |
+|---|---|---|
+| `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired** (stateless-collector cutover) — the weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. |
+| `com.wmata-dashboard.daily-batch` | ~~daily, 03:00 local~~ | **retired** (issue #246) — was installed-but-never-loaded; `pipelines/run_daily_batch.py` is now one step inside `bin/pull-and-derive.sh`, run by the job below. |
+| `com.wmata-dashboard.retain-trip-update-state` | ~~daily, 04:30 local~~ | **retired** (issue #246) — was installed-but-never-loaded; its `trip_update_state`-pruning job is superseded now the nightly job below runs `cleanup_trip_update_state.py` (both agencies) every night instead of on an occasional manual cadence — see `scripts/launchd/README.md` for the detail. |
+| `com.wmata-dashboard.pull-and-derive` | daily, 06:30 local | **live once installed per "Install" below** — runs `bin/pull-and-derive-nightly.sh`, a thin wrapper around `bin/pull-and-derive.sh` (§0 banner), with a healthchecks.io dead-man ping on success/failure. |
 
-| Job | Schedule (when loaded) | Status as of 2026-08-11 | Purpose |
-|---|---|---|---|
-| `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired** — this PR (stateless-collector cutover) deleted the plist and its `scripts/launchd/README.md` section. The weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. It was never loaded in production (`launchctl list | grep wmata` never showed it), so retiring it changed nothing live. | ~~Reloaded WMATA static GTFS into the laptop DB~~ — see `bin/pull-and-derive.sh` instead. |
-| `com.wmata-dashboard.daily-batch` | daily, 03:00 local | **not loaded** | Runs `pipelines/run_daily_batch.py` directly. Largely superseded day-to-day by the manual `bin/pull-and-derive.sh` flow (which also derives). |
-| `com.wmata-dashboard.retain-trip-update-state` | daily, 04:30 local | **not loaded** | Runs `pipelines/retain_trip_update_state.py` — prunes `trip_update_state` to a 14-day default retention window. |
-
-Check GTFS freshness at any time without waiting for the weekly job:
+Check GTFS freshness at any time without waiting for the nightly job:
 `curl -s localhost:8000/api/gtfs/freshness` (requires the API running
 locally) or `psql -d wmata_dashboard -Atc "SELECT max(created_at) FROM gtfs_snapshots;"`.
+
+### 12.0 `com.wmata-dashboard.pull-and-derive` — install / verify / uninstall
+
+**Why a nightly job at all, and why not before now (issue #246):**
+before the replay manifest (PR #245), `bin/pull-and-derive.sh`'s replay
+leg re-folded the whole `LOOKBACK_DAYS` window from scratch every run —
+a multi-hour DB writer that would have collided with interactive dev use
+if it ran unattended every night. The manifest makes a run cost only the
+archive files not yet folded, so a nightly unattended run is now cheap
+(steady-state ~13.5 min, verified 2026-09-13 — see
+`project_notes145_replay_manifest.md`).
+
+**API cache staleness (issue #246):** the API is run manually
+(`uv run uvicorn api.main:app --reload`), so there's no process to
+restart when fresh data lands mid-TTL. Instead, `api/aggregations.py`'s
+live-metrics caches (`_live_metrics_cache` / `_window_metrics_cache`)
+key each entry on `_current_data_version(db)` — a
+`MAX(system_metrics_daily.computed_at)` read once per request — on top
+of their existing TTL, so a cache entry from before the nightly run is
+treated as a miss the moment new data lands, no restart needed. This
+was chosen over a shorter TTL (still stale for up to the shorter
+window, and a much-more-frequent recompute cost the rest of the day)
+or a restart hook (nothing to hook, since the API isn't a managed
+process).
+
+**Fire time is 06:30 ET, not right after WMATA's day-roll (review
+finding, PR #259):** the job must fire after BOTH agencies' owl service
+has ended in their own timezone, plus S3 upload lag — `run_daily_batch.py`
+only re-derives a service_date with zero `runs` rows, so firing too
+early derives a date while trips are still in flight and permanently
+loses them (a later run sees non-zero `runs` and never revisits it), and
+the trip_update_state cleanup step then prunes their still-relevant
+state. SFMTA's owl service runs to ~03:00 Pacific = 06:00 Eastern — later
+than WMATA's cutoff — so it's the binding constraint, not WMATA's own
+Eastern day-roll.
+
+**Single-instance lock (review finding, PR #259):** launchd's
+catch-up-on-wake behavior means a missed 06:30 fire can run hours later,
+which could otherwise land in the middle of a manual
+`bin/pull-and-derive.sh` run or overlap a second catch-up fire.
+`bin/pull-and-derive-nightly.sh` takes an exclusive lock before running
+(`flock` on Linux/newer macOS, an atomic `mkdir` lock as a fallback where
+`flock(1)` isn't installed) and exits 0 without running if the lock is
+already held. **`bin/pull-and-derive.sh` itself does not take this
+lock** — only the nightly wrapper does, so it stays usable standalone
+the way it always has. Avoid running it manually while the nightly job
+might fire (or take `logs/.pull-and-derive.lock` yourself first).
+
+**Install:**
+
+```sh
+mkdir -p logs   # launchd opens StandardOutPath before exec and fails
+                # the spawn silently if this directory doesn't exist yet
+cp deployment/launchd/com.wmata-dashboard.pull-and-derive.plist \
+   ~/Library/LaunchAgents/com.wmata-dashboard.pull-and-derive.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.wmata-dashboard.pull-and-derive.plist
+```
+
+(`launchctl load -w ~/Library/LaunchAgents/com.wmata-dashboard.pull-and-derive.plist`
+on an older macOS still works if `bootstrap` isn't available.) `RunAtLoad`
+is `false`, so installing doesn't trigger an immediate run — validate
+end-to-end first with a manual invocation:
+
+```sh
+bin/pull-and-derive-nightly.sh
+```
+
+**Healthchecks.io check:** create one check (period ~24h / grace a few
+hours — this job runs once a night, not every few minutes like the
+collector's §13.5 checks), copy its ping URL into `.env` as
+`PULL_AND_DERIVE_HEALTHCHECK_URL=`. The wrapper pings it (plain URL on
+success, `<url>/fail` on failure) only when the var is set — unset is a
+silent no-op with a log line, not an error, so the job still runs fine
+before the check exists.
+
+**Status / logs:**
+
+```sh
+launchctl list | grep wmata-dashboard
+tail -f logs/pull-and-derive.log
+```
+
+**Uninstall:**
+
+```sh
+launchctl bootout gui/$UID/com.wmata-dashboard.pull-and-derive
+rm ~/Library/LaunchAgents/com.wmata-dashboard.pull-and-derive.plist
+```
+
+**Updating:** after editing the plist in this repo, bootout, re-copy,
+re-bootstrap (same three steps as Install, preceded by Uninstall's
+`launchctl bootout`).
 
 ### 12.1 GTFS reload gate + trip_id match-rate canary — how it works, and recovery
 

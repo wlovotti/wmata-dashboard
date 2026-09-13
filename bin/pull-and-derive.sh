@@ -6,6 +6,11 @@
 #   bin/pull-and-derive.sh          # replay+derive lookback of 14 days
 #   bin/pull-and-derive.sh 35       # wider catch-up
 #
+# Runs nightly via the com.wmata-dashboard.pull-and-derive launchd job
+# (deployment/launchd/, wrapped by bin/pull-and-derive-nightly.sh — see
+# docs/DEPLOYMENT.md §12, issue #246) once that job is installed; also
+# safe to run manually any time for an on-demand refresh.
+#
 # The replay leg is manifest-idempotent (tu_archive_replayed_files, PR #245):
 # widening LOOKBACK_DAYS only costs the files not yet folded, so the
 # default 14-day window is a catch-up safety net, not a per-run re-fold.
