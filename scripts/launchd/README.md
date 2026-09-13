@@ -8,7 +8,7 @@ consolidated the scheduled-job plists under `deployment/launchd/` (mirroring
 
 ## com.wmata-dashboard.daily-batch.plist — retired
 
-Retired by PR #M (issue #246): installed-but-never-loaded in production
+Retired by PR #259 (issue #246): installed-but-never-loaded in production
 (`launchctl list | grep wmata` showed nothing as of 2026-08-11), and its
 job — `pipelines/run_daily_batch.py` — is now one step inside
 `bin/pull-and-derive.sh`, which the new
@@ -20,7 +20,7 @@ on an older launchd) and delete the file.
 
 ## com.wmata-dashboard.retain-trip-update-state.plist — retired
 
-Retired by PR #M (issue #246): also installed-but-never-loaded. Its job —
+Retired by PR #259 (issue #246): also installed-but-never-loaded. Its job —
 pruning `trip_update_state` so the table stays bounded even if the nightly
 batch is paused — is superseded now that the batch itself (via
 `pipelines/cleanup_trip_update_state.py`, both agencies) runs nightly
