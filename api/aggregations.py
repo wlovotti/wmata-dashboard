@@ -95,8 +95,20 @@ from src.timezones import utcnow_naive
 # + Python pairing). Historical dates never change once the pipeline has
 # derived them, so they're safe to cache for a long time. Today's date
 # being up to an hour stale on a 7-day rollup dashboard is invisible (the
-# window dwarfs any in-day delta). The 1-hour TTL is the right tradeoff
-# given how expensive a recompute is.
+# window dwarfs any in-day delta) -- AS LONG AS the underlying data hasn't
+# actually changed since the entry was cached.
+#
+# Invalidation is two-layered (issue #246): the `_LIVE_METRICS_TTL_SEC`
+# clock below is a secondary bound, and the primary signal is a "data
+# version" stamp (`_current_data_version`) captured alongside each entry.
+# A nightly `bin/pull-and-derive.sh` run can land fresh derived data at any
+# point inside that hour-long TTL window -- before this, the API (run
+# manually, no restart hook) kept serving the pre-derive numbers until the
+# TTL happened to expire, which is what forced a manual restart after the
+# 2026-09-07 run. `_current_data_version` reads
+# `MAX(system_metrics_daily.computed_at)` once per request -- cheap
+# single-row aggregate -- and a cached entry whose stored stamp doesn't
+# match the current one is treated as a miss regardless of its age.
 _LIVE_METRICS_TTL_SEC = 3600.0
 # Keyed `(db_identity, service_date_iso)` (NOTES-139 review finding 1) --
 # `db_identity` (`src.ewt._db_identity`) namespaces entries by which
@@ -105,8 +117,34 @@ _LIVE_METRICS_TTL_SEC = 3600.0
 # SAME service_date string. Without it, whichever agency's request
 # happened to populate a given date's slot first would silently serve
 # its numbers back to every other agency's request for that date.
-_live_metrics_cache: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
+# Value is `(cached_at_monotonic, data_version, payload)` -- see the
+# module comment above for what `data_version` guards against.
+_live_metrics_cache: dict[tuple[str, str], tuple[float, str, dict[str, dict]]] = {}
 _live_metrics_lock = Lock()
+
+
+def _current_data_version(db: Session) -> str:
+    """Cheap once-per-request marker for "has new derived data landed".
+
+    Reads `MAX(system_metrics_daily.computed_at)` -- a single-row
+    aggregate over an indexed primary-key-adjacent column, not a scan of
+    `stop_events` -- and returns its ISO string, or `"none"` if the table
+    is empty for this database. `pipelines/upsert_system_metrics_daily.py`
+    (dispatched per-date from `run_daily_batch.py`, which
+    `bin/pull-and-derive.sh` runs every night) stamps a fresh `computed_at`
+    on every derive, including a same-date re-derive, so this advances
+    exactly when there's new data worth invalidating a cache entry for.
+
+    Used by both `_live_metrics_cache` and `_window_metrics_cache` as part
+    of each entry's identity (issue #246) -- a stored stamp that doesn't
+    match the current one is a miss, independent of TTL. Not itself
+    cached: the whole point is that it's read fresh on every cache
+    lookup, and a single-row `MAX()` is cheap enough that caching it would
+    just be reintroducing the staleness this exists to close.
+    """
+    stamp = db.query(func.max(SystemMetricsDaily.computed_at)).scalar()
+    return stamp.isoformat() if stamp is not None else "none"
+
 
 # Default scorecard window (in days). The scorecard pools each metric over
 # this window so a route that only runs Mon-Fri doesn't appear empty just
@@ -120,9 +158,12 @@ _SCORECARD_WINDOW_DAYS = 7
 # default WMATA request from sharing a windowed-rollup entry. Shorter
 # TTL than the per-date cache because this layer also caches the
 # cross-route aggregation pass; refreshing it lets newly-warmed per-date
-# entries flow into the rollup without waiting an hour.
+# entries flow into the rollup without waiting an hour. Same
+# `data_version`-stamped invalidation as `_live_metrics_cache` (issue
+# #246, see `_current_data_version`) -- value is
+# `(cached_at_monotonic, data_version, payload)`.
 _WINDOW_METRICS_TTL_SEC = 300.0
-_window_metrics_cache: dict[tuple[str, str, int], tuple[float, dict[str, dict]]] = {}
+_window_metrics_cache: dict[tuple[str, str, int], tuple[float, str, dict[str, dict]]] = {}
 _window_metrics_lock = Lock()
 
 # Singleflight registry for windowed-cache compute. Without this, two
@@ -735,6 +776,7 @@ def _compute_live_metrics_for_window_uncached(
     )
 
     db_identity = _db_identity(db)
+    data_version = _current_data_version(db)
     all_dates = [end_date - timedelta(days=i) for i in range(days)]
     partial_dates = _partial_service_dates_in_window(db, end_date, days)
     dates = [d for d in all_dates if d.isoformat() not in partial_dates]
@@ -746,8 +788,12 @@ def _compute_live_metrics_for_window_uncached(
         for d in dates:
             ds = d.isoformat()
             cached = _live_metrics_cache.get((db_identity, ds))
-            if cached is not None and (now - cached[0]) < _LIVE_METRICS_TTL_SEC:
-                cached_results[ds] = cached[1]
+            if (
+                cached is not None
+                and cached[1] == data_version
+                and (now - cached[0]) < _LIVE_METRICS_TTL_SEC
+            ):
+                cached_results[ds] = cached[2]
             else:
                 uncached_dates.append(d)
 
@@ -762,7 +808,11 @@ def _compute_live_metrics_for_window_uncached(
             if ds in overlay:
                 cached_results[ds] = overlay[ds]
                 with _live_metrics_lock:
-                    _live_metrics_cache[(db_identity, ds)] = (time.monotonic(), overlay[ds])
+                    _live_metrics_cache[(db_identity, ds)] = (
+                        time.monotonic(),
+                        data_version,
+                        overlay[ds],
+                    )
             else:
                 cold_dates.append(d)
 
@@ -828,7 +878,7 @@ def _compute_live_metrics_for_window_uncached(
             }
             cached_results[ds] = per_date
             with _live_metrics_lock:
-                _live_metrics_cache[(db_identity, ds)] = (time.monotonic(), per_date)
+                _live_metrics_cache[(db_identity, ds)] = (time.monotonic(), data_version, per_date)
 
     per_date_results = [cached_results[d.isoformat()] for d in dates]
     return _aggregate_live_metrics_window(per_date_results)
@@ -844,15 +894,16 @@ def _compute_live_metrics_for_date(db: Session, service_date) -> dict[str, dict]
     finding 1 -- see `_live_metrics_cache`'s module comment).
     """
     cache_key = (_db_identity(db), service_date.isoformat())
+    data_version = _current_data_version(db)
     with _live_metrics_lock:
         cached = _live_metrics_cache.get(cache_key)
         if cached is not None:
-            ts, value = cached
-            if (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
+            ts, version, value = cached
+            if version == data_version and (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
                 return value
     result = _compute_live_metrics_uncached(db, service_date)
     with _live_metrics_lock:
-        _live_metrics_cache[cache_key] = (time.monotonic(), result)
+        _live_metrics_cache[cache_key] = (time.monotonic(), data_version, result)
     return result
 
 
@@ -879,12 +930,13 @@ def get_live_metrics_for_window(
     only feeds the cell-hour gate lookup inside the uncached compute.
     """
     cache_key = (_db_identity(db), end_date.isoformat(), days)
+    data_version = _current_data_version(db)
     while True:
         with _window_metrics_lock:
             cached = _window_metrics_cache.get(cache_key)
             if cached is not None:
-                ts, value = cached
-                if (time.monotonic() - ts) < _WINDOW_METRICS_TTL_SEC:
+                ts, version, value = cached
+                if version == data_version and (time.monotonic() - ts) < _WINDOW_METRICS_TTL_SEC:
                     return value
             inflight = _window_metrics_inflight.get(cache_key)
             if inflight is None:
@@ -906,7 +958,7 @@ def get_live_metrics_for_window(
             inflight.set()
             raise
         with _window_metrics_lock:
-            _window_metrics_cache[cache_key] = (time.monotonic(), result)
+            _window_metrics_cache[cache_key] = (time.monotonic(), data_version, result)
             _window_metrics_inflight.pop(cache_key, None)
         inflight.set()
         return result
@@ -1037,8 +1089,12 @@ def get_live_metrics_for_route_today(
             cache_key = (_db_identity(db), anchor_date.isoformat())
             with _live_metrics_lock:
                 cached = _live_metrics_cache.get(cache_key)
-            if cached is not None and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC:
-                route_metrics = cached[1].get(route_id)
+            if (
+                cached is not None
+                and cached[1] == _current_data_version(db)
+                and (time.monotonic() - cached[0]) < _LIVE_METRICS_TTL_SEC
+            ):
+                route_metrics = cached[2].get(route_id)
                 if route_metrics is not None:
                     return route_metrics, anchor_date
 
@@ -1077,7 +1133,10 @@ def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
 
     Anchors on the latest service_date that has stop_events (today's data may
     not yet be derived — see `_latest_service_date_with_stop_events`). Reuses
-    the cached result if computed within `_LIVE_METRICS_TTL_SEC` (default 60s).
+    the cached result if computed within `_LIVE_METRICS_TTL_SEC` (default 60s)
+    AND the data version (`_current_data_version`, issue #246) hasn't moved —
+    a nightly `bin/pull-and-derive.sh` run landing fresh data invalidates the
+    entry immediately rather than waiting out the rest of the TTL.
     Cold-cache cost is the full ~3s; warm-cache cost is dict access.
     Concurrent callers may both compute on a cold miss — acceptable
     thundering-herd cost in single-process dev. Returns an empty dict if no
@@ -1090,18 +1149,19 @@ def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
     # agency's lookup from reading another agency's entry for the same
     # date string.
     cache_key = (_db_identity(db), service_date.isoformat())
+    data_version = _current_data_version(db)
 
     with _live_metrics_lock:
         cached = _live_metrics_cache.get(cache_key)
         if cached is not None:
-            ts, value = cached
-            if (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
+            ts, version, value = cached
+            if version == data_version and (time.monotonic() - ts) < _LIVE_METRICS_TTL_SEC:
                 return value
 
     result = _compute_live_metrics_uncached(db, service_date)
 
     with _live_metrics_lock:
-        _live_metrics_cache[cache_key] = (time.monotonic(), result)
+        _live_metrics_cache[cache_key] = (time.monotonic(), data_version, result)
     return result
 
 

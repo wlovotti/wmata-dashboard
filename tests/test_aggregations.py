@@ -14,6 +14,7 @@ from datetime import date, timedelta
 
 import pytest
 
+import api.aggregations as api_aggregations
 from api.aggregations import (
     EWT_SCORE_FLOOR_SEC,
     EWT_SCORE_TARGET_SEC,
@@ -841,7 +842,11 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
         instead of treating "missing from a warm cache" as "no data"."""
         import time
 
-        from api.aggregations import _live_metrics_cache, get_live_metrics_for_route_today
+        from api.aggregations import (
+            _current_data_version,
+            _live_metrics_cache,
+            get_live_metrics_for_route_today,
+        )
         from src.ewt import _db_identity
 
         self._seed_stop_event(db_session, "TEST1", "2026-08-07")
@@ -853,9 +858,13 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
         # starts empty and is cleared again after the test by the autouse
         # `_clear_live_metrics_cache` fixture.) Keyed `(db_identity, date)`
         # since NOTES-139 (agency query param) added a database component
-        # to this cache's key.
+        # to this cache's key. Value is `(cached_at, data_version, payload)`
+        # since issue #246 (see `_current_data_version`) -- stamping it
+        # with the current version keeps this poked entry "warm" the same
+        # way a real write would.
         _live_metrics_cache[(_db_identity(db_session), "2026-08-08")] = (
             time.monotonic(),
+            _current_data_version(db_session),
             {"TEST2": {"service_delivered": {"ratio": 1.0}}},
         )
 
@@ -954,7 +963,11 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
         outage numbers."""
         import time
 
-        from api.aggregations import _live_metrics_cache, get_live_metrics_for_route_today
+        from api.aggregations import (
+            _current_data_version,
+            _live_metrics_cache,
+            get_live_metrics_for_route_today,
+        )
         from src.ewt import _db_identity
 
         self._seed_stop_event(db_session, "TEST1", "2026-08-05")
@@ -962,9 +975,11 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
         self._seed_stop_event(db_session, "TEST2", "2026-08-08")
 
         # Keyed `(db_identity, date)` since NOTES-139 added a database
-        # component to this cache's key.
+        # component to this cache's key. Value is `(cached_at,
+        # data_version, payload)` since issue #246.
         _live_metrics_cache[(_db_identity(db_session), "2026-08-08")] = (
             time.monotonic(),
+            _current_data_version(db_session),
             {"TEST2": {"service_delivered": {"ratio": 1.0}}},  # no TEST1 entry
         )
 
@@ -1005,6 +1020,89 @@ class TestRouteHeaderAnchorsOnRouteOwnLatestDate:
 
         assert result["live_metrics_as_of_date"] == "2026-08-07"
         assert result["otp_all_pct"] == 100.0
+
+
+class TestLiveMetricsCacheDataVersionInvalidation:
+    """Issue #246: the live-metrics caches must additionally key on a cheap
+    "data version" marker (`MAX(system_metrics_daily.computed_at)`), not
+    TTL alone.
+
+    Before this, a nightly `bin/pull-and-derive.sh` run that lands fresh
+    data mid-TTL (up to an hour, `_LIVE_METRICS_TTL_SEC`) left the API
+    silently serving stale numbers until the TTL happened to expire (the
+    9/7 incident that needed a manual API restart). `_current_data_version`
+    reads `system_metrics_daily` once per request -- the nightly batch
+    writes a fresh `computed_at` there every run -- so a cache entry
+    stamped with an older version is treated as a miss even while its TTL
+    clock hasn't run out.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_live_metrics_cache(self):
+        """Process-global cache isolation -- same reasoning as the other
+        `_live_metrics_cache`-poking test classes in this file."""
+        from api.aggregations import _live_metrics_cache
+
+        _live_metrics_cache.clear()
+        yield
+        _live_metrics_cache.clear()
+
+    def _seed_stop_event(self, db_session, route_id, service_date_str, hour=14):
+        """One proximity stop_event, enough to anchor `_latest_service_date_with_stop_events`."""
+        from datetime import datetime as _dt
+
+        from src.models import StopEvent
+
+        d = date.fromisoformat(service_date_str)
+        db_session.add(
+            StopEvent(
+                service_date=service_date_str,
+                trip_id=f"TRIP_{route_id}_{service_date_str}_{hour}",
+                route_id=route_id,
+                direction_id=0,
+                stop_id=f"STOP_VERSION_{route_id}",
+                stop_sequence=1,
+                observed_arrival_ts=_dt.combine(d, _dt.min.time()).replace(hour=hour),
+                deviation_sec=0,
+                source="proximity",
+                schedule_relationship="SCHEDULED",
+            )
+        )
+        db_session.commit()
+
+    def test_new_system_metrics_daily_row_invalidates_warm_cache(
+        self, db_session, sample_route, monkeypatch
+    ):
+        """A fresh `system_metrics_daily` row (the nightly batch's signal
+        that new data landed) forces a recompute on the very next call,
+        even though the entry is nowhere near its TTL."""
+        from src.models import SystemMetricsDaily
+
+        self._seed_stop_event(db_session, "TEST1", "2026-08-07")
+
+        call_count = {"n": 0}
+        real_compute = api_aggregations._compute_live_metrics_uncached
+
+        def _counting_compute(db, service_date, agency="wmata"):
+            call_count["n"] += 1
+            return real_compute(db, service_date, agency=agency)
+
+        monkeypatch.setattr(api_aggregations, "_compute_live_metrics_uncached", _counting_compute)
+
+        api_aggregations.get_live_metrics_for_today(db_session)
+        assert call_count["n"] == 1
+
+        # Warm-cache re-read within TTL, no new data version: no recompute.
+        api_aggregations.get_live_metrics_for_today(db_session)
+        assert call_count["n"] == 1
+
+        # Simulate the nightly batch landing fresh data: a new
+        # system_metrics_daily row advances MAX(computed_at).
+        db_session.add(SystemMetricsDaily(service_date="2026-08-07", otp_percentage=80.0))
+        db_session.commit()
+
+        api_aggregations.get_live_metrics_for_today(db_session)
+        assert call_count["n"] == 2
 
 
 class TestGetRouteTrendData:

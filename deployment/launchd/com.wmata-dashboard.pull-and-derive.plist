@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wmata-dashboard.pull-and-derive</string>
+
+    <!--
+        Run bin/pull-and-derive-nightly.sh (which wraps
+        bin/pull-and-derive.sh) once daily at 03:30 local time (Eastern,
+        on the user's machine) — after WMATA's/SFMTA's service rolls over
+        for the day, so "yesterday's service date" is complete, and after
+        the retired com.wmata-dashboard.daily-batch's old 03:00 slot
+        (this job now supersedes it — see docs/DEPLOYMENT.md §12).
+
+        launchd's StartCalendarInterval fires a missed run on the next
+        wake if the laptop was asleep at 03:30 (unlike a cron-style fixed
+        interval, it doesn't just skip the missed occurrence) — so a
+        sleeping laptop yields "fresh within the hour of opening it,"
+        rather than "fresh only on nights the laptop happened to be
+        awake." launchd uses the system's local timezone here — no UTC
+        conversion needed.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!--
+        RunAtLoad=false: don't fire immediately when `launchctl load`
+        runs. Surprising and noisy for a multi-hour-capable job;
+        install-time validation happens by running the wrapper manually
+        (`bin/pull-and-derive-nightly.sh`) first.
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard</string>
+
+    <!--
+        launchd jobs do not inherit the user's shell PATH. The wrapper
+        script (and bin/pull-and-derive.sh underneath it) shells out to
+        `uv`, `aws`, `curl`, and BSD `date` by bare name, so PATH has to
+        include their Homebrew location explicitly — matching the PATH
+        an interactive terminal session on this machine actually has.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/wlovotti/repos/wmata-dashboard/bin/pull-and-derive-nightly.sh</string>
+    </array>
+
+    <!--
+        launchd's stdout/stderr capture is the outermost safety net --
+        catches anything too early to reach logs/pull-and-derive.log
+        (e.g. the wrapper script itself failing to exec).
+    -->
+    <key>StandardOutPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/pull-and-derive.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/wlovotti/repos/wmata-dashboard/logs/pull-and-derive.log</string>
+</dict>
+</plist>
