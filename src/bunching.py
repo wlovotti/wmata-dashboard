@@ -189,6 +189,7 @@ def compute_bunching_for_route_date(
     route_id: str,
     service_date: date_type,
     tz_name: str = "America/New_York",
+    gtfs_snapshot_id: int | None = None,
 ) -> list[dict]:
     """Compute bunching for one (route, service_date), one row per time_period.
 
@@ -202,11 +203,15 @@ def compute_bunching_for_route_date(
     agency's own local hour; defaults to Eastern. The scheduled side is
     always agency-local by construction (GTFS clock time), and resolves
     against the EXACT `service_date` (NOTES-109, no day_type/modal layer).
+    `gtfs_snapshot_id` pins that scheduled side to one GTFS snapshot
+    (issue #258); default is the live `is_current` snapshot.
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
 
-    sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(db, route_id, service_date)
+    sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(
+        db, route_id, service_date, gtfs_snapshot_id
+    )
     obs_by_cell_hour = _scheduled_observed_headways_by_cell_hour(
         db, route_id, service_date_str, tz_name
     )
@@ -251,6 +256,7 @@ def compute_bunching_for_routes(
     service_date: date_type,
     route_ids: list[str] | None = None,
     tz_name: str = "America/New_York",
+    gtfs_snapshot_id: int | None = None,
 ) -> list[dict]:
     """Compute bunching for every route seen in stop_events on the date.
 
@@ -262,6 +268,7 @@ def compute_bunching_for_routes(
 
     `tz_name` (NOTES-103 multi-agency) is forwarded to
     `compute_bunching_for_route_date` for every route; defaults to Eastern.
+    `gtfs_snapshot_id` is forwarded likewise (issue #258).
     """
     service_date_str = service_date.isoformat()
     if route_ids is None:
@@ -274,7 +281,7 @@ def compute_bunching_for_routes(
         )
     out: list[dict] = []
     for r in route_ids:
-        out.extend(compute_bunching_for_route_date(db, r, service_date, tz_name))
+        out.extend(compute_bunching_for_route_date(db, r, service_date, tz_name, gtfs_snapshot_id))
     return out
 
 
@@ -307,6 +314,7 @@ def compute_bunching_headline_for_route(
     service_date: date_type,
     period_key: str = "all",
     tz_name: str = "America/New_York",
+    gtfs_snapshot_id: int | None = None,
 ) -> dict:
     """Single-route bunching collapsed to one rate for the day.
 
@@ -323,12 +331,15 @@ def compute_bunching_headline_for_route(
 
     Returns the same dict shape as one period row from `compute_bunching_for_route_date`,
     minus the `time_period` key. The scheduled side resolves against the
-    EXACT `service_date` (NOTES-109, no day_type/modal layer).
+    EXACT `service_date` (NOTES-109, no day_type/modal layer), pinned to
+    `gtfs_snapshot_id` when given (issue #258).
     """
     service_date_str = service_date.isoformat()
     day_type = _day_type_for(service_date)
 
-    sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(db, route_id, service_date)
+    sched_by_cell_hour = _scheduled_headways_by_cell_hour_for_date(
+        db, route_id, service_date, gtfs_snapshot_id
+    )
     obs_by_cell_hour = _scheduled_observed_headways_by_cell_hour(
         db, route_id, service_date_str, tz_name
     )

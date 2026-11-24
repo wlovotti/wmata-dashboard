@@ -791,7 +791,7 @@ def _bucket_scheduled_headways_by_cell(
 
 
 def _scheduled_headways_by_cell_hour_for_date(
-    db: Session, route_id: str, service_date: date_type
+    db: Session, route_id: str, service_date: date_type, gtfs_snapshot_id: int | None = None
 ) -> dict[CellHour, list[float]]:
     """Compute scheduled headways per (direction, stop, hour) cell for the
     EXACT `service_date` (NOTES-109) — the per-date replacement for
@@ -804,8 +804,12 @@ def _scheduled_headways_by_cell_hour_for_date(
     representative-day fiction at all. A Friday sees its own Friday
     service_id; a federal holiday sees its own `calendar_dates`
     substitution.
+
+    ``gtfs_snapshot_id`` pins the schedule (service_id resolution AND the
+    trips/stop_times rows) to one historical snapshot — issue #258's
+    per-date snapshot; the default reads the live `is_current` snapshot.
     """
-    service_ids = _resolve_service_ids_for_date(db, service_date)
+    service_ids = _resolve_service_ids_for_date(db, service_date, gtfs_snapshot_id)
     if not service_ids:
         return {}
     rows = (
@@ -813,8 +817,8 @@ def _scheduled_headways_by_cell_hour_for_date(
         .join(StopTime, StopTime.trip_id == Trip.trip_id)
         .filter(
             Trip.route_id == route_id,
-            Trip.is_current,
-            StopTime.is_current,
+            gtfs_version_filter(Trip, gtfs_snapshot_id),
+            gtfs_version_filter(StopTime, gtfs_snapshot_id),
             Trip.service_id.in_(service_ids),
         )
         .all()
