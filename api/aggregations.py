@@ -101,7 +101,7 @@ from src.timezones import utcnow_naive
 # Invalidation is two-layered (issue #246): the `_LIVE_METRICS_TTL_SEC`
 # clock below is a secondary bound, and the primary signal is a "data
 # version" stamp (`_current_data_version`) captured alongside each entry.
-# A nightly `bin/pull-and-derive.sh` run can land fresh derived data at any
+# A `bin/pull-and-derive.sh` run (on demand) can land fresh derived data at any
 # point inside that hour-long TTL window -- before this, the API (run
 # manually, no restart hook) kept serving the pre-derive numbers until the
 # TTL happened to expire, which is what forced a manual restart after the
@@ -134,7 +134,7 @@ def _current_data_version(db: Session) -> str:
     ISO string, or `"none"` if the table is empty for this database.
     `pipelines/upsert_system_metrics_daily.py`
     (dispatched per-date from `run_daily_batch.py`, which
-    `bin/pull-and-derive.sh` runs every night) stamps a fresh `computed_at`
+    `bin/pull-and-derive.sh` runs on each refresh) stamps a fresh `computed_at`
     on every derive, including a same-date re-derive, so this advances
     exactly when there's new data worth invalidating a cache entry for.
 
@@ -1138,7 +1138,7 @@ def get_live_metrics_for_today(db: Session) -> dict[str, dict]:
     not yet be derived — see `_latest_service_date_with_stop_events`). Reuses
     the cached result if computed within `_LIVE_METRICS_TTL_SEC` (3600s)
     AND the data version (`_current_data_version`, issue #246) hasn't moved —
-    a nightly `bin/pull-and-derive.sh` run landing fresh data invalidates the
+    a `bin/pull-and-derive.sh` run landing fresh data invalidates the
     entry immediately rather than waiting out the rest of the TTL.
     Cold-cache cost is the full ~3s; warm-cache cost is dict access.
     Concurrent callers may both compute on a cold miss — acceptable

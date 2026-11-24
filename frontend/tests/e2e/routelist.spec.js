@@ -78,13 +78,18 @@ test('RouteList: contributors table renders with route data', async ({ page }) =
   await expect(page.getByRole('cell', { name: 'D72' })).toBeVisible()
 })
 
+// Exact header copy, as a blocking DOM-level check. Kept out of the
+// visual-regression test, which is advisory in CI: pixel tolerance missed
+// a header text change once (PR #204/#214); see helpers/headerCopy.js.
+test('RouteList: header copy is exact', async ({ page }) => {
+  await page.goto('/routes')
+  await assertHeaderCopy(page)
+})
+
 test('RouteList: visual regression', async ({ page }) => {
   await page.goto('/routes')
   // Wait for contributors to load.
   await expect(page.getByRole('cell', { name: 'D72' })).toBeVisible()
   await page.waitForTimeout(500)
-  // DOM-level header copy check alongside the pixel snapshot (PR #214) —
-  // see helpers/headerCopy.js for why.
-  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('routelist.png', { fullPage: true })
 })

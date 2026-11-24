@@ -71,12 +71,17 @@ test('Segments: click to expand drilldown', async ({ page }) => {
   await expect(page.getByText('Mean slip')).toBeVisible()
 })
 
+// Exact header copy, as a blocking DOM-level check. Kept out of the
+// visual-regression test, which is advisory in CI: pixel tolerance missed
+// a header text change once (PR #204/#214); see helpers/headerCopy.js.
+test('Segments: header copy is exact', async ({ page }) => {
+  await page.goto('/segments')
+  await assertHeaderCopy(page)
+})
+
 test('Segments: visual regression', async ({ page }) => {
   await page.goto('/segments')
   // Wait for the table to be fully rendered
   await page.waitForSelector('tbody tr')
-  // DOM-level header copy check alongside the pixel snapshot (PR #214) —
-  // see helpers/headerCopy.js for why.
-  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('segments-chromium.png', { fullPage: false })
 })

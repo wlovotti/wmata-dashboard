@@ -1,16 +1,17 @@
 # CLAUDE.md
 
-WMATA vs SFMTA (Muni) bus-performance dashboard. FastAPI + Postgres
-backend, React/Vite frontend. **The laptop's local PostgreSQL 16
-(`wmata_dashboard`) is the system of record**; a stateless nano
+WMATA bus-performance profile for local transit advocacy, with peer
+agencies (SFMTA/Muni first) as shallow comparison points. FastAPI +
+Postgres backend, React/Vite frontend. **The laptop's local PostgreSQL
+16 (`wmata_dashboard`) is the system of record**; a stateless nano
 collector polls WMATA + SFMTA GTFS-RT and uploads raw JSONL to S3 (no
 database on the collector box). API + frontend run locally against the
-local DB. Freshness: `bin/pull-and-derive.sh` (syncs the S3 archives,
-loads + replays, derives, then prunes SFMTA's trip_update_state
-retention window — no tunnel or VM access needed) runs nightly via the
-`com.wmata-dashboard.pull-and-derive` launchd job once installed
-(`deployment/launchd/`, `docs/DEPLOYMENT.md` §12); run it manually any
-time for an on-demand refresh. Topology/ops detail: `docs/DEPLOYMENT.md`.
+local DB. Freshness is on demand: run `bin/pull-and-derive.sh` by hand
+(syncs the S3 archives, loads + replays, derives, then prunes SFMTA's
+trip_update_state retention window — no tunnel or VM access needed).
+The nightly launchd wrapper/plist from PR #259 (`deployment/launchd/`,
+`docs/DEPLOYMENT.md` §12) still exist but are not deployed and not the
+intended mode (#260 closed as not planned). Topology/ops detail: `docs/DEPLOYMENT.md`.
 Punch list: GitHub Issues (`gh issue list`; labels `track:*`, `sev:*`,
 `effort:*`, `blocked`).
 Historical `NOTES-N` numbers in old PRs and docs refer to the retired
@@ -19,11 +20,27 @@ body, so `gh issue list --state all --search NOTES-N` finds them.
 
 ## North star
 
-An easily digestible display of bus performance metrics comparing
-agencies — WMATA vs SFMTA (Muni) first: a few headline KPIs computed
-identically per agency, shown side by side with honest comparability
-caveats. Audience for now: personal. Every open issue either serves
-this or is explicitly parked (`track:deferred`).
+A WMATA bus-performance profile for local transit advocacy (set
+2026-11-24). The main output is periodic, defensible, citable findings
+— generated reports/scorecards that state their method. The dashboard
+is the owner's exploration tool, not a hosted product (hosted deploy
+#254/#255 closed as not planned).
+
+- **WMATA is the only deep agency**: stop-level detail, diagnostics,
+  segments.
+- **Peer agencies are shallow comparison points** (SFMTA/Muni first,
+  maybe more cities later): the product compares them on headline KPIs
+  computed identically, with honest comparability caveats. Today SFMTA
+  runs the same pipeline and tables as WMATA; trimming peers to
+  aggregates is part of the storage direction below.
+- **Storage direction (not yet implemented)**: raw data in S3 as the
+  source of truth, stop-level tables kept for a rolling window (peers
+  possibly not at all), daily aggregates kept forever for every agency,
+  old periods re-derived from S3 on demand.
+  Don't describe this as current behaviour.
+
+Every open issue either serves this or is explicitly parked
+(`track:deferred`).
 
 ## Commands
 
@@ -43,7 +60,7 @@ bin/test-with-pg                             # full suite vs Postgres (mirrors C
 # PYTEST_ALLOW_PROD_DB=1 (issue #247)
 uv run ruff check src/ scripts/ api/ pipelines/ tests/           # lint — CI gate
 uv run ruff format --check src/ scripts/ api/ pipelines/ tests/  # format — separate CI gate
-cd frontend && npm run lint && npm test && npm run build         # frontend gates (CI runs all three)
+cd frontend && npm run lint && npm test && npm run build         # frontend gates (CI runs lint + test, not build)
 ```
 
 ## Architecture standards
@@ -115,11 +132,14 @@ cd frontend && npm run lint && npm test && npm run build         # frontend gate
 - Before pushing, run `ruff check`, `ruff format --check`, and
   `cd frontend && npm run lint` — all separate CI gates (frontend
   unit tests run in CI too).
-- Playwright visual regression is a blocking CI gate with
-  platform-specific baselines: changing a baselined page (Overview /
-  RouteList / RouteDetail-D72 / Segments) requires regenerating BOTH
-  the darwin and linux sets (commands in `frontend/README.md`); regen
-  is user-run.
+- Playwright visual regression (the `visual regression` pixel
+  snapshots) is advisory, not a merge gate: a mismatch leaves CI green
+  and uploads the diffs as the `playwright-visual-diffs` artifact.
+  Playwright functional e2e, frontend lint and unit tests stay
+  blocking. Baselines are platform-specific (darwin + linux); after a
+  deliberate change to a baselined page (Overview / RouteList /
+  RouteDetail-D72 / Segments), regenerate both sets when convenient
+  (commands in `frontend/README.md`, user-run) — not required to merge.
 - A PR that closes an issue puts `Closes #N` in its body, and the
   body explains *why* the change was scoped that way — the PR is the
   durable record of the decision, the issue of the problem. Reference

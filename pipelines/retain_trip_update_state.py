@@ -38,10 +38,10 @@ Usage
 
 This script's launchd timer
 (``com.wmata-dashboard.retain-trip-update-state.plist``) was retired by
-issue #246: with ``bin/pull-and-derive.sh`` now running nightly via
-``deployment/launchd/com.wmata-dashboard.pull-and-derive.plist``, its
-own nightly ``cleanup_trip_update_state`` calls (both agencies) keep the
-table bounded without a separate standalone timer. This script is left
+issue #246: ``bin/pull-and-derive.sh`` (run on demand; its nightly
+launchd job is not deployed, issue #260) calls
+``cleanup_trip_update_state`` (both agencies) on every run, which keeps
+the table bounded without a separate standalone timer. This script is left
 in the repo as a manual escape hatch (e.g. a long launchd outage) — run
 it by hand if needed, but it is no longer scheduled.
 Do NOT import and call it directly from ``run_daily_batch.py`` — the nightly

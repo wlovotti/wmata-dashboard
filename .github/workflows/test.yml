@@ -101,7 +101,8 @@ jobs:
         echo "✓ All tests passed"
 
   frontend-test:
-    runs-on: ubuntu-latest
+    # Pinned: Playwright has no chromium for ubuntu-latest (26.04), and 24.04 matches the noble image linux baselines are made in.
+    runs-on: ubuntu-24.04
 
     steps:
     - uses: actions/checkout@v3
@@ -127,6 +128,32 @@ jobs:
       working-directory: frontend
       run: npx playwright install --with-deps chromium
 
-    - name: Visual regression tests (Playwright)
+    - name: E2E functional tests (Playwright, blocking)
       working-directory: frontend
-      run: npx playwright test
+      run: npx playwright test --grep-invert "visual regression"
+
+    # Upload before the visual step runs: each Playwright run clears test-results/.
+    - name: Upload functional e2e failure output
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-functional-failures
+        path: frontend/test-results/
+        retention-days: 14
+
+    # Pixel-snapshot tests are advisory, not a merge gate (2026-11-24
+    # decision): a failure here leaves the job green, and the diff
+    # images are uploaded as an artifact so they're still reviewable.
+    - name: Visual regression tests (Playwright, advisory)
+      id: visual
+      working-directory: frontend
+      continue-on-error: true
+      run: npx playwright test --grep "visual regression"
+
+    - name: Upload visual regression diffs
+      if: steps.visual.outcome == 'failure'
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-visual-diffs
+        path: frontend/test-results/
+        retention-days: 14
