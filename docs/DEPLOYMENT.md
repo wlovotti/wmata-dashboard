@@ -774,9 +774,10 @@ the feed-header snapshot, which can lag further).
 ## 12. Laptop-side scheduled jobs (Path 2a)
 
 Since Path 2a (2026-07-18, §0 banner above) the laptop's local
-PostgreSQL 16 is the system of record, so some recurring jobs that
-would naturally be VM systemd units instead run as laptop `launchd`
-jobs against the laptop DB. Plists live in `deployment/launchd/`
+PostgreSQL 16 is the system of record, so jobs that would naturally be
+VM systemd units are laptop-side. As of 2026-11-24 none is scheduled:
+freshness is on demand via `bin/pull-and-derive.sh`, and the one
+remaining `launchd` job below is kept but not deployed (#260). Plists live in `deployment/launchd/`
 (consolidated there by issue #246, alongside `deployment/systemd/` for
 the nano collector — `scripts/launchd/` is retired, see its `README.md`
 for what moved where). This section is the pointer so the existence of

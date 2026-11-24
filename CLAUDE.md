@@ -9,9 +9,9 @@ database on the collector box). API + frontend run locally against the
 local DB. Freshness is on demand: run `bin/pull-and-derive.sh` by hand
 (syncs the S3 archives, loads + replays, derives, then prunes SFMTA's
 trip_update_state retention window — no tunnel or VM access needed).
-The nightly launchd wrapper/plist from PR #259 still exist in the repo
-but are not deployed and not the intended mode (#260 closed as not
-planned). Topology/ops detail: `docs/DEPLOYMENT.md`.
+The nightly launchd wrapper/plist from PR #259 (`deployment/launchd/`,
+`docs/DEPLOYMENT.md` §12) still exist but are not deployed and not the
+intended mode (#260 closed as not planned). Topology/ops detail: `docs/DEPLOYMENT.md`.
 Punch list: GitHub Issues (`gh issue list`; labels `track:*`, `sev:*`,
 `effort:*`, `blocked`).
 Historical `NOTES-N` numbers in old PRs and docs refer to the retired
@@ -28,12 +28,15 @@ is the owner's exploration tool, not a hosted product (hosted deploy
 
 - **WMATA is the only deep agency**: stop-level detail, diagnostics,
   segments.
-- **Peer agencies are shallow** (SFMTA/Muni first, maybe more cities
-  later): headline KPIs computed identically, daily aggregates kept,
-  honest comparability caveats.
+- **Peer agencies are shallow comparison points** (SFMTA/Muni first,
+  maybe more cities later): the product compares them on headline KPIs
+  computed identically, with honest comparability caveats. Today SFMTA
+  runs the same pipeline and tables as WMATA; trimming peers to
+  aggregates is part of the storage direction below.
 - **Storage direction (not yet implemented)**: raw data in S3 as the
-  source of truth, stop-level tables kept for a rolling window, daily
-  aggregates kept forever, old periods re-derived from S3 on demand.
+  source of truth, stop-level tables kept for a rolling window (peers
+  possibly not at all), daily aggregates kept forever for every agency,
+  old periods re-derived from S3 on demand.
   Don't describe this as current behaviour.
 
 Every open issue either serves this or is explicitly parked

@@ -111,6 +111,14 @@ test('Overview: system map renders polylines', async ({ page }) => {
   await expect(page.locator('.leaflet-overlay-pane path').first()).toBeVisible()
 })
 
+// Exact header copy, as a blocking DOM-level check. Kept out of the
+// visual-regression test, which is advisory in CI: pixel tolerance missed
+// a header text change once (PR #204/#214); see helpers/headerCopy.js.
+test('Overview: header copy is exact', async ({ page }) => {
+  await page.goto('/')
+  await assertHeaderCopy(page)
+})
+
 test('Overview: visual regression', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByText(/on time this week/i)).toBeVisible()
@@ -125,9 +133,5 @@ test('Overview: visual regression', async ({ page }) => {
   // wait for at least one so the screenshot doesn't catch a half-drawn map.
   await expect(page.locator('.leaflet-overlay-pane path').first()).toBeVisible()
   await page.waitForTimeout(500)
-  // Pixel diffing alone doesn't reliably catch small-area text changes (a
-  // header subtitle swap stayed under maxDiffPixelRatio in PR #204) —
-  // assert the exact header copy as a DOM-level check too (PR #214).
-  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('overview.png', { fullPage: true })
 })

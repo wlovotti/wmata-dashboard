@@ -109,13 +109,18 @@ test('RouteDetail: 30-Day Trend section renders', async ({ page }) => {
   await expect(page.getByText('30-Day Trend')).toBeVisible()
 })
 
+// Exact header copy, as a blocking DOM-level check. Kept out of the
+// visual-regression test, which is advisory in CI: pixel tolerance missed
+// a header text change once (PR #204/#214); see helpers/headerCopy.js.
+test('RouteDetail: header copy is exact', async ({ page }) => {
+  await page.goto('/route/D72')
+  await assertHeaderCopy(page)
+})
+
 test('RouteDetail: visual regression', async ({ page }) => {
   await page.goto('/route/D72')
   // Wait for the trend section and sparklines to render.
   await expect(page.getByText('30-Day Trend')).toBeVisible()
   await page.waitForTimeout(500)
-  // DOM-level header copy check alongside the pixel snapshot (PR #214) —
-  // see helpers/headerCopy.js for why.
-  await assertHeaderCopy(page)
   await expect(page).toHaveScreenshot('routedetail-d72.png', { fullPage: true })
 })

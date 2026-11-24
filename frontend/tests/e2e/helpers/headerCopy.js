@@ -14,12 +14,13 @@
 // harder-to-maintain screenshot fixture.
 //
 // Instead: assert the exact header text content as its own DOM-level check,
-// run immediately before the pixel snapshot in each visual-regression test.
+// run as a separate `<Page>: header copy is exact` test in each spec. Since
+// 2026-11-24 the pixel snapshots are advisory in CI, so this lives outside
+// the visual-regression tests and stays in the blocking functional step.
 // This doesn't touch the pixel tolerance or the committed baselines at all
 // (so it doesn't force a baseline regen), but a copy change anywhere in the
 // header — however small in pixel-area terms — fails this assertion
-// deterministically. It runs as a normal Playwright assertion, so it's part
-// of the same CI job as the pixel gate and needs no separate wiring.
+// deterministically.
 //
 // Centralized here (rather than duplicating the literal strings in all four
 // specs) so a legitimate, intentional header copy change only needs
@@ -34,9 +35,9 @@ export const EXPECTED_HEADER_SUBTITLE = 'Daily bus network performance metrics'
 /**
  * Assert the app header renders the current, exact title + subtitle copy.
  *
- * Intended to run right before `expect(page).toHaveScreenshot(...)` in each
- * visual-regression test, so a header copy regression fails CI even when
- * the pixel diff it produces is too small to trip `maxDiffPixelRatio`.
+ * Called from each spec's blocking `header copy is exact` test, so a header
+ * copy regression fails CI even though the pixel snapshots are advisory and
+ * would not catch a diff too small to trip `maxDiffPixelRatio` anyway.
  *
  * @param {import('@playwright/test').Page} page - the Playwright page,
  *   already navigated to a page that renders the shared `App.jsx` header.
