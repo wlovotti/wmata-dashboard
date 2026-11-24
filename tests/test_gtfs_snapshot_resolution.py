@@ -640,9 +640,7 @@ def test_main_exit_code_3_when_only_guard_skips(tmp_path, monkeypatch):
     """main() returns 3 (not 1) when no pipeline failed but a date was held back."""
     import pipelines.run_daily_batch as run_daily_batch_module
 
-    def _fake_run_batch(
-        target_dates, log_handle, dry_run=False, agency="wmata", guard_skipped=None
-    ):
+    def _fake_run_batch(target_dates, log_handle, guard_skipped=None, **kwargs):
         """Pretend the guard held back the only date."""
         guard_skipped.add(target_dates[0])
         return 0

@@ -34,10 +34,10 @@ Usage:
 
 import argparse
 import sys
-from datetime import timedelta
+from datetime import date, timedelta
 
 from dotenv import load_dotenv
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import delete, func, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from src.agency_config import load_agency_config, resolve_agency_db_url
@@ -60,6 +60,7 @@ def run_cleanup(
     tz_name: str = "America/New_York",
     dry_run: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    before_date: date | None = None,
 ) -> dict[str, int]:
     """Delete rows with ``service_date`` older than ``retention_days`` ago.
 
@@ -86,12 +87,21 @@ def run_cleanup(
         dry_run: If True, only counts rows past the cutoff -- no deletes,
             no commits. Still reports the full eligible count.
         batch_size: Rows deleted per batch. Default ``DEFAULT_BATCH_SIZE``.
+        before_date: When given, the cutoff is
+            ``min(before_date, local_today - retention_days)`` — the per-day
+            refresh's per-date cleanup (PR #264 review): rows for service
+            dates before the date just derived go, so a weeks-long backfill
+            reuses the same dead space instead of growing the table by a day
+            of state per date, while a recent date still keeps the normal
+            ``retention_days`` window.
 
     Returns:
         ``{"deleted": <row_count>}`` — the number of rows removed (or,
         for ``dry_run``, the number that would be removed).
     """
     cutoff = local_today(tz_name) - timedelta(days=retention_days)
+    if before_date is not None:
+        cutoff = min(cutoff, before_date)
 
     if dry_run:
         count_stmt = (
@@ -167,6 +177,20 @@ def main() -> int:
             "module docstring."
         ),
     )
+    parser.add_argument(
+        "--before-date",
+        type=date.fromisoformat,
+        default=None,
+        help=(
+            "Also delete rows for service dates before this one: cutoff = "
+            "min(this, today - retention-days). Used per date by the day-at-a-time refresh."
+        ),
+    )
+    parser.add_argument(
+        "--vacuum",
+        action="store_true",
+        help="Run VACUUM (ANALYZE) trip_update_state afterwards (autocommit; not with --dry-run).",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -178,14 +202,36 @@ def main() -> int:
             retention_days=args.retention_days,
             tz_name=cfg.timezone,
             dry_run=args.dry_run,
+            before_date=args.before_date,
         )
         if args.dry_run:
             print(f"DRY-RUN: would delete {counts}")
         else:
             print(f"Cleanup complete: {counts}")
+        engine = db.get_bind()
     finally:
         db.close()
+    if args.vacuum and not args.dry_run and counts["deleted"]:
+        vacuum_table(engine)
     return 0
+
+
+def vacuum_table(engine) -> None:
+    """``VACUUM (ANALYZE) trip_update_state`` on its own autocommit connection.
+
+    VACUUM cannot run inside a transaction block, so it gets a fresh
+    AUTOCOMMIT connection after the session (whose batches already
+    committed) is closed. Plain VACUUM takes SHARE UPDATE EXCLUSIVE —
+    concurrent reads/writes continue — and marks the deleted rows' space
+    reusable right away, so the next date's replay fills it instead of
+    extending the table. (Autovacuum would get there too — deleting a day
+    of a ~2-day table is far past the 20% scale factor — but on its own
+    schedule, possibly after the next replay has already extended the
+    file.) It does not shrink the file; VACUUM FULL would, and is not used.
+    """
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text("VACUUM (ANALYZE) trip_update_state"))
+    print("VACUUM (ANALYZE) trip_update_state done")
 
 
 if __name__ == "__main__":

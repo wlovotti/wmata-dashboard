@@ -7,6 +7,34 @@ phantom-timestamp guard at load time — raw files stay raw.
 
     uv run python pipelines/load_vp_archive.py --agency wmata
     uv run python pipelines/load_vp_archive.py --agency sfmta
+    uv run python pipelines/load_vp_archive.py --agency wmata \\
+        --utc-date 2026-10-03 --utc-date 2026-10-04          # scoped
+    uv run python pipelines/load_vp_archive.py --agency wmata \\
+        --utc-date 2026-10-03 --force                         # reload a day
+
+Re-loadability (issue #261): ``vehicle_positions`` has no natural unique
+key, so "load each file once" (the manifest) is the only thing preventing
+duplicates — and a date whose VP rows were later pruned could never be
+re-derived, because its files stayed manifested. ``--utc-date`` scopes a
+run to the files named for those UTC dates and reconciles each day first
+(see :func:`reconcile_utc_day`): a day whose rows are all still present
+loads only its new files; a day whose rows were pruned (fully or
+partially) is reloaded whole — delete exactly that day's rows, delete its
+manifest rows, re-insert every file, re-manifest — in ONE transaction, so
+a crash leaves the old state intact. The day is the unit because files
+are named by the UTC date of each row's ``collected_at``
+(``JsonlArchiveWriter``), so "rows with ``collected_at`` on day U" and
+"rows loaded from files ``U.*``" are the same set — provided every row
+came from those files, which the reconcile step checks (DB rows <=
+manifested rows) before it will delete anything. A day with more rows
+than its manifest (the VM era, through 2026-08-22) is left untouched when
+there is nothing new to load, and refused when there is.
+
+No VP retention runs today ("pruned" above means a future retention PR or
+a manual delete). WARNING for that PR: ``pipelines/archive_vehicle_positions.py``
+partitions by ``DATE(timestamp)``, not ``collected_at`` — a retention cut on
+``timestamp`` splits UTC days differently from these files, which reconcile
+then sees as a partial day and reloads whole (safe, but slower).
 """
 
 import argparse
@@ -14,16 +42,17 @@ import io
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import zstandard as zstd
 from dotenv import load_dotenv
-from sqlalchemy import insert
+from sqlalchemy import delete, func, insert, select
 
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
 from src.models import VehiclePosition, VpArchiveLoadedFile
+from src.raw_archive import VP_TIMESTAMP_GUARD_SEC, archive_file_date
 from src.timezones import from_epoch_naive_utc, utcnow_naive
 
 logger = logging.getLogger(__name__)
@@ -34,7 +63,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # poll time: the spec's "±15 min outside the 15-min rotation window" with
 # row-level precision. Catches the documented +20-24h phantom-timestamp
 # rows (stale AVL clocks); tolerates ordinary AVL lag.
-GUARD_SEC = 1800
+GUARD_SEC = VP_TIMESTAMP_GUARD_SEC
 INSERT_CHUNK = 5000
 
 
@@ -160,6 +189,27 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
         print(f"  {path.name}: already loaded ({already.row_count} rows), skipping")
         return 0, 0
 
+    inserted, dropped = _insert_vp_file(session, path)
+    session.add(
+        VpArchiveLoadedFile(
+            filename=path.name,
+            row_count=inserted,
+            dropped_count=dropped,
+            loaded_at=utcnow_naive(),
+        )
+    )
+    session.commit()
+    print(f"  {path.name}: inserted {inserted}, dropped {dropped}")
+    return inserted, dropped
+
+
+def _insert_vp_file(session, path: Path) -> tuple[int, int]:
+    """Insert one archive file's rows (no manifest row, no commit); return (inserted, dropped).
+
+    The shared body of :func:`load_vp_file` and :func:`reload_utc_day` —
+    see ``load_vp_file`` for the per-line drop rules and the
+    crash-truncated-frame warning.
+    """
     inserted = dropped = 0
     batch: list[dict] = []
     with open(path, "rb") as fh:
@@ -199,35 +249,233 @@ def load_vp_file(session, path: Path) -> tuple[int, int]:
             path.name,
             inserted,
         )
-
-    session.add(
-        VpArchiveLoadedFile(
-            filename=path.name,
-            row_count=inserted,
-            dropped_count=dropped,
-            loaded_at=utcnow_naive(),
-        )
-    )
-    session.commit()
-    print(f"  {path.name}: inserted {inserted}, dropped {dropped}")
     return inserted, dropped
 
 
-def main(argv=None) -> int:
-    """Load every not-yet-loaded VP archive file for one agency.
+class UnknownProvenanceError(RuntimeError):
+    """A UTC day holds more VP rows than its manifested files account for.
 
-    Each file is loaded in isolation: an exception from ``load_vp_file``
-    (any DB- or file-level failure a line-level guard didn't already
-    catch) is logged and the run continues to the next file rather than
-    aborting the whole batch — one bad file must not block every other
-    file behind it. Returns 1 if any file failed to load, so callers
-    (cron, CI) can detect a partial run; the manifest table is the source
-    of truth for exactly which files still need attention.
+    Those extra rows came from somewhere other than this loader (e.g. the
+    retired direct-to-DB collector), so neither deleting the day to reload
+    it nor inserting archive rows on top of it is safe: the first could
+    destroy data the archive doesn't hold, the second could duplicate rows.
+    """
+
+
+class MissingDayFilesError(RuntimeError):
+    """A full-day reload was needed but a manifested file for that day is not local."""
+
+
+def _day_bounds(utc_date: date) -> tuple[datetime, datetime]:
+    """Half-open naive-UTC ``collected_at`` bounds for one UTC calendar day."""
+    start = datetime(utc_date.year, utc_date.month, utc_date.day)
+    return start, start + timedelta(days=1)
+
+
+def day_row_count(session, utc_date: date) -> int:
+    """Count ``vehicle_positions`` rows whose ``collected_at`` falls on ``utc_date``."""
+    start, end = _day_bounds(utc_date)
+    return session.execute(
+        select(func.count())
+        .select_from(VehiclePosition)
+        .where(VehiclePosition.collected_at >= start, VehiclePosition.collected_at < end)
+    ).scalar_one()
+
+
+def manifested_day(session, utc_date: date) -> dict[str, int]:
+    """Return ``{filename: row_count}`` for manifest rows naming ``utc_date``."""
+    prefix = f"{utc_date.isoformat()}."
+    return {
+        name: count
+        for name, count in session.query(
+            VpArchiveLoadedFile.filename, VpArchiveLoadedFile.row_count
+        ).filter(VpArchiveLoadedFile.filename.startswith(prefix))
+        if archive_file_date(name) == utc_date
+    }
+
+
+def reconcile_utc_day(
+    session, utc_date: date, force: bool = False, local_names: set[str] | None = None
+) -> str:
+    """Decide how to load one UTC day: ``"incremental"``, ``"reload"`` or ``"noop"``.
+
+    Compares the rows present for the day (by ``collected_at``) with the
+    rows its manifested files inserted (each file's rows and manifest row
+    commit together, so after any sequence of loads the two are equal):
+
+    - equal (and not ``force``) → ``"incremental"``: everything already
+      loaded is still there; load only not-yet-manifested files.
+    - fewer rows than manifested (something deleted some or all of them —
+      no VP retention runs today, but a later retention PR or a manual
+      delete would), or ``force`` → ``"reload"``: rebuild the whole day.
+    - MORE rows than manifested: rows the manifest can't account for
+      (every day through 2026-08-22 holds rows written straight to the DB
+      by the old VM collector) are never deleted or loaded on top of.
+      Without ``force`` and with no unmanifested file among
+      ``local_names`` there is nothing to do → ``"noop"`` (logged);
+      otherwise :class:`UnknownProvenanceError`.
+    """
+    present = day_row_count(session, utc_date)
+    manifest = manifested_day(session, utc_date)
+    manifested = sum(manifest.values())
+    if present > manifested:
+        unmanifested = sorted(set(local_names or ()) - set(manifest))
+        if not force and not unmanifested:
+            print(
+                f"  {utc_date}: {present} rows vs {manifested} manifested (rows of unknown "
+                "provenance) and no new local files — leaving the day untouched"
+            )
+            return "noop"
+        raise UnknownProvenanceError(
+            f"{utc_date}: vehicle_positions holds {present} rows with collected_at on this "
+            f"UTC day but its manifested archive files account for only {manifested}; "
+            "refusing to delete or add rows for a day with rows of unknown provenance"
+            + (f" ({len(unmanifested)} unmanifested local file(s))" if unmanifested else "")
+        )
+    if force or present < manifested:
+        return "reload"
+    return "incremental"
+
+
+def reload_utc_day(session, utc_date: date, paths: list[Path]) -> tuple[int, int]:
+    """Rebuild one UTC day of ``vehicle_positions`` from its archive files, atomically.
+
+    In one transaction: delete every row with ``collected_at`` on
+    ``utc_date``, delete the day's manifest rows, insert every file in
+    ``paths``, add a manifest row per file, commit. Any exception rolls
+    the whole day back to its prior state. Refuses (before touching
+    anything) if a file the manifest says was loaded for this day is not
+    in ``paths`` — reloading a subset would silently lose its rows.
+    Returns ``(inserted, dropped)`` across the day.
+    """
+    names = {p.name for p in paths}
+    missing = sorted(set(manifested_day(session, utc_date)) - names)
+    if missing:
+        raise MissingDayFilesError(
+            f"{utc_date}: full-day reload needs every file loaded for that day, but "
+            f"{len(missing)} manifested file(s) are not local (e.g. {missing[0]}); "
+            "fetch them from S3 first"
+        )
+    start, end = _day_bounds(utc_date)
+    try:
+        deleted = session.execute(
+            delete(VehiclePosition).where(
+                VehiclePosition.collected_at >= start, VehiclePosition.collected_at < end
+            )
+        ).rowcount
+        session.execute(
+            delete(VpArchiveLoadedFile).where(
+                VpArchiveLoadedFile.filename.startswith(f"{utc_date.isoformat()}.")
+            )
+        )
+        total_ins = total_drop = 0
+        now = utcnow_naive()
+        for path in sorted(paths):
+            ins, drop = _insert_vp_file(session, path)
+            session.add(
+                VpArchiveLoadedFile(
+                    filename=path.name, row_count=ins, dropped_count=drop, loaded_at=now
+                )
+            )
+            total_ins += ins
+            total_drop += drop
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    print(
+        f"  {utc_date}: reloaded {len(paths)} file(s) — deleted {deleted} row(s), "
+        f"inserted {total_ins}, dropped {total_drop}"
+    )
+    return total_ins, total_drop
+
+
+def day_paths(archive_root: Path, utc_date: date) -> list[Path]:
+    """Local archive files named for ``utc_date`` (both naming schemes), sorted."""
+    return sorted(
+        p
+        for p in archive_root.glob(f"{utc_date.isoformat()}*.jsonl.zst")
+        if archive_file_date(p.name) == utc_date
+    )
+
+
+def load_utc_days(session, archive_root: Path, utc_dates: list[date], force: bool) -> list[str]:
+    """Load (or reload) the files named for each of ``utc_dates``; return failure messages.
+
+    Each day is reconciled (:func:`reconcile_utc_day`) and then either
+    loaded incrementally file-by-file (:func:`load_vp_file`, each file its
+    own transaction) or rebuilt whole (:func:`reload_utc_day`). A day with
+    no local files and nothing to reload is a notice, not an error (a
+    future date, an archive gap). One day's failure does not stop the
+    others.
+    """
+    failures: list[str] = []
+    for utc_date in sorted(set(utc_dates)):
+        paths = day_paths(archive_root, utc_date)
+        try:
+            mode = reconcile_utc_day(
+                session, utc_date, force=force, local_names={p.name for p in paths}
+            )
+            session.rollback()  # end the read-only transaction the counts opened
+            if mode == "noop":
+                continue
+            if mode == "reload":
+                reload_utc_day(session, utc_date, paths)
+                continue
+            if not paths:
+                print(f"  {utc_date}: no local VP files, nothing to load")
+                continue
+            for path in paths:
+                try:
+                    load_vp_file(session, path)
+                except Exception as exc:  # isolate one bad file, keep going
+                    session.rollback()
+                    failures.append(f"{path.name}: {exc!r}")
+                    print(f"  {path.name}: FAILED to load ({exc!r}), continuing")
+        except Exception as exc:
+            session.rollback()
+            failures.append(f"{utc_date}: {exc}")
+            print(f"  {utc_date}: FAILED ({exc})")
+    return failures
+
+
+def main(argv=None) -> int:
+    """Load VP archive files for one agency — all of them, or scoped to UTC dates.
+
+    Without ``--utc-date``: every not-yet-loaded file in the archive dir
+    (the original behavior). Each file is loaded in isolation: an
+    exception from ``load_vp_file`` (any DB- or file-level failure a
+    line-level guard didn't already catch) is logged and the run continues
+    to the next file rather than aborting the whole batch — one bad file
+    must not block every other file behind it.
+
+    With ``--utc-date`` (repeatable): only files named for those UTC
+    dates, each day reconciled first so a pruned day is reloaded — see
+    :func:`load_utc_days`. ``--force`` (requires ``--utc-date``) reloads
+    every named day whole even when its rows look intact.
+
+    Returns 1 if any file/day failed, so callers can detect a partial run;
+    the manifest table is the source of truth for exactly which files
+    still need attention.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agency", default="wmata", choices=("wmata", "sfmta"))
     parser.add_argument("--archive-root", type=Path, default=None)
+    parser.add_argument(
+        "--utc-date",
+        action="append",
+        type=date.fromisoformat,
+        default=None,
+        help="Only load files named for this UTC date (repeatable); reconciles the day first.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --utc-date: delete and reload each named day from its files.",
+    )
     args = parser.parse_args(argv)
+    if args.force and not args.utc_date:
+        parser.error("--force requires --utc-date (reloads are scoped to whole UTC days)")
     load_dotenv()
 
     cfg = load_agency_config(args.agency)
@@ -237,6 +485,14 @@ def main(argv=None) -> int:
         return 1
 
     session = get_session(db_url=resolve_agency_db_url(cfg))
+    if args.utc_date:
+        try:
+            failures = load_utc_days(session, archive_root, args.utc_date, args.force)
+        finally:
+            session.close()
+        if failures:
+            print(f"  {len(failures)} failure(s): " + "; ".join(failures))
+        return 1 if failures else 0
     try:
         total_ins = total_drop = 0
         failed_files: list[str] = []
