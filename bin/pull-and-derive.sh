@@ -19,7 +19,11 @@
 # itself; an operator re-replaying a date on purpose passes --force.
 #
 # Requires: AWS credentials with read access to the four
-# raw-jsonl-archive S3 prefixes (root, sfmta/, vp/, sfmta_vp/), and
+# raw-jsonl-archive S3 prefixes (root, sfmta/, vp/, sfmta_vp/), AND — for
+# the GTFS reload step — s3:ListBucket + s3:GetObject + s3:PutObject on
+# s3://wmata-dashboard-backups/gtfs-archive/ (a reload archives the
+# downloaded zip there before loading and fails, DB untouched, if it
+# can't — see scripts/reload_gtfs_complete.py), and
 # local DATABASE_URL + SFMTA_DATABASE_URL (.env) for the loader/replay/
 # derive steps below — the SFMTA replay/derive legs hard-require
 # SFMTA_DATABASE_URL.
@@ -172,8 +176,9 @@ echo "== post-replay GTFS trip_id match-rate canary =="
 # (inside run_daily_batch.py, below) also re-targets any older
 # zero-`runs`-row date within the lookback window — those catch-up dates
 # are NOT covered by this check. They are covered by run_daily_batch.py's
-# own per-date pre-derive match-rate guard (issue #258), which skips (and
-# counts as a failure) any target date whose observed trip_ids don't match
+# own per-date pre-derive match-rate guard (issue #258), which skips (exit
+# code 3 when that is the batch's only problem) any target date whose
+# observed trip_ids don't match
 # the GTFS snapshot resolved for that date, instead of writing a
 # near-empty day that reads as a real 0% (WMATA 9/12 on 2026-09-29).
 #
@@ -233,7 +238,9 @@ echo "Upstream status going into derive: gtfs_reload wmata rc=$gtfs_rc_wmata sfm
 # documented non-blocking housekeeping soft-failures
 # (pipelines/run_daily_batch.py), so treating its rc as fatal-and-fast
 # would abort a healthy SFMTA derive over a WMATA housekeeping hiccup
-# (PR #228 review).
+# (PR #228 review). It returns 3 when every pipeline that ran succeeded but
+# the match-rate guard held back >=1 date (issue #258) — see the SFMTA
+# cleanup gate below for how that differs from 1.
 batch_rc_wmata=0
 batch_rc_sfmta=0
 if [ "$skip_wmata" -eq 1 ]; then
@@ -270,8 +277,20 @@ echo "== SFMTA trip_update_state retention (WMATA's own is handled by run_daily_
 # again, just for SFMTA. Non-blocking otherwise: a cleanup failure must not
 # fail an otherwise-healthy freshness run, same treatment as the other
 # steps above.
+#
+# Exception: batch rc=3 (only guard-held-back dates, issue #258) DOES run
+# cleanup. A held-back date is one whose observed trip_ids don't exist in
+# any loaded schedule for it — it stays un-derivable until someone reloads
+# GTFS, and determine_target_dates re-targets it (rc=3 again) on every run
+# inside the lookback window, so gating on it would freeze SFMTA retention
+# for up to LOOKBACK_DAYS per incident. Its trip_update_state is not the
+# only copy any more: the raw TU archive in S3 rebuilds it
+# (replay_archive_to_state.py --date D --force), and cleanup only prunes
+# un-derived rows after 7 days anyway. This also matches WMATA, whose
+# cleanup runs inside run_daily_batch.py's housekeeping regardless of rc.
+# The overall run still fails (summary below) so the held-back date is seen.
 cleanup_rc_sfmta=0
-if [ "$skip_sfmta" -eq 1 ] || [ "$batch_rc_sfmta" -ne 0 ]; then
+if [ "$skip_sfmta" -eq 1 ] || { [ "$batch_rc_sfmta" -ne 0 ] && [ "$batch_rc_sfmta" -ne 3 ]; }; then
   echo "Skipping SFMTA trip_update_state cleanup (SFMTA derive was skipped or failed above) — leaving trip_update_state untouched rather than risk deleting an un-derived backlog." >&2
 else
   PYTHONUNBUFFERED=1 uv run python pipelines/cleanup_trip_update_state.py --agency sfmta || cleanup_rc_sfmta=$?
@@ -295,6 +314,9 @@ if [ "$overall_failure" -eq 1 ]; then
   echo "  canary_wmata rc=$canary_rc_wmata canary_sfmta rc=$canary_rc_sfmta (1=collapse — that agency's derive below was skipped, not" >&2
   echo "  the other's; 2=operational error — reported here but does not skip that agency's derive)" >&2
   echo "  derive: wmata rc=$batch_rc_wmata skipped=$skip_wmata; sfmta rc=$batch_rc_sfmta skipped=$skip_sfmta" >&2
+  echo "  (derive rc=3: no pipeline failed, but the match-rate guard held back date(s) whose" >&2
+  echo "  observed trip_ids match no loaded schedule — see 'guard-skipped dates' in that" >&2
+  echo "  agency's derive output; reload GTFS, then rerun. docs/DEPLOYMENT.md 12.1)" >&2
   echo "  cleanup_trip_update_state sfmta rc=$cleanup_rc_sfmta (WMATA's own runs inside run_daily_batch.py's" >&2
   echo "  housekeeping loop above, folded into its derive rc; non-blocking either way — see cleanup output" >&2
   echo "  above for the failure if rc!=0)" >&2

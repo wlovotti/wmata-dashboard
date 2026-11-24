@@ -22,7 +22,8 @@ from datetime import timedelta
 # How a snapshot was chosen for a date; logged by callers.
 REASON_COVERS = "covers"
 REASON_FALLBACK_LOADED_BY = "fallback_loaded_by_date"
-REASON_FALLBACK_CURRENT = "fallback_current"
+REASON_FALLBACK_OLDEST = "fallback_oldest"
+REASON_FALLBACK_CURRENT = "fallback_current"  # only when no snapshot has calendar rows
 
 
 def gtfs_version_filter(model, gtfs_snapshot_id=None):
@@ -52,7 +53,7 @@ class SnapshotChoice:
         current_snapshot_id: The snapshot owning the ``is_current`` rows
             (None if there is none).
         reason: One of ``REASON_COVERS`` / ``REASON_FALLBACK_LOADED_BY`` /
-            ``REASON_FALLBACK_CURRENT``.
+            ``REASON_FALLBACK_OLDEST`` / ``REASON_FALLBACK_CURRENT``.
     """
 
     snapshot_id: int | None
@@ -93,6 +94,28 @@ def current_gtfs_snapshot_id(session) -> int | None:
     )
 
 
+def _snapshots_with_calendar_newest_first(session) -> list[int]:
+    """Return ids of snapshots that have any ``calendar`` rows, newest load first.
+
+    Newest = latest ``gtfs_snapshots.snapshot_date``, ties broken by the
+    higher ``snapshot_id``. Snapshots with no calendar rows (a load that
+    never populated the versioned tables, e.g. WMATA snapshot 5) can never
+    schedule anything and are excluded everywhere.
+    """
+    from src.models import Calendar, GTFSSnapshot
+
+    has_calendar = (
+        session.query(Calendar.id).filter(Calendar.snapshot_id == GTFSSnapshot.snapshot_id).exists()
+    )
+    return [
+        sid
+        for (sid,) in session.query(GTFSSnapshot.snapshot_id)
+        .filter(has_calendar)
+        .order_by(GTFSSnapshot.snapshot_date.desc(), GTFSSnapshot.snapshot_id.desc())
+        .all()
+    ]
+
+
 def resolve_gtfs_snapshot_for_date(
     session, service_date: date_type, tz_name: str = "America/New_York"
 ) -> SnapshotChoice:
@@ -100,83 +123,58 @@ def resolve_gtfs_snapshot_for_date(
 
     Rule:
 
-    1. **Covers.** A snapshot covers the date when its ``calendar`` has a
-       row with ``start_date <= D <= end_date`` or its ``calendar_dates``
-       *adds* service on D (``exception_type = 1``). GTFS dates are
-       fixed-width ``YYYYMMDD`` strings, so string comparison is a correct
-       date comparison here (unlike GTFS *times*, which are unpadded — see
-       CLAUDE.md). Among covering snapshots the newest wins (latest
-       ``snapshot_date``, ties by ``snapshot_id``): several snapshots
-       routinely share one feed_version, and a republished feed that
-       still covers D supersedes its predecessor.
-    2. **Fallback, none covers** (the feed expired before a replacement
-       was loaded, or D predates every loaded feed): the newest snapshot
-       that was already loaded by the end of D (agency-local midnight
-       after D, in naive UTC, against ``gtfs_snapshots.snapshot_date``) —
-       i.e. the schedule the pipeline would have used had it run on time.
-       Snapshots with no ``calendar`` rows at all (a load that never
-       populated the versioned tables) are never chosen.
-    3. **Fallback, nothing loaded by then**: the current snapshot — exactly
-       the pre-#258 behaviour.
+    1. **Covers.** A snapshot covers D when it schedules service on D under
+       the GTFS-spec rule the pipelines themselves use —
+       `src/gtfs_calendar.py:scheduled_service_ids_for_date(session, D,
+       snapshot_id)` is non-empty (calendar day-of-week flag within
+       ``[start_date, end_date]``, minus ``calendar_dates`` removals, plus
+       additions). Being merely *inside* a calendar's date range is not
+       enough: a newer feed back-dated over D whose service there is
+       weekday-only or removed by ``exception_type=2`` does not cover D.
+       Among covering snapshots the newest wins (latest ``snapshot_date``,
+       ties by ``snapshot_id``): several snapshots routinely share one
+       feed_version, and a republished feed that still covers D supersedes
+       its predecessor.
+    2. **Fallback, none covers** (the feed expired before a replacement was
+       loaded, or a genuine no-service day): the newest snapshot already
+       loaded by the end of D (agency-local midnight after D, in naive UTC,
+       against ``gtfs_snapshots.snapshot_date``) — the schedule the
+       pipeline would have used had it run on time.
+    3. **Fallback, D predates every loaded snapshot**: the OLDEST snapshot —
+       the closest in time to D. (SFMTA 2026-07-21/22, observed before
+       snapshot 1 was loaded on 8/10, match snapshot 1's trips 100% and the
+       current snapshot 4's 0%.)
 
-    Returns a `SnapshotChoice`; use ``choice.override_id`` for the
+    Snapshots without calendar rows are never chosen. With no usable
+    snapshot at all, returns ``snapshot_id=None`` (callers fall back to
+    ``is_current``). Use ``choice.override_id`` for the
     ``--gtfs-snapshot-id`` CLI argument (None when the choice is the
-    current snapshot).
+    current snapshot). Costs ~3 small calendar queries per loaded snapshot
+    in the worst case — dozens of queries against tables of a few dozen
+    rows per snapshot.
     """
-    from src.models import Calendar, CalendarDate, GTFSSnapshot
+    from src.gtfs_calendar import scheduled_service_ids_for_date
+    from src.models import GTFSSnapshot
     from src.timezones import local_midnight_as_utc
 
     current_id = current_gtfs_snapshot_id(session)
-    d = service_date.strftime("%Y%m%d")
+    candidates = _snapshots_with_calendar_newest_first(session)
+    if not candidates:
+        return SnapshotChoice(current_id, current_id, REASON_FALLBACK_CURRENT)
 
-    covering_ids = {
-        sid
-        for (sid,) in session.query(Calendar.snapshot_id)
-        .filter(
-            Calendar.snapshot_id.isnot(None),
-            Calendar.start_date <= d,
-            Calendar.end_date >= d,
-        )
-        .distinct()
-        .all()
-    } | {
-        sid
-        for (sid,) in session.query(CalendarDate.snapshot_id)
-        .filter(
-            CalendarDate.snapshot_id.isnot(None),
-            CalendarDate.date == d,
-            CalendarDate.exception_type == 1,
-        )
-        .distinct()
-        .all()
-    }
-
-    if covering_ids:
-        newest = (
-            session.query(GTFSSnapshot.snapshot_id)
-            .filter(GTFSSnapshot.snapshot_id.in_(covering_ids))
-            .order_by(GTFSSnapshot.snapshot_date.desc(), GTFSSnapshot.snapshot_id.desc())
-            .limit(1)
-            .scalar()
-        )
-        # A covering calendar row whose gtfs_snapshots row is missing can't
-        # happen under the FK, but don't let a None slip through if it does.
-        if newest is None:
-            newest = max(covering_ids)
-        return SnapshotChoice(newest, current_id, REASON_COVERS)
+    for sid in candidates:
+        if scheduled_service_ids_for_date(session, service_date, sid):
+            return SnapshotChoice(sid, current_id, REASON_COVERS)
 
     end_of_day_utc = local_midnight_as_utc(service_date + timedelta(days=1), tz_name)
-    has_calendar = (
-        session.query(Calendar.id).filter(Calendar.snapshot_id == GTFSSnapshot.snapshot_id).exists()
-    )
-    loaded_by = (
-        session.query(GTFSSnapshot.snapshot_id)
-        .filter(GTFSSnapshot.snapshot_date < end_of_day_utc, has_calendar)
-        .order_by(GTFSSnapshot.snapshot_date.desc(), GTFSSnapshot.snapshot_id.desc())
-        .limit(1)
-        .scalar()
-    )
-    if loaded_by is not None:
-        return SnapshotChoice(loaded_by, current_id, REASON_FALLBACK_LOADED_BY)
+    loaded_by = {
+        sid
+        for (sid,) in session.query(GTFSSnapshot.snapshot_id)
+        .filter(GTFSSnapshot.snapshot_date < end_of_day_utc)
+        .all()
+    }
+    for sid in candidates:
+        if sid in loaded_by:
+            return SnapshotChoice(sid, current_id, REASON_FALLBACK_LOADED_BY)
 
-    return SnapshotChoice(current_id, current_id, REASON_FALLBACK_CURRENT)
+    return SnapshotChoice(candidates[-1], current_id, REASON_FALLBACK_OLDEST)

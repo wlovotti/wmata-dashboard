@@ -86,7 +86,14 @@ def compute_trip_match_rate(
 
     # Same snapshot choice run_daily_batch.py makes for this date (#258);
     # override_id is None when that's the current snapshot.
-    choice = snapshot_choice or resolve_gtfs_snapshot_for_date(session, service_date, tz_name)
+    # None means "not resolved yet" here; a caller whose pipelines will run
+    # against is_current passes an explicit no-override SnapshotChoice
+    # (run_daily_batch.make_match_guard does this after a resolver error).
+    choice = (
+        snapshot_choice
+        if snapshot_choice is not None
+        else resolve_gtfs_snapshot_for_date(session, service_date, tz_name)
+    )
     scheduled = {
         row[0]
         for row in session.query(Trip.trip_id)

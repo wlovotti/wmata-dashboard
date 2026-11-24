@@ -373,6 +373,16 @@ def snapshot_args(choice: SnapshotChoice | None) -> list[str]:
     return ["--gtfs-snapshot-id", str(choice.override_id)]
 
 
+# SnapshotChoice.reason used when resolution failed and pipelines fall back
+# to is_current (no --gtfs-snapshot-id).
+IS_CURRENT_FALLBACK_REASON = "is_current_after_resolution_error"
+
+# run_daily_batch.py exit code when the only problem was guard-skipped dates
+# (no pipeline failed). bin/pull-and-derive.sh treats it as "derived, with
+# dates held back" — see `main`.
+EXIT_GUARD_SKIPS_ONLY = 3
+
+
 def make_match_guard(
     agency: str = DEFAULT_AGENCY,
 ) -> Callable[[date_type, SnapshotChoice | None], TripMatchResult]:
@@ -385,7 +395,15 @@ def make_match_guard(
     cfg = load_agency_config(agency)
 
     def _guard(service_date: date_type, choice: SnapshotChoice | None) -> TripMatchResult:
-        """Compute ``service_date``'s match rate on a short-lived session."""
+        """Compute ``service_date``'s match rate on a short-lived session.
+
+        ``choice=None`` means `run_batch`'s resolution failed and the derive
+        will run against ``is_current`` — so check against exactly that
+        (an explicit no-override choice), never a fresh re-resolution that
+        could land on a different snapshot than the derive uses.
+        """
+        if choice is None:
+            choice = SnapshotChoice(None, None, IS_CURRENT_FALLBACK_REASON)
         db = get_session(db_url=resolve_agency_db_url(cfg))
         try:
             return compute_trip_match_rate(db, service_date, cfg.timezone, snapshot_choice=choice)
@@ -512,6 +530,7 @@ def run_batch(
     agency: str = DEFAULT_AGENCY,
     snapshot_resolver: Callable[[date_type], SnapshotChoice | None] | None = None,
     match_guard: Callable[[date_type, SnapshotChoice | None], TripMatchResult | None] | None = None,
+    guard_skipped: set[date_type] | None = None,
 ) -> int:
     """Drive all per-date pipelines across every (pipeline, target_date) cell.
 
@@ -524,14 +543,18 @@ def run_batch(
     ``match_guard`` (default `make_match_guard`) runs before each target
     date's derive: if that date's observed trip_ids match less than
     ``DEFAULT_THRESHOLD`` of the resolved snapshot's trips, the date is
-    skipped loudly (counted as a failure) instead of writing a near-empty
+    skipped loudly (reported separately, see below) instead of writing a near-empty
     day. That near-empty day is worse than a gap: its `runs` rows display
     as a real 0% and stop `determine_target_dates` from ever revisiting
     the date (WMATA 2026-09-12, catch-up-derived on 9/29 against the wrong
     snapshot: 14 stop_events, OTP 0.0% — issue #258 comment). The
     post-replay canary only checks "yesterday"; this covers catch-up
     dates too. No observed trip_ids at all (rate None) is not a collapse —
-    the date derives as before. A guard error is logged and the date
+    the date derives as before. Skipped dates are NOT counted in the
+    returned failure count; they are added to ``guard_skipped`` (when the
+    caller passes a set) so `main` can report them separately, and they are
+    excluded from Phase 2 even if another date's derive reports writing
+    rows under them (owl correction onto N-1). A guard error is logged and the date
     proceeds. Not run under ``dry_run``.
 
     Returns the number of (pipeline, date) combinations that failed —
@@ -620,6 +643,7 @@ def run_batch(
     # full set of service dates (target dates plus any day-shifted dates)
     # before any aggregation runs.
     all_service_dates: set[date_type] = set(target_dates)
+    skipped_dates: set[date_type] = set()
     for service_date in target_dates:
         log_handle.write(f"\n=== derive: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
@@ -631,8 +655,9 @@ def run_batch(
                 "and blocks the zero-runs auto-revisit. See docs/DEPLOYMENT.md 12.1.\n"
             )
             log_handle.flush()
-            failure_count += 1
-            all_service_dates.discard(service_date)
+            skipped_dates.add(service_date)
+            if guard_skipped is not None:
+                guard_skipped.add(service_date)
             continue
         for pipeline in derive_pipelines:
             extra_args = _args_for(pipeline, service_date)
@@ -668,7 +693,10 @@ def run_batch(
             log_handle.flush()
 
     # Phase 2: aggregate_runs + downstream across the full union, ascending.
-    for service_date in sorted(all_service_dates):
+    # A guard-skipped date stays skipped even if a later date's derive wrote a
+    # day-shifted row under it: aggregating it from that handful of trips
+    # would write exactly the near-empty day the guard exists to prevent.
+    for service_date in sorted(all_service_dates - skipped_dates):
         log_handle.write(f"\n=== aggregate: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
         for pipeline in downstream_pipelines:
@@ -832,17 +860,35 @@ def main() -> int:
         print(f"run_daily_batch: log={log_path}")
         print(f"run_daily_batch: target_dates={[d.isoformat() for d in target_dates]}")
 
+        guard_skipped: set[date_type] = set()
         failure_count = run_batch(
-            target_dates, log_handle, dry_run=args.dry_run, agency=args.agency
+            target_dates,
+            log_handle,
+            dry_run=args.dry_run,
+            agency=args.agency,
+            guard_skipped=guard_skipped,
         )
+        skipped_str = ",".join(d.isoformat() for d in sorted(guard_skipped)) or "none"
 
         log_handle.write(
             f"\n========== run_daily_batch done — "
-            f"{failure_count} (pipeline, date) failures ==========\n"
+            f"{failure_count} (pipeline, date) failures; "
+            f"guard-skipped dates: {skipped_str} ==========\n"
         )
 
     print(f"run_daily_batch: {failure_count} (pipeline, date) failures")
-    return 0 if failure_count == 0 else 1
+    print(f"run_daily_batch: guard-skipped dates (match-rate collapse, not derived): {skipped_str}")
+    # Exit codes: 0 clean; 1 any pipeline failure; EXIT_GUARD_SKIPS_ONLY (3)
+    # when every pipeline that ran succeeded but >=1 date was held back by
+    # the match-rate guard. The distinct code lets bin/pull-and-derive.sh
+    # still run SFMTA trip_update_state cleanup (a held-back date is
+    # recoverable from the raw S3 archive via replay --force, so it must not
+    # block retention forever) while still failing the overall run loudly.
+    if failure_count:
+        return 1
+    if guard_skipped:
+        return EXIT_GUARD_SKIPS_ONLY
+    return 0
 
 
 if __name__ == "__main__":
