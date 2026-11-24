@@ -22,10 +22,12 @@ Stale locks are taken over:
   may be mid-creation and is refused.
 
 Takeover is atomic: the taker first creates ``<lock>/takeover`` (``mkdir``
-— only one starter can), re-reads the holder to confirm it is unchanged,
-renames the whole lock dir aside to a unique name, removes it, and then
-competes for a fresh ``mkdir`` like any other starter. A starter that loses
-any of those steps re-evaluates from the top.
+— only one starter can), re-checks that the lock dir is the same
+directory (inode) with the same holder record, renames the whole lock dir
+aside to a unique name, removes it, and then competes for a fresh
+``mkdir`` like any other starter. A starter that loses any of those steps
+re-evaluates from the top. A ``takeover`` marker older than ``GRACE_SEC``
+(its taker crashed) is expired so it can't block every later start.
 
 ``bin/pull-and-derive.sh`` acquires it for its whole run (GTFS reload +
 refresh) with ``python -m src.run_lock acquire --pid $$`` and exports
@@ -137,6 +139,46 @@ def _write_holder(lock_dir: Path, record: dict) -> None:
     os.replace(tmp, lock_dir / "holder.json")
 
 
+def _dir_identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of ``path`` — distinguishes a recreated lock dir — or None."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _expire_takeover(takeover: Path) -> None:
+    """Remove a ``takeover`` dir older than ``GRACE_SEC`` (left by a taker that crashed).
+
+    Renamed aside first and removed only if the renamed dir is the very
+    one judged old (same inode); otherwise it is someone's fresh takeover
+    and is put back if its name is still free. (A residual race — a third
+    starter recreating ``takeover`` inside that microsecond window — would
+    only make one starter retry; the lock-dir inode check guards the
+    actual takeover.)
+    """
+    try:
+        st = takeover.stat()
+    except FileNotFoundError:
+        return
+    if time.time() - st.st_mtime <= GRACE_SEC:
+        return
+    aside = takeover.with_name(f"takeover.expired-{uuid.uuid4().hex}")
+    try:
+        os.rename(takeover, aside)
+    except FileNotFoundError:
+        return
+    if _dir_identity(aside) == (st.st_dev, st.st_ino):
+        shutil.rmtree(aside, ignore_errors=True)
+        print("run_lock: removed a stale takeover marker", file=sys.stderr)
+        return
+    if not takeover.exists():
+        os.rename(aside, takeover)
+    else:
+        shutil.rmtree(aside, ignore_errors=True)
+
+
 def acquire(pid: int, label: str, lock_dir: Path = LOCK_DIR, attempts: int = 5) -> None:
     """Take the lock for ``pid`` or raise :class:`LockHeldError` naming the holder."""
     lock_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -156,18 +198,26 @@ def acquire(pid: int, label: str, lock_dir: Path = LOCK_DIR, attempts: int = 5) 
                 },
             )
             return
+        identity = _dir_identity(lock_dir)
         holder = read_holder(lock_dir)
-        if holder is None:
+        if holder is None or identity is None:
             continue  # released between our mkdir and the read — try again
         if not _is_stale(lock_dir, holder):
             raise LockHeldError(f"another refresh holds {lock_dir}: {describe(holder)}")
+        takeover = lock_dir / "takeover"
         try:
-            (lock_dir / "takeover").mkdir()
-        except (FileExistsError, FileNotFoundError):
+            takeover.mkdir()
+        except FileNotFoundError:
+            continue  # already gone
+        except FileExistsError:
+            _expire_takeover(takeover)  # a crashed taker's leftover, if old enough
             time.sleep(0.05)
-            continue  # someone else is taking over, or it is already gone
-        if read_holder(lock_dir) != holder:
-            shutil.rmtree(lock_dir / "takeover", ignore_errors=True)
+            continue
+        # Compare the directory itself (inode), not just the holder record:
+        # a holder-less stale lock and another starter's fresh, not-yet-
+        # written lock both read as {}.
+        if _dir_identity(lock_dir) != identity or read_holder(lock_dir) != holder:
+            shutil.rmtree(takeover, ignore_errors=True)
             continue
         aside = lock_dir.with_name(f"{lock_dir.name}.stale-{os.getpid()}-{uuid.uuid4().hex}")
         try:

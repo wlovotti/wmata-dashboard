@@ -621,9 +621,13 @@ def default_dates(
         raise RuntimeError("runs is empty — pass --start/--end or --date explicitly")
     latest_date = date.fromisoformat(latest)
     dates: set[date] = set()
+    # Abandoned dates are skipped by EVERY rule — most importantly the main
+    # range, since a permanently failing date is usually max(runs)+1.
+    abandoned = set(progress.dates_with(ABANDONED)) if progress is not None else set()
     d = latest_date + timedelta(days=1)
     while d <= cap:
-        dates.add(d)
+        if d not in abandoned:
+            dates.add(d)
         d += timedelta(days=1)
     hole_start = max(today - timedelta(days=lookback_days), DATA_FLOOR)
     have_runs = {
@@ -633,7 +637,6 @@ def default_dates(
         .distinct()
     }
     d = hole_start
-    abandoned = set(progress.dates_with(ABANDONED)) if progress is not None else set()
     while d <= min(cap, latest_date):
         if d.isoformat() not in have_runs and d not in abandoned:
             dates.add(d)
@@ -716,6 +719,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--abandon-derived",
+        action="store_true",
+        help="with --abandon-date: allow abandoning a date that already has runs / is done",
+    )
+    p.add_argument(
         "--check-args",
         action="store_true",
         help="validate the arguments and exit (bin/pull-and-derive.sh runs this first)",
@@ -729,6 +737,8 @@ def validate_args(args) -> tuple[list[date] | None, str | None]:
         explicit = explicit_dates(args)
     except ValueError as exc:
         return None, str(exc)
+    if args.abandon_derived and not args.abandon_date:
+        return None, "--abandon-derived only makes sense with --abandon-date"
     if args.abandon_date:
         if args.agency == "both":
             return None, "--abandon-date needs --agency wmata or --agency sfmta"
@@ -740,10 +750,40 @@ def validate_args(args) -> tuple[list[date] | None, str | None]:
     return explicit, None
 
 
-def abandon(args, progress_dir: Path) -> int:
-    """Record ``args.abandon_date`` dates as abandoned for ``args.agency`` (under the lock)."""
+def abandon(args, progress_dir: Path, session_factory=None) -> int:
+    """Record ``args.abandon_date`` dates as abandoned for ``args.agency`` (under the lock).
+
+    Refuses (exit 2, nothing recorded) any date that is ``done`` or already
+    has runs unless ``--abandon-derived`` is given: abandoning a healthy date
+    stops a neighbour's owl-corrected rows from ever being re-aggregated
+    onto it. ``session_factory`` (tests) replaces the agency DB session.
+    """
+    from src.database import get_session
+
+    wanted = sorted(set(args.abandon_date))
     progress = Progress(progress_dir / f"refresh_progress_{args.agency}.json")
-    for d in sorted(set(args.abandon_date)):
+    if session_factory is None:
+        cfg = load_agency_config(args.agency)
+
+        def session_factory():
+            """Open a session on the agency DB."""
+            return get_session(db_url=resolve_agency_db_url(cfg))
+
+    session = session_factory()
+    try:
+        with_runs = runs_dates(session, wanted)
+    finally:
+        session.close()
+    healthy = [d for d in wanted if d in with_runs or progress.status(d) == DONE]
+    if healthy and not args.abandon_derived:
+        print(
+            f"ERROR: {' '.join(map(str, healthy))} already derived (runs present or progress "
+            "'done'); abandoning would stop owl-corrected re-aggregation onto it. Pass "
+            "--abandon-derived if that is really what you want. Nothing recorded.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    for d in wanted:
         prior = progress.status(d)
         progress.record(d, ABANDONED, f"abandoned by operator (was {prior})")
         log(

@@ -93,6 +93,43 @@ def test_lock_is_shared_by_worktrees(tmp_path):
     assert run_lock.main_checkout_root(main) == main
 
 
+@pytest.mark.smoke
+def test_old_takeover_marker_from_a_crashed_taker_expires(tmp_path):
+    """A takeover dir older than the grace period no longer blocks every later start."""
+    lock = tmp_path / "lock.d"
+    lock.mkdir()
+    (lock / "holder.json").write_text(
+        json.dumps({"pid": _dead_pid(), "host": socket.gethostname(), "label": "crashed"})
+    )
+    (lock / "takeover").mkdir()
+    old = time.time() - run_lock.GRACE_SEC - 5
+    os.utime(lock / "takeover", (old, old))
+    run_lock.acquire(os.getpid(), "run", lock)
+    assert run_lock.read_holder(lock)["label"] == "run"
+
+
+@pytest.mark.smoke
+def test_holderless_takeover_aborts_if_lock_dir_was_recreated(tmp_path, monkeypatch):
+    """Two holder-less locks both read {}: the inode check stops a steal of the new one."""
+    lock = tmp_path / "lock.d"
+    lock.mkdir()
+    old = time.time() - run_lock.GRACE_SEC - 5
+    os.utime(lock, (old, old))
+    real = run_lock._dir_identity
+    calls = {"n": 0}
+
+    def _identity(path):
+        """First stat sees the old dir; afterwards the dir 'was recreated' (new inode)."""
+        calls["n"] += 1
+        ident = real(path)
+        return ident if calls["n"] == 1 or ident is None else (ident[0], ident[1] + 1)
+
+    monkeypatch.setattr(run_lock, "_dir_identity", _identity)
+    with pytest.raises(run_lock.LockHeldError):
+        run_lock.acquire(os.getpid(), "run", lock, attempts=1)
+    assert lock.is_dir() and not (lock / "takeover").exists()
+
+
 def _dead_pid() -> int:
     """A pid that has already exited."""
     proc = subprocess.run(

@@ -1178,7 +1178,11 @@ to give up, record it:
 bin/pull-and-derive.sh --agency wmata --abandon-date 2026-10-07
 ```
 
-It is then never re-selected by default, never aggregated as a side
+It is refused for a date that already has runs or is `done` unless you
+add `--abandon-derived` (abandoning a healthy date would stop a
+neighbour's owl-corrected rows from ever being re-aggregated onto it).
+It is then never re-selected by default (main range, holes or progress
+rules), never aggregated as a side
 effect of a neighbour's derive (like held/failed dates), and listed as
 `abandoned` in every run's summary. `bin/pull-and-derive.sh --agency
 wmata --date 2026-10-07` still processes it explicitly (re-folding), and

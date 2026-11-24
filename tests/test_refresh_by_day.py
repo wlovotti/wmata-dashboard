@@ -422,6 +422,7 @@ def test_abandon_date_escape(tmp_path, db_session, monkeypatch):
 
     monkeypatch.setattr(mod.run_lock, "LOCK_DIR", tmp_path / "lock.d")
     monkeypatch.delenv(mod.run_lock.LOCK_ENV, raising=False)
+    monkeypatch.setattr("src.database.get_session", lambda db_url=None: db_session)
 
     # F failed every time: default selection keeps returning to it.
     progress = Progress(tmp_path / "refresh_progress_wmata.json")
@@ -452,6 +453,51 @@ def test_abandon_date_escape(tmp_path, db_session, monkeypatch):
     run = _run(tmp_path, "wmata", [D2])
     run_refresh([run], steps, force=False, housekeeping=False)
     assert steps.excludes[("wmata", D2)] == [D1]
+
+
+@pytest.mark.smoke
+def test_abandoned_next_date_is_skipped_by_main_range(db_session, tmp_path):
+    """Re-review: F = max(runs)+1 always fails; once abandoned, default runs go past it."""
+    import pipelines.refresh_by_day as mod
+
+    today = date(2026, 10, 20)
+    f = today - timedelta(days=6)
+    _add_runs(db_session, [f - timedelta(days=n) for n in range(1, 10)])  # max(runs) = F-1
+    progress = Progress(tmp_path / "refresh_progress_wmata.json")
+    progress.record(f, FAILED, "derive rc=1")
+    assert default_dates(db_session, 14, today, progress=progress).dates[0] == f
+
+    progress.record(f, mod.ABANDONED)
+    dates = default_dates(db_session, 14, today, progress=progress).dates
+    assert f not in dates
+    assert dates == [f + timedelta(days=n) for n in range(1, 6)]
+
+    # the run proceeds to F+1 and beyond; F is listed as abandoned in the summary
+    run = _run(tmp_path, "wmata", dates)
+    steps = FakeSteps()
+    assert run_refresh([run], steps, force=False, housekeeping=False) == EXIT_OK
+    assert steps.steps_for("wmata", "derive") == dates
+    assert all(steps.excludes[("wmata", d)] == [f] for d in dates)
+    assert run.progress.dates_with(mod.ABANDONED) == [f]
+
+
+@pytest.mark.smoke
+def test_abandon_refuses_a_derived_date_without_confirmation(tmp_path, db_session):
+    """Abandoning a date that already has runs (or is done) needs --abandon-derived."""
+    import pipelines.refresh_by_day as mod
+
+    _add_runs(db_session, [D1])
+    args = mod.build_parser().parse_args(["--agency", "wmata", "--abandon-date", D1.isoformat()])
+    rc = mod.abandon(args, tmp_path, session_factory=lambda: db_session)
+    assert rc == mod.EXIT_USAGE
+    assert Progress(tmp_path / "refresh_progress_wmata.json").status(D1) is None
+
+    args = mod.build_parser().parse_args(
+        ["--agency", "wmata", "--abandon-date", D1.isoformat(), "--abandon-derived"]
+    )
+    assert mod.abandon(args, tmp_path, session_factory=lambda: db_session) == EXIT_OK
+    assert Progress(tmp_path / "refresh_progress_wmata.json").status(D1) == mod.ABANDONED
+    assert mod.main(["--check-args", "--abandon-derived"]) == mod.EXIT_USAGE
 
 
 @pytest.mark.smoke
