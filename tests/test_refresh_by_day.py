@@ -93,6 +93,11 @@ class FakeSteps:
         self.calls.append(("cleanup", agency))
         return 0
 
+    def retention(self, agency):
+        """Record; scripted rc via ``retention_rc``."""
+        self.calls.append(("retention", agency))
+        return getattr(self, "retention_rc", 0)
+
     def steps_for(self, name, step):
         """Dates a given step ran for one agency, in order."""
         return [c[2] for c in self.calls if c[0] == step and c[1] == name]
@@ -283,6 +288,66 @@ def test_skip_housekeeping(tmp_path):
     steps = FakeSteps()
     run_refresh([_run(tmp_path, "wmata", [D1])], steps, force=False, housekeeping=False)
     assert ("housekeeping",) not in steps.calls
+
+
+@pytest.mark.smoke
+def test_retention_is_opt_in_and_runs_after_housekeeping(tmp_path):
+    """Retention runs only for named agencies, after housekeeping/cleanup."""
+    steps = FakeSteps()
+    runs = [_run(tmp_path, "wmata", [D1]), _run(tmp_path, "sfmta", [D1])]
+    assert run_refresh(runs, steps, force=False, housekeeping=True) == EXIT_OK
+    assert not [c for c in steps.calls if c[0] == "retention"]
+
+    steps = FakeSteps()
+    runs = [_run(tmp_path / "b", "wmata", [D1]), _run(tmp_path / "b", "sfmta", [D1])]
+    rc = run_refresh(
+        runs, steps, force=False, housekeeping=True, retention=frozenset({"wmata", "sfmta"})
+    )
+    assert rc == EXIT_OK
+    tail = steps.calls[-4:]
+    assert tail == [
+        ("housekeeping",),
+        ("retention", "wmata"),
+        ("cleanup", "sfmta"),
+        ("retention", "sfmta"),
+    ]
+
+
+@pytest.mark.smoke
+def test_retention_skipped_after_a_failure_and_failure_propagates(tmp_path):
+    """A failed date skips that agency's retention; a failing retention fails the run."""
+    steps = FakeSteps(derive_rc={("wmata", D1): 1})
+    run_refresh(
+        [_run(tmp_path, "wmata", [D1])],
+        steps,
+        force=False,
+        housekeeping=True,
+        retention=frozenset({"wmata"}),
+    )
+    assert ("retention", "wmata") not in steps.calls
+
+    steps = FakeSteps()
+    steps.retention_rc = 1
+    rc = run_refresh(
+        [_run(tmp_path / "b", "sfmta", [D1])],
+        steps,
+        force=False,
+        housekeeping=True,
+        retention=frozenset({"sfmta"}),
+    )
+    assert rc == EXIT_FAILED
+
+
+@pytest.mark.smoke
+def test_default_dates_never_treat_pruned_dates_as_holes(db_session):
+    """A lookback wider than the stop-level window stops at the window start."""
+    today = date(2026, 10, 20)
+    # Runs only in the last 10 days; days 11..60 back have none (pruned).
+    _add_runs(db_session, [today - timedelta(days=n) for n in range(1, 11)])
+    sel = default_dates(db_session, 60, today, stop_level_days=35)
+    assert sel.dates and min(sel.dates) == today - timedelta(days=35)
+    sel = default_dates(db_session, 60, today)  # no window: old behaviour
+    assert min(sel.dates) == today - timedelta(days=60)
 
 
 def _add_runs(db_session, dates):

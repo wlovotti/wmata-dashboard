@@ -1,4 +1,18 @@
-"""Tier-3 retention: archive aged `vehicle_positions` to S3 parquet, then DELETE (cloud-migration retention plan §3.5).
+"""SUPERSEDED — VM-era tier-3 VP archiver. Do not run it against the laptop DB.
+
+Superseded by ``pipelines/apply_retention.py`` (issue: retention tiers,
+``docs/DEPLOYMENT.md`` §13). Since the stateless collector (2026-08-22)
+every VP row is already archived raw in S3 (``raw-jsonl-archive/vp/``,
+``.../sfmta_vp/``) and reloads by UTC day of ``collected_at``
+(``pipelines/load_vp_archive.py``). This script deletes by
+``DATE(timestamp)`` and never touches ``vp_archive_loaded_files``, so it
+would split those UTC days and duplicate an archive that already exists.
+``main()`` therefore refuses unless ``--i-know-this-is-superseded`` is
+passed. The module stays because ``pipelines/load_vp_from_parquet.py``
+(restoring the pre-2026-08 ``wmata-vp-archive/`` parquet) imports its
+``KEY_PREFIX`` / ``ARCHIVE_SCHEMA``.
+
+Original description — tier-3 retention: archive aged `vehicle_positions` to S3 parquet, then DELETE (cloud-migration retention plan §3.5).
 
 `vehicle_positions` is the raw GPS feed and the project's largest table. It is
 the only tier with a SHORT in-DB window (30 days) because its single live
@@ -428,7 +442,20 @@ def main() -> int:
         action="store_true",
         help="Print the plan without writing parquet, uploading, or deleting.",
     )
+    parser.add_argument(
+        "--i-know-this-is-superseded",
+        action="store_true",
+        help="Run this superseded archiver anyway (see the module docstring).",
+    )
     args = parser.parse_args()
+    if not args.i_know_this_is_superseded:
+        print(
+            "archive_vehicle_positions.py is superseded by pipelines/apply_retention.py "
+            "(VP is already archived raw in S3 and prunes by UTC day of collected_at). "
+            "Refusing; pass --i-know-this-is-superseded to override.",
+            file=sys.stderr,
+        )
+        return 2
 
     load_dotenv()
     return archive_and_delete(

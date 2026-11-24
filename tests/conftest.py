@@ -543,3 +543,18 @@ def _reset_route_stops_cache():
     analytics_module._route_stops_cache.clear()
     yield
     analytics_module._route_stops_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_retention_cache():
+    """Reset `api/aggregations.py`'s 60 s `_retention_cache` (issue #265) around each test.
+
+    Keyed by `db_identity`, which every test sharing the `db_session`
+    bind renders identically — a detail floor cached by one test would
+    otherwise make another test's dates look pruned.
+    """
+    import api.aggregations as aggregations_module
+
+    aggregations_module._retention_cache.clear()
+    yield
+    aggregations_module._retention_cache.clear()

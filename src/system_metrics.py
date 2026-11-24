@@ -22,6 +22,49 @@ from src.models import SystemMetricsDaily
 from src.timezones import utcnow_naive
 
 
+class AggregateOverwriteRefused(RuntimeError):
+    """A per-date rollup would replace kept aggregates with values computed from nothing.
+
+    Raised when ``service_date`` has no stop-level rows (``runs`` +
+    ``stop_events`` — typically pruned by retention, ``src/retention.py``)
+    but already has observed aggregates. Re-deriving the date normally
+    (``refresh_by_day --date D``) reloads its raw data first, so the
+    stop-level rows exist again and this never fires; callers that really
+    mean to overwrite pass ``force=True`` (CLI ``--force-overwrite-aggregates``).
+    """
+
+
+def _system_row_has_observations(row: SystemMetricsDaily) -> bool:
+    """True when a ``system_metrics_daily`` row carries any observed-side value.
+
+    SWT is schedule-only (it is non-null even on a no-data day) and a
+    service-delivered ratio of 0 is what an unobserved day computes, so
+    neither counts; OTP, EWT, bunching or a positive service-delivered do.
+    """
+    return (
+        row.otp_percentage is not None
+        or row.ewt_seconds is not None
+        or row.bunching_rate is not None
+        or (row.service_delivered_ratio or 0) > 0
+    )
+
+
+def refuse_if_detail_missing(db: Session, service_date: date_type, has_aggregates: bool) -> None:
+    """Raise :class:`AggregateOverwriteRefused` when aggregates exist but stop-level rows don't."""
+    if not has_aggregates:
+        return
+    from src.retention import has_stop_level_rows
+
+    if not has_stop_level_rows(db, service_date):
+        raise AggregateOverwriteRefused(
+            f"{service_date.isoformat()} has kept daily aggregates but no stop-level rows "
+            "(runs/stop_events pruned by retention?); recomputing would overwrite them with "
+            f"empty values. Re-derive it with `bin/pull-and-derive.sh --date "
+            f"{service_date.isoformat()}` (reloads the raw data first), or pass "
+            "--force-overwrite-aggregates if overwriting is really intended."
+        )
+
+
 def compute_system_metrics_for_date(
     db: Session,
     service_date: date_type,
@@ -96,6 +139,7 @@ def upsert_system_metrics_for_date(
     tz_name: str = "America/New_York",
     completeness_threshold: float | None = None,
     agency: str = "wmata",
+    force: bool = False,
 ) -> dict | None:
     """Compute and upsert one row of `system_metrics_daily` for `service_date`.
 
@@ -136,6 +180,10 @@ def upsert_system_metrics_for_date(
             `compute_system_metrics_for_date`'s cell-hour gate lookup.
             Defaults to `"wmata"`; `pipelines/upsert_system_metrics_daily.py`
             passes its `--agency` CLI value through here.
+        force: Overwrite an existing row that carries observed values even
+            though the date has no stop-level rows left (see
+            :class:`AggregateOverwriteRefused`, raised otherwise — before
+            anything is written).
 
     Returns:
         The metrics dict written (includes ``data_quality`` and
@@ -160,6 +208,10 @@ def upsert_system_metrics_for_date(
     # The prior stamp lets resolve_data_quality keep an earned 'complete'
     # when the trip-update signal has since been pruned by retention
     # (NOTES-104) instead of misreporting the re-derive as an outage.
+    if not force:
+        refuse_if_detail_missing(
+            db, service_date, existing is not None and _system_row_has_observations(existing)
+        )
     prior = (existing.data_quality, existing.coverage_pct) if existing else None
     data_quality, pct, kept = resolve_data_quality(
         db, service_date, threshold=threshold, tz_name=tz_name, prior=prior

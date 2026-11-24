@@ -78,6 +78,20 @@ WMATA housekeeping once (skipped if a WMATA date failed this run, or with
 SFMTA date failed). A date whose state was deleted before it was derived
 self-heals: replay re-folds a date with neither state nor runs.
 
+Retention (opt-in, default OFF): with ``--apply-retention``, or
+``retention.apply_after_refresh: true`` in the agency YAML, each agency
+that processed dates with no failure runs ``pipelines.apply_retention
+--apply --vacuum`` after its end-of-run housekeeping/cleanup — the
+retention tiers and guards are in ``src/retention.py``. Off by default
+because DB deletes need the owner's explicit permission.
+
+Pruned dates are never "holes": the zero-runs rule only looks back
+``--lookback-days`` (14), retention windows are at least 15 days (35/100
+configured) counted from the latest derived date, and the hole scan
+additionally skips any date older than the agency's stop-level window
+(logged), so a ``--lookback-days`` larger than the window cannot select
+pruned dates either. Name such a date with ``--date`` to re-derive it.
+
 A non-dry-run holds ``<main checkout>/logs/.pull-and-derive.lock.d``
 (``src/run_lock.py``, shared by every worktree); progress files also live
 in the main checkout's ``logs/``.
@@ -282,11 +296,11 @@ class RealSteps:
         self._s3 = boto3.client("s3")
         self.min_free_gb = min_free_gb
 
-    def _run(self, args: list[str]) -> int:
+    def _run(self, args: list[str], extra_env: dict | None = None) -> int:
         """Run ``python -m <args>`` from the repo root, streaming output; return its rc."""
         cmd = [sys.executable, "-m", *args]
         log("$ " + " ".join(cmd))
-        env = dict(os.environ, PYTHONUNBUFFERED="1")
+        env = dict(os.environ, PYTHONUNBUFFERED="1", **(extra_env or {}))
         return subprocess.run(cmd, cwd=str(REPO_ROOT), env=env, check=False).returncode
 
     def fetch(self, run: AgencyRun, d: date) -> None:
@@ -412,6 +426,19 @@ class RealSteps:
         """Run ``cleanup_trip_update_state`` (7-day window) for a non-default agency."""
         return self._run(["pipelines.cleanup_trip_update_state", "--agency", agency])
 
+    def retention(self, agency: str) -> int:
+        """Apply the agency's retention tiers (``apply_retention --apply --vacuum``).
+
+        The child inherits this run's lock: ``PULL_AND_DERIVE_LOCK_PID`` is
+        the shell's pid under ``bin/pull-and-derive.sh``, else ours (this
+        process holds the lock when run directly).
+        """
+        lock_pid = os.environ.get(run_lock.LOCK_ENV) or str(os.getpid())
+        return self._run(
+            ["pipelines.apply_retention", "--agency", agency, "--apply", "--vacuum"],
+            extra_env={run_lock.LOCK_ENV: lock_pid},
+        )
+
 
 def process_date(run: AgencyRun, d: date, steps, force: bool) -> str:
     """Run every step for one (agency, date) and return its final status.
@@ -492,12 +519,22 @@ def process_date(run: AgencyRun, d: date, steps, force: bool) -> str:
     return status
 
 
-def run_refresh(runs: list[AgencyRun], steps, force: bool, housekeeping: bool) -> int:
+def run_refresh(
+    runs: list[AgencyRun],
+    steps,
+    force: bool,
+    housekeeping: bool,
+    retention: frozenset[str] = frozenset(),
+) -> int:
     """Process every agency's dates interleaved oldest-first; return the exit code.
 
+    ``retention`` names the agencies whose retention tiers are applied
+    after their end-of-run housekeeping/cleanup (opt-in; skipped, like
+    housekeeping, for an agency with a failed date or nothing processed).
+
     Exit codes: 0 everything done; 3 the only problem was held dates;
-    1 any hard failure, end-of-run housekeeping/cleanup failure, or warning
-    (guard could not run, per-date state cleanup failed).
+    1 any hard failure, end-of-run housekeeping/cleanup/retention failure,
+    or warning (guard could not run, per-date state cleanup failed).
     """
     all_dates = sorted({d for r in runs for d in r.dates})
     for d in all_dates:
@@ -541,6 +578,10 @@ def run_refresh(runs: list[AgencyRun], steps, force: bool, housekeeping: bool) -
         else:
             log(f"== {run.name}: trip_update_state cleanup (once, after all dates)")
             if steps.cleanup(run.name) != 0:
+                end_rc = 1
+        if run.name in retention:
+            log(f"== {run.name}: retention (opt-in; after housekeeping)")
+            if steps.retention(run.name) != 0:
                 end_rc = 1
 
     log("== summary")
@@ -600,6 +641,7 @@ def default_dates(
     today: date,
     last_complete: date | None = None,
     progress: Progress | None = None,
+    stop_level_days: int | None = None,
 ) -> DefaultSelection:
     """Default per-agency dates: after latest runs, recent holes, and unfinished progress.
 
@@ -607,6 +649,10 @@ def default_dates(
     up to yesterday are returned as ``deferred``. ``progress`` adds its
     ``failed``/``derived`` dates of any age and ``held`` dates within the
     lookback window; older held dates come back as ``stale_held``.
+    ``stop_level_days`` (the agency's retention window) keeps the zero-runs
+    hole scan from reaching dates older than ``today - stop_level_days``:
+    retention may have pruned them (no runs, aggregates kept), and
+    re-deriving them is an explicit ``--date`` decision.
     Raises ``RuntimeError`` when ``runs`` is empty (no anchor — pass an
     explicit range instead).
     """
@@ -630,6 +676,15 @@ def default_dates(
             dates.add(d)
         d += timedelta(days=1)
     hole_start = max(today - timedelta(days=lookback_days), DATA_FLOOR)
+    if stop_level_days is not None:
+        window_start = today - timedelta(days=stop_level_days)
+        if hole_start < window_start:
+            log(
+                f"plan: zero-runs scan starts at {window_start} (stop-level retention window), "
+                f"not {hole_start}; older dates may be pruned on purpose — name one with --date "
+                "to re-derive it"
+            )
+            hole_start = window_start
     have_runs = {
         row[0]
         for row in session.query(Run.service_date)
@@ -722,6 +777,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--abandon-derived",
         action="store_true",
         help="with --abandon-date: allow abandoning a date that already has runs / is done",
+    )
+    p.add_argument(
+        "--apply-retention",
+        action="store_true",
+        help=(
+            "after end-of-run housekeeping, apply each processed agency's retention tiers "
+            "(pipelines/apply_retention.py --apply; also enabled per agency by "
+            "retention.apply_after_refresh in its YAML). Default off: it deletes rows."
+        ),
     )
     p.add_argument(
         "--check-args",
@@ -823,7 +887,14 @@ def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[Agen
                         )
             else:
                 try:
-                    sel = default_dates(session, args.lookback_days, today, complete, progress)
+                    sel = default_dates(
+                        session,
+                        args.lookback_days,
+                        today,
+                        complete,
+                        progress,
+                        stop_level_days=cfg.retention.stop_level_days,
+                    )
                 except RuntimeError as exc:
                     print(f"ERROR ({name}): {exc}", file=sys.stderr)
                     return EXIT_USAGE
@@ -864,6 +935,15 @@ def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[Agen
     return runs
 
 
+def retention_agencies(args, runs: list[AgencyRun]) -> frozenset[str]:
+    """Agencies whose retention runs after this refresh: ``--apply-retention`` or YAML opt-in."""
+    return frozenset(
+        r.name
+        for r in runs
+        if args.apply_retention or load_agency_config(r.name).retention.apply_after_refresh
+    )
+
+
 def record_deferrals(runs: list[AgencyRun]) -> None:
     """Persist deferred dates (under the lock) so default selection always returns to them.
 
@@ -898,6 +978,8 @@ def main(argv=None) -> int:
         span = f"{run.dates[0]} .. {run.dates[-1]}" if run.dates else "none"
         done = sum(1 for d in run.dates if run.is_done(d))
         log(f"plan {run.name}: {len(run.dates)} date(s) {span} ({done} already done)")
+    for name in sorted(retention_agencies(args, runs)):
+        log(f"plan {name}: retention will be applied after housekeeping (opt-in)")
     if args.dry_run:
         for run in runs:
             for d in run.dates:
@@ -914,7 +996,13 @@ def main(argv=None) -> int:
         """Record deferrals, then run the refresh (called with the lock held)."""
         record_deferrals(runs)
         steps = RealSteps(min_free_gb=args.min_free_gb)
-        return run_refresh(runs, steps, force=args.force, housekeeping=not args.skip_housekeeping)
+        return run_refresh(
+            runs,
+            steps,
+            force=args.force,
+            housekeeping=not args.skip_housekeeping,
+            retention=retention_agencies(args, runs),
+        )
 
     return with_lock(argv, _go)
 

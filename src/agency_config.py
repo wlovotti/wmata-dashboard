@@ -17,6 +17,68 @@ CONFIG_DIR = Path(__file__).resolve().parent.parent / "config" / "agencies"
 
 
 @dataclass(frozen=True)
+class RetentionPolicy:
+    """How long one agency keeps each data tier in its local database.
+
+    Read from the optional ``retention:`` block of the agency YAML (see
+    ``config/agencies/*.yaml`` and ``docs/DEPLOYMENT.md`` §13). Daily
+    aggregates (``system_metrics_daily``, ``route_metrics_daily_overlay``,
+    ``route_headway_metrics``) are never pruned, so they have no knob.
+
+    Attributes:
+        stop_level_days: Service dates of ``stop_events`` + ``runs`` kept,
+            counted back from (and including) the latest fully derived
+            service date. Must exceed the refresh's zero-runs lookback (14)
+            so a pruned date can never look like a hole.
+        raw_days: Service dates whose raw inputs (``vehicle_positions``
+            UTC days, ``trip_update_state``) are kept. At least 3: the VP
+            reader window for date D reaches agency-local midnight D+2.
+        apply_after_refresh: When true, ``pipelines/refresh_by_day.py``
+            applies retention after its end-of-run housekeeping. Default
+            false — deletes need the owner's explicit opt-in.
+    """
+
+    stop_level_days: int = 35
+    raw_days: int = 7
+    apply_after_refresh: bool = False
+
+
+# Floors enforced on every RetentionPolicy (see its docstring for why).
+MIN_STOP_LEVEL_DAYS = 15
+MIN_RAW_DAYS = 3
+
+
+def parse_retention(raw: dict | None, source: str = "<config>") -> RetentionPolicy:
+    """Build a RetentionPolicy from a YAML ``retention:`` block (None = shallow default).
+
+    Raises ValueError for unknown keys or values below the floors, so a
+    typo can never silently shorten (or disable) a retention window.
+    """
+    if not raw:
+        return RetentionPolicy()
+    allowed = {"stop_level_days", "raw_days", "apply_after_refresh"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"Unknown retention key(s) {sorted(unknown)} in {source}")
+    policy = RetentionPolicy(
+        stop_level_days=int(raw.get("stop_level_days", RetentionPolicy.stop_level_days)),
+        raw_days=int(raw.get("raw_days", RetentionPolicy.raw_days)),
+        apply_after_refresh=bool(raw.get("apply_after_refresh", False)),
+    )
+    if policy.stop_level_days < MIN_STOP_LEVEL_DAYS:
+        raise ValueError(
+            f"retention.stop_level_days={policy.stop_level_days} in {source} is below "
+            f"{MIN_STOP_LEVEL_DAYS} (must exceed the refresh's 14-day zero-runs lookback)"
+        )
+    if policy.raw_days < MIN_RAW_DAYS:
+        raise ValueError(
+            f"retention.raw_days={policy.raw_days} in {source} is below {MIN_RAW_DAYS} "
+            "(the VP window for date D reads UTC days D..D+2)"
+        )
+    return policy
+
+
+@dataclass(frozen=True)
 class AgencyConfig:
     """Immutable snapshot of one agency's collection parameters."""
 
@@ -42,6 +104,8 @@ class AgencyConfig:
     s3_bucket: str
     s3_tu_prefix: str
     s3_vp_prefix: str
+    # Local-DB retention tiers (optional YAML block; shallow-tier default).
+    retention: RetentionPolicy = RetentionPolicy()
 
 
 def load_agency_config(name: str) -> AgencyConfig:
@@ -83,6 +147,7 @@ def load_agency_config(name: str) -> AgencyConfig:
         s3_bucket=raw["s3"]["bucket"],
         s3_tu_prefix=raw["s3"]["tu_prefix"],
         s3_vp_prefix=raw["s3"]["vp_prefix"],
+        retention=parse_retention(raw.get("retention"), str(path)),
     )
 
 

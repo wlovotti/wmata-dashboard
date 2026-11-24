@@ -28,10 +28,11 @@ batch is paused — is superseded now that the batch itself (via
 manual step: WMATA's cleanup happens inside `run_daily_batch.py`'s
 housekeeping loop, and `bin/pull-and-derive.sh` calls
 `cleanup_trip_update_state.py --agency sfmta` directly after a successful
-SFMTA derive. `pipelines/retain_trip_update_state.py` itself (the
-standalone 14-day safety-net script) is left in the repo as a manual
-escape hatch, just no longer scheduled. Uninstall the same way as
-daily-batch above if a stray copy is still loaded.
+SFMTA derive. `pipelines/retain_trip_update_state.py` itself was removed
+by issue #265 (nothing referenced it; `pipelines/apply_retention.py` is the
+retention tool now — `docs/DEPLOYMENT.md` §12.4). Both stale plists are
+still in `~/Library/LaunchAgents/` on the laptop as of 2026-11-24; the
+removal commands are in §12.4 step 9.
 
 ## com.wmata-dashboard.gtfs-reload.plist — retired
 

@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from api.aggregations import (
+    DetailNotRetainedError,
     _latest_service_date_with_stop_events,
     compute_block_timeline,
     get_active_blocks,
@@ -26,6 +27,7 @@ from api.aggregations import (
     get_corridor_rollup,
     get_cross_route_segments,
     get_live_metrics_for_window,
+    get_retention_info,
     get_route_blocks,
     get_route_bunching_causes,
     get_route_contributors,
@@ -41,6 +43,8 @@ from api.aggregations import (
     get_system_shapes,
     get_system_trend_data,
     get_system_weekly_narrative,
+    require_detail_retained,
+    retention_note,
 )
 from api.config import settings
 from src.database import get_session
@@ -516,7 +520,13 @@ async def get_routes_contributors(
 
     db = _session_for_agency(agency)
     try:
-        return get_route_contributors(db, metric=metric, days=days, agency=agency)
+        result = get_route_contributors(db, metric=metric, days=days, agency=agency)
+        latest = get_retention_info(db, agency)["latest_detail_date"]
+        anchor = datetime.strptime(latest, "%Y-%m-%d").date() if latest else eastern_today()
+        return {
+            **result,
+            "retention": retention_note(db, agency, anchor - timedelta(days=days - 1)),
+        }
     finally:
         db.close()
 
@@ -657,6 +667,8 @@ async def get_route_trend(
             detail=f"Invalid period. Must be one of: {', '.join(VALID_PERIOD_KEYS)}",
         )
 
+    # Bounded (issue #265): the per-day loop used to accept any `days`.
+    days = max(1, min(days, 400))
     db = _session_for_agency(agency)
     try:
         result = get_route_trend_data(
@@ -667,6 +679,7 @@ async def get_route_trend(
             day_type_filter=day_type,
             period_key=period,
             otp_window=otp_window,
+            agency=agency,
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
@@ -1007,7 +1020,7 @@ async def get_route_stop_diagnostics_endpoint(
 
     db = _session_for_agency(agency)
     try:
-        return get_route_stop_diagnostics(
+        result = get_route_stop_diagnostics(
             db,
             route_id,
             days=days,
@@ -1016,6 +1029,8 @@ async def get_route_stop_diagnostics_endpoint(
             direction_id=direction_id,
             otp_window=otp_window,
         )
+        start = eastern_today() - timedelta(days=days)
+        return {**result, "retention": retention_note(db, agency, start)}
     finally:
         db.close()
 
@@ -1084,13 +1099,15 @@ async def get_route_bunching_causes_endpoint(
 
     db = _session_for_agency(agency)
     try:
-        return get_route_bunching_causes(
+        result = get_route_bunching_causes(
             db,
             route_id,
             days=days,
             day_type=day_type,
             period=period,
         )
+        start = eastern_today() - timedelta(days=days)
+        return {**result, "retention": retention_note(db, agency, start)}
     finally:
         db.close()
 
@@ -1228,7 +1245,14 @@ async def get_run_deviations_endpoint(
     try:
         result = get_run_deviations(db, run_id)
         if result is None:
-            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+            info = get_retention_info(db, agency)
+            note = (
+                f" (stop-level detail is retained for observed dates from "
+                f"{info['detail_retained_from']}; older runs may have been pruned)"
+                if info["pruned_dates"]
+                else ""
+            )
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found{note}")
         return result
     finally:
         db.close()
@@ -1252,6 +1276,42 @@ def _parse_service_date_param(service_date: str | None):
             status_code=400,
             detail=f"Invalid service_date {service_date!r}; expected YYYY-MM-DD",
         ) from exc
+
+
+def _require_detail_or_410(db, agency: str, service_date) -> None:
+    """HTTP 410 for a single-date stop-level view older than the retained detail.
+
+    Block views mark trips observed/missed from `runs`; for a pruned date
+    every trip would read as "not observed" — a confident wrong answer.
+    410 Gone (with the floor in the message) says the detail existed and
+    was retired; the daily aggregates remain.
+    """
+    try:
+        require_detail_retained(db, agency, service_date)
+    except DetailNotRetainedError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+
+
+@app.get("/api/retention")
+async def get_retention_endpoint(
+    agency: str = Query("wmata", description=_AGENCY_QUERY_DESCRIPTION),
+):
+    """
+    Stop-level retention facts for one agency (issue #265).
+
+    Returns the configured windows (`stop_level_days`, `raw_days` from
+    `config/agencies/<agency>.yaml`), `detail_retained_from` (earliest
+    service date that still has `runs`/`stop_events`; null when the
+    database has none) and `latest_detail_date`. Daily aggregates
+    (`/api/system/trend`, the scorecard overlay) are kept forever; views
+    that read stop-level rows report `retention.window_truncated` or return
+    410 for dates before `detail_retained_from`.
+    """
+    db = _session_for_agency(agency)
+    try:
+        return get_retention_info(db, agency)
+    finally:
+        db.close()
 
 
 @app.get("/api/routes/{route_id}/blocks")
@@ -1279,6 +1339,7 @@ async def get_route_blocks_endpoint(
     sd = _parse_service_date_param(service_date)
     db = _session_for_agency(agency)
     try:
+        _require_detail_or_410(db, agency, sd)
         result = get_route_blocks(db, route_id, sd)
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
@@ -1314,6 +1375,7 @@ async def get_active_blocks_endpoint(
     sd = _parse_service_date_param(service_date)
     db = _session_for_agency(agency)
     try:
+        _require_detail_or_410(db, agency, sd)
         return get_active_blocks(db, sd, limit=limit)
     finally:
         db.close()
@@ -1371,6 +1433,7 @@ async def get_block_timeline_endpoint(
     sd = _parse_service_date_param(service_date)
     db = _session_for_agency(agency)
     try:
+        _require_detail_or_410(db, agency, sd)
         result = compute_block_timeline(db, block_id, sd)
         if result is None:
             raise HTTPException(

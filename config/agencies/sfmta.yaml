@@ -37,3 +37,15 @@ s3:
   bucket: wmata-dashboard-backups
   tu_prefix: raw-jsonl-archive/sfmta/
   vp_prefix: raw-jsonl-archive/sfmta_vp/
+# Local-DB retention (docs/DEPLOYMENT.md §13; pipelines/apply_retention.py).
+# stop_level_days: stop_events + runs, counted back from the latest fully
+#   derived service date — shallow tier (peers): the frontend requests 7- or 30-day windows, plus margin.
+# raw_days: vehicle_positions + trip_update_state — only needed until a date
+#   is derived (VP window reaches local midnight D+2) plus a rerun buffer;
+#   older dates reload from S3. Daily aggregates are kept forever.
+# apply_after_refresh: run retention at the end of refresh_by_day (default
+#   off — DB deletes need the owner's opt-in).
+retention:
+  stop_level_days: 35
+  raw_days: 7
+  apply_after_refresh: false

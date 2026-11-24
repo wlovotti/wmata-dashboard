@@ -94,13 +94,17 @@ def current_gtfs_snapshot_id(session) -> int | None:
     )
 
 
-def _snapshots_with_calendar_newest_first(session) -> list[int]:
+def _snapshots_with_calendar_newest_first(
+    session, exclude: frozenset[int] = frozenset()
+) -> list[int]:
     """Return ids of snapshots that have any ``calendar`` rows, newest load first.
 
     Newest = latest ``gtfs_snapshots.snapshot_date``, ties broken by the
     higher ``snapshot_id``. Snapshots with no calendar rows (a load that
     never populated the versioned tables, e.g. WMATA snapshot 5) can never
-    schedule anything and are excluded everywhere.
+    schedule anything and are excluded everywhere. ``exclude`` drops ids
+    as if they were not loaded (the snapshot de-dup tool's "what would
+    resolve after deleting these" check).
     """
     from src.models import Calendar, GTFSSnapshot
 
@@ -113,11 +117,15 @@ def _snapshots_with_calendar_newest_first(session) -> list[int]:
         .filter(has_calendar)
         .order_by(GTFSSnapshot.snapshot_date.desc(), GTFSSnapshot.snapshot_id.desc())
         .all()
+        if sid not in exclude
     ]
 
 
 def resolve_gtfs_snapshot_for_date(
-    session, service_date: date_type, tz_name: str = "America/New_York"
+    session,
+    service_date: date_type,
+    tz_name: str = "America/New_York",
+    exclude_snapshot_ids: frozenset[int] = frozenset(),
 ) -> SnapshotChoice:
     """Pick the GTFS snapshot to derive ``service_date`` against.
 
@@ -149,7 +157,9 @@ def resolve_gtfs_snapshot_for_date(
     snapshot at all, returns ``snapshot_id=None`` (callers fall back to
     ``is_current``). Use ``choice.override_id`` for the
     ``--gtfs-snapshot-id`` CLI argument (None when the choice is the
-    current snapshot). Costs ~3 small calendar queries per loaded snapshot
+    current snapshot). ``exclude_snapshot_ids`` resolves as if those
+    snapshots were not loaded (``scripts/dedup_gtfs_snapshots.py`` proves a
+    de-dup changes no date's resolved content). Costs ~3 small calendar queries per loaded snapshot
     in the worst case — dozens of queries against tables of a few dozen
     rows per snapshot.
     """
@@ -158,7 +168,7 @@ def resolve_gtfs_snapshot_for_date(
     from src.timezones import local_midnight_as_utc
 
     current_id = current_gtfs_snapshot_id(session)
-    candidates = _snapshots_with_calendar_newest_first(session)
+    candidates = _snapshots_with_calendar_newest_first(session, frozenset(exclude_snapshot_ids))
     if not candidates:
         return SnapshotChoice(current_id, current_id, REASON_FALLBACK_CURRENT)
 

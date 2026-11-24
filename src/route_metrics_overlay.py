@@ -162,6 +162,28 @@ def compute_route_metrics_overlay_for_date(
     return rows
 
 
+def _overlay_row_has_observations(row: RouteMetricsDailyOverlay) -> bool:
+    """True when an overlay row carries any observed-side count (OTP, delivered, EWT, bunching).
+
+    ``scheduled_trips`` and the ``ewt_sched_*`` sums are schedule-only and
+    non-zero even on a day nothing was observed, so they don't count.
+    """
+    return bool(
+        (row.otp_origin_early or 0)
+        + (row.otp_origin_on_time or 0)
+        + (row.otp_origin_late or 0)
+        + (row.otp_destination_early or 0)
+        + (row.otp_destination_on_time or 0)
+        + (row.otp_destination_late or 0)
+        + (row.otp_all_early or 0)
+        + (row.otp_all_on_time or 0)
+        + (row.otp_all_late or 0)
+        + (row.delivered_trips or 0)
+        + (row.ewt_n_observed_headways or 0)
+        + (row.bunching_total_headways or 0)
+    )
+
+
 def upsert_route_metrics_for_date(
     db: Session,
     service_date: date_type,
@@ -169,6 +191,7 @@ def upsert_route_metrics_for_date(
     tz_name: str = "America/New_York",
     completeness_threshold: float | None = None,
     agency: str = "wmata",
+    force: bool = False,
 ) -> int | None:
     """Compute and upsert overlay rows for every route active on `service_date`.
 
@@ -203,6 +226,12 @@ def upsert_route_metrics_for_date(
     ``compute_route_metrics_overlay_for_date``'s cell-hour gate lookup.
     Defaults to ``"wmata"``; ``pipelines/upsert_route_metrics_overlay.py``
     passes its ``--agency`` CLI value through here.
+
+    ``force``: overwrite existing rows that carry observed counts even
+    though the date has no stop-level rows left; otherwise
+    ``src.system_metrics.AggregateOverwriteRefused`` is raised before
+    anything is written (retention keeps aggregates forever but prunes
+    the rows they were computed from).
     """
     from src.data_completeness import (
         MIN_COVERAGE_FOR_MATERIALIZATION,
@@ -221,6 +250,14 @@ def upsert_route_metrics_for_date(
         .filter(RouteMetricsDailyOverlay.service_date == service_date_iso)
         .all()
     }
+    if not force:
+        from src.system_metrics import refuse_if_detail_missing
+
+        refuse_if_detail_missing(
+            db,
+            service_date,
+            any(_overlay_row_has_observations(r) for r in existing_by_route.values()),
+        )
     # Every overlay row for a date carries the same date-level stamp
     # (this function writes them all in one pass), so the lowest route_id
     # is a deterministic representative. It lets resolve_data_quality keep

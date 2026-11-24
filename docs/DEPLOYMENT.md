@@ -481,6 +481,10 @@ or `--restore-date`), then follow §5.4 to swap it in.
 
 ### 5.6 Enable retention timers (tier-3 VP archival + tier-2 derived-table window)
 
+> **Historical (VM era, superseded).** The VM and these timers are gone;
+> `window_derived_tables.py` was removed and `archive_vehicle_positions.py`
+> refuses to run. Laptop retention is §12.4.
+
 Two nightly housekeeping jobs keep the DB from growing without bound. They were
 authored on 2026-06-03 but held until (a) S3 was in place (item 1, done
 2026-06-09) and (b) explicit user sign-off was given, because both jobs perform
@@ -1234,14 +1238,227 @@ so the manifest is what stops duplicates. `--utc-date U` compares the
 rows with `collected_at` on U against the manifest's row counts for
 files `U.*` (files are named by each row's `collected_at` UTC date, so
 the two describe the same set): equal → load only new files; fewer
-(rows deleted — no VP retention runs today, but a future retention or a
-manual delete) or `--force` → delete U's rows and manifest rows and
+(rows deleted — by `pipelines/apply_retention.py`, §12.4, which deletes
+whole `collected_at` UTC days and keeps their manifest rows, or a manual
+delete) or `--force` → delete U's rows and manifest rows and
 re-insert every `U.*` file in one transaction; more (VM-era days through
 2026-08-22, written straight to the DB) → no-op when there is nothing
 new to load, refusal when there is (or with `--force`). A reload also
-refuses if any manifested `U.*` file is not local. Note for the
-retention PR: `pipelines/archive_vehicle_positions.py` partitions by
-`DATE(timestamp)`, not `collected_at`.
+refuses if any manifested `U.*` file is not local.
+
+### 12.4 Local-DB retention tiers + GTFS snapshot de-dup (issue #265)
+
+**Status:** tools only. Nothing prunes automatically and nothing has been
+run against the real databases. Every delete path below is dry-run by
+default; the owner runs them.
+
+**Tiers** (`config/agencies/<agency>.yaml` → `retention:`, parsed by
+`src/agency_config.py:RetentionPolicy`):
+
+| Data | WMATA (deep) | SFMTA / peers (shallow) |
+|---|---|---|
+| `stop_events`, `runs` (`stop_level_days`) | 100 days | 35 days |
+| `vehicle_positions`, `trip_update_state` (`raw_days`) | 7 days | 7 days |
+| `system_metrics_daily`, `route_metrics_daily_overlay`, `route_headway_metrics` | forever | forever |
+
+A missing `retention:` block means the shallow tier; values below
+15 / 3 days are rejected (they must exceed the refresh's 14-day zero-runs
+lookback; the VP window for date D reads UTC days D..D+2).
+
+**Window anchor.** Both windows count back from the latest *fully derived*
+service date — newest `system_metrics_daily` row stamped `complete` with
+non-null OTP that still has `runs` — capped at agency-local yesterday,
+never from today. While a backfill has only reached mid-October the
+anchor is mid-October (the tool keeps more, never less); after weeks of
+not running anything the window does not shrink. No derived date → no
+deletes.
+
+**What `pipelines/apply_retention.py --agency X` does** (dry run prints
+rows / date ranges / estimated bytes per table and every kept date with
+its reason; `--apply` re-checks each guard immediately before each date
+or day, deletes in `--batch-size` batches committing each, and holds the
+refresh run lock):
+
+| Delete path | Unit | Guards (all must pass) |
+|---|---|---|
+| `runs`, then `stop_events` | service date D < anchor − (stop_level_days − 1) | D's `system_metrics_daily` is `complete` with non-null OTP and service-delivered, and D has `route_metrics_daily_overlay` and `route_headway_metrics` rows (`--allow-partial-date D` accepts a `partial` stamp, nothing else); D is not `failed`/`held`/`deferred`/`derived` in `logs/refresh_progress_<agency>.json`; D's VP window starts at or after the first manifested S3 VP archive file (2026-08-22 20:54 UTC), i.e. D can be re-derived — unless `--allow-unrederivable` |
+| `vehicle_positions` | UTC day of `collected_at` before the first VP day the raw window needs | every row of the day came from manifested archive files (rows ≤ `vp_archive_loaded_files` count — VM-era days are kept unless `--include-unmanifested-vp`); no not-yet-derived date (no `system_metrics_daily` row, or an unfinished progress status) reads the day. Manifest rows are **kept**, so `load_vp_archive --utc-date U` sees "fewer rows than manifested" and reloads the whole day when `refresh_by_day --date D` needs it |
+| `trip_update_state` | `service_date < local today − raw_days` | the existing `cleanup_trip_update_state.run_cleanup` (a date whose state goes before it is derived re-folds from S3 on replay) |
+
+`runs` go before `stop_events` so an interrupted run never leaves a date
+with `runs` but no `stop_events` (the API floor and the rollup guard key
+on `runs`).
+
+**Rolling-window tables need nothing.** `route_diagnostic_*`,
+`cross_route_segment_rollup` and `corridor_slip_rollup` are rebuilt by the
+housekeeping refresh from the last 30 days of `stop_events`, which both
+tiers keep.
+
+**Safety elsewhere in the pipeline.**
+- `upsert_system_metrics_daily`, `upsert_route_metrics_overlay` and
+  `compute_bunching` exit 1 without writing when a date has kept observed
+  aggregates but no `runs`/`stop_events` (`--force-overwrite-aggregates`
+  overrides). Re-deriving an old date with
+  `bin/pull-and-derive.sh --date D` reloads its raw data first, so it
+  works normally.
+- The zero-runs "hole" scans (`refresh_by_day` default selection,
+  `run_daily_batch` catch-up) never reach past `today − stop_level_days`,
+  so a pruned date is re-derived only when named with `--date`.
+- API: a date is *pruned* when its daily aggregates show observations but
+  it has no `runs` (kept older islands — partial or un-re-derivable dates —
+  are not pruned, so this is a set, not a cut-off). `/api/retention?agency=`
+  reports the windows, `detail_retained_from` (every observed date from
+  there on still has detail), `earliest_detail_date` and the pruned count.
+  `/api/routes/{id}/trend` falls back to the daily overlay on pruned dates
+  (official-window OTP, service-delivered; rows marked
+  `"source": "daily_aggregate"`, otherwise null with
+  `"detail_retained": false`) and is capped at 400 days; `/stops`,
+  `/bunching-causes` and `/contributors` carry a `retention` block with
+  `window_truncated` / `pruned_dates_in_window` (a 90-day SFMTA view is
+  truncated once its 35-day tier is applied); block views return 410 for a
+  pruned date.
+
+**Read-only measurements, 2026-11-24** (backfill running; WMATA and
+SFMTA derived through 2026-09-29; stop_events rows estimated from per-date
+`runs` counts × the table's stop_events/runs ratio, bytes from
+`pg_total_relation_size / reltuples`):
+
+| | anchor 2026-09-29 (today) | anchor 2026-11-23 (after the backfill) |
+|---|---|---|
+| SFMTA stop-level, deletable by default | 3 dates (8/23–8/25), ~1.0M stop_events, ~0.4 GB | 37 dates (8/23–9/29), ~13.0M, ~5.5 GB |
+| SFMTA stop-level, needs `--allow-unrederivable` | 31 dates (7/23–8/22), ~10.5M, ~4.5 GB | same |
+| SFMTA kept (aggregates partial / null service-delivered) | 7/21 partial, 7/22 null SD | + 8/28 null SD |
+| WMATA stop-level, deletable by default | none | none (everything before 8/16 predates the VP archive) |
+| WMATA stop-level, needs `--allow-unrederivable` | 46 dates (5/04–6/21), ~25.3M, ~9.7 GB | 98 dates (5/04–8/15), ~59.9M, ~22.9 GB |
+| WMATA kept (aggregates missing / partial / null) | 5/02–5/03 (no overlay), 5/07 (null), 5/24 (no row), 5/29 (partial) | + 7/11, 7/12, 7/17 (partial) |
+| VP manifested days older than the raw window | WMATA ~29.6M rows ~6.8 GB, SFMTA ~8.3M ~1.6 GB | WMATA ~39.1M ~9.0 GB, SFMTA ~10.7M ~2.1 GB |
+| VP VM-era rows (kept unless `--include-unmanifested-vp`) | WMATA ~44.4M ~10.2 GB (6/11–8/22), SFMTA ~5.7M ~1.1 GB (7/22–8/22) | same |
+
+WMATA's VM-era VP before 2026-08-02 also exists as parquet in
+`s3://…/wmata-vp-archive/` (`pipelines/load_vp_from_parquet.py`); 8/02–8/21
+exists only in the DB.
+
+**GTFS snapshot de-dup** (`scripts/dedup_gtfs_snapshots.py`, Postgres
+only): groups snapshots by a content fingerprint of all six versioned
+tables, keeps one per distinct content (`is_current` > has an `archive=`
+token > newest load — the newest member is what
+`resolve_gtfs_snapshot_for_date` already picks among identical covering
+snapshots), refuses a group if excluding its duplicates would change any
+service date's resolved content, proves row-for-row equality
+(`EXCEPT ALL` both ways; `trips`/`stop_times` in trip_id ranges) right
+before each delete, repoints `corridors.gtfs_snapshot_id` and
+`route_service_profile.snapshot_id`, deletes the duplicate's calendar
+first (a calendar-less snapshot is never resolved), tags it
+`dedup_into=N` (a rerun resumes), then its rows in batches and its
+`gtfs_snapshots` row. `--metadata-only` (feed_version + stored counts,
+instant, never used by `--apply`) today shows WMATA 16 snapshots → 4
+groups, 12 "duplicates", ~18.3 GB; SFMTA 5 → 2, 3 duplicates, ~1.3 GB.
+That grouping is wrong for WMATA 11/12 (calendar `end_date` 20260613 vs
+20260620 — checked on the small `calendar` table), so the content run
+should keep 4, 5, 11, 12, 19 and 22 and delete 6, 8, 9, 10, 15–18, 20, 21
+(~16 GB) if their large tables match. Snapshot 5 has no `calendar` /
+`calendar_dates` rows at all (a partial load), so it is distinct content,
+never resolved, and kept — removing it is a separate decision.
+
+#### Runbook (owner-run, in this order)
+
+Steps marked **(no backfill)** read or rewrite large tables: run them only
+when `logs/.pull-and-derive.lock.d` does not exist in the main checkout.
+`--apply` steps take that lock themselves and refuse while it is held.
+
+1. **Dry runs** (read-only; **(no backfill)** for the per-date counts):
+
+   ```bash
+   uv run python -m pipelines.apply_retention --agency sfmta
+   uv run python -m pipelines.apply_retention --agency wmata
+   uv run python scripts/dedup_gtfs_snapshots.py --agency wmata --metadata-only
+   uv run python scripts/dedup_gtfs_snapshots.py --agency sfmta --metadata-only
+   ```
+
+2. **Backups** (`docs/MIGRATIONS.md` step 1, adapted to the laptop; ~97 GB
+   free on 2026-11-24). The aggregates are what retention promises to keep
+   forever, so dump them every time (small):
+
+   ```bash
+   mkdir -p ~/backups
+   for db in wmata_dashboard sfmta_dashboard; do
+     pg_dump -Fc -d $db -t system_metrics_daily -t route_metrics_daily_overlay \
+       -t route_headway_metrics -t gtfs_snapshots -t vp_archive_loaded_files \
+       -t tu_archive_replayed_files -f ~/backups/${db}_aggregates_$(date +%Y%m%dT%H%M%S).dump
+     pg_restore --list ~/backups/${db}_aggregates_*.dump | tail -3
+   done
+   ```
+
+   Before any `--allow-unrederivable` or `--include-unmanifested-vp` run,
+   copy the rows it will delete (they exist nowhere else), e.g. for WMATA
+   with cutoff C = the dry run's "stop-level keeps >=" date **(no backfill)**:
+
+   ```bash
+   psql -d wmata_dashboard -c "\copy (SELECT * FROM stop_events WHERE service_date < 'C') TO PROGRAM 'zstd -T0 > ~/backups/wmata_stop_events_before_C.csv.zst' CSV HEADER"
+   psql -d wmata_dashboard -c "\copy (SELECT * FROM runs WHERE service_date < 'C') TO PROGRAM 'zstd -T0 > ~/backups/wmata_runs_before_C.csv.zst' CSV HEADER"
+   ```
+
+   and upload them (`aws s3 cp ~/backups/… s3://wmata-dashboard-backups/wmata-db-backups/`).
+
+3. **SFMTA retention** (smallest first): `uv run python -m pipelines.apply_retention --agency sfmta --apply --vacuum`.
+4. **WMATA retention, default guards**: `uv run python -m pipelines.apply_retention --agency wmata --apply --vacuum`
+   (today: VP manifested days + `trip_update_state` only).
+5. **Optional, after step 2's row copies**: rerun 3/4 with
+   `--allow-unrederivable` (and/or `--include-unmanifested-vp`). This is the
+   step that frees most WMATA space (~23 GB stop-level, ~10 GB VM-era VP).
+6. **GTFS de-dup (no backfill)**:
+
+   ```bash
+   uv run python scripts/dedup_gtfs_snapshots.py --agency wmata            # content fingerprints (reads all stop_times)
+   uv run python scripts/dedup_gtfs_snapshots.py --agency wmata export --out-dir ~/gtfs-db-export
+   aws s3 cp ~/gtfs-db-export/ s3://wmata-dashboard-backups/gtfs-archive/wmata/db-export/ --recursive --exclude '*' --include '*.zip'
+   uv run python scripts/dedup_gtfs_snapshots.py --agency wmata --prove    # exact comparison only
+   uv run python scripts/dedup_gtfs_snapshots.py --agency wmata --apply
+   ```
+
+   then the same for `--agency sfmta`.
+7. **Space.** `--vacuum` / the de-dup's suggested `VACUUM (ANALYZE)` are
+   plain VACUUMs: no exclusive lock, the freed pages become reusable by
+   later inserts, but the files do not shrink. That is enough for
+   `stop_events`, `runs`, `vehicle_positions` and `trip_update_state`,
+   which refill their free space daily. Use `VACUUM FULL` only when the
+   disk itself is needed back and the table will not refill soon — mainly
+   `stop_times` after the de-dup (~24 GB → ~6–8 GB live), or `stop_events`
+   after a large `--allow-unrederivable` cut. `VACUUM FULL` rewrites the
+   table: it holds **ACCESS EXCLUSIVE** for the whole rewrite (the API,
+   the refresh and every read of that table block), and needs free disk
+   roughly equal to the table's *live* size plus its indexes while it
+   runs. Check first, then run **(no backfill, API stopped)**:
+
+   ```bash
+   psql -d wmata_dashboard -c "SELECT pg_size_pretty(pg_total_relation_size('stop_times'))"
+   df -h ~
+   psql -d wmata_dashboard -c "VACUUM (FULL, ANALYZE, VERBOSE) stop_times"
+   ```
+
+8. **Opt in to retention after every refresh** (only once 3–6 look
+   right): set `retention.apply_after_refresh: true` in the agency YAML, or
+   pass `bin/pull-and-derive.sh --apply-retention`. It runs
+   `apply_retention --apply --vacuum` after the end-of-run housekeeping
+   for each agency that processed dates without a failure — default
+   guards only (never `--allow-unrederivable`).
+9. **Remove the stale LaunchAgents** (never loaded; their jobs are gone or
+   superseded):
+
+   ```bash
+   launchctl bootout gui/$UID/com.wmata-dashboard.daily-batch 2>/dev/null
+   launchctl bootout gui/$UID/com.wmata-dashboard.retain-trip-update-state 2>/dev/null
+   rm ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist \
+      ~/Library/LaunchAgents/com.wmata-dashboard.retain-trip-update-state.plist
+   ```
+
+**Retired by this PR:** `pipelines/window_derived_tables.py` (flat
+365-day today-anchored delete whose `--dry-run` ran the DELETE) and
+`pipelines/retain_trip_update_state.py` (unreferenced; superseded by
+`cleanup_trip_update_state`). `pipelines/archive_vehicle_positions.py`
+stays only because `load_vp_from_parquet.py` imports its constants; its
+CLI now refuses to run (it would delete VP by `DATE(timestamp)` and
+duplicate an archive S3 already holds).
 
 ## 13. Stateless collector (nano) — live topology
 

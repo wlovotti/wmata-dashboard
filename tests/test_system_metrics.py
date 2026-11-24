@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.models import StopEvent, SystemMetricsDaily
+from src.models import Run, StopEvent, SystemMetricsDaily
 from src.system_metrics import compute_system_metrics_for_date, upsert_system_metrics_for_date
 from src.timezones import eastern_today
 
@@ -216,6 +216,18 @@ def test_pipeline_upserts_system_metrics_row(db_session, sample_routes, monkeypa
                 deviation_sec=120,
             ),
         ]
+    )
+    # A run row too: re-running the upsert over an existing observed row
+    # requires stop-level rows (runs + stop_events) to be present — the
+    # retention guard refuses to overwrite kept aggregates from nothing.
+    db_session.add(
+        Run(
+            service_date=target_iso,
+            trip_id="TRIP_T1",
+            route_id="TEST1",
+            direction_id=0,
+            source="proximity",
+        )
     )
     db_session.commit()
 
@@ -560,6 +572,19 @@ def test_upsert_persists_swt_seconds(db_session, monkeypatch):
     upsert_system_metrics_for_date(db_session, datetime(2026, 8, 10).date())
     row = db_session.query(SystemMetricsDaily).filter_by(service_date="2026-08-10").one()
     assert row.swt_seconds == 300.0
+    # The update path below re-runs over an observed row, which needs the
+    # date's stop-level rows present (retention guard).
+    db_session.add(
+        Run(
+            service_date="2026-08-10", trip_id="t", route_id="R", direction_id=0, source="proximity"
+        )
+    )
+    db_session.add(
+        _make_stop_event(
+            service_date="2026-08-10", route_id="R", trip_id="t", stop_sequence=1, deviation_sec=0
+        )
+    )
+    db_session.commit()
 
     # Update path: change the value, re-run, confirm overwrite.
     def _fake_compute_2(
