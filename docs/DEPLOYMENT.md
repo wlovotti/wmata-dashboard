@@ -914,12 +914,17 @@ before it derives:
    local copy is still "fresh" by that clock. Since the issue #258 PR a
    reload first archives the exact downloaded zip to
    `s3://wmata-dashboard-backups/gtfs-archive/<agency>/<UTC ts>_<feed_version>_<sha12>.zip`
-   (an upload failure fails the reload with the DB untouched), and skips
-   creating a snapshot at all when the feed's content hash matches the
-   current snapshot's (`content_sha256=` in `gtfs_snapshots.notes`). A
+   (an upload failure fails the reload with the DB untouched; the reload's
+   AWS credentials therefore need `s3:ListBucket`, `s3:GetObject` and
+   `s3:PutObject` on that prefix), reusing an existing object with the same
+   content hash instead of uploading a second copy, and skips creating a
+   snapshot at all when the feed's content hash matches the current
+   snapshot's and that snapshot is archived (`content_sha256=` and
+   `archive=` in `gtfs_snapshots.notes`; a snapshot loaded with
+   `--no-archive` is archived on the next unchanged run instead). A
    skipped reload doesn't advance the snapshot's age, so once the newest
    snapshot is > 7 days old the gate re-downloads (and re-hashes) the feed
-   on every run until the agency publishes a new one — a cheap daily
+   on every run until the agency publishes a new one — a cheap
    feed-change check.
 2. **Post-replay trip_id match-rate canary**
    (`scripts/gtfs_trip_match_canary.py`) — after replay, recomputes the
@@ -966,10 +971,14 @@ agency's derive.)
 **Per-date GTFS snapshot (issue #258).** Every per-date pipeline that
 `run_daily_batch.py` drives, and the canary above, use the snapshot
 `src/gtfs_versioning.py:resolve_gtfs_snapshot_for_date` picks for *that*
-service date — the newest snapshot whose `calendar` range (or an
-added-service `calendar_dates` row) covers the date; if none covers it,
-the newest snapshot already loaded by the end of that date; failing that,
-the current one. Each batch log carries a `gtfs_snapshot:` line per date.
+service date — the newest snapshot that actually schedules service on
+the date under the GTFS rule the pipelines use
+(`src/gtfs_calendar.py:scheduled_service_ids_for_date`: weekday flag in
+range, minus `calendar_dates` removals, plus additions); if none does, the
+newest snapshot already loaded by the end of that date; if the date
+predates every loaded snapshot, the oldest one. Each batch log carries a
+`gtfs_snapshot:` line per date, and every per-date pipeline — including
+bunching's scheduled-headway thresholds — reads that one snapshot.
 This closes the *reverse* race to the 2026-08-30 one: a reload that lands
 a feed effective "today" before "yesterday" was derived (WMATA 9/13
 reload → 9/12 at 0/9,917 against snapshot 20) no longer collapses
@@ -978,7 +987,17 @@ yesterday — it is derived against the outgoing snapshot automatically.
 date (catch-up dates included, which the canary itself never sees) and
 skips a collapsed date loudly rather than writing a near-empty day whose
 `runs` rows would read as a real 0% and block the zero-runs auto-revisit
-(what happened to WMATA 9/12 in the 2026-09-29 catch-up).
+(what happened to WMATA 9/12 in the 2026-09-29 catch-up). Held-back dates
+are listed as `guard-skipped dates` in the batch summary, not counted as
+pipeline failures, and stay excluded from aggregation even if a
+neighbouring date's derive writes owl-corrected rows under them. A batch
+whose only problem is held-back dates exits **3** (any pipeline failure
+is still 1); `bin/pull-and-derive.sh` still runs SFMTA
+`trip_update_state` cleanup on 3 — the held-back date's state is
+rebuildable from the S3 raw archive (`replay_archive_to_state.py --date D
+--force`), and gating cleanup on a date that re-fails every run would
+freeze retention for the whole lookback window — but the overall run
+still exits nonzero with a summary line.
 A date that slipped through before this fix just needs its derive re-run;
 no reload is involved (reloading again changes nothing — the date needs
 the *previous* snapshot, which the resolver now selects).
