@@ -974,6 +974,11 @@ This closes the *reverse* race to the 2026-08-30 one: a reload that lands
 a feed effective "today" before "yesterday" was derived (WMATA 9/13
 reload → 9/12 at 0/9,917 against snapshot 20) no longer collapses
 yesterday — it is derived against the outgoing snapshot automatically.
+`run_daily_batch.py` also runs the canary's match-rate check per target
+date (catch-up dates included, which the canary itself never sees) and
+skips a collapsed date loudly rather than writing a near-empty day whose
+`runs` rows would read as a real 0% and block the zero-runs auto-revisit
+(what happened to WMATA 9/12 in the 2026-09-29 catch-up).
 A date that slipped through before this fix just needs its derive re-run;
 no reload is involved (reloading again changes nothing — the date needs
 the *previous* snapshot, which the resolver now selects).

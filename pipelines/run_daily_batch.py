@@ -100,6 +100,7 @@ from src.date_ranges import iter_eastern_dates
 from src.gtfs_versioning import SnapshotChoice, resolve_gtfs_snapshot_for_date
 from src.models import Route, Run
 from src.timezones import eastern_today, local_today
+from src.trip_match_rate import DEFAULT_THRESHOLD, TripMatchResult, compute_trip_match_rate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
@@ -328,19 +329,17 @@ def make_snapshot_resolver(
     return _resolve
 
 
-def snapshot_args_for_date(
+def resolve_choice_logged(
     resolver: Callable[[date_type], SnapshotChoice | None],
     service_date: date_type,
     log_handle,
-) -> list[str]:
-    """Return the ``--gtfs-snapshot-id`` args for one date, logging the choice.
+) -> SnapshotChoice | None:
+    """Resolve one date's GTFS snapshot via ``resolver`` and log the choice.
 
-    Empty when the resolved snapshot is the current one (or the resolver
-    returns None), so steady-state commands are unchanged. A resolver
-    error is logged loudly and falls back to ``is_current`` — the
-    pre-#258 behaviour — rather than aborting the date: the post-replay
-    match-rate canary in `bin/pull-and-derive.sh` still guards against
-    the collapse that a wrong schedule produces.
+    A resolver error is logged loudly and returns None, which means
+    "fall back to ``is_current``" — the pre-#258 behaviour — rather than
+    aborting the date; the per-date match-rate guard in `run_batch` still
+    catches the collapse a wrong schedule would produce.
     """
     try:
         choice = resolver(service_date)
@@ -350,9 +349,9 @@ def snapshot_args_for_date(
             f"({exc!r}) — falling back to is_current\n"
         )
         log_handle.flush()
-        return []
+        return None
     if choice is None:
-        return []
+        return None
     log_handle.write(
         f"gtfs_snapshot: service_date={service_date.isoformat()} "
         f"snapshot_id={choice.snapshot_id} reason={choice.reason} "
@@ -360,9 +359,40 @@ def snapshot_args_for_date(
         f"{'' if choice.override_id is None else ' (PINNED to non-current snapshot)'}\n"
     )
     log_handle.flush()
-    if choice.override_id is None:
+    return choice
+
+
+def snapshot_args(choice: SnapshotChoice | None) -> list[str]:
+    """Return the ``--gtfs-snapshot-id`` CLI args for a resolved choice.
+
+    Empty when there is no choice or it is the current snapshot, so
+    steady-state commands are unchanged.
+    """
+    if choice is None or choice.override_id is None:
         return []
     return ["--gtfs-snapshot-id", str(choice.override_id)]
+
+
+def make_match_guard(
+    agency: str = DEFAULT_AGENCY,
+) -> Callable[[date_type, SnapshotChoice | None], TripMatchResult]:
+    """Build the per-date pre-derive match-rate check for one agency.
+
+    Returns ``(service_date, snapshot_choice) -> TripMatchResult``: the
+    same observed-vs-scheduled trip_id intersection the post-replay canary
+    computes, against the snapshot this date will be derived with.
+    """
+    cfg = load_agency_config(agency)
+
+    def _guard(service_date: date_type, choice: SnapshotChoice | None) -> TripMatchResult:
+        """Compute ``service_date``'s match rate on a short-lived session."""
+        db = get_session(db_url=resolve_agency_db_url(cfg))
+        try:
+            return compute_trip_match_rate(db, service_date, cfg.timezone, snapshot_choice=choice)
+        finally:
+            db.close()
+
+    return _guard
 
 
 def run_housekeeping_pipeline(
@@ -481,6 +511,7 @@ def run_batch(
     dry_run: bool = False,
     agency: str = DEFAULT_AGENCY,
     snapshot_resolver: Callable[[date_type], SnapshotChoice | None] | None = None,
+    match_guard: Callable[[date_type, SnapshotChoice | None], TripMatchResult | None] | None = None,
 ) -> int:
     """Drive all per-date pipelines across every (pipeline, target_date) cell.
 
@@ -489,6 +520,19 @@ def run_batch(
     pipeline for a date — derive, aggregate, bunching, both rollups —
     gets the same ``--gtfs-snapshot-id`` so the stop_events, the runs,
     and the scheduled side of service-delivered all read one schedule.
+
+    ``match_guard`` (default `make_match_guard`) runs before each target
+    date's derive: if that date's observed trip_ids match less than
+    ``DEFAULT_THRESHOLD`` of the resolved snapshot's trips, the date is
+    skipped loudly (counted as a failure) instead of writing a near-empty
+    day. That near-empty day is worse than a gap: its `runs` rows display
+    as a real 0% and stop `determine_target_dates` from ever revisiting
+    the date (WMATA 2026-09-12, catch-up-derived on 9/29 against the wrong
+    snapshot: 14 stop_events, OTP 0.0% — issue #258 comment). The
+    post-replay canary only checks "yesterday"; this covers catch-up
+    dates too. No observed trip_ids at all (rate None) is not a collapse —
+    the date derives as before. A guard error is logged and the date
+    proceeds. Not run under ``dry_run``.
 
     Returns the number of (pipeline, date) combinations that failed —
     callers turn a non-zero into a non-zero process exit so launchd can
@@ -532,15 +576,45 @@ def run_batch(
 
     if snapshot_resolver is None:
         snapshot_resolver = make_snapshot_resolver(agency)
-    snapshot_args: dict[date_type, list[str]] = {}
+    if match_guard is None and not dry_run:
+        match_guard = make_match_guard(agency)
+    choices: dict[date_type, SnapshotChoice | None] = {}
+
+    def _choice_for(service_date: date_type) -> SnapshotChoice | None:
+        """Resolve (once per batch) and log the date's GTFS snapshot."""
+        if service_date not in choices:
+            choices[service_date] = resolve_choice_logged(
+                snapshot_resolver, service_date, log_handle
+            )
+        return choices[service_date]
 
     def _args_for(pipeline: dict, service_date: date_type) -> list[str]:
         """Per-pipeline extra args plus the date's resolved snapshot args."""
-        if service_date not in snapshot_args:
-            snapshot_args[service_date] = snapshot_args_for_date(
-                snapshot_resolver, service_date, log_handle
+        return list(pipeline.get("extra_args") or []) + snapshot_args(_choice_for(service_date))
+
+    def _collapsed(service_date: date_type) -> bool:
+        """Run the pre-derive match-rate guard; True means skip this date."""
+        if dry_run or match_guard is None:
+            return False
+        choice = _choice_for(service_date)
+        try:
+            result = match_guard(service_date, choice)
+        except Exception as exc:
+            log_handle.write(
+                f"WARN match_guard: could not check {service_date.isoformat()} ({exc!r}) "
+                "— deriving anyway\n"
             )
-        return list(pipeline.get("extra_args") or []) + snapshot_args[service_date]
+            log_handle.flush()
+            return False
+        if result is None or result.rate is None:
+            return False
+        log_handle.write(
+            f"match_guard: service_date={service_date.isoformat()} "
+            f"{result.matched_count}/{result.observed_count} observed trip_ids in snapshot "
+            f"{result.gtfs_snapshot_id} ({result.rate * 100:.1f}%)\n"
+        )
+        log_handle.flush()
+        return result.rate < DEFAULT_THRESHOLD
 
     # Phase 1: derive_stop_events* for every target date, collecting the
     # full set of service dates (target dates plus any day-shifted dates)
@@ -549,6 +623,17 @@ def run_batch(
     for service_date in target_dates:
         log_handle.write(f"\n=== derive: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
+        if _collapsed(service_date):
+            log_handle.write(
+                f"SKIP all pipelines for {service_date.isoformat()} — observed trip_ids "
+                f"match < {DEFAULT_THRESHOLD * 100:.0f}% of the resolved GTFS snapshot's "
+                "trips; deriving would write a near-empty day that reads as a real 0% "
+                "and blocks the zero-runs auto-revisit. See docs/DEPLOYMENT.md 12.1.\n"
+            )
+            log_handle.flush()
+            failure_count += 1
+            all_service_dates.discard(service_date)
+            continue
         for pipeline in derive_pipelines:
             extra_args = _args_for(pipeline, service_date)
             if dry_run:

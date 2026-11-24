@@ -251,11 +251,21 @@ class _FakeCompletedProcess:
     returncode = 0
 
 
-def _run_batch_capturing(tmp_path, monkeypatch, target_dates, resolver, agency="sfmta"):
+def _run_batch_capturing(
+    tmp_path,
+    monkeypatch,
+    target_dates,
+    resolver,
+    agency="sfmta",
+    match_guard=lambda d, choice: None,
+    dry_run=False,
+    expected_failures=0,
+):
     """Run run_batch with subprocess stubbed out; return (captured_cmds, log_text).
 
     ``agency="sfmta"`` by default so the WMATA-only housekeeping loop is
-    skipped and only per-date pipeline commands are captured.
+    skipped and only per-date pipeline commands are captured. The default
+    ``match_guard`` returns None ("nothing to check") so no DB is touched.
     """
     import pipelines.run_daily_batch as run_daily_batch_module
 
@@ -270,9 +280,14 @@ def _run_batch_capturing(tmp_path, monkeypatch, target_dates, resolver, agency="
     log_path = tmp_path / "batch.log"
     with log_path.open("a") as log_handle:
         failures = run_daily_batch_module.run_batch(
-            target_dates, log_handle, agency=agency, snapshot_resolver=resolver
+            target_dates,
+            log_handle,
+            dry_run=dry_run,
+            agency=agency,
+            snapshot_resolver=resolver,
+            match_guard=match_guard,
         )
-    assert failures == 0
+    assert failures == expected_failures
     return captured, log_path.read_text()
 
 
@@ -321,14 +336,73 @@ def test_run_batch_resolver_error_falls_back_to_is_current(tmp_path, monkeypatch
 
 @pytest.mark.smoke
 def test_run_batch_dry_run_shows_pinned_snapshot(tmp_path, monkeypatch):
-    """--dry-run prints the per-date snapshot pin in its plan lines."""
-    _captured, log_text = _run_batch_capturing(
+    """--dry-run prints the per-date snapshot pin in its plan lines, runs nothing,
+    and never calls the match guard."""
+
+    def _guard_must_not_run(d, choice):
+        """Fail if the guard is consulted under dry-run."""
+        raise AssertionError("match guard ran under dry_run")
+
+    captured, log_text = _run_batch_capturing(
         tmp_path,
         monkeypatch,
         [date(2026, 9, 12)],
         lambda d: SnapshotChoice(19, 20, REASON_COVERS),
+        match_guard=_guard_must_not_run,
+        dry_run=True,
     )
-    assert "--gtfs-snapshot-id 19" in log_text
+    assert captured == []
+    assert "DRY-RUN would run pipelines.aggregate_runs --all-routes --date 2026-09-12 " in log_text
+    assert "--gtfs-snapshot-id 19 --agency sfmta" in log_text
+    assert "match_guard" not in log_text
+
+
+@pytest.mark.smoke
+def test_run_batch_match_guard_skips_a_collapsed_catch_up_date(tmp_path, monkeypatch):
+    """The 9/29 catch-up shape: a date whose observed trip_ids don't exist in its
+    snapshot is skipped entirely (no derive, no aggregate, counted as a failure)
+    while a healthy date in the same batch still runs."""
+    from src.trip_match_rate import TripMatchResult
+
+    results = {
+        date(2026, 9, 12): TripMatchResult(9917, 0, 0.0, gtfs_snapshot_id=21),
+        date(2026, 9, 13): TripMatchResult(9800, 9700, 9700 / 9800, gtfs_snapshot_id=21),
+    }
+    captured, log_text = _run_batch_capturing(
+        tmp_path,
+        monkeypatch,
+        [date(2026, 9, 12), date(2026, 9, 13)],
+        lambda d: SnapshotChoice(21, 21, REASON_FALLBACK_CURRENT),
+        match_guard=lambda d, choice: results[d],
+        expected_failures=1,
+    )
+    dates_run = {cmd[cmd.index("--date") + 1] for cmd in captured}
+    assert dates_run == {"2026-09-13"}
+    assert "SKIP all pipelines for 2026-09-12" in log_text
+    assert "0/9917 observed trip_ids in snapshot 21" in log_text
+
+
+@pytest.mark.smoke
+def test_run_batch_match_guard_no_observations_or_error_still_derives(tmp_path, monkeypatch):
+    """rate None (nothing observed) and a guard exception both let the date derive."""
+    from src.trip_match_rate import TripMatchResult
+
+    def _guard(d, choice):
+        """No observations for 9/12; a DB error for 9/13."""
+        if d == date(2026, 9, 12):
+            return TripMatchResult(0, 0, None)
+        raise RuntimeError("db unavailable")
+
+    captured, log_text = _run_batch_capturing(
+        tmp_path,
+        monkeypatch,
+        [date(2026, 9, 12), date(2026, 9, 13)],
+        lambda d: None,
+        match_guard=_guard,
+    )
+    dates_run = {cmd[cmd.index("--date") + 1] for cmd in captured}
+    assert dates_run == {"2026-09-12", "2026-09-13"}
+    assert "WARN match_guard: could not check 2026-09-13" in log_text
 
 
 # ---------------------------------------------------------------------------

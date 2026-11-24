@@ -51,7 +51,6 @@ Usage:
 
 import argparse
 import sys
-from dataclasses import dataclass
 from datetime import date as date_type
 from datetime import timedelta
 
@@ -59,88 +58,18 @@ from dotenv import load_dotenv
 
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
-from src.gtfs_versioning import gtfs_version_filter, resolve_gtfs_snapshot_for_date
-from src.models import Trip, VehiclePosition
-from src.timezones import local_service_date_position_window_utc, local_today
+from src.timezones import local_today
+from src.trip_match_rate import (  # noqa: F401 -- re-exported for callers/tests
+    DEFAULT_THRESHOLD,
+    TripMatchResult,
+    compute_trip_match_rate,
+)
 
 DEFAULT_AGENCY = "wmata"
-
-# Below this fraction, treat the match as a collapse rather than normal
-# day-to-day variation. The observed failure signature (the 2026-08-30
-# Muni fall service change) was a drop from a healthy match rate to
-# exactly 0% — a low, conservative bar catches that collapse without
-# risking false positives on an ordinary reduced-service day.
-DEFAULT_THRESHOLD = 0.05
-
-
-@dataclass(frozen=True)
-class TripMatchResult:
-    """Outcome of comparing one service date's observed feed trip_ids
-    against the currently-loaded GTFS trip_id space.
-
-    ``rate`` is None when there were no observed trip_ids to compare at
-    all (e.g. the date hasn't been replayed/loaded yet) — that's a
-    "nothing to check" skip, not a collapse.
-    """
-
-    observed_count: int
-    matched_count: int
-    rate: float | None
-    gtfs_snapshot_id: int | None = None
 
 
 class MatchRateCollapseError(RuntimeError):
     """Raised when a service date's feed/GTFS trip_id match rate collapses."""
-
-
-def compute_trip_match_rate(session, service_date: date_type, tz_name: str) -> TripMatchResult:
-    """Compute the feed-trip_id ∩ current-GTFS-trip_id match rate for one service date.
-
-    Mirrors the gate both derive paths actually use
-    (`derive_stop_events_from_state.py`'s `vp_trip_ids` query, and
-    `derive_stop_events.py`'s equivalent): the same agency-local
-    service-date window AND the same `trip_start_date` equality filter.
-    The timestamp window alone is ~48h wide (past-midnight service),
-    so without the `trip_start_date` filter a date's observed set
-    would also pick up the *next* service date's positions that happen
-    to fall inside this window — feed-wide rather than per-route,
-    since one collapsed date collapses every route at once and a
-    single check is cheap.
-    """
-    window_start, window_end = local_service_date_position_window_utc(service_date, tz_name)
-    trip_start_date_str = service_date.strftime("%Y%m%d")
-    observed = {
-        row[0]
-        for row in session.query(VehiclePosition.trip_id)
-        .filter(
-            VehiclePosition.trip_id.isnot(None),
-            VehiclePosition.trip_start_date == trip_start_date_str,
-            VehiclePosition.timestamp >= window_start,
-            VehiclePosition.timestamp < window_end,
-        )
-        .distinct()
-        .all()
-    }
-    if not observed:
-        return TripMatchResult(observed_count=0, matched_count=0, rate=None)
-
-    # Same snapshot choice run_daily_batch.py makes for this date (#258);
-    # override_id is None when that's the current snapshot.
-    choice = resolve_gtfs_snapshot_for_date(session, service_date, tz_name)
-    scheduled = {
-        row[0]
-        for row in session.query(Trip.trip_id)
-        .filter(gtfs_version_filter(Trip, choice.override_id))
-        .distinct()
-        .all()
-    }
-    matched = observed & scheduled
-    return TripMatchResult(
-        observed_count=len(observed),
-        matched_count=len(matched),
-        rate=len(matched) / len(observed),
-        gtfs_snapshot_id=choice.snapshot_id,
-    )
 
 
 def check_trip_match_rate(

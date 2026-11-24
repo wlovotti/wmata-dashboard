@@ -171,7 +171,11 @@ echo "== post-replay GTFS trip_id match-rate canary =="
 # agency-local ("yesterday") service date. `determine_target_dates`
 # (inside run_daily_batch.py, below) also re-targets any older
 # zero-`runs`-row date within the lookback window — those catch-up dates
-# are NOT covered by this check.
+# are NOT covered by this check. They are covered by run_daily_batch.py's
+# own per-date pre-derive match-rate guard (issue #258), which skips (and
+# counts as a failure) any target date whose observed trip_ids don't match
+# the GTFS snapshot resolved for that date, instead of writing a
+# near-empty day that reads as a real 0% (WMATA 9/12 on 2026-09-29).
 #
 # Exit codes from gtfs_trip_match_canary.py: 0 ok/skip, 1 a real
 # match-rate collapse, 2 an operational error (the check itself couldn't
