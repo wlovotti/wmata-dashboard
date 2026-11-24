@@ -20,8 +20,11 @@
 #
 # Requires: AWS credentials with read access to the four
 # raw-jsonl-archive S3 prefixes (root, sfmta/, vp/, sfmta_vp/), AND — for
-# the GTFS reload step — s3:ListBucket + s3:GetObject + s3:PutObject on
-# s3://wmata-dashboard-backups/gtfs-archive/ (a reload archives the
+# the GTFS reload step — s3:GetObject + s3:PutObject on
+# arn:aws:s3:::wmata-dashboard-backups/gtfs-archive/* and s3:ListBucket on
+# arn:aws:s3:::wmata-dashboard-backups with an s3:prefix condition of
+# gtfs-archive/* (ListBucket is a bucket-level action; granting it on an
+# object ARN grants nothing) (a reload archives the
 # downloaded zip there before loading and fails, DB untouched, if it
 # can't — see scripts/reload_gtfs_complete.py), and
 # local DATABASE_URL + SFMTA_DATABASE_URL (.env) for the loader/replay/
@@ -264,8 +267,9 @@ echo "== SFMTA trip_update_state retention (WMATA's own is handled by run_daily_
 # missing retention into standing, unbounded growth (the retention hookup
 # added here, PR #229).
 #
-# Gated on the SFMTA derive above having actually run AND succeeded this
-# invocation (skip_sfmta==0 and batch_rc_sfmta==0) — the same guard every
+# Gated on the SFMTA derive above having actually run (skip_sfmta==0) AND
+# finished with batch_rc_sfmta 0, or 3 (only guard-held-back dates — see
+# the exception below); any other rc skips cleanup — the same guard every
 # other SFMTA-downstream step in this script uses. This is not optional
 # caution: cleanup_trip_update_state.py treats un-derived rows past the
 # retention window as noise and deletes them with no archive

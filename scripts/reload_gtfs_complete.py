@@ -83,6 +83,7 @@ import io
 import os
 import re
 import sys
+import urllib.parse
 import zipfile
 from datetime import datetime
 
@@ -209,7 +210,16 @@ def _download_gtfs_zip(cfg: AgencyConfig) -> bytes:
         # which the wrapper then writes into logs/gtfs_reload_*.log via the
         # traceback. Re-raise with the key redacted and the original
         # exception suppressed (`from None`) so it never reaches a log.
-        message = str(exc).replace(api_key, "<redacted>")
+        # Redact the raw key AND its percent-encoded forms: requests encodes
+        # query params, so a key containing `+ / = &` appears in the URL as
+        # quote()/quote_plus() output, not verbatim.
+        message = str(exc)
+        for form in {
+            api_key,
+            urllib.parse.quote(api_key, safe=""),
+            urllib.parse.quote_plus(api_key),
+        }:
+            message = message.replace(form, "<redacted>")
         raise RuntimeError(
             f"GTFS download failed for {cfg.name}: {type(exc).__name__}: {message}"
         ) from None

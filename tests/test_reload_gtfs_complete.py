@@ -515,3 +515,21 @@ def test_download_error_never_leaks_the_query_param_api_key(monkeypatch):
     with pytest.raises(RuntimeError) as excinfo:
         _download_gtfs_zip(cfg)
     assert "SUPERSECRET123" not in str(excinfo.value)
+
+    # A key with URL-special characters reaches the error message percent-encoded
+    # (requests encodes query params), not verbatim — both encodings are redacted.
+    from urllib.parse import quote, quote_plus
+
+    special_key = "ab+c/d=e&f g"
+    monkeypatch.setenv("SFMTA_API_KEY", special_key)
+    for encoded in (quote(special_key, safe=""), quote_plus(special_key)):
+
+        def _encoded_error(*args, _encoded=encoded, **kwargs):
+            """Raise with the percent-encoded key embedded in the URL."""
+            raise requests.HTTPError(f"401 for url: https://x/y?api_key={_encoded}&operator_id=SF")
+
+        monkeypatch.setattr("scripts.reload_gtfs_complete.requests.get", _encoded_error)
+        with pytest.raises(RuntimeError) as excinfo:
+            _download_gtfs_zip(cfg)
+        assert encoded not in str(excinfo.value)
+        assert "<redacted>" in str(excinfo.value)

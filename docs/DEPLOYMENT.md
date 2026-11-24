@@ -915,8 +915,11 @@ before it derives:
    reload first archives the exact downloaded zip to
    `s3://wmata-dashboard-backups/gtfs-archive/<agency>/<UTC ts>_<feed_version>_<sha12>.zip`
    (an upload failure fails the reload with the DB untouched; the reload's
-   AWS credentials therefore need `s3:ListBucket`, `s3:GetObject` and
-   `s3:PutObject` on that prefix), reusing an existing object with the same
+   AWS credentials therefore need `s3:GetObject` and `s3:PutObject` on
+   `arn:aws:s3:::wmata-dashboard-backups/gtfs-archive/*` and `s3:ListBucket`
+   on `arn:aws:s3:::wmata-dashboard-backups` with an `s3:prefix` condition
+   of `gtfs-archive/*` — ListBucket is a bucket-level action, so granting
+   it on an object ARN grants nothing), reusing an existing object with the same
    content hash instead of uploading a second copy, and skips creating a
    snapshot at all when the feed's content hash matches the current
    snapshot's and that snapshot is archived (`content_sha256=` and
