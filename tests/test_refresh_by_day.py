@@ -354,19 +354,148 @@ def test_default_dates_requires_some_runs(db_session):
 @pytest.mark.parametrize(
     ("tz", "margin_h", "now_utc", "expected"),
     [
-        # WMATA (EST, UTC-5) 4 h margin: 11/23 completes at 11/24 04:00 ET = 09:00 UTC
-        ("America/New_York", 4, datetime(2026, 11, 24, 8, 59), date(2026, 11, 22)),
-        ("America/New_York", 4, datetime(2026, 11, 24, 9, 0), date(2026, 11, 23)),
-        # SFMTA (PST, UTC-8) 8 h margin: 11/23 completes at 11/24 08:00 PT = 16:00 UTC
-        ("America/Los_Angeles", 8, datetime(2026, 11, 24, 15, 59), date(2026, 11, 22)),
-        ("America/Los_Angeles", 8, datetime(2026, 11, 24, 16, 0), date(2026, 11, 23)),
+        # WMATA (EST, UTC-5) 5 h margin: 11/23 completes at 11/24 05:00 ET = 10:00 UTC
+        ("America/New_York", 5, datetime(2026, 11, 24, 9, 59), date(2026, 11, 22)),
+        ("America/New_York", 5, datetime(2026, 11, 24, 10, 0), date(2026, 11, 23)),
+        # SFMTA (PST, UTC-8) 9 h margin: 11/23 completes at 11/24 09:00 PT = 17:00 UTC
+        ("America/Los_Angeles", 9, datetime(2026, 11, 24, 16, 59), date(2026, 11, 22)),
+        ("America/Los_Angeles", 9, datetime(2026, 11, 24, 17, 0), date(2026, 11, 23)),
         # 01:00 ET run: yesterday (11/23) is not complete
-        ("America/New_York", 4, datetime(2026, 11, 24, 6, 0), date(2026, 11, 22)),
+        ("America/New_York", 5, datetime(2026, 11, 24, 6, 0), date(2026, 11, 22)),
     ],
 )
 def test_last_complete_date(tz, margin_h, now_utc, expected):
     """A date is complete only after local midnight following it + the agency margin."""
     assert last_complete_date(tz, timedelta(hours=margin_h), now_utc) == expected
+
+
+@pytest.mark.smoke
+def test_window_margins_cover_last_trip_plus_upload_lag():
+    """WMATA 26:58 / SFMTA 30:53 last arrivals + ~16 min upload lag leave >= 1.5 h slack."""
+    from pipelines.refresh_by_day import WINDOW_MARGIN
+
+    upload = timedelta(minutes=16)
+    assert WINDOW_MARGIN["wmata"] - timedelta(hours=2, minutes=58) - upload >= timedelta(hours=1.5)
+    assert WINDOW_MARGIN["sfmta"] - timedelta(hours=6, minutes=53) - upload >= timedelta(hours=1.5)
+
+
+@pytest.mark.smoke
+def test_failed_after_aggregate_retry_refolds_after_state_was_cleaned(tmp_path):
+    """Review finding A: F fails in the TU derive (runs already written by aggregate_runs).
+
+    A later run derives another date, whose per-date cleanup deletes F's
+    state. The retry of F must replay with --force (re-fold from raw files)
+    and then derive fully — not derive from empty state.
+    """
+    steps1 = FakeSteps(derive_rc={("wmata", D1): 1})
+    run1 = _run(tmp_path, "wmata", [D1])
+    run_refresh([run1], steps1, force=False, housekeeping=False)
+    assert run1.progress.status(D1) == FAILED
+
+    steps2 = FakeSteps()  # a separate, explicit run of a later date
+    run_refresh(
+        [_run(tmp_path, "wmata", [D3], with_runs={D1})], steps2, force=False, housekeeping=False
+    )
+    assert steps2.steps_for("wmata", "clean_state") == [D3]  # cutoff D3 > D1: F's state gone
+    assert steps2.excludes[("wmata", D3)] == [D1]
+
+    steps3 = FakeSteps()
+    run3 = _run(tmp_path, "wmata", [D1], with_runs={D1, D3})
+    assert run_refresh([run3], steps3, force=False, housekeeping=False) == EXIT_OK
+    assert ("replay", "wmata", D1, True) in steps3.calls
+    assert steps3.steps_for("wmata", "derive") == [D1]
+    assert run3.progress.status(D1) == DONE
+
+
+@pytest.mark.smoke
+def test_plain_new_date_replays_without_force(tmp_path):
+    """Only previously failed/held/abandoned dates force the replay."""
+    steps = FakeSteps()
+    run_refresh([_run(tmp_path, "wmata", [D1])], steps, force=False, housekeeping=False)
+    assert ("replay", "wmata", D1, False) in steps.calls
+
+
+@pytest.mark.smoke
+def test_abandon_date_escape(tmp_path, db_session, monkeypatch):
+    """--abandon-date: recorded, skipped by default selection, excluded downstream, summarized."""
+    import pipelines.refresh_by_day as mod
+
+    monkeypatch.setattr(mod.run_lock, "LOCK_DIR", tmp_path / "lock.d")
+    monkeypatch.delenv(mod.run_lock.LOCK_ENV, raising=False)
+
+    # F failed every time: default selection keeps returning to it.
+    progress = Progress(tmp_path / "refresh_progress_wmata.json")
+    progress.record(D1, FAILED, "derive rc=1")
+    today = date(2026, 10, 20)
+    _add_runs(db_session, [today - timedelta(days=n) for n in range(2, 15)])
+    sel = default_dates(db_session, 14, today, progress=progress)
+    assert D1 in sel.dates
+
+    rc = mod.main(
+        [
+            "--agency",
+            "wmata",
+            "--abandon-date",
+            D1.isoformat(),
+            "--progress-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == EXIT_OK
+    progress = Progress(tmp_path / "refresh_progress_wmata.json")
+    assert progress.status(D1) == mod.ABANDONED
+    assert not (tmp_path / "lock.d").exists()  # lock taken and released
+    assert D1 not in default_dates(db_session, 14, today, progress=progress).dates
+
+    # excluded from neighbours' aggregation; listed in the summary
+    steps = FakeSteps()
+    run = _run(tmp_path, "wmata", [D2])
+    run_refresh([run], steps, force=False, housekeeping=False)
+    assert steps.excludes[("wmata", D2)] == [D1]
+
+
+@pytest.mark.smoke
+def test_abandoned_zero_runs_date_is_not_a_hole(db_session, tmp_path):
+    """An abandoned date with no runs inside the lookback is not re-selected as a hole."""
+    import pipelines.refresh_by_day as mod
+
+    today = date(2026, 10, 20)
+    hole = today - timedelta(days=5)
+    _add_runs(db_session, [today - timedelta(days=n) for n in range(2, 15) if n != 5])
+    progress = Progress(tmp_path / "p.json")
+    assert hole in default_dates(db_session, 14, today, progress=progress).dates
+    progress.record(hole, mod.ABANDONED)
+    assert hole not in default_dates(db_session, 14, today, progress=progress).dates
+
+
+@pytest.mark.smoke
+def test_deferred_dates_are_recorded_and_always_returned_to(db_session, tmp_path):
+    """A recorded 'deferred' date is selected later even after newer dates were derived."""
+    import pipelines.refresh_by_day as mod
+
+    today = date(2026, 11, 20)
+    deferred = date(2026, 10, 1)  # long outside the 14-day hole lookback
+    _add_runs(db_session, [today - timedelta(days=n) for n in range(1, 15)])
+    progress = Progress(tmp_path / "p.json")
+    run = _run(tmp_path, "wmata", [])
+    run.progress = progress
+    run.to_defer = [deferred]
+    mod.record_deferrals([run])
+    assert progress.status(deferred) == mod.DEFERRED
+    assert deferred in default_dates(db_session, 14, today, progress=progress).dates
+
+
+@pytest.mark.smoke
+def test_check_args_rejects_typos_and_bad_combinations(tmp_path):
+    """--check-args validates without touching anything; argparse typos exit 2."""
+    import pipelines.refresh_by_day as mod
+
+    assert mod.main(["--check-args", "--agency", "wmata", "--date", "2026-10-01"]) == EXIT_OK
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["--check-args", "--dryrun"])
+    assert exc.value.code == 2
+    assert mod.main(["--check-args", "--start", "2026-10-01"]) == mod.EXIT_USAGE
+    assert mod.main(["--check-args", "--abandon-date", "2026-10-01"]) == mod.EXIT_USAGE
 
 
 @pytest.mark.smoke

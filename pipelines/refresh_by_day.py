@@ -21,24 +21,37 @@ Date selection (default, per agency):
 - every date after the latest ``runs.service_date`` through the latest
   date whose raw window is COMPLETE (below),
 - zero-``runs`` dates in the last ``--lookback-days`` (default 14),
-- every date the progress file has as ``failed`` or ``derived``
-  (whatever its age — a date can fail after ``aggregate_runs`` wrote
-  runs, which would otherwise hide it from the two rules above), and
+- every date the progress file has as ``failed``, ``derived`` or
+  ``deferred`` (whatever its age — a date can fail after ``aggregate_runs``
+  wrote runs, which would otherwise hide it from the two rules above), and
   ``held`` dates inside the lookback window. Older held dates are listed
   in the plan as "not retried" each run — rerun them with ``--date D``
   after reloading GTFS.
+- never an ``abandoned`` date (``--abandon-date D --agency X``): the escape
+  for a date that fails every time and would otherwise block the agency's
+  default runs forever. It is excluded from aggregation like held/failed
+  dates and listed in every summary; ``--date D`` still processes it.
 
 ``--start``/``--end`` (inclusive) or ``--date`` (repeatable) select exactly
 those dates instead.
 
 Complete raw window: a date D is eligible by default only once now is past
-agency-local midnight after D plus ``WINDOW_MARGIN`` — the last scheduled
-arrival of a trip on service day D (current GTFS, measured 2026-11-24:
-WMATA 26:58, SFMTA 30:53 — Muni owl service runs to ~07:00 PT) plus ~1 h
-for lateness, the 15-minute archive rotation and S3 upload. Deriving
-earlier writes runs for a partial day that is then never revisited.
-Deferred dates are printed. An explicit date inside that margin is
-processed with a loud warning.
+agency-local midnight after D plus ``WINDOW_MARGIN`` (WMATA 5 h, SFMTA
+9 h) — the last scheduled arrival of a trip on service day D (current
+GTFS, measured 2026-11-24: WMATA 26:58, SFMTA 30:53 — Muni owl service runs
+to ~07:00 PT) plus ~2 h. S3 object timestamps show rows land in S3 at most
+~16 min after their file opens (15-min rotation + upload), so ~1 h 45 min
+is left for late-running trips. Deriving earlier writes runs for a partial
+day that is then never revisited. Deferred dates are printed and recorded
+as ``deferred`` so default selection always returns to them. An explicit
+date inside that margin is processed with a loud warning.
+
+Retry re-folds: a date previously ``failed``/``held``/``abandoned`` is
+replayed with ``--force``. ``aggregate_runs`` depends only on the
+proximity derive, so a date that failed in the trip-update derive already
+has runs; if a later run's cleanup then deleted its state, a plain replay
+(manifest + runs present) would not re-fold and the retry would derive
+from empty state.
 
 "Done" means BOTH the progress file says ``done`` AND ``runs`` has rows for
 the date; the DB wins over the file (a done date with zero runs is
@@ -65,13 +78,16 @@ WMATA housekeeping once (skipped if a WMATA date failed this run, or with
 SFMTA date failed). A date whose state was deleted before it was derived
 self-heals: replay re-folds a date with neither state nor runs.
 
-A non-dry-run holds ``logs/.pull-and-derive.lock.d`` (``src/run_lock.py``).
+A non-dry-run holds ``<main checkout>/logs/.pull-and-derive.lock.d``
+(``src/run_lock.py``, shared by every worktree); progress files also live
+in the main checkout's ``logs/``.
 
 Usage:
     uv run python -m pipelines.refresh_by_day                       # catch up
     uv run python -m pipelines.refresh_by_day --agency wmata --date 2026-09-29
     uv run python -m pipelines.refresh_by_day --start 2026-09-29 --end 2026-11-23
     uv run python -m pipelines.refresh_by_day --dry-run             # plan only, writes nothing
+    uv run python -m pipelines.refresh_by_day --agency wmata --abandon-date 2026-10-07
 """
 
 from __future__ import annotations
@@ -115,8 +131,10 @@ DATA_FLOOR = date(2026, 6, 14)
 DEFAULT_MIN_FREE_GB = 15.0
 # Time after agency-local midnight following D before D's raw window is
 # complete: last scheduled arrival (WMATA 26:58 ET, SFMTA 30:53 PT, current
-# GTFS 2026-11-24) + ~1 h lateness/rotation/upload lag, rounded up.
-WINDOW_MARGIN = {"wmata": timedelta(hours=4), "sfmta": timedelta(hours=8)}
+# GTFS 2026-11-24) + ~2 h. Measured from S3 LastModified vs file-open epoch
+# (2026-11-20): rows reach S3 at most ~16 min after their file opens
+# (15-min rotation + upload), leaving ~1 h 45 min for late-running trips.
+WINDOW_MARGIN = {"wmata": timedelta(hours=5), "sfmta": timedelta(hours=9)}
 # bin/pull-and-derive.sh's historical local-dir overrides, per (agency, kind).
 DIR_ENV = {
     ("wmata", "tu"): "LOCAL_ARCHIVE",
@@ -129,6 +147,12 @@ DERIVED = "derived"
 DONE = "done"
 HELD = "held"
 FAILED = "failed"
+# Operator gave up on the date (--abandon-date): never re-selected by default,
+# excluded from aggregation like held/failed, always listed in the summary.
+ABANDONED = "abandoned"
+# Not yet complete when a default run planned it; default selection always
+# returns to it, even after later dates were derived explicitly.
+DEFERRED = "deferred"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -219,6 +243,7 @@ class AgencyRun:
     dates_with_runs: set[date] = field(default_factory=set)
     outcomes: dict[date, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    to_defer: list[date] = field(default_factory=list)
     stopped: bool = False
 
     @property
@@ -238,7 +263,7 @@ class AgencyRun:
 
     def excluded_for(self, d: date) -> list[date]:
         """Held/failed dates (other than ``d``) a neighbour's derive must not aggregate."""
-        return [x for x in self.progress.dates_with(HELD, FAILED) if x != d]
+        return [x for x in self.progress.dates_with(HELD, FAILED, ABANDONED) if x != d]
 
 
 class RealSteps:
@@ -405,6 +430,15 @@ def process_date(run: AgencyRun, d: date, steps, force: bool) -> str:
             return DONE
         log(f"== {label}: progress says derived but runs has no rows — processing in full")
 
+    # A date that failed (or was held/abandoned) earlier may already have runs
+    # (aggregate_runs depends only on the proximity derive) while its
+    # trip_update_state was deleted by a later run's cleanup. Plain replay
+    # would see manifest + runs and not re-fold, deriving from empty state —
+    # so re-fold it from the raw files (fetched for this date anyway).
+    refold = run.progress.status(d) in (FAILED, HELD, ABANDONED)
+    if refold and not force:
+        log(f"== {label}: previously {run.progress.status(d)} — replay will re-fold (--force)")
+
     log(f"== {label}: fetch")
     try:
         steps.fetch(run, d)
@@ -415,7 +449,7 @@ def process_date(run: AgencyRun, d: date, steps, force: bool) -> str:
 
     for step_name, call in (
         ("load_vp", lambda: steps.load_vp(run, d)),
-        ("replay", lambda: steps.replay(run, d, force)),
+        ("replay", lambda: steps.replay(run, d, force or refold)),
     ):
         log(f"== {label}: {step_name}")
         rc = call()
@@ -521,6 +555,9 @@ def run_refresh(runs: list[AgencyRun], steps, force: bool, housekeeping: bool) -
         for s in (HELD, FAILED):
             if s in counts:
                 log(f"    {s}: {' '.join(counts[s])}")
+        abandoned = run.progress.dates_with(ABANDONED)
+        if abandoned:
+            log(f"    abandoned (never derived, never retried): {' '.join(map(str, abandoned))}")
         for w in run.warnings:
             log(f"    WARNING {w}")
         if not_attempted:
@@ -596,13 +633,14 @@ def default_dates(
         .distinct()
     }
     d = hole_start
+    abandoned = set(progress.dates_with(ABANDONED)) if progress is not None else set()
     while d <= min(cap, latest_date):
-        if d.isoformat() not in have_runs:
+        if d.isoformat() not in have_runs and d not in abandoned:
             dates.add(d)
         d += timedelta(days=1)
     stale_held: list[date] = []
     if progress is not None:
-        for x in progress.dates_with(FAILED, DERIVED):
+        for x in progress.dates_with(FAILED, DERIVED, DEFERRED):
             if DATA_FLOOR <= x <= cap:
                 dates.add(x)
         for x in progress.dates_with(HELD):
@@ -663,9 +701,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip WMATA's end-of-run housekeeping (~1.5 h); for one-day trials",
     )
     p.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
-    p.add_argument("--progress-dir", type=Path, default=REPO_ROOT / "logs")
+    p.add_argument(
+        "--progress-dir", type=Path, default=run_lock.main_checkout_root(REPO_ROOT) / "logs"
+    )
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit; writes nothing")
+    p.add_argument(
+        "--abandon-date",
+        action="append",
+        type=date.fromisoformat,
+        help=(
+            "record this date (repeatable; needs --agency wmata|sfmta) as abandoned and exit: "
+            "never re-selected by default, never aggregated as a side effect, always listed "
+            "in the summary. `--date D` still processes it explicitly."
+        ),
+    )
+    p.add_argument(
+        "--check-args",
+        action="store_true",
+        help="validate the arguments and exit (bin/pull-and-derive.sh runs this first)",
+    )
     return p
+
+
+def validate_args(args) -> tuple[list[date] | None, str | None]:
+    """Return ``(explicit_dates, error)``; ``error`` is a message for a usage problem."""
+    try:
+        explicit = explicit_dates(args)
+    except ValueError as exc:
+        return None, str(exc)
+    if args.abandon_date:
+        if args.agency == "both":
+            return None, "--abandon-date needs --agency wmata or --agency sfmta"
+        if explicit is not None or args.dry_run or args.force:
+            return (
+                None,
+                "--abandon-date cannot be combined with --date/--start/--end/--dry-run/--force",
+            )
+    return explicit, None
+
+
+def abandon(args, progress_dir: Path) -> int:
+    """Record ``args.abandon_date`` dates as abandoned for ``args.agency`` (under the lock)."""
+    progress = Progress(progress_dir / f"refresh_progress_{args.agency}.json")
+    for d in sorted(set(args.abandon_date)):
+        prior = progress.status(d)
+        progress.record(d, ABANDONED, f"abandoned by operator (was {prior})")
+        log(
+            f"{args.agency} {d}: marked abandoned (was {prior}) — default runs skip it and "
+            "never aggregate it; `--date D` processes it explicitly"
+        )
+    return EXIT_OK
 
 
 def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[AgencyRun] | int:
@@ -675,6 +760,7 @@ def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[Agen
     agencies = AGENCIES if args.agency == "both" else (args.agency,)
     runs: list[AgencyRun] = []
     for name in agencies:
+        to_defer: list[date] = []
         cfg = load_agency_config(name)
         today = local_today(cfg.timezone)
         complete = last_complete_date(cfg.timezone, WINDOW_MARGIN[name], now_utc)
@@ -686,6 +772,8 @@ def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[Agen
             if explicit is not None:
                 dates = explicit
                 for d in dates:
+                    if progress.status(d) == ABANDONED:
+                        log(f"plan {name}: {d} is abandoned; processing it because it was named")
                     if complete < d < today:
                         log(
                             f"WARNING ({name}): {d}'s raw window is not complete yet (needs "
@@ -700,6 +788,7 @@ def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[Agen
                     print(f"ERROR ({name}): {exc}", file=sys.stderr)
                     return EXIT_USAGE
                 dates = sel.dates
+                to_defer = [d for d in sel.deferred if progress.status(d) is None]
                 for d in sel.deferred:
                     log(
                         f"plan {name}: deferring {d} — raw window completes at local midnight "
@@ -729,19 +818,37 @@ def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[Agen
             tu_dir=os.environ.get(DIR_ENV[(name, "tu")]) or None,
             vp_dir=os.environ.get(DIR_ENV[(name, "vp")]) or None,
         )
-        runs.append(AgencyRun(name, cfg.timezone, tu, vp, progress, dates, with_runs))
+        run = AgencyRun(name, cfg.timezone, tu, vp, progress, dates, with_runs)
+        run.to_defer = to_defer
+        runs.append(run)
     return runs
+
+
+def record_deferrals(runs: list[AgencyRun]) -> None:
+    """Persist deferred dates (under the lock) so default selection always returns to them.
+
+    Without this, a deferred date would become a permanent hole if a later
+    date were derived explicitly first and it then fell outside the
+    zero-runs lookback.
+    """
+    for run in runs:
+        for d in run.to_defer:
+            run.progress.record(d, DEFERRED, "raw window not complete when planned")
 
 
 def main(argv=None) -> int:
     """CLI entry point."""
     args = build_parser().parse_args(argv)
-    load_dotenv()
-    try:
-        explicit = explicit_dates(args)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    explicit, error = validate_args(args)
+    if error:
+        print(f"ERROR: {error}", file=sys.stderr)
         return EXIT_USAGE
+    if args.check_args:
+        return EXIT_OK
+    load_dotenv()
+
+    if args.abandon_date:
+        return with_lock(argv, lambda: abandon(args, args.progress_dir))
 
     planned = plan_runs(args, explicit, utcnow_naive())
     if isinstance(planned, int):
@@ -763,21 +870,32 @@ def main(argv=None) -> int:
                 )
         return EXIT_OK
 
-    own_lock = not run_lock.held_by_parent()
+    def _go() -> int:
+        """Record deferrals, then run the refresh (called with the lock held)."""
+        record_deferrals(runs)
+        steps = RealSteps(min_free_gb=args.min_free_gb)
+        return run_refresh(runs, steps, force=args.force, housekeeping=not args.skip_housekeeping)
+
+    return with_lock(argv, _go)
+
+
+def with_lock(argv, fn) -> int:
+    """Run ``fn`` holding the refresh lock (unless the parent shell already holds it)."""
+    lock_dir = run_lock.LOCK_DIR  # read at call time so tests can point it elsewhere
+    own_lock = not run_lock.held_by_parent(lock_dir)
     if own_lock:
         try:
             run_lock.acquire(
-                os.getpid(), "pipelines.refresh_by_day " + " ".join(argv or sys.argv[1:])
+                os.getpid(), "pipelines.refresh_by_day " + " ".join(argv or sys.argv[1:]), lock_dir
             )
         except run_lock.LockHeldError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return run_lock.EXIT_LOCKED
     try:
-        steps = RealSteps(min_free_gb=args.min_free_gb)
-        return run_refresh(runs, steps, force=args.force, housekeeping=not args.skip_housekeeping)
+        return fn()
     finally:
         if own_lock:
-            run_lock.release(os.getpid())
+            run_lock.release(os.getpid(), lock_dir)
 
 
 if __name__ == "__main__":

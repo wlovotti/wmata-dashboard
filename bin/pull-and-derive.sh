@@ -11,6 +11,10 @@
 #   bin/pull-and-derive.sh --date 2026-10-03 --agency sfmta --force   # re-derive a done date
 #   bin/pull-and-derive.sh --dry-run                       # plan only: no reload, no lock, no writes
 #   bin/pull-and-derive.sh 35                              # legacy: = --lookback-days 35
+#   bin/pull-and-derive.sh --agency wmata --abandon-date 2026-10-07  # give up on a date that always fails
+#
+# Arguments are validated first (refresh_by_day --check-args); a bad one
+# exits 2 before the lock, the GTFS reload, or anything else runs.
 #
 # Every argument is passed to pipelines/refresh_by_day.py — its module
 # docstring is the full contract (date selection incl. the raw-window
@@ -75,16 +79,33 @@ if [ "$#" -eq 1 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
 fi
 
 dry_run=0
+abandon=0
 agency="both"
 prev=""
 for a in ${args[@]+"${args[@]}"}; do
   case "$a" in
     --dry-run) dry_run=1 ;;
+    --abandon-date|--abandon-date=*) abandon=1 ;;
     --agency=*) agency="${a#--agency=}" ;;
   esac
   if [ "$prev" = "--agency" ]; then agency="$a"; fi
   prev="$a"
 done
+
+# Validate before anything writes: a typo must not reload GTFS into the DB
+# (or take the lock) and only then fail.
+check_rc=0
+uv run python -m pipelines.refresh_by_day --check-args ${args[@]+"${args[@]}"} || check_rc=$?
+if [ "$check_rc" -ne 0 ]; then
+  echo "pull-and-derive: invalid arguments (rc=$check_rc) — nothing was run." >&2
+  exit "$check_rc"
+fi
+
+if [ "$abandon" -eq 1 ]; then
+  # Bookkeeping only (progress file, under the lock the driver takes itself).
+  PYTHONUNBUFFERED=1 uv run python -m pipelines.refresh_by_day ${args[@]+"${args[@]}"}
+  exit $?
+fi
 
 if [ "$dry_run" -eq 1 ]; then
   echo "== dry run: no GTFS reload, no lock, nothing written =="

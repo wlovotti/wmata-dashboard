@@ -854,12 +854,17 @@ launchd's catch-up-on-wake behavior means a missed 06:30 fire can run
 hours later, which could otherwise land in the middle of a manual
 `bin/pull-and-derive.sh` run or overlap a second catch-up fire. Since
 issue #261 **`bin/pull-and-derive.sh` itself** takes the lock — the
-directory `logs/.pull-and-derive.lock.d` with a `holder.json` naming
-pid/host/start/command (`src/run_lock.py`; a dead holder's lock is taken
-over) — for every non-dry run, manual or nightly, and exits 75 naming the
-holder when another run has it. The nightly wrapper no longer locks
-itself and treats 75 as "skip, exit 0". `pipelines/refresh_by_day.py`
-run directly takes the same lock.
+directory `logs/.pull-and-derive.lock.d` **in the main checkout** (a
+`git worktree` resolves to it through its `.git` file, so all worktrees of
+this clone exclude each other; a separate clone does not — don't refresh
+from two clones), with a `holder.json` naming pid/host/start/command
+(`src/run_lock.py`) — for every non-dry run, manual or nightly, and exits
+75 naming the holder when another run has it. A dead holder's lock, or a
+holder-less lock dir older than 60 s, is taken over atomically (a
+`takeover` sub-dir first, then rename-aside), so two starters can't both
+take it. The nightly wrapper no longer locks itself and treats 75 as
+"skip, exit 0". `pipelines/refresh_by_day.py` run directly takes the same
+lock.
 
 **Install:**
 
@@ -1126,13 +1131,17 @@ the retry), and WMATA's with `--skip-housekeeping`.
 **Which dates.** Default, per agency: the day after `max(runs.service_date)`
 through the latest date whose **raw window is complete**, plus zero-`runs`
 dates in the last `--lookback-days` (default 14), plus every `failed` /
-`derived` date in the progress file (any age — a date can fail after
-`aggregate_runs` wrote runs) and `held` dates inside the lookback (older
-held dates are listed as "not retried"; rerun them with `--date D` after
-a GTFS reload). Complete = now ≥ agency-local midnight after D + 4 h
-(WMATA, last scheduled arrival 26:58 ET) / 8 h (SFMTA, owl service to
-30:53 PT), covering lateness, the 15-min archive rotation and upload lag;
-later dates are printed as deferred. `--start A --end B` / `--date D`
+`derived` / `deferred` date in the progress file (any age — a date can
+fail after `aggregate_runs` wrote runs) and `held` dates inside the
+lookback (older held dates are listed as "not retried"; rerun them with
+`--date D` after a GTFS reload), never an `abandoned` date. Complete =
+now ≥ agency-local midnight after D + 5 h (WMATA, last scheduled arrival
+26:58 ET) / 9 h (SFMTA, owl service to 30:53 PT). S3 object timestamps
+(2026-11-20) put rows in S3 at most ~16 min after their file opens
+(15-min rotation + upload), which leaves ~1 h 45 min for late trips.
+Later dates are printed and recorded as `deferred`, so a default run
+always returns to them even if a later date was derived explicitly in
+between. `--start A --end B` / `--date D`
 select explicitly (an incomplete date then gets a loud warning). Dates
 before 2026-06-14 are refused. `--dry-run` prints the plan and writes
 nothing (no GTFS reload, no lock, no progress file).
@@ -1152,8 +1161,33 @@ carrying on would fail and re-download N more times. A `held` date
 whose guard could not run (batch exit 4) is derived, listed as a warning,
 and makes the run exit 1.
 
-**Single instance.** A non-dry run holds `logs/.pull-and-derive.lock.d`
-(§12.0). A second run exits 75 naming the holder.
+A retry of a previously `failed`/`held`/`abandoned` date replays with
+`--force`. `aggregate_runs` depends only on the proximity derive, so a
+date that failed in the trip-update derive already has runs; if a later
+run's per-date cleanup (or housekeeping) deleted its state meanwhile, a
+plain replay would see manifest + runs, not re-fold, and the retry would
+derive from empty state.
+
+**A date that fails every time.** Failed dates are re-selected first and
+a failure stops the agency, so one permanently broken date would block
+that agency's default runs forever (`--start` past it doesn't help — the
+default run still returns to it). Once you have looked at it and decided
+to give up, record it:
+
+```sh
+bin/pull-and-derive.sh --agency wmata --abandon-date 2026-10-07
+```
+
+It is then never re-selected by default, never aggregated as a side
+effect of a neighbour's derive (like held/failed dates), and listed as
+`abandoned` in every run's summary. `bin/pull-and-derive.sh --agency
+wmata --date 2026-10-07` still processes it explicitly (re-folding), and
+success marks it `done`.
+
+**Single instance.** A non-dry run holds the main checkout's
+`logs/.pull-and-derive.lock.d` (§12.0). A second run exits 75 naming the
+holder. Arguments are validated first (`refresh_by_day --check-args`): a
+typo exits 2 before the lock, the GTFS reload, or anything else runs.
 
 **Disk budget for the 2026-09-29 → yesterday backfill (56 dates).**
 

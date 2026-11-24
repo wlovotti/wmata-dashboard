@@ -3,12 +3,29 @@
 Two refreshes at once can prune raw files under the other's replay, delete
 its in-flight ``trip_update_state`` via cleanup, and clobber the progress
 JSON (PR #264 review). Every non-dry-run refresh therefore holds one lock:
-the directory ``logs/.pull-and-derive.lock.d`` (``mkdir`` is atomic on
-every filesystem and needs no ``flock(1)``, which macOS lacks — it is the
-same directory the nightly wrapper's fallback used). A ``holder.json``
-inside names the holder (pid, host, start time, command) so a refusal can
-say who has it, and a lock whose holder pid is gone on this host is
-treated as stale and taken over.
+the directory ``<main checkout>/logs/.pull-and-derive.lock.d``. ``mkdir``
+is atomic on every filesystem and needs no ``flock(1)``, which macOS lacks.
+
+**Shared by every worktree of this repo.** The lock lives under the MAIN
+checkout's ``logs/`` (resolved through a worktree's ``.git`` file), so a
+run from any ``git worktree`` of this clone excludes a run from any other
+— they all target the same ``.env`` databases. A separate *clone* of the
+repo is not excluded; don't run refreshes from two clones.
+
+A ``holder.json`` inside (written atomically: temp file + rename) names the
+holder (pid, host, start time, command) so a refusal can say who has it.
+Stale locks are taken over:
+
+- a holder pid that no longer exists on this host, or
+- a lock dir with no readable ``holder.json`` older than ``GRACE_SEC``
+  (a crash between ``mkdir`` and writing the holder); younger than that it
+  may be mid-creation and is refused.
+
+Takeover is atomic: the taker first creates ``<lock>/takeover`` (``mkdir``
+— only one starter can), re-reads the holder to confirm it is unchanged,
+renames the whole lock dir aside to a unique name, removes it, and then
+competes for a fresh ``mkdir`` like any other starter. A starter that loses
+any of those steps re-evaluates from the top.
 
 ``bin/pull-and-derive.sh`` acquires it for its whole run (GTFS reload +
 refresh) with ``python -m src.run_lock acquire --pid $$`` and exports
@@ -30,14 +47,36 @@ import os
 import shutil
 import socket
 import sys
+import time
+import uuid
 from pathlib import Path
 
 from src.timezones import utcnow_naive
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LOCK_DIR = REPO_ROOT / "logs" / ".pull-and-derive.lock.d"
 LOCK_ENV = "PULL_AND_DERIVE_LOCK_PID"
 EXIT_LOCKED = 75  # EX_TEMPFAIL
+GRACE_SEC = 60
+
+
+def main_checkout_root(repo_root: Path) -> Path:
+    """Return the main checkout for ``repo_root`` (itself unless it is a git worktree).
+
+    A worktree's ``.git`` is a file ``gitdir: <main>/.git/worktrees/<name>``.
+    """
+    git = repo_root / ".git"
+    if git.is_file():
+        text = git.read_text().strip()
+        if text.startswith("gitdir:"):
+            gitdir = Path(text.split(":", 1)[1].strip())
+            if not gitdir.is_absolute():
+                gitdir = (repo_root / gitdir).resolve()
+            if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
+                return gitdir.parent.parent.parent
+    return repo_root
+
+
+LOCK_DIR = main_checkout_root(REPO_ROOT) / "logs" / ".pull-and-derive.lock.d"
 
 
 class LockHeldError(RuntimeError):
@@ -75,38 +114,69 @@ def describe(holder: dict | None) -> str:
     )
 
 
-def acquire(pid: int, label: str, lock_dir: Path = LOCK_DIR) -> None:
-    """Take the lock for ``pid`` or raise :class:`LockHeldError` naming the holder.
+def _is_stale(lock_dir: Path, holder: dict | None) -> bool:
+    """True for a dead holder on this host, or a holder-less dir older than the grace period."""
+    if holder is None:
+        return False
+    if not holder:
+        try:
+            return time.time() - lock_dir.stat().st_mtime > GRACE_SEC
+        except FileNotFoundError:
+            return False
+    return (
+        holder.get("host") == socket.gethostname()
+        and isinstance(holder.get("pid"), int)
+        and not _pid_alive(holder["pid"])
+    )
 
-    A lock held by a dead pid on this host is stale and is taken over (one
-    retry). A lock dir without a readable holder file is NOT assumed stale
-    — it may be mid-creation by another process — and is refused.
-    """
+
+def _write_holder(lock_dir: Path, record: dict) -> None:
+    """Write ``holder.json`` atomically (temp file + rename) so readers never see half a file."""
+    tmp = lock_dir / f".holder.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(record))
+    os.replace(tmp, lock_dir / "holder.json")
+
+
+def acquire(pid: int, label: str, lock_dir: Path = LOCK_DIR, attempts: int = 5) -> None:
+    """Take the lock for ``pid`` or raise :class:`LockHeldError` naming the holder."""
     lock_dir.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(2):
+    for _ in range(attempts):
         try:
             lock_dir.mkdir()
         except FileExistsError:
-            holder = read_holder(lock_dir)
-            if (
-                holder
-                and holder.get("host") == socket.gethostname()
-                and isinstance(holder.get("pid"), int)
-                and not _pid_alive(holder["pid"])
-            ):
-                print(f"run_lock: removing stale lock held by {describe(holder)}", file=sys.stderr)
-                shutil.rmtree(lock_dir, ignore_errors=True)
-                continue
-            raise LockHeldError(f"another refresh holds {lock_dir}: {describe(holder)}") from None
-        record = {
-            "pid": pid,
-            "host": socket.gethostname(),
-            "started": utcnow_naive().isoformat(timespec="seconds"),
-            "label": label,
-        }
-        (lock_dir / "holder.json").write_text(json.dumps(record))
-        return
-    raise LockHeldError(f"could not take {lock_dir} after removing a stale lock")
+            pass
+        else:
+            _write_holder(
+                lock_dir,
+                {
+                    "pid": pid,
+                    "host": socket.gethostname(),
+                    "started": utcnow_naive().isoformat(timespec="seconds"),
+                    "label": label,
+                },
+            )
+            return
+        holder = read_holder(lock_dir)
+        if holder is None:
+            continue  # released between our mkdir and the read — try again
+        if not _is_stale(lock_dir, holder):
+            raise LockHeldError(f"another refresh holds {lock_dir}: {describe(holder)}")
+        try:
+            (lock_dir / "takeover").mkdir()
+        except (FileExistsError, FileNotFoundError):
+            time.sleep(0.05)
+            continue  # someone else is taking over, or it is already gone
+        if read_holder(lock_dir) != holder:
+            shutil.rmtree(lock_dir / "takeover", ignore_errors=True)
+            continue
+        aside = lock_dir.with_name(f"{lock_dir.name}.stale-{os.getpid()}-{uuid.uuid4().hex}")
+        try:
+            os.rename(lock_dir, aside)
+        except FileNotFoundError:
+            continue
+        print(f"run_lock: removed stale lock held by {describe(holder)}", file=sys.stderr)
+        shutil.rmtree(aside, ignore_errors=True)
+    raise LockHeldError(f"could not take {lock_dir} after {attempts} attempts")
 
 
 def release(pid: int, lock_dir: Path = LOCK_DIR) -> bool:
@@ -114,7 +184,12 @@ def release(pid: int, lock_dir: Path = LOCK_DIR) -> bool:
     holder = read_holder(lock_dir)
     if holder is None or holder.get("pid") != pid:
         return False
-    shutil.rmtree(lock_dir, ignore_errors=True)
+    aside = lock_dir.with_name(f"{lock_dir.name}.released-{uuid.uuid4().hex}")
+    try:
+        os.rename(lock_dir, aside)
+    except FileNotFoundError:
+        return False
+    shutil.rmtree(aside, ignore_errors=True)
     return True
 
 
