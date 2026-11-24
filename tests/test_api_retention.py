@@ -86,8 +86,10 @@ def seeded(db_session):
     return db_session
 
 
-def test_retention_endpoint(client, seeded):
+def test_retention_endpoint(client, seeded, monkeypatch):
     """/api/retention reports the configured windows and the contiguous detail floor."""
+    # CI has no SFMTA_DATABASE_URL; the client fixture routes every agency to the test DB.
+    monkeypatch.setenv("SFMTA_DATABASE_URL", "postgresql:///unused_by_client_fixture")
     body = client.get("/api/retention").json()
     assert body["stop_level_days"] == 100 and body["raw_days"] == 7
     assert body["detail_retained_from"] == (PRUNED + timedelta(days=1)).isoformat()
