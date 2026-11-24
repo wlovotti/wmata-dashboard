@@ -796,15 +796,20 @@ launchctl list | grep wmata
 | Job | Schedule (when loaded) | Purpose |
 |---|---|---|
 | `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired** (stateless-collector cutover) — the weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. |
-| `com.wmata-dashboard.daily-batch` | ~~daily, 03:00 local~~ | **retired** (issue #246) — was installed-but-never-loaded; `pipelines/run_daily_batch.py` is now one step inside `bin/pull-and-derive.sh`, run by the job below. |
-| `com.wmata-dashboard.retain-trip-update-state` | ~~daily, 04:30 local~~ | **retired** (issue #246) — was installed-but-never-loaded; its `trip_update_state`-pruning job is superseded now the nightly job below runs `cleanup_trip_update_state.py` (both agencies) every night instead of on an occasional manual cadence — see `scripts/launchd/README.md` for the detail. |
-| `com.wmata-dashboard.pull-and-derive` | daily, 06:30 local | **live once installed per "Install" below** — runs `bin/pull-and-derive-nightly.sh`, a thin wrapper around `bin/pull-and-derive.sh` (§0 banner), with a healthchecks.io dead-man ping on success/failure. |
+| `com.wmata-dashboard.daily-batch` | ~~daily, 03:00 local~~ | **retired** (issue #246) — was installed-but-never-loaded; `pipelines/run_daily_batch.py` is now one step inside `bin/pull-and-derive.sh`. |
+| `com.wmata-dashboard.retain-trip-update-state` | ~~daily, 04:30 local~~ | **retired** (issue #246) — was installed-but-never-loaded; its `trip_update_state`-pruning job is superseded now `bin/pull-and-derive.sh` runs `cleanup_trip_update_state.py` (both agencies) on every run — see `scripts/launchd/README.md` for the detail. |
+| `com.wmata-dashboard.pull-and-derive` | daily, 06:30 local | **not deployed; not the intended mode** (issue #260 closed as not planned, 2026-11-24 — freshness is on demand: run `bin/pull-and-derive.sh` by hand). Kept in the repo; installing it per "Install" below would run `bin/pull-and-derive-nightly.sh`, a thin wrapper around `bin/pull-and-derive.sh` (§0 banner), with a healthchecks.io dead-man ping on success/failure. |
 
-Check GTFS freshness at any time without waiting for the nightly job:
+Check GTFS freshness at any time:
 `curl -s localhost:8000/api/gtfs/freshness` (requires the API running
 locally) or `psql -d wmata_dashboard -Atc "SELECT max(created_at) FROM gtfs_snapshots;"`.
 
 ### 12.0 `com.wmata-dashboard.pull-and-derive` — install / verify / uninstall
+
+> **Status (2026-11-24): not deployed, not the intended mode.** Issue
+> #260 was closed as not planned; freshness is on demand via
+> `bin/pull-and-derive.sh`. The wrapper and plist stay in the repo and
+> the notes below remain accurate if it is ever installed.
 
 **Why a nightly job at all, and why not before now (issue #246):**
 before the replay manifest (PR #245), `bin/pull-and-derive.sh`'s replay

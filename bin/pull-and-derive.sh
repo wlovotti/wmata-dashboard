@@ -6,10 +6,10 @@
 #   bin/pull-and-derive.sh          # replay+derive lookback of 14 days
 #   bin/pull-and-derive.sh 35       # wider catch-up
 #
-# Runs nightly via the com.wmata-dashboard.pull-and-derive launchd job
-# (deployment/launchd/, wrapped by bin/pull-and-derive-nightly.sh — see
-# docs/DEPLOYMENT.md §12, issue #246) once that job is installed; also
-# safe to run manually any time for an on-demand refresh.
+# Freshness is on demand: run this by hand. A nightly launchd wrapper
+# (bin/pull-and-derive-nightly.sh + deployment/launchd/, docs/DEPLOYMENT.md
+# §12) exists but is not deployed and not the intended mode (issue #260
+# closed as not planned).
 #
 # The replay leg is manifest-idempotent (tu_archive_replayed_files, PR #245):
 # widening LOOKBACK_DAYS only costs the files not yet folded, so the

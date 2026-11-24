@@ -11,8 +11,8 @@ consolidated the scheduled-job plists under `deployment/launchd/` (mirroring
 Retired by PR #259 (issue #246): installed-but-never-loaded in production
 (`launchctl list | grep wmata` showed nothing as of 2026-08-11), and its
 job — `pipelines/run_daily_batch.py` — is now one step inside
-`bin/pull-and-derive.sh`, which the new
-`com.wmata-dashboard.pull-and-derive` job runs nightly. If a copy is still
+`bin/pull-and-derive.sh` (run on demand; the nightly
+`com.wmata-dashboard.pull-and-derive` job is not deployed — issue #260). If a copy is still
 sitting in `~/Library/LaunchAgents/` from an earlier install attempt,
 `launchctl bootout gui/$UID/com.wmata-dashboard.daily-batch` it (or
 `launchctl unload -w ~/Library/LaunchAgents/com.wmata-dashboard.daily-batch.plist`
@@ -23,8 +23,8 @@ on an older launchd) and delete the file.
 Retired by PR #259 (issue #246): also installed-but-never-loaded. Its job —
 pruning `trip_update_state` so the table stays bounded even if the nightly
 batch is paused — is superseded now that the batch itself (via
-`pipelines/cleanup_trip_update_state.py`, both agencies) runs nightly
-through `bin/pull-and-derive.sh` rather than being an occasionally-run
+`pipelines/cleanup_trip_update_state.py`, both agencies) runs on every
+`bin/pull-and-derive.sh` run rather than being an occasionally-run
 manual step: WMATA's cleanup happens inside `run_daily_batch.py`'s
 housekeeping loop, and `bin/pull-and-derive.sh` calls
 `cleanup_trip_update_state.py --agency sfmta` directly after a successful
