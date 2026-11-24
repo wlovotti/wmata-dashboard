@@ -93,6 +93,11 @@ class FakeSteps:
         self.calls.append(("cleanup", agency))
         return 0
 
+    def retention(self, agency):
+        """Record; scripted rc via ``retention_rc``."""
+        self.calls.append(("retention", agency))
+        return getattr(self, "retention_rc", 0)
+
     def steps_for(self, name, step):
         """Dates a given step ran for one agency, in order."""
         return [c[2] for c in self.calls if c[0] == step and c[1] == name]
@@ -283,6 +288,66 @@ def test_skip_housekeeping(tmp_path):
     steps = FakeSteps()
     run_refresh([_run(tmp_path, "wmata", [D1])], steps, force=False, housekeeping=False)
     assert ("housekeeping",) not in steps.calls
+
+
+@pytest.mark.smoke
+def test_retention_is_opt_in_and_runs_after_housekeeping(tmp_path):
+    """Retention runs only for named agencies, after housekeeping/cleanup."""
+    steps = FakeSteps()
+    runs = [_run(tmp_path, "wmata", [D1]), _run(tmp_path, "sfmta", [D1])]
+    assert run_refresh(runs, steps, force=False, housekeeping=True) == EXIT_OK
+    assert not [c for c in steps.calls if c[0] == "retention"]
+
+    steps = FakeSteps()
+    runs = [_run(tmp_path / "b", "wmata", [D1]), _run(tmp_path / "b", "sfmta", [D1])]
+    rc = run_refresh(
+        runs, steps, force=False, housekeeping=True, retention=frozenset({"wmata", "sfmta"})
+    )
+    assert rc == EXIT_OK
+    tail = steps.calls[-4:]
+    assert tail == [
+        ("housekeeping",),
+        ("retention", "wmata"),
+        ("cleanup", "sfmta"),
+        ("retention", "sfmta"),
+    ]
+
+
+@pytest.mark.smoke
+def test_retention_skipped_after_a_failure_and_failure_propagates(tmp_path):
+    """A failed date skips that agency's retention; a failing retention fails the run."""
+    steps = FakeSteps(derive_rc={("wmata", D1): 1})
+    run_refresh(
+        [_run(tmp_path, "wmata", [D1])],
+        steps,
+        force=False,
+        housekeeping=True,
+        retention=frozenset({"wmata"}),
+    )
+    assert ("retention", "wmata") not in steps.calls
+
+    steps = FakeSteps()
+    steps.retention_rc = 1
+    rc = run_refresh(
+        [_run(tmp_path / "b", "sfmta", [D1])],
+        steps,
+        force=False,
+        housekeeping=True,
+        retention=frozenset({"sfmta"}),
+    )
+    assert rc == EXIT_FAILED
+
+
+@pytest.mark.smoke
+def test_default_dates_never_treat_pruned_dates_as_holes(db_session):
+    """A lookback wider than the stop-level window stops at the window start."""
+    today = date(2026, 10, 20)
+    # Runs only in the last 10 days; days 11..60 back have none (pruned).
+    _add_runs(db_session, [today - timedelta(days=n) for n in range(1, 11)])
+    sel = default_dates(db_session, 60, today, stop_level_days=35)
+    assert sel.dates and min(sel.dates) == today - timedelta(days=35)
+    sel = default_dates(db_session, 60, today)  # no window: old behaviour
+    assert min(sel.dates) == today - timedelta(days=60)
 
 
 def _add_runs(db_session, dates):
@@ -590,3 +655,35 @@ def test_real_steps_command_lines(tmp_path, monkeypatch):
         "2026-10-01",
         "--vacuum",
     ]
+
+
+@pytest.mark.smoke
+def test_explicit_date_without_vp_source_is_refused(tmp_path, monkeypatch):
+    """Review S1: a VM-era date whose VP was pruned is refused (TU-only would null OTP)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import pipelines.refresh_by_day as mod
+    import src.database
+    from src.models import Base, VpArchiveLoadedFile
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'r.db'}")
+    Base.metadata.create_all(engine)
+    maker = sessionmaker(bind=engine)
+    s = maker()
+    s.add(VpArchiveLoadedFile(filename="2026-08-22.7414.1787432050.jsonl.zst", row_count=1))
+    s.commit()
+    s.close()
+    monkeypatch.setattr(src.database, "get_session", lambda db_url=None: maker())
+    now = datetime(2026, 11, 24, 12)
+
+    def plan(*extra):
+        """plan_runs for one explicit date."""
+        args = mod.build_parser().parse_args(
+            ["--agency", "wmata", "--date", "2026-07-15", "--progress-dir", str(tmp_path), *extra]
+        )
+        return mod.plan_runs(args, mod.explicit_dates(args), now)
+
+    assert plan() == mod.EXIT_USAGE
+    runs = plan("--allow-missing-vp")
+    assert [r.dates for r in runs] == [[date(2026, 7, 15)]]

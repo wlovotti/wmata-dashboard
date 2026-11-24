@@ -243,6 +243,19 @@ def release(pid: int, lock_dir: Path = LOCK_DIR) -> bool:
     return True
 
 
+def held_by_other(lock_dir: Path = LOCK_DIR) -> dict | None:
+    """The live holder record when another process holds the lock, else None.
+
+    None when unlocked, when the holder is stale (dead pid on this host),
+    or when our parent holds it. Read-only tools that scan large tables
+    use it to refuse running beside a refresh.
+    """
+    holder = read_holder(lock_dir)
+    if holder is None or _is_stale(lock_dir, holder) or held_by_parent(lock_dir):
+        return None
+    return holder
+
+
 def held_by_parent(lock_dir: Path = LOCK_DIR) -> bool:
     """True when ``PULL_AND_DERIVE_LOCK_PID`` names the current lock holder."""
     env_pid = os.environ.get(LOCK_ENV)

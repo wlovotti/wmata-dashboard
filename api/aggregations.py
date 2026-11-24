@@ -287,6 +287,120 @@ def _resolve_route_anchor_date(db: Session, route_id: str) -> date_type | None:
     return _latest_service_date_for_route(db, route_id)
 
 
+# ---------------------------------------------------------------------------
+# Stop-level retention (issue #265, src/retention.py)
+#
+# `stop_events` / `runs` are kept for a per-agency window (WMATA 100 days,
+# SFMTA 35) while the daily aggregates are kept forever. Endpoints that read
+# stop-level rows directly use these helpers to say so instead of returning
+# silent nulls/zeros for dates beyond the window: `retention_note` for pooled
+# windows (`window_truncated`), `require_detail_retained` for single-date
+# views, and per-date fallbacks to `route_metrics_daily_overlay` where an
+# aggregate exists.
+# ---------------------------------------------------------------------------
+
+_RETENTION_TTL_SEC = 60.0
+_retention_cache: dict[str, tuple[float, dict, frozenset]] = {}
+_retention_lock = Lock()
+
+
+def _retention_state(db: Session, agency: str) -> tuple[dict, frozenset]:
+    """Compute (and cache 60 s per database) the retention info dict and the pruned-date set.
+
+    A date is *pruned* when its daily aggregates show it was observed
+    (`system_metrics_daily` with OTP / EWT / bunching non-null or
+    service-delivered > 0) but it has no `runs` any more — exactly what
+    retention leaves behind. Dates retention refused to prune (partial or
+    un-re-derivable) keep their rows and are not pruned, so this is a set,
+    not a single cut-off. One `runs` index probe per observed date (a few
+    hundred), hence the cache.
+    """
+    from src.agency_config import load_agency_config
+
+    key = f"{_db_identity(db)}|{agency}"
+    with _retention_lock:
+        hit = _retention_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < _RETENTION_TTL_SEC:
+            return hit[1], hit[2]
+    policy = load_agency_config(agency).retention
+    observed = [
+        iso
+        for (iso,) in db.query(SystemMetricsDaily.service_date).filter(
+            (SystemMetricsDaily.otp_percentage.isnot(None))
+            | (SystemMetricsDaily.ewt_seconds.isnot(None))
+            | (SystemMetricsDaily.bunching_rate.isnot(None))
+            | (SystemMetricsDaily.service_delivered_ratio > 0)
+        )
+    ]
+    pruned = frozenset(
+        date_type.fromisoformat(iso)
+        for iso in observed
+        if db.query(Run.id).filter(Run.service_date == iso).first() is None
+    )
+    earliest = db.query(func.min(Run.service_date)).scalar()
+    latest = db.query(func.max(Run.service_date)).scalar()
+    if pruned:
+        floor = (max(pruned) + timedelta(days=1)).isoformat()
+    else:
+        floor = earliest
+    info = {
+        "agency": agency,
+        "stop_level_days": policy.stop_level_days,
+        "raw_days": policy.raw_days,
+        # Every observed date from here on still has its stop-level rows;
+        # older dates may too (kept islands) — see pruned_dates.
+        "detail_retained_from": floor,
+        "earliest_detail_date": earliest,
+        "latest_detail_date": latest,
+        "pruned_dates": len(pruned),
+    }
+    with _retention_lock:
+        _retention_cache[key] = (time.monotonic(), info, pruned)
+    return info, pruned
+
+
+def get_retention_info(db: Session, agency: str = "wmata") -> dict:
+    """Per-agency retention facts: configured windows, detail floor, pruned-date count."""
+    return _retention_state(db, agency)[0]
+
+
+def pruned_dates(db: Session, agency: str = "wmata") -> frozenset:
+    """Service dates whose aggregates are kept but whose stop-level rows were pruned."""
+    return _retention_state(db, agency)[1]
+
+
+def retention_note(db: Session, agency: str, window_start: date_type) -> dict:
+    """Retention block for a pooled stop-level window from ``window_start`` to today.
+
+    ``window_truncated`` is true when pruned dates fall inside the window —
+    the result then pools only the dates that still have detail (e.g. any
+    90-day SFMTA view once its 35-day tier is applied).
+    """
+    info, pruned = _retention_state(db, agency)
+    in_window = sorted(d for d in pruned if d >= window_start)
+    return {
+        **info,
+        "window_start": window_start.isoformat(),
+        "window_truncated": bool(in_window),
+        "pruned_dates_in_window": len(in_window),
+    }
+
+
+class DetailNotRetainedError(LookupError):
+    """A single-date stop-level view was asked for a date whose detail was pruned."""
+
+
+def require_detail_retained(db: Session, agency: str, service_date: date_type) -> None:
+    """Raise :class:`DetailNotRetainedError` when ``service_date``'s stop-level rows were pruned."""
+    info, pruned = _retention_state(db, agency)
+    if service_date in pruned:
+        raise DetailNotRetainedError(
+            f"Stop-level detail is not retained for {service_date.isoformat()} "
+            f"(agency {agency!r} keeps it for observed dates from "
+            f"{info['detail_retained_from']}; daily aggregates remain available)"
+        )
+
+
 def sanitize_float(value):
     """
     Convert float value to None if it's NaN or Infinity
@@ -2079,9 +2193,19 @@ def get_route_trend_data(
     day_type_filter: str = ALL_DAY_TYPES,
     period_key: str = ALL_HOURS,
     otp_window: str = "official",
+    agency: str = "wmata",
 ) -> dict:
     """
     Get time-series trend data for a specific route metric.
+
+    Retention (issue #265): dates whose stop-level rows were pruned
+    (`pruned_dates`: aggregates kept, no `runs`) are not computed live. They fall back to the
+    route's `route_metrics_daily_overlay` row where one can answer the
+    question -- `otp` (official window, all hours) and `service_delivered`
+    -- marked `"source": "daily_aggregate"`; otherwise the value is null
+    with `"detail_retained": false` (`excess_trip_time`, a period filter,
+    or the rider window). The response carries a top-level `retention`
+    block (`retention_note`).
 
     Computes daily values for OTP, headway, speed, or service-delivered over the
     specified time period. Used for trend charts on the route detail page.
@@ -2134,6 +2258,48 @@ def get_route_trend_data(
     # Calculate date range in Eastern (the WMATA service date)
     end_date = eastern_today()
     start_date = end_date - timedelta(days=days)
+    pruned = {d for d in pruned_dates(db, agency) if start_date <= d <= end_date}
+    retention = retention_note(db, agency, start_date)
+    old_overlay: dict[str, RouteMetricsDailyOverlay] = {}
+    if pruned:
+        old_overlay = {
+            row.service_date: row
+            for row in db.query(RouteMetricsDailyOverlay).filter(
+                RouteMetricsDailyOverlay.route_id == route_id,
+                RouteMetricsDailyOverlay.service_date.in_([d.isoformat() for d in pruned]),
+            )
+        }
+
+    def _pruned(d: date_type) -> bool:
+        """True when ``d``'s stop-level rows were pruned (aggregates kept)."""
+        return d in pruned
+
+    def _aggregate_value(d: date_type, metric_name: str) -> float | None:
+        """Overlay-backed value for a pruned date, or None when no aggregate answers it."""
+        row = old_overlay.get(d.isoformat())
+        if row is None:
+            return None
+        if metric_name == "otp":
+            if period_key != ALL_HOURS or otp_window != "official":
+                return None
+            n = row.otp_all_early + row.otp_all_on_time + row.otp_all_late
+            return row.otp_all_on_time / n * 100.0 if n else None
+        if metric_name == "service_delivered":
+            if not row.scheduled_trips or not row.delivered_trips:
+                return None  # same no-observation rule as the live path
+            return row.delivered_trips / row.scheduled_trips
+        return None
+
+    def _pruned_row(d: date_type, key: str, metric_name: str, **extra) -> dict:
+        """Trend row for a date beyond retention (aggregate fallback or explicit null)."""
+        value = _aggregate_value(d, metric_name) if _matches_day_type(d) else None
+        return {
+            "date": d.isoformat(),
+            key: value,
+            **extra,
+            "detail_retained": False,
+            "source": "daily_aggregate" if value is not None else None,
+        }
 
     def _matches_day_type(d: date_type) -> bool:
         """True iff `d` matches the active day_type filter (or filter is `all`)."""
@@ -2154,6 +2320,19 @@ def get_route_trend_data(
         trend_data = []
         current = start_date
         while current <= end_date:
+            if _pruned(current):
+                row = old_overlay.get(current.isoformat())
+                trend_data.append(
+                    _pruned_row(
+                        current,
+                        "service_delivered_ratio",
+                        "service_delivered",
+                        scheduled_trips=row.scheduled_trips if row else 0,
+                        delivered_trips=row.delivered_trips if row else 0,
+                    )
+                )
+                current = current + timedelta(days=1)
+                continue
             # Day-type filter: skip dates that don't match (emit null so the
             # sparkline draws a gap rather than a phantom 0%).
             if not _matches_day_type(current):
@@ -2205,6 +2384,7 @@ def get_route_trend_data(
             "period_key": period_key,
             "otp_window": otp_window,
             "trend_data": trend_data,
+            "retention": retention,
         }
 
     # excess_trip_time series — computed live per-day from `runs`
@@ -2218,6 +2398,10 @@ def get_route_trend_data(
         while current <= end_date:
             d_iso = current.isoformat()
             value: float | None
+            if _pruned(current):
+                trend_data.append(_pruned_row(current, "excess_trip_time_pct", "excess_trip_time"))
+                current = current + timedelta(days=1)
+                continue
             if not _matches_day_type(current):
                 value = None
             else:
@@ -2233,6 +2417,7 @@ def get_route_trend_data(
             "period_key": period_key,
             "otp_window": otp_window,
             "trend_data": trend_data,
+            "retention": retention,
         }
 
     # OTP series — proximity stop_events are the canonical source
@@ -2253,6 +2438,10 @@ def get_route_trend_data(
     while current <= end_date:
         d_iso = current.isoformat()
         value: float | None
+        if _pruned(current):
+            trend_data.append(_pruned_row(current, "otp_percentage", "otp"))
+            current = current + timedelta(days=1)
+            continue
         if not _matches_day_type(current):
             value = None
         else:
@@ -2267,6 +2456,7 @@ def get_route_trend_data(
         "period_key": period_key,
         "otp_window": otp_window,
         "trend_data": trend_data,
+        "retention": retention,
     }
 
 

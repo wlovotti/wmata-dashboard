@@ -39,6 +39,7 @@ from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.data_completeness import agency_coverage_threshold
 from src.database import get_session
 from src.route_metrics_overlay import upsert_route_metrics_for_date
+from src.system_metrics import AggregateOverwriteRefused
 
 
 def _parse_date(value: str) -> date_type:
@@ -78,6 +79,15 @@ def main() -> int:
             "target database — see pipelines/run_daily_batch.py."
         ),
     )
+    parser.add_argument(
+        "--force-overwrite-aggregates",
+        action="store_true",
+        help=(
+            "Recompute even when the date has kept aggregates but no stop-level rows "
+            "(pruned by retention) — overwrites them with empty values. Without it that "
+            "case exits 1 and writes nothing."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = load_agency_config(args.agency)
@@ -90,8 +100,12 @@ def main() -> int:
             tz_name=cfg.timezone,
             completeness_threshold=agency_coverage_threshold(cfg),
             agency=args.agency,
+            force=args.force_overwrite_aggregates,
         )
         return 0 if result is not None else 1
+    except AggregateOverwriteRefused as exc:
+        print(f"  ✗ REFUSED: {exc}", file=sys.stderr)
+        return 1
     finally:
         db.close()
 

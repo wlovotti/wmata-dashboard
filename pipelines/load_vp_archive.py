@@ -30,11 +30,11 @@ manifested rows) before it will delete anything. A day with more rows
 than its manifest (the VM era, through 2026-08-22) is left untouched when
 there is nothing new to load, and refused when there is.
 
-No VP retention runs today ("pruned" above means a future retention PR or
-a manual delete). WARNING for that PR: ``pipelines/archive_vehicle_positions.py``
-partitions by ``DATE(timestamp)``, not ``collected_at`` — a retention cut on
-``timestamp`` splits UTC days differently from these files, which reconcile
-then sees as a partial day and reloads whole (safe, but slower).
+VP retention (``pipelines/apply_retention.py``, ``src/retention.py``)
+deletes whole UTC days of ``collected_at`` and keeps their manifest rows, so
+a pruned day reconciles as "fewer rows than manifested" and reloads whole.
+It never deletes a day holding rows the manifest cannot account for unless
+told to (``--include-unmanifested-vp``).
 """
 
 import argparse
@@ -306,8 +306,9 @@ def reconcile_utc_day(
     - equal (and not ``force``) → ``"incremental"``: everything already
       loaded is still there; load only not-yet-manifested files.
     - fewer rows than manifested (something deleted some or all of them —
-      no VP retention runs today, but a later retention PR or a manual
-      delete would), or ``force`` → ``"reload"``: rebuild the whole day.
+      ``pipelines/apply_retention.py`` deletes whole days and keeps the
+      manifest, or a manual delete), or ``force`` → ``"reload"``: rebuild
+      the whole day.
     - MORE rows than manifested: rows the manifest can't account for
       (every day through 2026-08-22 holds rows written straight to the DB
       by the old VM collector) are never deleted or loaded on top of.

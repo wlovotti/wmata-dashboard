@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import sys
 import time
 from datetime import date as date_type
 from datetime import datetime, timedelta
@@ -153,8 +154,31 @@ def materialize_for_routes(
     )
 
 
+def refused_dates(db: Session, service_dates: list[date_type]) -> list[date_type]:
+    """Dates whose kept ``route_headway_metrics`` would be zeroed by recomputing.
+
+    A date qualifies when it has rows with ``total_headways > 0`` but no
+    ``trip_update`` stop_events (the source bunching pairs come from) — retention
+    keeps the aggregates forever and prunes the rows they came from.
+    """
+    from src.retention import stop_level_sources
+
+    out = []
+    for d in service_dates:
+        observed = (
+            db.query(RouteHeadwayMetrics.id)
+            .filter(
+                RouteHeadwayMetrics.date == d.isoformat(), RouteHeadwayMetrics.total_headways > 0
+            )
+            .first()
+        )
+        if observed is not None and "trip_update" not in stop_level_sources(db, d):
+            out.append(d)
+    return out
+
+
 def main():
-    """CLI entry point — parse args, materialize bunching, print summary."""
+    """CLI entry point — parse args, materialize bunching, print summary; returns the exit code."""
     parser = argparse.ArgumentParser(
         description="Materialize bunching rates into route_headway_metrics."
     )
@@ -195,6 +219,15 @@ def main():
             "'wmata'). Selects the service-date timezone (for the "
             "--date-less default only — see module docstring) and target "
             "database — see pipelines/run_daily_batch.py."
+        ),
+    )
+    parser.add_argument(
+        "--force-overwrite-aggregates",
+        action="store_true",
+        help=(
+            "Recompute even when the date has kept aggregates but no stop-level rows "
+            "(pruned by retention) — overwrites them with empty values. Without it that "
+            "case exits 1 and writes nothing."
         ),
     )
     args = parser.parse_args()
@@ -252,6 +285,20 @@ def main():
             ]
             print(f"Processing {len(route_ids)} routes × {len(service_dates)} dates...")
 
+        if not args.force_overwrite_aggregates:
+            refused = refused_dates(db, service_dates)
+            if refused:
+                for d in refused:
+                    print(
+                        f"  ✗ REFUSED {d.isoformat()}: route_headway_metrics has observed "
+                        "headways but runs/stop_events are gone (pruned by retention?) — "
+                        "recomputing would zero them. Re-derive the date with "
+                        f"`bin/pull-and-derive.sh --date {d.isoformat()}` or pass "
+                        "--force-overwrite-aggregates.",
+                        file=sys.stderr,
+                    )
+                return 1
+
         results = materialize_for_routes(
             db,
             route_ids,
@@ -274,7 +321,8 @@ def main():
         print(f"Elapsed: {elapsed:.1f}s")
     finally:
         db.close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -84,8 +84,13 @@ def test_overlay_upsert_is_idempotent(db_session):
     db_session.add(row)
     db_session.commit()
     assert db_session.query(RouteMetricsDailyOverlay).count() == 1
-    # Second upsert: still empty source, the existing TEST1 row stays.
-    upsert_route_metrics_for_date(db_session, target)
+    # Second upsert: still empty source. The row carries observed counts
+    # and the date has no stop-level rows, so the retention guard refuses
+    # (instead of silently recomputing from nothing); the row stays.
+    from src.system_metrics import AggregateOverwriteRefused
+
+    with pytest.raises(AggregateOverwriteRefused):
+        upsert_route_metrics_for_date(db_session, target)
     assert db_session.query(RouteMetricsDailyOverlay).count() == 1
 
 

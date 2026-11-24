@@ -33,14 +33,26 @@ is the owner's exploration tool, not a hosted product (hosted deploy
   segments.
 - **Peer agencies are shallow comparison points** (SFMTA/Muni first,
   maybe more cities later): the product compares them on headline KPIs
-  computed identically, with honest comparability caveats. Today SFMTA
-  runs the same pipeline and tables as WMATA; trimming peers to
-  aggregates is part of the storage direction below.
-- **Storage direction (not yet implemented)**: raw data in S3 as the
-  source of truth, stop-level tables kept for a rolling window (peers
-  possibly not at all), daily aggregates kept forever for every agency,
-  old periods re-derived from S3 on demand.
-  Don't describe this as current behaviour.
+  computed identically, with honest comparability caveats. SFMTA runs
+  the same pipeline and tables as WMATA, on the shallow retention tier.
+- **Storage tiers (tools built, issue #265; deletes are owner-run)**:
+  raw GTFS-RT in S3 is the source of truth; `config/agencies/*.yaml`
+  `retention:` sets per agency how long the local DB keeps
+  `stop_events`/`runs` (WMATA 100 days, SFMTA 35) and raw
+  `vehicle_positions`/`trip_update_state` (7 days); daily aggregates are
+  kept forever. `pipelines/apply_retention.py` is dry-run by default;
+  nothing prunes automatically (`refresh_by_day --apply-retention` /
+  `apply_after_refresh` are opt-in, default off). Dates whose VP predates
+  the S3 JSONL VP archive (2026-08-22) can't be re-derived by
+  `refresh_by_day`, so the tool keeps their stop-level rows unless told
+  `--allow-unrederivable` (WMATA VP 5/03–8/01 also exists as S3 parquet
+  for a manual re-derive; later VM-era VP only in the DB and, probably,
+  the 8/31 final dumps). Guards, anchor, where older data lives, runbook:
+  `src/retention.py`, `docs/DEPLOYMENT.md` §12.4. Per-date rollups refuse
+  to overwrite a kept aggregate whose source rows (proximity /
+  trip_update / runs) are absent; the refresh refuses dates with no VP
+  source; API views of pruned dates say so (`retention` block, 410 on
+  single-date block views).
 
 Every open issue either serves this or is explicitly parked
 (`track:deferred`).
@@ -53,6 +65,8 @@ uv run uvicorn api.main:app --reload         # API on :8000
 cd frontend && npm run dev                   # frontend on :5173
 bin/pull-and-derive.sh                       # freshness: per date fetch raw from S3 + load VP + replay + derive + prune local raw (--start/--end, --date, --dry-run)
 uv run python scripts/prune_local_archive.py # dry run: which local raw files are S3-verified + processed (--apply deletes)
+uv run python -m pipelines.apply_retention --agency wmata   # dry run: what the retention tiers would delete (--apply deletes)
+uv run python scripts/dedup_gtfs_snapshots.py --agency wmata --metadata-only  # GTFS snapshot de-dup plan (--prove / --apply / export)
 uv run python pipelines/run_daily_batch.py   # derive + aggregate + rollup (--agency sfmta for Muni)
 psql -d wmata_dashboard                      # ad-hoc queries (Muni sidecar DB: sfmta_dashboard)
 uv run pytest -m smoke                       # fast tests

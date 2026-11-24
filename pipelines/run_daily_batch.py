@@ -254,7 +254,9 @@ def determine_target_dates(lookback_days: int = 7, agency: str = DEFAULT_AGENCY)
     Always includes yesterday (agency-local; Eastern for the default
     `wmata` agency). Additionally scans the prior `lookback_days` service
     dates and includes any that have ZERO rows in `runs` — those are
-    catch-up targets where the scheduler missed a day.
+    catch-up targets where the scheduler missed a day. The scan never
+    reaches past the agency's stop-level retention window
+    (`retention.stop_level_days`), where zero runs can mean "pruned".
 
     Service dates are returned in ascending order (oldest first) so the
     catch-up pipelines see data in chronological order, matching how a
@@ -279,6 +281,16 @@ def determine_target_dates(lookback_days: int = 7, agency: str = DEFAULT_AGENCY)
         # branch to avoid double-listing. iter_eastern_dates yields
         # ascending; that matches the existing oldest-first sort below.
         catch_up_start = today - timedelta(days=lookback_days)
+        # Never reach past the stop-level retention window: an older date
+        # with zero runs may have been pruned on purpose (aggregates kept;
+        # src/retention.py) and is re-derived only when named with --date.
+        window_start = today - timedelta(days=cfg.retention.stop_level_days)
+        if catch_up_start < window_start:
+            print(
+                f"run_daily_batch: catch-up scan starts at {window_start} (stop-level "
+                f"retention window), not {catch_up_start}"
+            )
+            catch_up_start = window_start
         catch_up_end = today - timedelta(days=2)
         for candidate in iter_eastern_dates(catch_up_start, catch_up_end):
             count = db.query(Run).filter(Run.service_date == candidate.isoformat()).count()
@@ -455,7 +467,7 @@ def run_housekeeping_pipeline(
     """Run a single non-date-scoped housekeeping pipeline.
 
     Same subprocess pattern as `run_pipeline`, minus `--all-routes`/`--date`
-    args — housekeeping pipelines like `retain_trip_update_state`
+    args — housekeeping pipelines like `cleanup_trip_update_state`
     operate on the global table, not a per-(route, date) subset.
     """
     cmd = [sys.executable, "-m", module]

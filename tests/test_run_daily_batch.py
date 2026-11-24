@@ -500,3 +500,15 @@ def test_main_explicit_dates_bypass_determine_target_dates(tmp_path, monkeypatch
     )
     assert mod.main() == 0
     assert seen == {"dates": [date(2026, 10, 3), date(2026, 10, 4)], "housekeeping": False}
+
+
+@pytest.mark.smoke
+def test_determine_target_dates_stops_at_the_retention_window(db_session, monkeypatch):
+    """A lookback wider than the stop-level window never selects (pruned) older dates."""
+    import pipelines.run_daily_batch as run_daily_batch_module
+
+    monkeypatch.setattr(run_daily_batch_module, "get_session", lambda db_url=None: db_session)
+    monkeypatch.setattr(run_daily_batch_module, "local_today", lambda tz_name: date(2026, 10, 20))
+    monkeypatch.setenv("SFMTA_DATABASE_URL", "postgresql:///sfmta_test")
+    targets = determine_target_dates(lookback_days=60, agency="sfmta")  # sfmta window: 35
+    assert min(targets) == date(2026, 10, 20) - timedelta(days=35)
