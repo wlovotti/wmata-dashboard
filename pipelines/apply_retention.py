@@ -18,7 +18,7 @@ re-checks each guard immediately before each date/day, and deletes in
 batches of ``--batch-size`` rows, committing each batch. ``--vacuum``
 then runs plain ``VACUUM (ANALYZE)`` on the touched tables (no exclusive
 lock; makes the space reusable but does not shrink files — see
-``docs/DEPLOYMENT.md`` §13 for when ``VACUUM FULL`` is worth it).
+``docs/DEPLOYMENT.md`` §12.4 for when ``VACUUM FULL`` is worth it).
 
 Usage:
     uv run python -m pipelines.apply_retention --agency wmata              # dry run
@@ -136,26 +136,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unrederivable",
         action="store_true",
         help=(
-            "also prune stop-level rows of dates whose VP window predates the S3 VP archive "
-            "(their aggregates stay, but the dates can never be re-derived)"
+            "also prune stop-level rows of dates the automated per-day path cannot rebuild "
+            "(VP window predates the S3 JSONL VP archive, 2026-08-22). Aggregates stay. WMATA "
+            "dates through ~7/30 can still be re-derived by hand from the wmata-vp-archive/ "
+            "parquet; later VM-era dates (and SFMTA's) probably only from the 8/31 final dumps "
+            "(unverified) — see docs/DEPLOYMENT.md §12.4"
         ),
     )
     p.add_argument(
         "--include-unmanifested-vp",
         action="store_true",
         help=(
-            "also prune VP UTC days holding rows no archive file accounts for (VM era; the DB "
-            "may be the only copy)"
+            "also prune VP UTC days holding rows no JSONL archive file accounts for (VM era, "
+            "through 2026-08-22). WMATA days through 8/01 also exist as parquet in S3; WMATA "
+            "8/02-8/22 and SFMTA 7/22-8/22 probably only in the DB and the 8/31 final dumps "
+            "(unverified) — copy them out first (docs/DEPLOYMENT.md §12.4)"
         ),
     )
     p.add_argument(
-        "--allow-partial-date",
+        "--release-date",
         action="append",
         type=date.fromisoformat,
         default=[],
-        help="prune this date (repeatable) even though its aggregates are stamped partial",
+        help=(
+            "prune this date (repeatable) although its aggregates are not final (partial stamp, "
+            "NULL OTP/service-delivered, missing overlay/headway rows) — such dates are "
+            "otherwise kept forever. Progress and re-derivability guards still apply."
+        ),
     )
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    p.add_argument(
+        "--allow-during-refresh",
+        action="store_true",
+        help=(
+            "run the dry run even while another process holds the refresh lock (it counts "
+            "rows per date on the big tables)"
+        ),
+    )
     p.add_argument(
         "--vacuum",
         action="store_true",
@@ -202,7 +219,7 @@ def run(args, session_factory=None) -> int:
         "progress": progress,
         "allow_unrederivable": args.allow_unrederivable,
         "include_unmanifested_vp": args.include_unmanifested_vp,
-        "allow_partial_dates": set(args.allow_partial_date),
+        "release_dates": set(args.release_date),
     }
     session = session_factory()
     try:
@@ -237,6 +254,15 @@ def main(argv=None) -> int:
         return 2
     load_dotenv()
     if not args.apply:
+        holder = run_lock.held_by_other(run_lock.LOCK_DIR)
+        if holder is not None and not args.allow_during_refresh:
+            print(
+                f"ERROR: a refresh holds the run lock ({run_lock.describe(holder)}); the dry run "
+                "scans stop_events/vehicle_positions by date. Wait for it, or pass "
+                "--allow-during-refresh.",
+                file=sys.stderr,
+            )
+            return run_lock.EXIT_LOCKED
         return run(args)
     lock_dir = run_lock.LOCK_DIR
     own_lock = not run_lock.held_by_parent(lock_dir)

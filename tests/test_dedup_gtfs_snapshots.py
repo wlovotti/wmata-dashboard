@@ -82,7 +82,18 @@ def _feed(session, sid, *, loaded, end_date="20261231", is_current=False, varian
 
 @pytest.fixture
 def seeded(pg_session):
-    """Four snapshots as described in the module docstring, plus a corridor on snapshot 1."""
+    """Four snapshots as described in the module docstring, plus a corridor on snapshot 1.
+
+    Wipes the GTFS, corridor and system_metrics_daily tables (inside the
+    rolled-back test transaction), so it refuses — unconditionally, even
+    with PYTEST_ALLOW_PROD_DB=1 — any database that is a production name or
+    does not look like a scratch test DB.
+    """
+    from tests._prod_db_guard import PRODUCTION_DB_NAMES
+
+    dbname = pg_session.execute(text("SELECT current_database()")).scalar()
+    if dbname in PRODUCTION_DB_NAMES or "test" not in dbname:
+        pytest.fail(f"refusing to wipe tables in {dbname!r}: scratch test databases only")
     for table in (
         "corridor_slip_rollup",
         "corridor_route_membership",
@@ -289,3 +300,14 @@ def test_group_refused_when_dedup_would_change_a_fallback_resolution(seeded):
     assert run(_args("--apply"), seeded, log=out.append) == 0
     assert any("REFUSED: 2026-05-02 resolves to snapshot 10" in line for line in out)
     assert _ids(seeded) == [10, 11, 12]
+
+
+def test_content_columns_match_schema_and_last_scheduled_date(seeded):
+    """Review N10/N1: CONTENT_COLUMNS covers every content column; resolution checks
+    run through the last scheduled date, not just today."""
+    from datetime import date
+
+    from scripts.dedup_gtfs_snapshots import content_columns_problem, last_scheduled_date
+
+    assert content_columns_problem(seeded) is None
+    assert last_scheduled_date(seeded) == date(2027, 1, 7)

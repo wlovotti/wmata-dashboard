@@ -158,10 +158,10 @@ def refused_dates(db: Session, service_dates: list[date_type]) -> list[date_type
     """Dates whose kept ``route_headway_metrics`` would be zeroed by recomputing.
 
     A date qualifies when it has rows with ``total_headways > 0`` but no
-    stop-level rows (``src.retention.has_stop_level_rows``) — retention
+    ``trip_update`` stop_events (the source bunching pairs come from) — retention
     keeps the aggregates forever and prunes the rows they came from.
     """
-    from src.retention import has_stop_level_rows
+    from src.retention import stop_level_sources
 
     out = []
     for d in service_dates:
@@ -172,7 +172,7 @@ def refused_dates(db: Session, service_dates: list[date_type]) -> list[date_type
             )
             .first()
         )
-        if observed is not None and not has_stop_level_rows(db, d):
+        if observed is not None and "trip_update" not in stop_level_sources(db, d):
             out.append(d)
     return out
 

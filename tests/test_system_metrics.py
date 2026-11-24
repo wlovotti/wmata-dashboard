@@ -584,6 +584,17 @@ def test_upsert_persists_swt_seconds(db_session, monkeypatch):
             service_date="2026-08-10", route_id="R", trip_id="t", stop_sequence=1, deviation_sec=0
         )
     )
+    # EWT/bunching derive from trip_update rows: the guard needs them too.
+    db_session.add(
+        _make_stop_event(
+            service_date="2026-08-10",
+            route_id="R",
+            trip_id="t",
+            stop_sequence=1,
+            deviation_sec=0,
+            source="trip_update",
+        )
+    )
     db_session.commit()
 
     # Update path: change the value, re-run, confirm overwrite.

@@ -43,12 +43,16 @@ is the owner's exploration tool, not a hosted product (hosted deploy
   kept forever. `pipelines/apply_retention.py` is dry-run by default;
   nothing prunes automatically (`refresh_by_day --apply-retention` /
   `apply_after_refresh` are opt-in, default off). Dates whose VP predates
-  the S3 VP archive (2026-08-22) cannot be re-derived, so the tool keeps
-  their stop-level rows unless told `--allow-unrederivable`. Guards,
-  anchor and runbook: `src/retention.py`, `docs/DEPLOYMENT.md` §12.4.
-  Per-date rollups refuse to overwrite kept aggregates for a date with
-  no stop-level rows; API views of pruned dates say so
-  (`retention` block, 410 on single-date block views).
+  the S3 JSONL VP archive (2026-08-22) can't be re-derived by
+  `refresh_by_day`, so the tool keeps their stop-level rows unless told
+  `--allow-unrederivable` (WMATA VP 5/03–8/01 also exists as S3 parquet
+  for a manual re-derive; later VM-era VP only in the DB and, probably,
+  the 8/31 final dumps). Guards, anchor, where older data lives, runbook:
+  `src/retention.py`, `docs/DEPLOYMENT.md` §12.4. Per-date rollups refuse
+  to overwrite a kept aggregate whose source rows (proximity /
+  trip_update / runs) are absent; the refresh refuses dates with no VP
+  source; API views of pruned dates say so (`retention` block, 410 on
+  single-date block views).
 
 Every open issue either serves this or is explicitly parked
 (`track:deferred`).

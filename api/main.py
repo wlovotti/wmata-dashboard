@@ -460,7 +460,13 @@ async def get_routes(
         # default-only targets rather than WMATA's per-route config
         # applied to the wrong routes. See `src/frequent_routes.py` /
         # `src/route_targets.py`.
-        return get_all_routes_scorecard(db, days=days, agency=agency)
+        result = get_all_routes_scorecard(db, days=days, agency=agency)
+        # Scorecard metrics come from the daily overlay (kept forever); the
+        # block flags the pieces still pooled live from runs/stop_events
+        # (excess-trip-time, dates with no overlay row) when dates in the
+        # window were pruned.
+        start = eastern_today() - timedelta(days=days)
+        return {**result, "retention": retention_note(db, agency, start)}
     finally:
         db.close()
 
@@ -601,7 +607,8 @@ async def get_route(
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
-        return result
+        start = eastern_today() - timedelta(days=days)
+        return {**result, "retention": retention_note(db, agency, start)}
     finally:
         db.close()
 
@@ -876,7 +883,19 @@ def get_agency_comparison_endpoint():
     """
     sessions = _open_agency_sessions(["wmata", "sfmta"])
     try:
-        return get_agency_comparison_data(sessions)
+        result = get_agency_comparison_data(sessions)
+        # route_distribution pools live from stop_events over the matched
+        # window; say per agency when part of it was pruned.
+        start = datetime.strptime(result["window_start"], "%Y-%m-%d").date()
+        for entry in result.get("agencies", []):
+            db = sessions.get(entry.get("agency"))
+            if db is not None:
+                try:
+                    entry["retention"] = retention_note(db, entry["agency"], start)
+                except Exception:  # an additive signal must never break the comparison
+                    logger.exception("retention note failed for agency=%r", entry["agency"])
+                    entry["retention"] = None
+        return result
     finally:
         for db in sessions.values():
             db.close()
@@ -1300,12 +1319,14 @@ async def get_retention_endpoint(
     Stop-level retention facts for one agency (issue #265).
 
     Returns the configured windows (`stop_level_days`, `raw_days` from
-    `config/agencies/<agency>.yaml`), `detail_retained_from` (earliest
-    service date that still has `runs`/`stop_events`; null when the
-    database has none) and `latest_detail_date`. Daily aggregates
+    `config/agencies/<agency>.yaml`), `detail_retained_from` (every
+    observed date from there on still has its stop-level rows; older kept
+    "islands" may too), `earliest_detail_date` / `latest_detail_date`
+    (min/max `runs` date) and `pruned_dates` (dates whose aggregates are
+    kept but whose stop-level rows are gone). Daily aggregates
     (`/api/system/trend`, the scorecard overlay) are kept forever; views
     that read stop-level rows report `retention.window_truncated` or return
-    410 for dates before `detail_retained_from`.
+    410 for a pruned date.
     """
     db = _session_for_agency(agency)
     try:

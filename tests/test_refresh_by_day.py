@@ -655,3 +655,35 @@ def test_real_steps_command_lines(tmp_path, monkeypatch):
         "2026-10-01",
         "--vacuum",
     ]
+
+
+@pytest.mark.smoke
+def test_explicit_date_without_vp_source_is_refused(tmp_path, monkeypatch):
+    """Review S1: a VM-era date whose VP was pruned is refused (TU-only would null OTP)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import pipelines.refresh_by_day as mod
+    import src.database
+    from src.models import Base, VpArchiveLoadedFile
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'r.db'}")
+    Base.metadata.create_all(engine)
+    maker = sessionmaker(bind=engine)
+    s = maker()
+    s.add(VpArchiveLoadedFile(filename="2026-08-22.7414.1787432050.jsonl.zst", row_count=1))
+    s.commit()
+    s.close()
+    monkeypatch.setattr(src.database, "get_session", lambda db_url=None: maker())
+    now = datetime(2026, 11, 24, 12)
+
+    def plan(*extra):
+        """plan_runs for one explicit date."""
+        args = mod.build_parser().parse_args(
+            ["--agency", "wmata", "--date", "2026-07-15", "--progress-dir", str(tmp_path), *extra]
+        )
+        return mod.plan_runs(args, mod.explicit_dates(args), now)
+
+    assert plan() == mod.EXIT_USAGE
+    runs = plan("--allow-missing-vp")
+    assert [r.dates for r in runs] == [[date(2026, 7, 15)]]

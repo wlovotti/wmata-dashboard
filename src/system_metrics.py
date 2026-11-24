@@ -23,45 +23,54 @@ from src.timezones import utcnow_naive
 
 
 class AggregateOverwriteRefused(RuntimeError):
-    """A per-date rollup would replace kept aggregates with values computed from nothing.
+    """A per-date rollup would replace kept aggregates with values computed from missing rows.
 
-    Raised when ``service_date`` has no stop-level rows (``runs`` +
-    ``stop_events`` — typically pruned by retention, ``src/retention.py``)
-    but already has observed aggregates. Re-deriving the date normally
-    (``refresh_by_day --date D``) reloads its raw data first, so the
-    stop-level rows exist again and this never fires; callers that really
+    Each kept aggregate derives from a specific stop-level source: OTP from
+    ``proximity`` stop_events/runs, EWT / bunching / destination OTP from
+    ``trip_update`` stop_events, service-delivered from ``runs``. Raised
+    (before anything is written) when an existing observed value's source
+    is absent for the date — e.g. retention pruned the date, or only the
+    trip-update replay recreated rows after the VM-era VP was deleted, so
+    a recompute would null the proximity-based OTP. Callers that really
     mean to overwrite pass ``force=True`` (CLI ``--force-overwrite-aggregates``).
     """
 
 
-def _system_row_has_observations(row: SystemMetricsDaily) -> bool:
-    """True when a ``system_metrics_daily`` row carries any observed-side value.
+def system_row_required_sources(row: SystemMetricsDaily | None) -> set[str]:
+    """Stop-level sources a ``system_metrics_daily`` row's observed values were computed from.
 
-    SWT is schedule-only (it is non-null even on a no-data day) and a
-    service-delivered ratio of 0 is what an unobserved day computes, so
-    neither counts; OTP, EWT, bunching or a positive service-delivered do.
+    SWT is schedule-only and a service-delivered ratio of 0 is what an
+    unobserved day computes, so neither requires anything.
     """
-    return (
-        row.otp_percentage is not None
-        or row.ewt_seconds is not None
-        or row.bunching_rate is not None
-        or (row.service_delivered_ratio or 0) > 0
-    )
+    if row is None:
+        return set()
+    required = set()
+    if row.otp_percentage is not None:
+        required.add("proximity")
+    if row.ewt_seconds is not None or row.bunching_rate is not None:
+        required.add("trip_update")
+    if (row.service_delivered_ratio or 0) > 0:
+        required.add("runs")
+    return required
 
 
-def refuse_if_detail_missing(db: Session, service_date: date_type, has_aggregates: bool) -> None:
-    """Raise :class:`AggregateOverwriteRefused` when aggregates exist but stop-level rows don't."""
-    if not has_aggregates:
+def refuse_if_detail_missing(db: Session, service_date: date_type, required: set[str]) -> None:
+    """Raise :class:`AggregateOverwriteRefused` when a ``required`` source is absent for the date."""
+    if not required:
         return
-    from src.retention import has_stop_level_rows
+    from src.retention import stop_level_sources
 
-    if not has_stop_level_rows(db, service_date):
+    missing = sorted(set(required) - stop_level_sources(db, service_date))
+    if missing:
+        d = service_date.isoformat()
         raise AggregateOverwriteRefused(
-            f"{service_date.isoformat()} has kept daily aggregates but no stop-level rows "
-            "(runs/stop_events pruned by retention?); recomputing would overwrite them with "
-            f"empty values. Re-derive it with `bin/pull-and-derive.sh --date "
-            f"{service_date.isoformat()}` (reloads the raw data first), or pass "
-            "--force-overwrite-aggregates if overwriting is really intended."
+            f"{d} has kept daily aggregates computed from {', '.join(sorted(required))} rows, "
+            f"but {', '.join(missing)} rows are not present now (pruned by retention, or only "
+            "partly re-derived); recomputing would overwrite them with values from incomplete "
+            "data. Re-derive only once the raw inputs are back: inside the S3 JSONL archives "
+            f"`bin/pull-and-derive.sh --date {d}` reloads them (it refuses a date whose VP is "
+            "unavailable); for older WMATA dates see docs/DEPLOYMENT.md §12.4 (VP parquet "
+            "archive). --force-overwrite-aggregates overrides."
         )
 
 
@@ -209,9 +218,7 @@ def upsert_system_metrics_for_date(
     # when the trip-update signal has since been pruned by retention
     # (NOTES-104) instead of misreporting the re-derive as an outage.
     if not force:
-        refuse_if_detail_missing(
-            db, service_date, existing is not None and _system_row_has_observations(existing)
-        )
+        refuse_if_detail_missing(db, service_date, system_row_required_sources(existing))
     prior = (existing.data_quality, existing.coverage_pct) if existing else None
     data_quality, pct, kept = resolve_data_quality(
         db, service_date, threshold=threshold, tz_name=tz_name, prior=prior

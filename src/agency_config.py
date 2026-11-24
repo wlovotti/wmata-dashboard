@@ -21,7 +21,7 @@ class RetentionPolicy:
     """How long one agency keeps each data tier in its local database.
 
     Read from the optional ``retention:`` block of the agency YAML (see
-    ``config/agencies/*.yaml`` and ``docs/DEPLOYMENT.md`` §13). Daily
+    ``config/agencies/*.yaml`` and ``docs/DEPLOYMENT.md`` §12.4). Daily
     aggregates (``system_metrics_daily``, ``route_metrics_daily_overlay``,
     ``route_headway_metrics``) are never pruned, so they have no knob.
 
@@ -54,16 +54,36 @@ def parse_retention(raw: dict | None, source: str = "<config>") -> RetentionPoli
     Raises ValueError for unknown keys or values below the floors, so a
     typo can never silently shorten (or disable) a retention window.
     """
-    if not raw:
+    if raw is None:
         return RetentionPolicy()
+    if not isinstance(raw, dict):
+        raise ValueError(f"retention in {source} must be a mapping, got {type(raw).__name__}")
     allowed = {"stop_level_days", "raw_days", "apply_after_refresh"}
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"Unknown retention key(s) {sorted(unknown)} in {source}")
+
+    def _int(key: str, default: int) -> int:
+        """A real YAML integer (bools, floats and strings are rejected, not coerced)."""
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(
+                f"retention.{key} in {source} must be an integer, got {value!r} "
+                f"({type(value).__name__})"
+            )
+        return value
+
+    switch = raw.get("apply_after_refresh", False)
+    if not isinstance(switch, bool):
+        # The switch enables automatic deletes: "false"/"no"/0 must not read as on.
+        raise ValueError(
+            f"retention.apply_after_refresh in {source} must be true or false (a YAML "
+            f"boolean, unquoted), got {switch!r} ({type(switch).__name__})"
+        )
     policy = RetentionPolicy(
-        stop_level_days=int(raw.get("stop_level_days", RetentionPolicy.stop_level_days)),
-        raw_days=int(raw.get("raw_days", RetentionPolicy.raw_days)),
-        apply_after_refresh=bool(raw.get("apply_after_refresh", False)),
+        stop_level_days=_int("stop_level_days", RetentionPolicy.stop_level_days),
+        raw_days=_int("raw_days", RetentionPolicy.raw_days),
+        apply_after_refresh=switch,
     )
     if policy.stop_level_days < MIN_STOP_LEVEL_DAYS:
         raise ValueError(

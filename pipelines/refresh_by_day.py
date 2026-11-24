@@ -430,10 +430,18 @@ class RealSteps:
         """Apply the agency's retention tiers (``apply_retention --apply --vacuum``).
 
         The child inherits this run's lock: ``PULL_AND_DERIVE_LOCK_PID`` is
-        the shell's pid under ``bin/pull-and-derive.sh``, else ours (this
-        process holds the lock when run directly).
+        set to the pid recorded as the lock holder (the shell under
+        ``bin/pull-and-derive.sh``, else this process), so it always names
+        the actual holder rather than a stale inherited value.
+
+        Retention may prune a date this run just re-derived with ``--date D``
+        when D is older than the stop-level window: that is by design (its
+        aggregates are what is kept). Re-derive old dates without
+        ``--apply-retention`` if you want their detail to stay until the
+        next retention run.
         """
-        lock_pid = os.environ.get(run_lock.LOCK_ENV) or str(os.getpid())
+        holder = run_lock.read_holder(run_lock.LOCK_DIR) or {}
+        lock_pid = str(holder.get("pid") or os.getpid())
         return self._run(
             ["pipelines.apply_retention", "--agency", agency, "--apply", "--vacuum"],
             extra_env={run_lock.LOCK_ENV: lock_pid},
@@ -779,6 +787,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --abandon-date: allow abandoning a date that already has runs / is done",
     )
     p.add_argument(
+        "--allow-missing-vp",
+        action="store_true",
+        help=(
+            "derive dates whose vehicle_positions window is neither in the DB nor in the S3 "
+            "JSONL archive (proximity rows and OTP would be missing). Refused by default."
+        ),
+    )
+    p.add_argument(
         "--apply-retention",
         action="store_true",
         help=(
@@ -920,6 +936,30 @@ def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[Agen
                     file=sys.stderr,
                 )
                 return EXIT_USAGE
+            if not args.allow_missing_vp:
+                from src.retention import dates_missing_vp
+
+                missing = dates_missing_vp(session, dates, cfg.timezone, now_utc.date())
+                if missing and explicit is None:
+                    # Default selection (old failed/derived/deferred progress
+                    # dates): skip them loudly rather than block every run.
+                    log(
+                        f"plan {name}: skipping {' '.join(map(str, missing))} — no "
+                        "vehicle_positions source (neither in the DB nor the S3 JSONL archive); "
+                        "see docs/DEPLOYMENT.md §12.4"
+                    )
+                    dates = [d for d in dates if d not in set(missing)]
+                elif missing:
+                    print(
+                        f"ERROR ({name}): no vehicle_positions source for "
+                        f"{' '.join(map(str, missing))} — its VP window predates the S3 JSONL VP "
+                        "archive (2026-08-22) and the rows are not in the DB (pruned?). Deriving "
+                        "it would rebuild only trip_update rows and null its proximity OTP. See "
+                        "docs/DEPLOYMENT.md §12.4 (VP parquet archive); --allow-missing-vp "
+                        "overrides.",
+                        file=sys.stderr,
+                    )
+                    return EXIT_USAGE
             with_runs = runs_dates(session, dates)
         finally:
             session.close()

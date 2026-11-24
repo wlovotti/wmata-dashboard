@@ -164,3 +164,12 @@ def test_nothing_pruned_means_no_signal(client, db_session):
     assert body["retention"]["window_truncated"] is False
     assert all("detail_retained" not in r for r in body["trend_data"])
     assert client.get("/api/runs/1/deviations").json()["detail"] == "Run 1 not found"
+
+
+def test_scorecard_and_route_detail_carry_retention(client, seeded):
+    """Review S3: pooled scorecard / route-detail windows report pruned dates too."""
+    body = client.get("/api/routes?days=30").json()
+    assert body["retention"]["window_truncated"] is True
+    assert body["retention"]["pruned_dates_in_window"] == 1
+    body = client.get("/api/routes?days=7").json()
+    assert body["retention"]["window_truncated"] is False

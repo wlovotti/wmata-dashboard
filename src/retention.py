@@ -31,10 +31,13 @@ delete):
   all present and final: a ``complete`` ``system_metrics_daily`` row with
   non-null OTP and service-delivered, plus ``route_metrics_daily_overlay``
   and ``route_headway_metrics`` rows (:func:`aggregate_status`); D is not
-  an unfinished date in the refresh progress file; and D can be re-derived
-  from the S3 archives (its VP window starts at or after the first VP
-  archive file the loader manifested — WMATA and SFMTA VP JSONL begins
-  2026-08-22 ~17:10 UTC) unless the operator passes ``allow_unrederivable``.
+  an unfinished date in the refresh progress file (``release_dates`` lifts
+  the aggregate check for named dates); and the automated per-day path can
+  re-derive D (its VP window starts at or after the first JSONL VP archive
+  file the loader manifested — 2026-08-22 20:54 UTC for both agencies)
+  unless the operator passes ``allow_unrederivable``. Older WMATA VP (5/03–
+  8/01) exists as S3 parquet for a manual re-derive; see
+  ``docs/DEPLOYMENT.md`` §12.4 "Where older data exists".
 - a VP UTC day is deleted only when every row in it came from manifested
   archive files (rows ≤ manifested row count — the same test
   ``load_vp_archive.reconcile_utc_day`` uses), so the day can be reloaded;
@@ -92,6 +95,11 @@ UNFINISHED_STATUSES = ("failed", "held", "deferred", "derived")
 
 STATUS_OK = "ok"
 
+NOT_AUTO_REDERIVABLE = (
+    "not re-derivable by the automated per-day path (VP window predates the S3 JSONL VP "
+    "archive; see docs/DEPLOYMENT.md §12.4 for the parquet / final-dump options)"
+)
+
 _ARCHIVE_EPOCH_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.\d+\.(\d+)\.jsonl\.zst$")
 
 
@@ -123,15 +131,39 @@ def has_stop_level_rows(session: Session, service_date: date) -> bool:
     return has_se is not None
 
 
-def latest_derived_date(session: Session, tz_name: str) -> date | None:
+def stop_level_sources(session: Session, service_date: date) -> set[str]:
+    """Which stop-level sources ``service_date`` has: subset of runs / proximity / trip_update.
+
+    Three index probes on the ``(service_date, ...)`` unique indexes. The
+    per-date rollups use it to refuse overwriting a kept aggregate whose
+    source rows are absent (``src.system_metrics.refuse_if_detail_missing``).
+    """
+    iso = _iso(service_date)
+    out: set[str] = set()
+    if session.execute(select(Run.id).where(Run.service_date == iso).limit(1)).first():
+        out.add("runs")
+    for source in ("proximity", "trip_update"):
+        hit = session.execute(
+            select(StopEvent.id)
+            .where(StopEvent.service_date == iso, StopEvent.source == source)
+            .limit(1)
+        ).first()
+        if hit is not None:
+            out.add(source)
+    return out
+
+
+def latest_derived_date(session: Session, tz_name: str, today: date | None = None) -> date | None:
     """Newest service date that is fully derived, capped at agency-local yesterday.
+
+    ``today`` overrides agency-local today (tests / what-if planning).
 
     Fully derived = a ``system_metrics_daily`` row stamped ``complete`` with
     non-null ``otp_percentage`` AND ``runs`` rows still present. Partial,
     null, or runs-less dates are skipped (they never anchor a window).
     Returns None when no date qualifies — callers then prune nothing.
     """
-    cap = _iso(local_today(tz_name) - timedelta(days=1))
+    cap = _iso((today or local_today(tz_name)) - timedelta(days=1))
     candidates = session.execute(
         select(SystemMetricsDaily.service_date)
         .where(
@@ -242,6 +274,44 @@ def is_rederivable(service_date: date, tz_name: str, archive_start: datetime | N
         return False
     start, _end = local_service_date_position_window_utc(service_date, tz_name)
     return start - timedelta(seconds=VP_TIMESTAMP_GUARD_SEC) >= archive_start
+
+
+def vp_day_has_rows(session: Session, utc_day: date) -> bool:
+    """True when ``vehicle_positions`` has any row collected on ``utc_day`` (index probe)."""
+    start = datetime.combine(utc_day, datetime.min.time())
+    return (
+        session.execute(
+            select(VehiclePosition.id)
+            .where(
+                VehiclePosition.collected_at >= start,
+                VehiclePosition.collected_at < start + timedelta(days=1),
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
+def dates_missing_vp(
+    session: Session, dates: list[date], tz_name: str, utc_today: date
+) -> list[date]:
+    """Dates whose VP read window is available neither from S3 JSONL nor from the DB.
+
+    Available = the window lies inside the S3 JSONL VP archive
+    (:func:`is_rederivable`; the refresh fetches and loads it), or every
+    UTC day of the window up to ``utc_today`` still has rows in the DB
+    (VM-era days that were never pruned). Deriving a date without either
+    would rebuild only ``trip_update`` rows — the refresh refuses it.
+    """
+    archive_start = vp_archive_start(session)
+    out = []
+    for d in dates:
+        if is_rederivable(d, tz_name, archive_start):
+            continue
+        days = [u for u in vp_utc_dates(d, tz_name) if u <= utc_today]
+        if not days or not all(vp_day_has_rows(session, u) for u in days):
+            out.append(d)
+    return out
 
 
 def avg_row_bytes(session: Session, table: str) -> float | None:
@@ -376,7 +446,7 @@ def plan_retention(
     progress: dict[date, str] | None = None,
     allow_unrederivable: bool = False,
     include_unmanifested_vp: bool = False,
-    allow_partial_dates: set[date] | None = None,
+    release_dates: set[date] | None = None,
     today: date | None = None,
 ) -> RetentionPlan:
     """Work out what retention would delete for one agency (reads only).
@@ -390,19 +460,26 @@ def plan_retention(
             in ``UNFINISHED_STATUSES`` are never pruned and their VP days
             are protected.
         allow_unrederivable: Also delete stop-level rows of dates whose VP
-            window predates the S3 VP archive (they can never be re-derived
-            afterwards — the aggregates remain).
+            window predates the S3 JSONL VP archive, i.e. dates
+            ``refresh_by_day`` cannot rebuild. WMATA dates through ~7/30
+            remain re-derivable by hand from the ``wmata-vp-archive/``
+            parquet; later VM-era dates (and all SFMTA ones) have no known
+            VP copy outside the DB except, probably, the 8/31 final dumps.
         include_unmanifested_vp: Also delete VP UTC days holding rows the
-            archive manifest cannot account for (the VM era, through
-            2026-08-22; WMATA's ``wmata-vp-archive/`` parquet covers only
-            part of it, so the DB may be the only copy).
-        allow_partial_dates: Dates whose aggregates exist but are stamped
-            ``partial`` that the operator explicitly accepts pruning.
+            JSONL manifest cannot account for (the VM era, through
+            2026-08-22). WMATA days through 8/01 also exist as parquet;
+            WMATA 8/02–8/22 and SFMTA 7/22–8/22 probably only in the DB and
+            the 8/31 final dumps (contents unverified).
+        release_dates: Dates the operator explicitly releases although
+            their aggregates are not final (partial stamp, NULL OTP or
+            service-delivered, missing overlay/headway rows — such dates are
+            otherwise kept forever). Progress-file and re-derivability guards
+            still apply.
         today: Agency-local today override (tests).
     """
     progress = progress or {}
-    allow_partial_dates = allow_partial_dates or set()
-    anchor = latest_derived_date(session, tz_name)
+    release_dates = release_dates or set()
+    anchor = latest_derived_date(session, tz_name, today)
     plan = RetentionPlan(agency=agency, policy=policy, anchor=anchor)
     for table in ("stop_events", "runs", "vehicle_positions", "trip_update_state"):
         plan.bytes_per_row[table] = avg_row_bytes(session, table)
@@ -427,7 +504,7 @@ def plan_retention(
             progress,
             archive_start,
             allow_unrederivable=allow_unrederivable,
-            allow_partial=d in allow_partial_dates,
+            release=d in release_dates,
         )
         plan.dates.append(
             DatePlan(
@@ -454,12 +531,12 @@ def plan_retention(
             )
         plan.vp_days.append(VpDayPlan(utc_day, rows, manifested, reason))
 
-    from pipelines.cleanup_trip_update_state import run_cleanup
+    from src.models import TripUpdateState
 
-    plan.tus_cutoff = local_today(tz_name) - timedelta(days=policy.raw_days)
-    plan.tus_rows = run_cleanup(
-        session, retention_days=policy.raw_days, tz_name=tz_name, dry_run=True
-    )["deleted"]
+    # Same rule as cleanup_trip_update_state.run_cleanup (today-anchored);
+    # apply passes this cutoff as its before_date so plan and apply agree.
+    plan.tus_cutoff = (today or local_today(tz_name)) - timedelta(days=policy.raw_days)
+    plan.tus_rows = _count(session, TripUpdateState, TripUpdateState.service_date < plan.tus_cutoff)
     return plan
 
 
@@ -470,17 +547,17 @@ def stop_level_refusal(
     progress: dict[date, str],
     archive_start: datetime | None,
     allow_unrederivable: bool = False,
-    allow_partial: bool = False,
+    release: bool = False,
 ) -> str | None:
     """Return why ``service_date``'s stop-level rows must be kept, or None if deletable."""
     status = progress.get(service_date)
     if status in UNFINISHED_STATUSES:
         return f"refresh progress says {status!r}"
     agg = aggregate_status(session, service_date)
-    if agg != STATUS_OK and not (allow_partial and agg == "system_metrics_daily partial"):
-        return f"aggregates not final: {agg}"
+    if agg != STATUS_OK and not release:
+        return f"aggregates not final: {agg} (kept until released with --release-date)"
     if not allow_unrederivable and not is_rederivable(service_date, tz_name, archive_start):
-        return "not re-derivable from S3 (VP window predates the VP archive)"
+        return NOT_AUTO_REDERIVABLE
     return None
 
 
@@ -594,7 +671,7 @@ def apply_retention(
     progress: dict[date, str] | None = None,
     allow_unrederivable: bool = False,
     include_unmanifested_vp: bool = False,
-    allow_partial_dates: set[date] | None = None,
+    release_dates: set[date] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     log: Callable[[str], None] = print,
 ) -> RetentionResult:
@@ -606,7 +683,7 @@ def apply_retention(
     whose guard no longer passes is skipped and listed in ``skipped``.
     """
     progress = progress or {}
-    allow_partial_dates = allow_partial_dates or set()
+    release_dates = release_dates or set()
     result = RetentionResult()
     archive_start = vp_archive_start(session)
     first_kept = plan.stop_level_first_kept
@@ -623,7 +700,7 @@ def apply_retention(
                 progress,
                 archive_start,
                 allow_unrederivable=allow_unrederivable,
-                allow_partial=d in allow_partial_dates,
+                release=d in release_dates,
             )
         session.rollback()  # end the read transaction before the deletes
         if reason:
@@ -676,7 +753,11 @@ def apply_retention(
         from pipelines.cleanup_trip_update_state import run_cleanup
 
         result.trip_update_state = run_cleanup(
-            session, retention_days=plan.policy.raw_days, tz_name=tz_name, batch_size=batch_size
+            session,
+            retention_days=plan.policy.raw_days,
+            tz_name=tz_name,
+            batch_size=batch_size,
+            before_date=plan.tus_cutoff,
         )["deleted"]
     return result
 

@@ -162,26 +162,36 @@ def compute_route_metrics_overlay_for_date(
     return rows
 
 
-def _overlay_row_has_observations(row: RouteMetricsDailyOverlay) -> bool:
-    """True when an overlay row carries any observed-side count (OTP, delivered, EWT, bunching).
+def overlay_required_sources(rows) -> set[str]:
+    """Stop-level sources the observed counts in these overlay rows were computed from.
 
-    ``scheduled_trips`` and the ``ewt_sched_*`` sums are schedule-only and
-    non-zero even on a day nothing was observed, so they don't count.
+    Origin and all-timepoints OTP come from ``proximity`` runs/stop_events,
+    destination OTP / EWT / bunching from ``trip_update``, delivered trips
+    from ``runs``. ``scheduled_trips`` and the ``ewt_sched_*`` sums are
+    schedule-only and require nothing.
     """
-    return bool(
-        (row.otp_origin_early or 0)
-        + (row.otp_origin_on_time or 0)
-        + (row.otp_origin_late or 0)
-        + (row.otp_destination_early or 0)
-        + (row.otp_destination_on_time or 0)
-        + (row.otp_destination_late or 0)
-        + (row.otp_all_early or 0)
-        + (row.otp_all_on_time or 0)
-        + (row.otp_all_late or 0)
-        + (row.delivered_trips or 0)
-        + (row.ewt_n_observed_headways or 0)
-        + (row.bunching_total_headways or 0)
-    )
+    required: set[str] = set()
+    for row in rows:
+        if (
+            (row.otp_origin_early or 0)
+            + (row.otp_origin_on_time or 0)
+            + (row.otp_origin_late or 0)
+            + (row.otp_all_early or 0)
+            + (row.otp_all_on_time or 0)
+            + (row.otp_all_late or 0)
+        ):
+            required.add("proximity")
+        if (
+            (row.otp_destination_early or 0)
+            + (row.otp_destination_on_time or 0)
+            + (row.otp_destination_late or 0)
+            + (row.ewt_n_observed_headways or 0)
+            + (row.bunching_total_headways or 0)
+        ):
+            required.add("trip_update")
+        if row.delivered_trips:
+            required.add("runs")
+    return required
 
 
 def upsert_route_metrics_for_date(
@@ -256,7 +266,7 @@ def upsert_route_metrics_for_date(
         refuse_if_detail_missing(
             db,
             service_date,
-            any(_overlay_row_has_observations(r) for r in existing_by_route.values()),
+            overlay_required_sources(existing_by_route.values()),
         )
     # Every overlay row for a date carries the same date-level stamp
     # (this function writes them all in one pass), so the lowest route_id

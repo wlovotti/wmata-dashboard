@@ -1,7 +1,7 @@
 """SUPERSEDED — VM-era tier-3 VP archiver. Do not run it against the laptop DB.
 
 Superseded by ``pipelines/apply_retention.py`` (issue: retention tiers,
-``docs/DEPLOYMENT.md`` §13). Since the stateless collector (2026-08-22)
+``docs/DEPLOYMENT.md`` §12.4). Since the stateless collector (2026-08-22)
 every VP row is already archived raw in S3 (``raw-jsonl-archive/vp/``,
 ``.../sfmta_vp/``) and reloads by UTC day of ``collected_at``
 (``pipelines/load_vp_archive.py``). This script deletes by

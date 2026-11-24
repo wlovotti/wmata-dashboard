@@ -213,7 +213,7 @@ def test_plan_and_apply_stop_level_with_every_guard(db_session):
     progress = {failed: "failed"}
 
     plan = plan_retention(
-        db_session, "wmata", TZ, POLICY, progress=progress, allow_partial_dates={allowed_partial}
+        db_session, "wmata", TZ, POLICY, progress=progress, release_dates={allowed_partial}
     )
     assert plan.anchor == ANCHOR and plan.stop_level_first_kept == first_kept
     by_date = {p.service_date: p for p in plan.dates}
@@ -227,7 +227,7 @@ def test_plan_and_apply_stop_level_with_every_guard(db_session):
     assert _counts(db_session, ok_old) == (4, 1)
 
     result = apply_retention(
-        db_session, plan, TZ, progress=progress, allow_partial_dates={allowed_partial}, batch_size=3
+        db_session, plan, TZ, progress=progress, release_dates={allowed_partial}, batch_size=3
     )
     assert (result.stop_events, result.runs) == (8, 2)
     assert _counts(db_session, ok_old) == (0, 0)
@@ -434,4 +434,93 @@ def test_cli_apply_respects_the_run_lock(tmp_path, monkeypatch):
     finally:
         import shutil
 
+        shutil.rmtree(lock_dir, ignore_errors=True)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"apply_after_refresh": "false"},
+        {"apply_after_refresh": "no"},
+        {"apply_after_refresh": 1},
+        {"stop_level_days": 100.5},
+        {"stop_level_days": "100"},
+        {"raw_days": True},
+        ["stop_level_days", 100],
+    ],
+)
+def test_parse_retention_rejects_non_bool_and_non_int(block):
+    """Review S2: the delete switch needs a real YAML bool, the windows real ints."""
+    with pytest.raises(ValueError, match="must be"):
+        parse_retention(block)
+
+
+@pytest.mark.smoke
+def test_parse_retention_accepts_real_bool():
+    """``true`` (YAML bool) turns the hook on."""
+    assert parse_retention({"apply_after_refresh": True}).apply_after_refresh is True
+
+
+@pytest.mark.smoke
+def test_release_date_frees_a_null_aggregate_date(db_session):
+    """Dates with NULL / partial aggregates are kept unless explicitly released."""
+    _manifest_everything(db_session)
+    _add_day(db_session, ANCHOR)
+    old = ANCHOR - timedelta(days=30)
+    _add_day(db_session, old, otp=None)
+    (p,) = plan_retention(db_session, "wmata", TZ, POLICY).dates
+    assert "release-date" in p.reason
+    (p,) = plan_retention(db_session, "wmata", TZ, POLICY, release_dates={old}).dates
+    assert p.deletable
+
+
+@pytest.mark.smoke
+def test_today_override_reaches_anchor_and_tus_cutoff(db_session):
+    """Review N6: ``today`` drives the anchor cap and the trip_update_state cutoff."""
+    _manifest_everything(db_session)
+    _add_day(db_session, ANCHOR)
+    _add_day(db_session, ANCHOR - timedelta(days=5))
+    early = ANCHOR - timedelta(days=3)  # anchor capped at early - 1
+    plan = plan_retention(db_session, "wmata", TZ, POLICY, today=early)
+    assert plan.anchor == ANCHOR - timedelta(days=5)
+    assert plan.tus_cutoff == early - timedelta(days=POLICY.raw_days)
+
+
+@pytest.mark.smoke
+def test_dates_missing_vp(db_session):
+    """Review S1: a pre-archive date is derivable only while its VP days are still in the DB."""
+    from src.retention import dates_missing_vp
+
+    db_session.add(
+        VpArchiveLoadedFile(filename="2026-08-22.7414.1787432050.jsonl.zst", row_count=1)
+    )
+    db_session.commit()
+    vm_date = date(2026, 7, 15)
+    for d in (date(2026, 7, 15), date(2026, 7, 16)):
+        _vp(db_session, datetime.combine(d, datetime.min.time()) + timedelta(hours=10), 1)
+    utc_today = date(2026, 11, 24)
+    # 7/15 reads UTC 7/15..7/17; 7/17 has no rows -> missing.
+    assert dates_missing_vp(db_session, [vm_date], TZ, utc_today) == [vm_date]
+    _vp(db_session, datetime(2026, 7, 17, 1), 1)
+    assert dates_missing_vp(db_session, [vm_date], TZ, utc_today) == []
+    # A date inside the JSONL archive is always fine (the refresh fetches it).
+    assert dates_missing_vp(db_session, [date(2026, 9, 1)], TZ, utc_today) == []
+
+
+@pytest.mark.smoke
+def test_cli_dry_run_refuses_while_a_refresh_holds_the_lock(tmp_path, monkeypatch):
+    """Review N8: the dry run scans big tables, so it refuses beside a refresh."""
+    import shutil
+
+    import pipelines.apply_retention as mod
+    from src import run_lock
+
+    lock_dir = tmp_path / ".lock.d"
+    monkeypatch.setattr(run_lock, "LOCK_DIR", lock_dir)
+    monkeypatch.delenv(run_lock.LOCK_ENV, raising=False)
+    run_lock.acquire(1, "someone else", lock_dir)
+    try:
+        assert mod.main(["--agency", "wmata"]) == run_lock.EXIT_LOCKED
+    finally:
         shutil.rmtree(lock_dir, ignore_errors=True)

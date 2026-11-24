@@ -53,7 +53,11 @@ Steps (each subcommand includes the ones before it):
 ``export``: write each surviving snapshot that has no ``archive=`` token
 (or ``--snapshot N``) to ``<out-dir>/<agency>_snapshot<N>_<feed_version>.zip``
 — one CSV per versioned table (via ``COPY``) plus ``manifest.json`` with
-the snapshot row, per-file row counts and sha256 — as a safety copy. The
+the snapshot row, per-file row counts and sha256 — as a safety copy of
+the six versioned tables. It is NOT a loadable GTFS feed: ``shapes``,
+``agency``, ``feed_info`` and the GTFS-Plus timepoint files are not
+versioned in the DB and are absent, and ``reload_gtfs_complete.py`` cannot
+read it; restoring means inserting the CSV rows back under a snapshot id. The
 tool only writes locally; uploading is the owner's ``aws s3 cp`` step
 (printed). Run it BEFORE ``--apply``.
 
@@ -336,6 +340,52 @@ def check_resolution(
                 g.resolution_problem = f"combined de-dup: {problem}"
 
 
+# Columns of the versioned tables that are bookkeeping, not GTFS content.
+BOOKKEEPING_COLUMNS = frozenset(
+    {"id", "snapshot_id", "valid_from", "valid_to", "is_current", "created_at"}
+)
+
+
+def content_columns_problem(session: Session) -> str | None:
+    """Return why ``CONTENT_COLUMNS`` no longer matches the live schema, or None.
+
+    A column added to a versioned table but not to ``CONTENT_COLUMNS`` would
+    be silently ignored by the fingerprint and the proof, so two snapshots
+    differing only there would be "identical". Refuse instead.
+    """
+    for table, cols in CONTENT_COLUMNS.items():
+        live = {
+            r[0]
+            for r in session.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = :t"
+                ),
+                {"t": table},
+            )
+        }
+        content = live - BOOKKEEPING_COLUMNS
+        if content != set(cols):
+            return (
+                f"{table}: schema content columns {sorted(content)} != CONTENT_COLUMNS "
+                f"{sorted(cols)} — update scripts/dedup_gtfs_snapshots.py before running"
+            )
+    return None
+
+
+def last_scheduled_date(session: Session) -> date | None:
+    """Latest date any snapshot's calendar / calendar_dates mentions (YYYYMMDD strings)."""
+    raw = session.execute(
+        text(
+            "SELECT greatest((SELECT max(end_date) FROM calendar), "
+            "(SELECT max(date) FROM calendar_dates))"
+        )
+    ).scalar()
+    if not raw:
+        return None
+    return date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+
+
 def _piece_bounds(session: Session, snapshot_id: int, piece_trips: int) -> list[str | None]:
     """trip_id boundaries splitting a snapshot's trips into ``piece_trips``-sized ranges.
 
@@ -544,6 +594,11 @@ def _fmt_gb(n: float) -> str:
 def run(args, session: Session, log: Callable[[str], None] = print) -> int:
     """Plan / prove / apply / export for one agency on ``session``; returns the exit code."""
     cfg = load_agency_config(args.agency)
+    problem = content_columns_problem(session)
+    session.rollback()
+    if problem:
+        log(f"ERROR: {problem}")
+        return 2
     exporting = getattr(args, "command", None) == "export"
     if exporting and args.metadata_only and not args.snapshot:
         log("ERROR: export needs content fingerprints (or explicit --snapshot ids)")
@@ -597,7 +652,8 @@ def run(args, session: Session, log: Callable[[str], None] = print) -> int:
 
     today = local_today(cfg.timezone)
     start = date.fromisoformat(first) if first else today
-    check_resolution(session, groups, cfg.timezone, start, today)
+    end = max(today, last_scheduled_date(session) or today)
+    check_resolution(session, groups, cfg.timezone, start, end)
     session.rollback()
 
     total_bytes = 0.0
@@ -648,7 +704,7 @@ def run(args, session: Session, log: Callable[[str], None] = print) -> int:
     if args.apply:
         log(
             "Done. Space is reusable now; `VACUUM (ANALYZE)` the six tables, and see "
-            "docs/DEPLOYMENT.md §13 for when VACUUM FULL is worth it."
+            "docs/DEPLOYMENT.md §12.4 for when VACUUM FULL is worth it."
         )
     return rc
 
@@ -662,6 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="prove, then delete proven duplicates")
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     p.add_argument("--piece-trips", type=int, default=DEFAULT_PIECE_TRIPS)
+    p.add_argument(
+        "--allow-during-refresh",
+        action="store_true",
+        help="read-only modes only: run even while a refresh holds the run lock",
+    )
     sub = p.add_subparsers(dest="command")
     ex = sub.add_parser("export", help="write un-archived snapshots to local zips")
     ex.add_argument("--out-dir", type=Path, required=True)
@@ -682,6 +743,15 @@ def main(argv=None) -> int:
         return 2
     own_lock = False
     try:
+        holder = run_lock.held_by_other(run_lock.LOCK_DIR)
+        if holder is not None and not args.metadata_only and not args.allow_during_refresh:
+            print(
+                f"ERROR: a refresh holds the run lock ({run_lock.describe(holder)}); "
+                "fingerprints, --prove, --apply and export read every snapshot's stop_times. "
+                "Wait for it, use --metadata-only, or pass --allow-during-refresh (not --apply).",
+                file=sys.stderr,
+            )
+            return run_lock.EXIT_LOCKED
         if args.apply and not run_lock.held_by_parent(run_lock.LOCK_DIR):
             try:
                 run_lock.acquire(os.getpid(), "dedup_gtfs_snapshots --apply", run_lock.LOCK_DIR)
