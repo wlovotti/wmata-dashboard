@@ -63,6 +63,17 @@ needed this since they don't bucket by hour. `run_daily_batch.py --agency
 sfmta` now writes correct EWT/bunching numbers alongside OTP/service-
 delivered.
 
+Per-date GTFS snapshot (issue #258): every per-date pipeline is pinned to
+the GTFS snapshot resolved for *that* service date by
+`src/gtfs_versioning.py:resolve_gtfs_snapshot_for_date` (the newest
+snapshot whose calendar covers the date; see its docstring for the
+fallback). Before this, every date was derived against `is_current`, so a
+reload that landed a feed starting "today" before "yesterday" was derived
+collapsed yesterday's trip match to 0% (WMATA 2026-09-12). When the
+resolved snapshot IS the current one, no `--gtfs-snapshot-id` is passed —
+the steady-state command lines are unchanged. Each choice is logged as a
+`gtfs_snapshot:` line per date.
+
 Usage:
   uv run python pipelines/run_daily_batch.py
   uv run python pipelines/run_daily_batch.py --lookback-days 14   # wider catch-up
@@ -76,6 +87,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import date as date_type
 from datetime import timedelta
 from pathlib import Path
@@ -85,6 +97,7 @@ from dotenv import load_dotenv
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
 from src.date_ranges import iter_eastern_dates
+from src.gtfs_versioning import SnapshotChoice, resolve_gtfs_snapshot_for_date
 from src.models import Route, Run
 from src.timezones import eastern_today, local_today
 
@@ -289,6 +302,69 @@ def list_active_route_ids(agency: str = DEFAULT_AGENCY) -> list[str]:
         db.close()
 
 
+def make_snapshot_resolver(
+    agency: str = DEFAULT_AGENCY,
+) -> Callable[[date_type], SnapshotChoice | None]:
+    """Build a cached ``service_date -> SnapshotChoice`` resolver for one agency.
+
+    Each date is resolved once per batch (a few small queries against
+    ``calendar`` / ``calendar_dates`` / ``gtfs_snapshots``) on a
+    short-lived session against the agency's own database, in its own
+    timezone.
+    """
+    cfg = load_agency_config(agency)
+    cache: dict[date_type, SnapshotChoice] = {}
+
+    def _resolve(service_date: date_type) -> SnapshotChoice:
+        """Resolve (and memoize) the snapshot for ``service_date``."""
+        if service_date not in cache:
+            db = get_session(db_url=resolve_agency_db_url(cfg))
+            try:
+                cache[service_date] = resolve_gtfs_snapshot_for_date(db, service_date, cfg.timezone)
+            finally:
+                db.close()
+        return cache[service_date]
+
+    return _resolve
+
+
+def snapshot_args_for_date(
+    resolver: Callable[[date_type], SnapshotChoice | None],
+    service_date: date_type,
+    log_handle,
+) -> list[str]:
+    """Return the ``--gtfs-snapshot-id`` args for one date, logging the choice.
+
+    Empty when the resolved snapshot is the current one (or the resolver
+    returns None), so steady-state commands are unchanged. A resolver
+    error is logged loudly and falls back to ``is_current`` — the
+    pre-#258 behaviour — rather than aborting the date: the post-replay
+    match-rate canary in `bin/pull-and-derive.sh` still guards against
+    the collapse that a wrong schedule produces.
+    """
+    try:
+        choice = resolver(service_date)
+    except Exception as exc:
+        log_handle.write(
+            f"WARN gtfs_snapshot: resolution failed for {service_date.isoformat()} "
+            f"({exc!r}) — falling back to is_current\n"
+        )
+        log_handle.flush()
+        return []
+    if choice is None:
+        return []
+    log_handle.write(
+        f"gtfs_snapshot: service_date={service_date.isoformat()} "
+        f"snapshot_id={choice.snapshot_id} reason={choice.reason} "
+        f"current={choice.current_snapshot_id}"
+        f"{'' if choice.override_id is None else ' (PINNED to non-current snapshot)'}\n"
+    )
+    log_handle.flush()
+    if choice.override_id is None:
+        return []
+    return ["--gtfs-snapshot-id", str(choice.override_id)]
+
+
 def run_housekeeping_pipeline(
     module: str,
     log_handle,
@@ -332,9 +408,10 @@ def run_pipeline(
     SERVICE_DATES_WRITTEN marker — empty for pipelines that don't print
     one) are returned.
 
-    ``extra_args`` is appended after ``--all-routes --date X`` for pipelines
-    that need additional flags. None of the currently-configured pipelines
-    use it; the hook remains for future per-pipeline overrides.
+    ``extra_args`` is appended after ``--all-routes --date X``. `run_batch`
+    uses it for the per-date ``--gtfs-snapshot-id N`` (issue #258) when a
+    date resolves to a non-current snapshot, plus any per-pipeline
+    ``extra_args`` configured in ``PIPELINES``.
 
     ``agency`` (NOTES-100 multi-agency) is always appended as
     `--agency <agency>` — every per-date pipeline this wrapper drives
@@ -403,8 +480,15 @@ def run_batch(
     log_handle,
     dry_run: bool = False,
     agency: str = DEFAULT_AGENCY,
+    snapshot_resolver: Callable[[date_type], SnapshotChoice | None] | None = None,
 ) -> int:
     """Drive all per-date pipelines across every (pipeline, target_date) cell.
+
+    ``snapshot_resolver`` maps a service date to its GTFS snapshot (issue
+    #258); default is `make_snapshot_resolver(agency)`. Every per-date
+    pipeline for a date — derive, aggregate, bunching, both rollups —
+    gets the same ``--gtfs-snapshot-id`` so the stop_events, the runs,
+    and the scheduled side of service-delivered all read one schedule.
 
     Returns the number of (pipeline, date) combinations that failed —
     callers turn a non-zero into a non-zero process exit so launchd can
@@ -446,6 +530,18 @@ def run_batch(
     derive_pipelines = [p for p in PIPELINES if p["depends_on"] is None]
     downstream_pipelines = [p for p in PIPELINES if p["depends_on"] is not None]
 
+    if snapshot_resolver is None:
+        snapshot_resolver = make_snapshot_resolver(agency)
+    snapshot_args: dict[date_type, list[str]] = {}
+
+    def _args_for(pipeline: dict, service_date: date_type) -> list[str]:
+        """Per-pipeline extra args plus the date's resolved snapshot args."""
+        if service_date not in snapshot_args:
+            snapshot_args[service_date] = snapshot_args_for_date(
+                snapshot_resolver, service_date, log_handle
+            )
+        return list(pipeline.get("extra_args") or []) + snapshot_args[service_date]
+
     # Phase 1: derive_stop_events* for every target date, collecting the
     # full set of service dates (target dates plus any day-shifted dates)
     # before any aggregation runs.
@@ -454,8 +550,8 @@ def run_batch(
         log_handle.write(f"\n=== derive: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
         for pipeline in derive_pipelines:
+            extra_args = _args_for(pipeline, service_date)
             if dry_run:
-                extra_args = pipeline.get("extra_args", []) or []
                 extra_str = " ".join(extra_args)
                 log_handle.write(
                     f"DRY-RUN would run {pipeline['module']} "
@@ -469,7 +565,7 @@ def run_batch(
                 pipeline["module"],
                 service_date,
                 log_handle,
-                extra_args=pipeline.get("extra_args"),
+                extra_args=extra_args,
                 agency=agency,
             )
             results[service_date][pipeline["name"]] = rc
@@ -504,8 +600,8 @@ def run_batch(
                 results[service_date][pipeline["name"]] = -1
                 continue
 
+            extra_args = _args_for(pipeline, service_date)
             if dry_run:
-                extra_args = pipeline.get("extra_args", []) or []
                 extra_str = " ".join(extra_args)
                 log_handle.write(
                     f"DRY-RUN would run {pipeline['module']} "
@@ -519,7 +615,7 @@ def run_batch(
                 pipeline["module"],
                 service_date,
                 log_handle,
-                extra_args=pipeline.get("extra_args"),
+                extra_args=extra_args,
                 agency=agency,
             )
             results[service_date][pipeline["name"]] = rc

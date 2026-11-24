@@ -26,6 +26,15 @@ required the manual SFMTA 8/9–8/10 top-up (PR #227). See
 `docs/DEPLOYMENT.md` for the full recovery procedure and the
 reasoning behind fail-loud over auto-recovery.
 
+Per-date snapshot (issue #258): the comparison set is the trip_ids of the
+GTFS snapshot `run_daily_batch.py` will actually derive the date against
+(`src/gtfs_versioning.py:resolve_gtfs_snapshot_for_date`), not blindly
+`is_current`. Otherwise a reload that lands a feed starting "today" makes
+"yesterday" look collapsed (WMATA 2026-09-12: 0/9,917 vs snapshot 20) and
+skips a derive that the per-date snapshot would have done correctly. A
+genuine collapse — the date's own resolved schedule doesn't know the
+feed's trip_ids, the 2026-08-30 Muni signature — still fails loudly.
+
 Exit codes (distinguish "the data really collapsed" from "the check
 itself couldn't run" — both are silent-collapse risks if conflated):
     0  ok — healthy match rate, or a skip (nothing observed yet)
@@ -50,6 +59,7 @@ from dotenv import load_dotenv
 
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
+from src.gtfs_versioning import gtfs_version_filter, resolve_gtfs_snapshot_for_date
 from src.models import Trip, VehiclePosition
 from src.timezones import local_service_date_position_window_utc, local_today
 
@@ -76,6 +86,7 @@ class TripMatchResult:
     observed_count: int
     matched_count: int
     rate: float | None
+    gtfs_snapshot_id: int | None = None
 
 
 class MatchRateCollapseError(RuntimeError):
@@ -113,15 +124,22 @@ def compute_trip_match_rate(session, service_date: date_type, tz_name: str) -> T
     if not observed:
         return TripMatchResult(observed_count=0, matched_count=0, rate=None)
 
-    current = {
+    # Same snapshot choice run_daily_batch.py makes for this date (#258);
+    # override_id is None when that's the current snapshot.
+    choice = resolve_gtfs_snapshot_for_date(session, service_date, tz_name)
+    scheduled = {
         row[0]
-        for row in session.query(Trip.trip_id).filter(Trip.is_current.is_(True)).distinct().all()
+        for row in session.query(Trip.trip_id)
+        .filter(gtfs_version_filter(Trip, choice.override_id))
+        .distinct()
+        .all()
     }
-    matched = observed & current
+    matched = observed & scheduled
     return TripMatchResult(
         observed_count=len(observed),
         matched_count=len(matched),
         rate=len(matched) / len(observed),
+        gtfs_snapshot_id=choice.snapshot_id,
     )
 
 
@@ -151,7 +169,8 @@ def check_trip_match_rate(
         raise MatchRateCollapseError(
             f"gtfs_trip_match_canary: COLLAPSED match rate for agency={agency} "
             f"date={service_date.isoformat()}: {result.matched_count}/{result.observed_count} "
-            f"observed trip_ids matched a current GTFS trip ({pct:.1f}%, threshold "
+            f"observed trip_ids matched a trip in GTFS snapshot {result.gtfs_snapshot_id} "
+            f"(the snapshot resolved for this date) ({pct:.1f}%, threshold "
             f"{threshold * 100:.0f}%). This matches the 2026-08-30 Muni fall-service-change "
             "signature — a service change likely landed while the loaded GTFS snapshot was "
             "still 'fresh' by the age gate. See docs/DEPLOYMENT.md for the recovery "
@@ -162,7 +181,8 @@ def check_trip_match_rate(
 
     print(
         f"gtfs_trip_match_canary: OK agency={agency} date={service_date.isoformat()} "
-        f"— {result.matched_count}/{result.observed_count} matched ({pct:.1f}%)."
+        f"— {result.matched_count}/{result.observed_count} matched ({pct:.1f}%) "
+        f"against GTFS snapshot {result.gtfs_snapshot_id}."
     )
     return result
 

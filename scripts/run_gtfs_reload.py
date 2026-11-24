@@ -56,6 +56,20 @@ Usage:
       # 2026-08-22 stateless-collector, Task 9) so a reload happens at
       # most weekly instead of on every pull.
 
+Since the issue #258 PR, `reload_gtfs_complete.py` exits 0 WITHOUT creating
+a snapshot when the downloaded feed's content hash matches the current
+snapshot's. The age gate keys on the newest snapshot's `snapshot_date`, so
+after an unchanged-feed skip the gate stays "due" and the next run
+re-downloads and re-hashes the feed — i.e. once the loaded feed is > N days
+old this becomes a cheap per-run "has the agency published a new feed?"
+check rather than a weekly full reload of identical data.
+
+Dependency note (2026-10-25 failure): `uv run` here used to rebuild the
+venv with only core dependencies when uv replaced its managed Python, and
+`psycopg2-binary` was an optional extra, so every reload from 2026-10-25
+on died with `ModuleNotFoundError: psycopg2`. It is a core dependency now
+(pyproject.toml), so a bare `uv run`/`uv sync` can no longer drop it.
+
 Precedence when both flags are passed: --max-age-days is checked
 FIRST, before --dry-run has any effect. If the snapshot is fresh
 enough, the wrapper exits 0 immediately — --dry-run's "log the plan,

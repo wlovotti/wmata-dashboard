@@ -796,7 +796,7 @@ launchctl list | grep wmata
 
 | Job | Schedule (when loaded) | Purpose |
 |---|---|---|
-| `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired** (stateless-collector cutover) — the weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. |
+| `com.wmata-dashboard.gtfs-reload` | ~~weekly, Sun 04:00 local~~ | **retired in the repo, but was still installed AND loaded on the laptop as of 2026-11** (stateless-collector cutover) — the weekly GTFS reload is now step 1 of `bin/pull-and-derive.sh` (`scripts/run_gtfs_reload.py --max-age-days 7`), gated on snapshot age rather than run on its own schedule. The stale job reloaded WMATA on 2026-09-13 ahead of the 9/12 derive (issue #258) and failed every run from 2026-10-25 (`psycopg2` missing — see the issue #258 PR). Unload it: `launchctl bootout gui/$UID/com.wmata-dashboard.gtfs-reload && rm ~/Library/LaunchAgents/com.wmata-dashboard.gtfs-reload.plist`. |
 | `com.wmata-dashboard.daily-batch` | ~~daily, 03:00 local~~ | **retired** (issue #246) — was installed-but-never-loaded; `pipelines/run_daily_batch.py` is now one step inside `bin/pull-and-derive.sh`. |
 | `com.wmata-dashboard.retain-trip-update-state` | ~~daily, 04:30 local~~ | **retired** (issue #246) — was installed-but-never-loaded; its `trip_update_state`-pruning job is superseded now `bin/pull-and-derive.sh` runs `cleanup_trip_update_state.py` (both agencies) on every run — see `scripts/launchd/README.md` for the detail. |
 | `com.wmata-dashboard.pull-and-derive` | daily, 06:30 local | **not deployed; not the intended mode** (issue #260 closed as not planned, 2026-11-24 — freshness is on demand: run `bin/pull-and-derive.sh` by hand). Kept in the repo; installing it per "Install" below would run `bin/pull-and-derive-nightly.sh`, a thin wrapper around `bin/pull-and-derive.sh` (§0 banner), with a healthchecks.io dead-man ping on success/failure. |
@@ -911,7 +911,16 @@ before it derives:
    an agency's static GTFS if the newest loaded snapshot is more than 7
    days old. This is a staleness *proxy*: it bounds how old the loaded
    snapshot can get, but it can't see a service change land while the
-   local copy is still "fresh" by that clock.
+   local copy is still "fresh" by that clock. Since the issue #258 PR a
+   reload first archives the exact downloaded zip to
+   `s3://wmata-dashboard-backups/gtfs-archive/<agency>/<UTC ts>_<feed_version>_<sha12>.zip`
+   (an upload failure fails the reload with the DB untouched), and skips
+   creating a snapshot at all when the feed's content hash matches the
+   current snapshot's (`content_sha256=` in `gtfs_snapshots.notes`). A
+   skipped reload doesn't advance the snapshot's age, so once the newest
+   snapshot is > 7 days old the gate re-downloads (and re-hashes) the feed
+   on every run until the agency publishes a new one — a cheap daily
+   feed-change check.
 2. **Post-replay trip_id match-rate canary**
    (`scripts/gtfs_trip_match_canary.py`) — after replay, recomputes the
    same feed-trip_id ∩ current-GTFS-trip_id intersection both derive
@@ -954,8 +963,25 @@ routinely. (Single-agency canary collapses no longer need this flag to
 protect the other agency, since a collapse now only skips its own
 agency's derive.)
 
+**Per-date GTFS snapshot (issue #258).** Every per-date pipeline that
+`run_daily_batch.py` drives, and the canary above, use the snapshot
+`src/gtfs_versioning.py:resolve_gtfs_snapshot_for_date` picks for *that*
+service date — the newest snapshot whose `calendar` range (or an
+added-service `calendar_dates` row) covers the date; if none covers it,
+the newest snapshot already loaded by the end of that date; failing that,
+the current one. Each batch log carries a `gtfs_snapshot:` line per date.
+This closes the *reverse* race to the 2026-08-30 one: a reload that lands
+a feed effective "today" before "yesterday" was derived (WMATA 9/13
+reload → 9/12 at 0/9,917 against snapshot 20) no longer collapses
+yesterday — it is derived against the outgoing snapshot automatically.
+A date that slipped through before this fix just needs its derive re-run;
+no reload is involved (reloading again changes nothing — the date needs
+the *previous* snapshot, which the resolver now selects).
+
 **Recovery procedure**, once a real collapse is confirmed (agency,
-date, and match rate are in the canary's error output):
+date, and match rate are in the canary's error output) — i.e. the
+date's *own* resolved schedule doesn't know the feed's trip_ids, the
+2026-08-30 direction (feed changed, new GTFS not loaded yet):
 
 1. Reload that agency's static GTFS:
    `uv run python scripts/reload_gtfs_complete.py --agency <agency>`.

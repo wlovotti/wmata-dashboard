@@ -58,6 +58,15 @@ echo "== GTFS reload if stale (>7 days), per agency =="
 # alone doesn't fully close the gap for either agency — the post-replay
 # match-rate canary below is the second, stronger check for exactly that
 # failure shape.
+#
+# Reload-before-derive race (issue #258): this step runs BEFORE yesterday
+# is derived, so a reload here can land a feed effective today. That no
+# longer collapses yesterday: run_daily_batch.py and the canary below both
+# resolve the GTFS snapshot per service date
+# (src/gtfs_versioning.py:resolve_gtfs_snapshot_for_date), so yesterday is
+# still derived against the outgoing snapshot. Nothing in this script needs
+# to pass a snapshot id — replay doesn't read GTFS, and the per-date
+# resolution lives inside the derive/canary steps themselves.
 gtfs_rc_wmata=0
 PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --agency wmata --max-age-days 7 || gtfs_rc_wmata=$?
 gtfs_rc_sfmta=0
