@@ -79,6 +79,13 @@ Usage:
   uv run python pipelines/run_daily_batch.py --lookback-days 14   # wider catch-up
   uv run python pipelines/run_daily_batch.py --dry-run            # print plan, don't execute
   uv run python pipelines/run_daily_batch.py --agency sfmta       # SFMTA sidecar DB
+  uv run python pipelines/run_daily_batch.py --date 2026-10-03 --skip-housekeeping
+  uv run python pipelines/run_daily_batch.py --housekeeping-only  # WMATA housekeeping alone
+
+`--date` / `--skip-housekeeping` / `--housekeeping-only` exist for the
+day-at-a-time refresh (`pipelines/refresh_by_day.py`, issue #261), which
+derives exactly one service date per call and runs housekeeping once at
+the end of the whole run.
 """
 
 import argparse
@@ -531,6 +538,7 @@ def run_batch(
     snapshot_resolver: Callable[[date_type], SnapshotChoice | None] | None = None,
     match_guard: Callable[[date_type, SnapshotChoice | None], TripMatchResult | None] | None = None,
     guard_skipped: set[date_type] | None = None,
+    housekeeping: bool = True,
 ) -> int:
     """Drive all per-date pipelines across every (pipeline, target_date) cell.
 
@@ -584,6 +592,13 @@ def run_batch(
     derive that corrects a row onto date N-1 would run after N-1's own
     aggregation already completed (target_dates are processed oldest
     first) and the row would never be aggregated.
+
+    ``housekeeping=False`` (CLI ``--skip-housekeeping``) stops after the
+    per-date phases: the day-at-a-time refresh
+    (``pipelines/refresh_by_day.py``) derives one date per call and runs
+    housekeeping once at the end (``--housekeeping-only``) — per date it
+    would re-run the ~1.5 h diagnostic-profile refresh, and
+    ``cleanup_trip_update_state`` between dates buys nothing.
     """
     failure_count = 0
     # results[date][pipeline_name] = exit_code, used for skipping downstream
@@ -744,6 +759,11 @@ def run_batch(
                 )
             log_handle.flush()
 
+    if not housekeeping:
+        log_handle.write("\nSKIP housekeeping (--skip-housekeeping)\n")
+        log_handle.flush()
+        return failure_count
+
     # Housekeeping runs ONCE per batch, after all per-date pipelines. Failures
     # log but do not increment the metrics-critical failure count; the caller
     # surfaces housekeeping outcomes through the same exit code so launchd
@@ -831,7 +851,29 @@ def main() -> int:
             "skipped for any non-default agency — see module docstring."
         ),
     )
+    parser.add_argument(
+        "--date",
+        action="append",
+        type=date_type.fromisoformat,
+        default=None,
+        help=(
+            "Process exactly this service date (repeatable) instead of yesterday + "
+            "zero-runs catch-up dates; --lookback-days is ignored."
+        ),
+    )
+    parser.add_argument(
+        "--skip-housekeeping",
+        action="store_true",
+        help="Run only the per-date pipelines (the day-at-a-time refresh runs housekeeping once).",
+    )
+    parser.add_argument(
+        "--housekeeping-only",
+        action="store_true",
+        help="Run only HOUSEKEEPING_PIPELINES (default agency only), no per-date pipelines.",
+    )
     args = parser.parse_args()
+    if args.housekeeping_only and (args.date or args.skip_housekeeping):
+        parser.error("--housekeeping-only cannot be combined with --date or --skip-housekeeping")
 
     load_dotenv()
     LOGS_DIR.mkdir(exist_ok=True)
@@ -843,7 +885,12 @@ def main() -> int:
     log_suffix = "" if args.agency == DEFAULT_AGENCY else f"_{args.agency}"
     log_path = LOGS_DIR / f"daily_batch{log_suffix}_{today.isoformat()}.log"
 
-    target_dates = determine_target_dates(lookback_days=args.lookback_days, agency=args.agency)
+    if args.housekeeping_only:
+        target_dates = []
+    elif args.date:
+        target_dates = sorted(set(args.date))
+    else:
+        target_dates = determine_target_dates(lookback_days=args.lookback_days, agency=args.agency)
     route_ids = list_active_route_ids(agency=args.agency)
 
     with log_path.open("a") as log_handle:
@@ -867,6 +914,7 @@ def main() -> int:
             dry_run=args.dry_run,
             agency=args.agency,
             guard_skipped=guard_skipped,
+            housekeeping=not args.skip_housekeeping,
         )
         skipped_str = ",".join(d.isoformat() for d in sorted(guard_skipped)) or "none"
 

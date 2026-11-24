@@ -6,6 +6,7 @@ loader function that consumes this manifest for idempotency.
 
 from datetime import datetime
 
+import pytest
 import zstandard as zstd
 
 from src.models import VpArchiveLoadedFile
@@ -338,3 +339,144 @@ def test_main_continues_past_a_failing_file(db_session, tmp_path, monkeypatch):
 
     assert db_session.query(VehiclePosition).count() == 1
     assert good_path.exists() and bad_path.exists()
+
+
+# --- issue #261: UTC-day-scoped (re)loading -----------------------------------
+
+RELOAD_DAY = datetime(2031, 3, 5).date()  # far from any other test's rows
+
+
+def _write_day_files(dirpath, n_files=2, per_file=3):
+    """Write ``n_files`` VP archive files for RELOAD_DAY, ``per_file`` vehicles each.
+
+    Each file gets a distinct collected_at hour and a distinct writer
+    (so a distinct open-epoch filename); ``timestamp`` is omitted so the
+    loader falls back to collected_at (no guard interaction).
+    """
+    from src.archive_writer import JsonlArchiveWriter
+    from src.stateless_poller import archive_vp_rows
+
+    paths = []
+    for f in range(n_files):
+        vehicles = [
+            dict(VEHICLE, vehicle_id=f"v{f}-{i}", timestamp=None, trip_start_date="20310305")
+            for i in range(per_file)
+        ]
+        w = JsonlArchiveWriter(dirpath)
+        w._pid = 1000 + f  # distinct filename per file
+        archive_vp_rows(w, vehicles, collected_at=datetime(2031, 3, 5, 10 + f, 0, 0))
+        paths.append(w.close())
+    return paths
+
+
+def _day_state(session):
+    """(rows on RELOAD_DAY, manifest rows for RELOAD_DAY, manifest row_count sum)."""
+    from pipelines.load_vp_archive import day_row_count, manifested_day
+
+    manifest = manifested_day(session, RELOAD_DAY)
+    return day_row_count(session, RELOAD_DAY), len(manifest), sum(manifest.values())
+
+
+@pytest.mark.integration
+def test_scoped_load_then_reload_never_duplicates(pg_session, tmp_path):
+    """Loading a day twice, or force-reloading it, leaves exactly one copy of each row."""
+    from pipelines.load_vp_archive import load_utc_days
+
+    _write_day_files(tmp_path)
+    assert load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False) == []
+    assert _day_state(pg_session) == (6, 2, 6)
+
+    assert load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False) == []
+    assert _day_state(pg_session) == (6, 2, 6)
+
+    assert load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=True) == []
+    assert _day_state(pg_session) == (6, 2, 6)
+
+
+@pytest.mark.integration
+def test_pruned_day_is_reloaded_from_its_files(pg_session, tmp_path):
+    """Rows deleted after loading (retention) come back on a scoped load, manifest intact."""
+    from sqlalchemy import delete
+
+    from pipelines.load_vp_archive import load_utc_days
+    from src.models import VehiclePosition
+
+    _write_day_files(tmp_path)
+    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+
+    # Partial prune (as a timestamp-cutoff retention could do mid-day) ...
+    pg_session.execute(delete(VehiclePosition).where(VehiclePosition.vehicle_id == "v0-0"))
+    pg_session.commit()
+    assert _day_state(pg_session) == (5, 2, 6)
+    assert load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False) == []
+    assert _day_state(pg_session) == (6, 2, 6)
+
+    # ... and a full prune.
+    pg_session.execute(delete(VehiclePosition).where(VehiclePosition.trip_start_date == "20310305"))
+    pg_session.commit()
+    assert load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False) == []
+    assert _day_state(pg_session) == (6, 2, 6)
+
+
+@pytest.mark.integration
+def test_new_file_for_intact_day_loads_incrementally(pg_session, tmp_path):
+    """A day whose rows are intact only loads its not-yet-manifested files."""
+    from pipelines.load_vp_archive import load_utc_days
+
+    first, second = _write_day_files(tmp_path)
+    second.rename(tmp_path.parent / second.name)  # second file "not synced yet"
+    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    assert _day_state(pg_session) == (3, 1, 3)
+    (tmp_path.parent / second.name).rename(second)
+    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    assert _day_state(pg_session) == (6, 2, 6)
+
+
+@pytest.mark.integration
+def test_reload_refuses_when_a_manifested_file_is_missing(pg_session, tmp_path):
+    """A needed full-day reload with a manifested file absent changes nothing."""
+    from sqlalchemy import delete
+
+    from pipelines.load_vp_archive import load_utc_days
+    from src.models import VehiclePosition
+
+    first, second = _write_day_files(tmp_path)
+    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    pg_session.execute(delete(VehiclePosition).where(VehiclePosition.vehicle_id == "v1-0"))
+    pg_session.commit()
+    second.unlink()
+    failures = load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    assert len(failures) == 1 and "not local" in failures[0]
+    assert _day_state(pg_session) == (5, 2, 6)
+
+
+@pytest.mark.integration
+def test_rows_of_unknown_provenance_block_reload_and_load(pg_session, tmp_path):
+    """More rows than the manifest accounts for → refuse to delete or add anything."""
+    from pipelines.load_vp_archive import load_utc_days
+    from src.models import VehiclePosition
+
+    _write_day_files(tmp_path)
+    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    pg_session.add(
+        VehiclePosition(
+            vehicle_id="legacy",
+            latitude=1.0,
+            longitude=1.0,
+            timestamp=datetime(2031, 3, 5, 12),
+            collected_at=datetime(2031, 3, 5, 12),
+        )
+    )
+    pg_session.commit()
+    for force in (False, True):
+        failures = load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=force)
+        assert len(failures) == 1 and "unknown provenance" in failures[0]
+        assert _day_state(pg_session) == (7, 2, 6)
+
+
+def test_main_force_requires_utc_date():
+    """--force without --utc-date is a usage error (reloads are whole UTC days)."""
+    import pipelines.load_vp_archive as mod
+
+    with pytest.raises(SystemExit):
+        mod.main(["--agency", "wmata", "--force"])

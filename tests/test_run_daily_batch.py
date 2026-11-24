@@ -276,3 +276,86 @@ def test_run_batch_runs_housekeeping_for_default_agency(tmp_path, monkeypatch):
 
     run_modules = {cmd[2] for cmd in captured_cmds}
     assert "pipelines.cleanup_trip_update_state" in run_modules
+
+
+def _capture_subprocess(monkeypatch):
+    """Patch run_daily_batch's subprocess.run to record commands and succeed."""
+    import pipelines.run_daily_batch as run_daily_batch_module
+
+    captured_cmds = []
+
+    class _FakeCompletedProcess:
+        returncode = 0
+
+    def _fake_subprocess_run(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(run_daily_batch_module.subprocess, "run", _fake_subprocess_run)
+    return captured_cmds
+
+
+def test_run_batch_skip_housekeeping_runs_only_per_date_pipelines(tmp_path, monkeypatch):
+    """housekeeping=False (CLI --skip-housekeeping, issue #261) runs no housekeeping module."""
+    from pipelines.run_daily_batch import HOUSEKEEPING_PIPELINES, run_batch
+
+    captured_cmds = _capture_subprocess(monkeypatch)
+    with (tmp_path / "test.log").open("a") as log_handle:
+        rc = run_batch(
+            [date(2026, 10, 3)],
+            log_handle,
+            snapshot_resolver=lambda d: None,
+            match_guard=lambda d, c: None,
+            housekeeping=False,
+        )
+    assert rc == 0
+    run_modules = {cmd[2] for cmd in captured_cmds}
+    assert "pipelines.derive_stop_events_from_state" in run_modules
+    assert not run_modules & {hk["module"] for hk in HOUSEKEEPING_PIPELINES}
+    assert all("2026-10-03" in cmd for cmd in captured_cmds)
+
+
+def test_run_batch_with_no_dates_is_housekeeping_only(tmp_path, monkeypatch):
+    """An empty target list (CLI --housekeeping-only) runs exactly the housekeeping modules."""
+    from pipelines.run_daily_batch import HOUSEKEEPING_PIPELINES, run_batch
+
+    captured_cmds = _capture_subprocess(monkeypatch)
+    with (tmp_path / "test.log").open("a") as log_handle:
+        run_batch([], log_handle, snapshot_resolver=lambda d: None, match_guard=lambda d, c: None)
+    assert [cmd[2] for cmd in captured_cmds] == [hk["module"] for hk in HOUSEKEEPING_PIPELINES]
+
+
+def test_main_explicit_dates_bypass_determine_target_dates(tmp_path, monkeypatch):
+    """--date D (repeatable) targets exactly those dates; --skip-housekeeping is forwarded."""
+    import pipelines.run_daily_batch as mod
+
+    seen = {}
+
+    def _fake_run_batch(target_dates, log_handle, **kwargs):
+        """Record what main() asked run_batch to do."""
+        seen["dates"] = target_dates
+        seen["housekeeping"] = kwargs.get("housekeeping")
+        return 0
+
+    def _no_determine(**kwargs):
+        """Fail if main() falls back to the default date selection."""
+        raise AssertionError("determine_target_dates must not run with --date")
+
+    monkeypatch.setattr(mod, "determine_target_dates", _no_determine)
+    monkeypatch.setattr(mod, "list_active_route_ids", lambda agency: ["R"])
+    monkeypatch.setattr(mod, "run_batch", _fake_run_batch)
+    monkeypatch.setattr(mod, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(
+        mod.sys,
+        "argv",
+        [
+            "run_daily_batch.py",
+            "--date",
+            "2026-10-04",
+            "--date",
+            "2026-10-03",
+            "--skip-housekeeping",
+        ],
+    )
+    assert mod.main() == 0
+    assert seen == {"dates": [date(2026, 10, 3), date(2026, 10, 4)], "housekeeping": False}

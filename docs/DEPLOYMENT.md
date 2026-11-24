@@ -18,21 +18,21 @@ are in the spec §5 runbook.
 > 15-minute cadence — no database anywhere on that box. §13 below is the
 > live runbook for it. **The laptop's local PostgreSQL 16
 > (`wmata_dashboard`) is the system of record**; freshness is
-> `bin/pull-and-derive.sh`, which `aws s3 sync`s the four raw prefixes
-> under `s3://wmata-dashboard-backups/raw-jsonl-archive/` straight to the
-> laptop, loads VP archives (`pipelines/load_vp_archive.py`), replays TU
-> archives, derives, and — the script's only destructive step — prunes
-> SFMTA's `trip_update_state` retention window
-> (`pipelines/cleanup_trip_update_state.py --agency sfmta`, gated to run
-> only after a successful SFMTA derive) — no SSH tunnel, no VM access,
-> no manual S3 sync step required. `s3://wmata-dashboard-backups/raw-jsonl-archive/` is the
-> permanent raw store, written directly by the collector rather than
-> synced up after the fact. Before deriving, the script also reloads
-> each agency's static GTFS if stale (`scripts/run_gtfs_reload.py
-> --max-age-days 7`) and runs a post-replay trip_id match-rate canary
-> (`scripts/gtfs_trip_match_canary.py`) that catches a service change
-> landing while the age gate still calls the snapshot "fresh" — see
-> §12.1 for the gate/canary detail and the recovery procedure.
+> `bin/pull-and-derive.sh`, which processes one service date at a time
+> (§12.3): fetch just that date's files from the four raw prefixes under
+> `s3://wmata-dashboard-backups/raw-jsonl-archive/`, load VP
+> (`pipelines/load_vp_archive.py`), replay TU, derive, then delete the
+> local raw files no later date needs once each is verified in S3 — no
+> SSH tunnel, no VM access, no manual S3 sync step required.
+> `s3://wmata-dashboard-backups/raw-jsonl-archive/` is the permanent raw
+> store, written directly by the collector rather than synced up after
+> the fact; the laptop holds only a couple of days of raw files at a time.
+> Before deriving, the script reloads each agency's static GTFS if stale
+> (`scripts/run_gtfs_reload.py --max-age-days 7`), and every derived date
+> passes `run_daily_batch.py`'s per-date trip_id match-rate guard, which
+> catches a service change landing while the age gate still calls the
+> snapshot "fresh" — see §12.1 for the gate/guard detail and the recovery
+> procedure.
 >
 > §1–§11 below document the outgoing `wmata-data` Lightsail VM (Phase 1)
 > that the nano box replaces. That VM is scheduled for decommission (O3,
@@ -902,10 +902,20 @@ rm ~/Library/LaunchAgents/com.wmata-dashboard.pull-and-derive.plist
 re-bootstrap (same three steps as Install, preceded by Uninstall's
 `launchctl bootout`).
 
-### 12.1 GTFS reload gate + trip_id match-rate canary — how it works, and recovery
+### 12.1 GTFS reload gate + trip_id match-rate guard — how it works, and recovery
 
-`bin/pull-and-derive.sh` runs two checks per agency (WMATA and SFMTA)
-before it derives:
+> **Since issue #261** `bin/pull-and-derive.sh` no longer runs the
+> separate canary (item 2 below): every date it derives goes through
+> `run_daily_batch.py --date D`, whose per-date match-rate guard (the
+> "Per-date GTFS snapshot" paragraph below) performs the same check on
+> *every* date against that date's own resolved snapshot. A held date is
+> reported as `held` by the per-day refresh, the run continues, and it
+> exits 3. `scripts/gtfs_trip_match_canary.py` still works by hand, and
+> `GTFS_CANARY_SKIP` is gone. The canary text below is kept as the
+> description of that script.
+
+`bin/pull-and-derive.sh` ran two checks per agency (WMATA and SFMTA)
+before it derived:
 
 1. **Age gate** (`scripts/run_gtfs_reload.py --max-age-days 7`) — reloads
    an agency's static GTFS if the newest loaded snapshot is more than 7
@@ -1020,11 +1030,12 @@ date's *own* resolved schedule doesn't know the feed's trip_ids, the
    without this, a near-zero derive still writes `runs` rows, which
    blocks `run_daily_batch.py`'s auto-revisit — the shape that
    required the manual SFMTA 8/9–8/10 top-up (PR #227).
-3. Re-derive: rerun `bin/pull-and-derive.sh` (both agencies), or target
-   just one agency directly with
-   `pipelines/run_daily_batch.py [--agency sfmta] --lookback-days N` /
-   `pipelines/derive_stop_events_from_state.py --all-routes --date D
-   [--agency sfmta]`.
+3. Re-derive: `bin/pull-and-derive.sh --agency <agency> --date D`
+   (add `--force` if the date is already `done` in
+   `logs/refresh_progress_<agency>.json` — that also forces the replay,
+   and re-fetches the date's raw files from S3 if they were pruned).
+   A plain rerun of `bin/pull-and-derive.sh` also retries a `held` date
+   inside the 14-day lookback.
 
 ---
 
@@ -1067,6 +1078,73 @@ uv run python scripts/migrate_create_tu_archive_replayed_files.py --agency sfmta
 The first run after the migration re-folds the lookback window once to
 seed the manifest. `bin/refresh-dev-db.sh` TOC-excludes the manifest
 alongside `trip_update_state` so a scratch restore can still replay.
+
+### 12.3 Day-at-a-time refresh + local raw-archive prune (issue #261)
+
+The laptop can't hold the raw archive (WMATA TU alone is ~1.3 GB/day;
+all four prefixes ~1.7 GB/day), so `bin/pull-and-derive.sh` runs
+`pipelines/refresh_by_day.py`, which processes **one service date at a
+time, oldest first, agencies interleaved**:
+
+| Step | What | Files / command |
+|---|---|---|
+| fetch | only that date's raw files from S3 (size + ETag verified, `.part` then rename) | TU: UTC D, D+1 (replay's primary + supplement). VP: UTC D..D+2 (the derive's VP window, local midnight D → local midnight D+2, widened by the loader's 30-min timestamp guard) |
+| load VP | per UTC day; a day whose rows were pruned is reloaded whole | `load_vp_archive.py --utc-date U ...` |
+| replay | TU for D (SFMTA `--allow-empty`) | `replay_archive_to_state.py --date D` |
+| derive | per-date chain, no housekeeping | `run_daily_batch.py --date D --skip-housekeeping` |
+| prune | local files dated before the next date's first needed UTC day, only if S3-identical + manifested | `src/raw_archive.py:prune_stream` |
+
+After the last date: WMATA housekeeping once (`run_daily_batch.py
+--housekeeping-only`, ~1.5 h — the diagnostic-profile refresh; also
+WMATA's `trip_update_state` cleanup) unless `--skip-housekeeping`, and
+SFMTA's `cleanup_trip_update_state.py --agency sfmta` once unless an
+SFMTA date failed. Nothing prunes `trip_update_state` between dates, so
+a weeks-old date's replayed state survives until its own derive has
+finished even though cleanup's cutoff (local today − 7) is far past it.
+
+**Which dates.** Default, per agency: the day after `max(runs.service_date)`
+through agency-local yesterday, plus zero-`runs` dates in the last
+`--lookback-days` (default 14). Or `--start A --end B` / `--date D`
+(repeatable). `--dry-run` prints the plan and the UTC files each date
+needs. Dates before 2026-06-14 are refused.
+
+**Resume / failure.** `logs/refresh_progress_<agency>.json` records each
+date (`done`, `held`, `failed`, or `derived` = derive committed, prune
+pending). A rerun skips `done` dates and resumes at the first unfinished
+one (`--force` re-does `done` dates and forces the replay). A hard
+failure (fetch, VP load, replay, derive exit 1, or free disk below
+`--min-free-gb`, default 15) **stops that agency** — the other continues
+— and keeps the failed date's raw files; a failure is almost always
+systemic, so carrying on would fail and re-download N more times. A
+`held` date (match-rate guard, exit 3) is reported and the run
+continues; its files are pruned (S3 has them) and it is retried on later
+runs.
+
+**Disk.** Peak raw-file footprint ≈ 2 UTC days of TU + 3 of VP per
+agency: ~2.9 GB WMATA + ~0.9 GB SFMTA (from the 2026-09-29→11-24 S3
+listings: WMATA TU max 1.44 GB/day, SFMTA TU max 0.42 GB/day, VP
+0.04/0.01 GB/day). The DB still grows by each date's VP +
+`trip_update_state` + derived rows.
+
+**Pruning an existing local archive.** `scripts/prune_local_archive.py`
+(dry run by default; `--apply` deletes) applies the same rule to the
+whole local archive with "needed" = dated after the agency's latest
+`runs.service_date`. It prints per-directory counts/bytes and every
+refusal (missing from S3, size or checksum mismatch, not in the
+manifest, unrecognized name). Directories that aren't one of the four
+streams — `archive/trip_update_snapshots/` (the retired May 2026
+`trip_update_snapshots` parquet export, no S3 copy) — are listed and
+never touched.
+
+**VP reload idempotency.** `vehicle_positions` has no natural unique key,
+so the manifest is what stops duplicates. `--utc-date U` compares the
+rows with `collected_at` on U against the manifest's row counts for
+files `U.*` (files are named by each row's `collected_at` UTC date, so
+the two describe the same set): equal → load only new files; fewer
+(retention pruned some) or `--force` → delete U's rows and manifest rows
+and re-insert every `U.*` file in one transaction; more → refuse (rows
+of unknown provenance). A reload also refuses if any manifested `U.*`
+file is not local.
 
 ## 13. Stateless collector (nano) — live topology
 

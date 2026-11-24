@@ -7,8 +7,10 @@ Postgres backend, React/Vite frontend. **The laptop's local PostgreSQL
 collector polls WMATA + SFMTA GTFS-RT and uploads raw JSONL to S3 (no
 database on the collector box). API + frontend run locally against the
 local DB. Freshness is on demand: run `bin/pull-and-derive.sh` by hand
-(syncs the S3 archives, loads + replays, derives, then prunes SFMTA's
-trip_update_state retention window — no tunnel or VM access needed).
+— one service date at a time it fetches just that date's raw files from
+S3, loads VP, replays, derives, and deletes the local raw files once
+verified in S3 (`pipelines/refresh_by_day.py`; the laptop keeps no raw
+archive, S3 is the raw store; no tunnel or VM access needed).
 The nightly launchd wrapper/plist from PR #259 (`deployment/launchd/`,
 `docs/DEPLOYMENT.md` §12) still exist but are not deployed and not the
 intended mode (#260 closed as not planned). Topology/ops detail: `docs/DEPLOYMENT.md`.
@@ -48,7 +50,8 @@ Every open issue either serves this or is explicitly parked
 uv sync --extra dev                          # install (psycopg2 is core; --extra viz for matplotlib scripts)
 uv run uvicorn api.main:app --reload         # API on :8000
 cd frontend && npm run dev                   # frontend on :5173
-bin/pull-and-derive.sh                       # freshness: sync S3 raw archives + load + replay + derive + prune SFMTA trip_update_state locally
+bin/pull-and-derive.sh                       # freshness: per date fetch raw from S3 + load VP + replay + derive + prune local raw (--start/--end, --date, --dry-run)
+uv run python scripts/prune_local_archive.py # dry run: which local raw files are S3-verified + processed (--apply deletes)
 uv run python pipelines/run_daily_batch.py   # derive + aggregate + rollup (--agency sfmta for Muni)
 psql -d wmata_dashboard                      # ad-hoc queries (Muni sidecar DB: sfmta_dashboard)
 uv run pytest -m smoke                       # fast tests
