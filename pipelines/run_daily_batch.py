@@ -389,6 +389,34 @@ IS_CURRENT_FALLBACK_REASON = "is_current_after_resolution_error"
 # dates held back" — see `main`.
 EXIT_GUARD_SKIPS_ONLY = 3
 
+# run_daily_batch.py exit code when every pipeline succeeded and nothing was
+# held back, but the match-rate guard itself could not run for >=1 date
+# (that date was derived unchecked). The per-day refresh reports it the way
+# the retired canary's rc=2 was reported.
+EXIT_GUARD_ERROR = 4
+
+
+def make_has_runs(agency: str = DEFAULT_AGENCY) -> Callable[[date_type], bool]:
+    """Build a ``service_date -> bool`` "does this date have any runs rows" lookup.
+
+    Used by `run_batch` to refuse aggregating a day-shifted, non-target
+    date that was never derived on its own (see its docstring).
+    """
+    cfg = load_agency_config(agency)
+
+    def _has_runs(service_date: date_type) -> bool:
+        """True when ``runs`` holds at least one row for ``service_date``."""
+        db = get_session(db_url=resolve_agency_db_url(cfg))
+        try:
+            return (
+                db.query(Run.id).filter(Run.service_date == service_date.isoformat()).first()
+                is not None
+            )
+        finally:
+            db.close()
+
+    return _has_runs
+
 
 def make_match_guard(
     agency: str = DEFAULT_AGENCY,
@@ -539,6 +567,9 @@ def run_batch(
     match_guard: Callable[[date_type, SnapshotChoice | None], TripMatchResult | None] | None = None,
     guard_skipped: set[date_type] | None = None,
     housekeeping: bool = True,
+    exclude_dates: set[date_type] | None = None,
+    has_runs: Callable[[date_type], bool] | None = None,
+    guard_errors: set[date_type] | None = None,
 ) -> int:
     """Drive all per-date pipelines across every (pipeline, target_date) cell.
 
@@ -562,8 +593,25 @@ def run_batch(
     returned failure count; they are added to ``guard_skipped`` (when the
     caller passes a set) so `main` can report them separately, and they are
     excluded from Phase 2 even if another date's derive reports writing
-    rows under them (owl correction onto N-1). A guard error is logged and the date
-    proceeds. Not run under ``dry_run``.
+    rows under them (owl correction onto N-1). A guard error is logged, the
+    date proceeds, and the date is added to ``guard_errors`` (when passed) so
+    `main` can exit 4 instead of 0. Not run under ``dry_run``.
+
+    Cross-invocation protection (PR #264 review): ``guard_skipped`` only
+    knows about dates held in *this* invocation, but the day-at-a-time
+    refresh calls this once per date — so a date held (or failed) by an
+    earlier call would be aggregated from the handful of owl-corrected rows
+    the next date's derive writes under it. Two rules close that, both for
+    dates that are NOT targets of this call (a day-shifted date):
+
+    - ``exclude_dates`` (CLI ``--exclude-date``; the refresh passes every
+      date its progress file has as held/failed) are never derived or
+      aggregated;
+    - a non-target date with no ``runs`` rows of its own (``has_runs``,
+      default a DB lookup; skipped under ``dry_run``) is not aggregated —
+      it was never derived (held, failed before aggregate_runs, or simply
+      not reached yet), and its owl-corrected stop_events stay in place for
+      when it is derived as a target itself.
 
     Returns the number of (pipeline, date) combinations that failed —
     callers turn a non-zero into a non-zero process exit so launchd can
@@ -643,6 +691,8 @@ def run_batch(
                 "— deriving anyway\n"
             )
             log_handle.flush()
+            if guard_errors is not None:
+                guard_errors.add(service_date)
             return False
         if result is None or result.rate is None:
             return False
@@ -658,10 +708,15 @@ def run_batch(
     # full set of service dates (target dates plus any day-shifted dates)
     # before any aggregation runs.
     all_service_dates: set[date_type] = set(target_dates)
-    skipped_dates: set[date_type] = set()
+    excluded = set(exclude_dates or ())
+    skipped_dates: set[date_type] = set(excluded)
     for service_date in target_dates:
         log_handle.write(f"\n=== derive: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
+        if service_date in excluded:
+            log_handle.write(f"SKIP all pipelines for {service_date.isoformat()} — excluded\n")
+            log_handle.flush()
+            continue
         if _collapsed(service_date):
             log_handle.write(
                 f"SKIP all pipelines for {service_date.isoformat()} — observed trip_ids "
@@ -711,7 +766,37 @@ def run_batch(
     # A guard-skipped date stays skipped even if a later date's derive wrote a
     # day-shifted row under it: aggregating it from that handful of trips
     # would write exactly the near-empty day the guard exists to prevent.
+    if has_runs is None and not dry_run:
+        has_runs = make_has_runs(agency)
+    target_set = set(target_dates)
+    for d in sorted(all_service_dates & excluded - target_set):
+        log_handle.write(
+            f"\nSKIP aggregate for {d.isoformat()} — day-shifted rows landed under an "
+            "excluded (held/failed) date; it is aggregated only when derived as a target\n"
+        )
+
+    def _shifted_date_unaggregatable(service_date: date_type) -> bool:
+        """True for a non-target date with no runs of its own (lookup errors count as True)."""
+        if service_date in target_set or has_runs is None:
+            return False
+        try:
+            return not has_runs(service_date)
+        except Exception as exc:
+            log_handle.write(
+                f"WARN has_runs: lookup failed for {service_date.isoformat()} ({exc!r}) — "
+                "not aggregating that day-shifted date\n"
+            )
+            return True
+
     for service_date in sorted(all_service_dates - skipped_dates):
+        if _shifted_date_unaggregatable(service_date):
+            log_handle.write(
+                f"\nSKIP aggregate for {service_date.isoformat()} — not a target of this "
+                "batch and has no runs of its own (never derived, held, or failed); its "
+                "day-shifted stop_events wait for its own derive\n"
+            )
+            log_handle.flush()
+            continue
         log_handle.write(f"\n=== aggregate: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
         for pipeline in downstream_pipelines:
@@ -871,9 +956,26 @@ def main() -> int:
         action="store_true",
         help="Run only HOUSEKEEPING_PIPELINES (default agency only), no per-date pipelines.",
     )
+    parser.add_argument(
+        "--exclude-date",
+        action="append",
+        type=date_type.fromisoformat,
+        default=None,
+        help=(
+            "Never derive or aggregate this date (repeatable) — the per-day refresh "
+            "passes its held/failed dates so a neighbour's owl-corrected rows can't "
+            "aggregate them."
+        ),
+    )
     args = parser.parse_args()
     if args.housekeeping_only and (args.date or args.skip_housekeeping):
         parser.error("--housekeeping-only cannot be combined with --date or --skip-housekeeping")
+    if args.housekeeping_only and args.agency != DEFAULT_AGENCY:
+        parser.error(
+            f"--housekeeping-only runs only for the default agency ({DEFAULT_AGENCY}); its "
+            "housekeeping modules are not agency-aware. For "
+            f"{args.agency}, run `pipelines/cleanup_trip_update_state.py --agency {args.agency}`."
+        )
 
     load_dotenv()
     LOGS_DIR.mkdir(exist_ok=True)
@@ -908,6 +1010,7 @@ def main() -> int:
         print(f"run_daily_batch: target_dates={[d.isoformat() for d in target_dates]}")
 
         guard_skipped: set[date_type] = set()
+        guard_errors: set[date_type] = set()
         failure_count = run_batch(
             target_dates,
             log_handle,
@@ -915,8 +1018,11 @@ def main() -> int:
             agency=args.agency,
             guard_skipped=guard_skipped,
             housekeeping=not args.skip_housekeeping,
+            exclude_dates=set(args.exclude_date or ()),
+            guard_errors=guard_errors,
         )
         skipped_str = ",".join(d.isoformat() for d in sorted(guard_skipped)) or "none"
+        errors_str = ",".join(d.isoformat() for d in sorted(guard_errors)) or "none"
 
         log_handle.write(
             f"\n========== run_daily_batch done — "
@@ -926,6 +1032,9 @@ def main() -> int:
 
     print(f"run_daily_batch: {failure_count} (pipeline, date) failures")
     print(f"run_daily_batch: guard-skipped dates (match-rate collapse, not derived): {skipped_str}")
+    print(
+        f"run_daily_batch: guard-error dates (check could not run, derived unchecked): {errors_str}"
+    )
     # Exit codes: 0 clean; 1 any pipeline failure; EXIT_GUARD_SKIPS_ONLY (3)
     # when every pipeline that ran succeeded but >=1 date was held back by
     # the match-rate guard. The distinct code lets bin/pull-and-derive.sh
@@ -936,6 +1045,8 @@ def main() -> int:
         return 1
     if guard_skipped:
         return EXIT_GUARD_SKIPS_ONLY
+    if guard_errors:
+        return EXIT_GUARD_ERROR
     return 0
 
 

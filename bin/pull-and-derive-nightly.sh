@@ -18,14 +18,9 @@
 #      job at all — see the plist's StandardOutPath comment — but the
 #      wrapper also creates it defensively for a manual invocation from
 #      a fresh clone).
-#   3. Take an exclusive lock so a launchd catch-up-on-wake fire can't
-#      run concurrently with a manual `bin/pull-and-derive.sh` invocation
-#      (or a second late catch-up fire) — see the lock block below.
-#      NOTE: only THIS wrapper takes the lock; running
-#      bin/pull-and-derive.sh directly does not, by design (it has to
-#      stay usable standalone, matching its existing manual-invocation
-#      contract) — don't run it directly while the nightly job might
-#      fire, or take the same lock yourself first.
+#   3. Skip cleanly (exit 0) when another refresh holds the lock:
+#      bin/pull-and-derive.sh takes logs/.pull-and-derive.lock.d itself
+#      (issue #261, manual runs included) and exits 75 when it can't.
 #   4. Source .env if present, so DATABASE_URL / SFMTA_DATABASE_URL / AWS
 #      credentials are available the same way an interactive `uv run`
 #      invocation picks them up (launchd does not source shell rc files).
@@ -47,23 +42,11 @@ mkdir -p logs
 # Single-instance guard (review finding, PR #259): a launchd catch-up
 # fire (a sleeping laptop woken after a missed 06:30) can otherwise land
 # in the middle of a manual bin/pull-and-derive.sh run, or overlap a
-# second catch-up fire, and two concurrent replay/derive passes racing
-# against the same DB is not something either script was written to
-# tolerate. macOS has no flock(1) by default, so prefer it when present
-# (Linux dev boxes / a future container image) and fall back to an
-# atomic `mkdir` lock otherwise.
-LOCK_FILE="logs/.pull-and-derive.lock"
-LOCK_DIR="logs/.pull-and-derive.lock.d"
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"$LOCK_FILE"
-  flock -n 9 || { echo "pull-and-derive-nightly: another pull-and-derive is running (flock) — skipping." >&2; exit 0; }
-else
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "pull-and-derive-nightly: another pull-and-derive is running (lock dir present) — skipping." >&2
-    exit 0
-  fi
-  trap 'rmdir "$LOCK_DIR"' EXIT
-fi
+# second catch-up fire. Since issue #261 bin/pull-and-derive.sh itself
+# takes the lock (logs/.pull-and-derive.lock.d via src/run_lock.py, for
+# manual runs too) and exits 75 when another run holds it; this wrapper
+# no longer locks (taking it here as well would make the script refuse
+# its own wrapper) and just treats 75 as "skip".
 
 if [ -f "$REPO_ROOT/.env" ]; then
   set -a
@@ -76,6 +59,10 @@ echo "== $(date -u +%FT%TZ) pull-and-derive-nightly starting =="
 
 "$REPO_ROOT/bin/pull-and-derive.sh"
 rc=$?
+if [ "$rc" -eq 75 ]; then
+  echo "pull-and-derive-nightly: another pull-and-derive holds the lock — skipping." >&2
+  exit 0
+fi
 
 if [ "$rc" -eq 0 ]; then
   echo "== $(date -u +%FT%TZ) pull-and-derive-nightly succeeded =="

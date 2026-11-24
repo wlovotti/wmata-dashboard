@@ -39,7 +39,8 @@ module answers three questions for the day-at-a-time refresh
    the AWS CLI use — anything else is "unverifiable" and refused), AND
    the file is recorded as processed in its manifest
    (``tu_archive_replayed_files`` / ``vp_archive_loaded_files``), AND its
-   UTC date is not needed by any date still to be processed.
+   UTC date is before the first one the next date to process reads (a
+   later re-derive of an older hole/held date simply re-fetches from S3).
 """
 
 from __future__ import annotations
@@ -287,9 +288,9 @@ class FetchResult:
 def fetch_day_files(s3, stream: ArchiveStream, utc_date: date, log=print) -> FetchResult:
     """Make ``stream.local_dir`` hold every S3 object for ``utc_date``.
 
-    A local file already matching the S3 size is kept as-is (the cheap
-    check; the full checksum runs before anything is pruned). Anything
-    missing or a different size is downloaded to ``<name>.part``, verified
+    A local file already byte-identical to S3 (size AND ETag — a corrupt
+    same-size file must not be replayed) is kept as-is. Anything missing
+    or different is downloaded to ``<name>.part``, verified
     (size + ETag), and atomically renamed into place, so an interrupted
     download never leaves a truncated ``*.jsonl.zst`` for replay or the
     loader to read. A UTC date with no objects (a future date, or an
@@ -307,9 +308,14 @@ def fetch_day_files(s3, stream: ArchiveStream, utc_date: date, log=print) -> Fet
     for name in sorted(objects):
         obj = objects[name]
         dest = stream.local_dir / name
-        if dest.exists() and dest.stat().st_size == obj.size:
-            present.append(name)
-            continue
+        if dest.exists():
+            problem = verify_local_against_s3(dest, obj)
+            if problem is None:
+                present.append(name)
+                continue
+            log(
+                f"  fetch {stream.label} {name}: local copy differs from S3 ({problem}); re-fetching"
+            )
         part = stream.local_dir / f"{name}.part"
         try:
             s3.download_file(stream.bucket, stream.prefix + name, str(part))

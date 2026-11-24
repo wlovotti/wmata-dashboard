@@ -7,61 +7,71 @@ catch-up — processes ONE service date at a time, oldest first, per agency:
 1. **fetch** exactly the raw files that date reads from S3
    (``src/raw_archive.py``: TU UTC D and D+1; VP UTC D..D+2),
 2. **load VP** for those UTC days (``load_vp_archive.py --utc-date``,
-   which reloads a day whose rows were pruned),
+   which reloads a day whose rows were deleted),
 3. **replay** trip updates for D (``replay_archive_to_state.py``),
-4. **derive** D (``run_daily_batch.py --date D --skip-housekeeping``),
-5. **prune** local raw files no later date needs, once each is verified
+4. **derive** D (``run_daily_batch.py --date D --skip-housekeeping
+   --exclude-date <held/failed dates>``),
+5. **clean state**: delete ``trip_update_state`` for service dates before
+   D (``cleanup_trip_update_state.py --before-date D --vacuum``),
+6. **prune** local raw files no later date needs, once each is verified
    byte-identical in S3 and recorded in its manifest.
 
-Peak extra disk is therefore about two UTC days of trip-update files plus
-three of VP per agency (~3 GB WMATA + ~1 GB SFMTA), not the whole window.
+Date selection (default, per agency):
 
-Date selection:
+- every date after the latest ``runs.service_date`` through the latest
+  date whose raw window is COMPLETE (below),
+- zero-``runs`` dates in the last ``--lookback-days`` (default 14),
+- every date the progress file has as ``failed`` or ``derived``
+  (whatever its age — a date can fail after ``aggregate_runs`` wrote
+  runs, which would otherwise hide it from the two rules above), and
+  ``held`` dates inside the lookback window. Older held dates are listed
+  in the plan as "not retried" each run — rerun them with ``--date D``
+  after reloading GTFS.
 
-- default: per agency, every date from the day after the latest
-  ``runs.service_date`` through agency-local yesterday, plus any
-  zero-``runs`` date in the last ``--lookback-days`` (default 14 — the
-  old catch-up net for a held/failed date);
-- ``--start``/``--end`` (inclusive) or ``--date`` (repeatable): exactly
-  those dates.
+``--start``/``--end`` (inclusive) or ``--date`` (repeatable) select exactly
+those dates instead.
 
-Dates are interleaved (D for WMATA, then D for SFMTA, then D+1 ...).
+Complete raw window: a date D is eligible by default only once now is past
+agency-local midnight after D plus ``WINDOW_MARGIN`` — the last scheduled
+arrival of a trip on service day D (current GTFS, measured 2026-11-24:
+WMATA 26:58, SFMTA 30:53 — Muni owl service runs to ~07:00 PT) plus ~1 h
+for lateness, the 15-minute archive rotation and S3 upload. Deriving
+earlier writes runs for a partial day that is then never revisited.
+Deferred dates are printed. An explicit date inside that margin is
+processed with a loud warning.
+
+"Done" means BOTH the progress file says ``done`` AND ``runs`` has rows for
+the date; the DB wins over the file (a done date with zero runs is
+re-processed, a ``derived`` date with no runs is re-run in full, a corrupt
+progress file is set aside with a warning). ``--force`` re-processes done
+dates and forces the replay.
 
 Failure policy: a hard failure (fetch, VP load, replay, or derive exit 1)
-STOPS that agency for the rest of the run — the other agency continues.
-Later dates aren't attempted because (a) a failure is almost always
-systemic (credentials, disk, DB, a broken feed day) so continuing would
-fail and re-download N more times, and (b) stopping keeps "resume" exact:
-the default range restarts at the failed date (it has no runs) and an
-explicit range skips only the dates already ``done``. Its local raw files
-are kept for the retry. A date the pre-derive match-rate guard holds back
-(``run_daily_batch`` exit 3 — its trip_ids match no loaded schedule) is
-reported as ``held`` and the run CONTINUES: retrying won't help until GTFS
-is reloaded, and its raw files are in S3 for that later retry.
+STOPS that agency for the rest of the run — the other agency continues —
+because failures are almost always systemic and stopping keeps resume
+exact (the failed date is re-selected next run). Its local raw files are
+kept. A held date (``run_daily_batch`` exit 3) is reported and the run
+continues. A date whose match-rate guard could not run (exit 4) is derived
+and reported as a warning; the run exits non-zero.
 
-Progress lives in ``logs/refresh_progress_<agency>.json``
-(``derived`` → ``done`` after the prune, or ``held`` / ``failed``), so an
-interrupted run resumes at the first unfinished date and a date derived
-but not yet pruned only re-runs the prune. ``--force`` re-processes
-``done`` dates (and passes ``--force`` to replay, which otherwise treats
-an already-folded date as finished even if its state was pruned).
+trip_update_state: after each derived (or held) date D, state for service
+dates before ``min(D, local today - 7)`` is deleted and the table is
+vacuumed, so a backfill reuses the same space instead of growing a day of
+state per date. D itself survives because D+1's completeness rollup reads
+state polled inside local day D+1, which includes D's owl trips; nothing
+reads older state (derive reads only ``service_date == D``). End of run:
+WMATA housekeeping once (skipped if a WMATA date failed this run, or with
+``--skip-housekeeping``) and SFMTA's 7-day cleanup once (skipped if an
+SFMTA date failed). A date whose state was deleted before it was derived
+self-heals: replay re-folds a date with neither state nor runs.
 
-trip_update_state retention: WMATA's ``cleanup_trip_update_state`` runs
-in ``run_daily_batch`` housekeeping and SFMTA's is a separate call; both
-delete state with ``service_date`` older than local today - 7, which
-covers every backfilled date. Neither runs between dates: per-date
-derives pass ``--skip-housekeeping``, and housekeeping (WMATA) / cleanup
-(SFMTA, skipped if any SFMTA date hard-failed this run) run once, after
-the last date — so a date's replayed state always survives until its own
-derive has finished. A date whose state is pruned before it is derived
-(e.g. after a failure) self-heals on the next run: replay re-folds a date
-with neither state nor runs.
+A non-dry-run holds ``logs/.pull-and-derive.lock.d`` (``src/run_lock.py``).
 
 Usage:
-    uv run python -m pipelines.refresh_by_day                       # catch up to yesterday
+    uv run python -m pipelines.refresh_by_day                       # catch up
     uv run python -m pipelines.refresh_by_day --agency wmata --date 2026-09-29
     uv run python -m pipelines.refresh_by_day --start 2026-09-29 --end 2026-11-23
-    uv run python -m pipelines.refresh_by_day --dry-run             # print the plan only
+    uv run python -m pipelines.refresh_by_day --dry-run             # plan only, writes nothing
 """
 
 from __future__ import annotations
@@ -73,11 +83,12 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src import run_lock
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.raw_archive import (
     ArchiveStream,
@@ -88,7 +99,12 @@ from src.raw_archive import (
     summarize_prune,
     utc_dates_needed,
 )
-from src.timezones import local_today, utcnow_naive
+from src.timezones import (
+    local_date_from_naive_utc,
+    local_midnight_as_utc,
+    local_today,
+    utcnow_naive,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 AGENCIES = ("wmata", "sfmta")
@@ -97,6 +113,10 @@ DEFAULT_LOOKBACK_DAYS = 14
 # (scripts/local_recovery_2026_07.sh); never re-derive them from here.
 DATA_FLOOR = date(2026, 6, 14)
 DEFAULT_MIN_FREE_GB = 15.0
+# Time after agency-local midnight following D before D's raw window is
+# complete: last scheduled arrival (WMATA 26:58 ET, SFMTA 30:53 PT, current
+# GTFS 2026-11-24) + ~1 h lateness/rotation/upload lag, rounded up.
+WINDOW_MARGIN = {"wmata": timedelta(hours=4), "sfmta": timedelta(hours=8)}
 # bin/pull-and-derive.sh's historical local-dir overrides, per (agency, kind).
 DIR_ENV = {
     ("wmata", "tu"): "LOCAL_ARCHIVE",
@@ -114,6 +134,7 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_HELD_ONLY = 3  # same meaning as run_daily_batch's EXIT_GUARD_SKIPS_ONLY
+BATCH_GUARD_ERROR = 4  # run_daily_batch's EXIT_GUARD_ERROR
 
 
 def log(msg: str) -> None:
@@ -126,21 +147,51 @@ class Progress:
 
     ``{"dates": {"2026-10-03": {"status": "done", "at": "...", "detail": ""}}}``.
     Written atomically (temp file + rename) after every status change so a
-    crash never leaves a half-written file.
+    crash never leaves a half-written file. It is a resume hint, never the
+    source of truth — callers check ``runs`` too. An unreadable file is
+    renamed to ``*.corrupt-<ts>`` with a warning and the run starts from
+    the DB alone.
     """
 
-    def __init__(self, path: Path):
-        """Load ``path`` if it exists, else start empty."""
+    def __init__(self, path: Path, read_only: bool = False):
+        """Load ``path`` if it exists and parses, else start empty.
+
+        ``read_only`` (dry runs) leaves an unreadable file where it is.
+        """
         self.path = path
         self.data: dict = {"dates": {}}
         if path.exists():
-            self.data = json.loads(path.read_text())
-            self.data.setdefault("dates", {})
+            try:
+                data = json.loads(path.read_text())
+                if not isinstance(data, dict) or not isinstance(data.get("dates", {}), dict):
+                    raise ValueError("unexpected structure")
+                data.setdefault("dates", {})
+                self.data = data
+            except (OSError, ValueError) as exc:
+                aside = path.with_name(f"{path.name}.corrupt-{utcnow_naive():%Y%m%dT%H%M%S}")
+                log(
+                    f"WARNING: progress file {path} unreadable ({exc}); "
+                    + ("ignoring it" if read_only else f"moved to {aside.name}")
+                    + ", falling back to the DB (runs) alone"
+                )
+                if not read_only:
+                    path.rename(aside)
 
     def status(self, d: date) -> str | None:
         """Return the recorded status for ``d`` (None if never attempted)."""
         entry = self.data["dates"].get(d.isoformat())
-        return entry["status"] if entry else None
+        return entry.get("status") if isinstance(entry, dict) else None
+
+    def dates_with(self, *statuses: str) -> list[date]:
+        """Dates whose recorded status is one of ``statuses``, ascending."""
+        out = []
+        for key, entry in self.data["dates"].items():
+            if isinstance(entry, dict) and entry.get("status") in statuses:
+                try:
+                    out.append(date.fromisoformat(key))
+                except ValueError:
+                    continue
+        return sorted(out)
 
     def record(self, d: date, status: str, detail: str = "") -> None:
         """Set ``d``'s status and persist immediately."""
@@ -157,7 +208,7 @@ class Progress:
 
 @dataclass
 class AgencyRun:
-    """One agency's state for this run: streams, progress file, dates, outcomes."""
+    """One agency's state for this run: streams, progress, dates, runs presence, outcomes."""
 
     name: str
     tz_name: str
@@ -165,7 +216,9 @@ class AgencyRun:
     vp: ArchiveStream
     progress: Progress
     dates: list[date]
+    dates_with_runs: set[date] = field(default_factory=set)
     outcomes: dict[date, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
     stopped: bool = False
 
     @property
@@ -178,6 +231,14 @@ class AgencyRun:
         if not self.dates:
             return None
         return min(min(utc_dates_needed(s, self.dates[0])) for s in self.streams)
+
+    def is_done(self, d: date) -> bool:
+        """Done = progress says done AND runs has rows for ``d`` (the DB wins)."""
+        return self.progress.status(d) == DONE and d in self.dates_with_runs
+
+    def excluded_for(self, d: date) -> list[date]:
+        """Held/failed dates (other than ``d``) a neighbour's derive must not aggregate."""
+        return [x for x in self.progress.dates_with(HELD, FAILED) if x != d]
 
 
 class RealSteps:
@@ -206,9 +267,10 @@ class RealSteps:
     def fetch(self, run: AgencyRun, d: date) -> None:
         """Download the raw files ``d`` reads for both streams (raises on failure).
 
-        Refuses to start when free disk is below ``min_free_gb`` — a weeks-
-        long backfill also grows the DB, and running the disk out mid-write
-        to Postgres is the failure #261 exists to prevent.
+        Refuses to start when free disk is below ``min_free_gb``. That is
+        a coarse floor checked once per date before anything is written —
+        it keeps a backfill from starting a date with the disk nearly
+        full, not from a single date's DB writes overrunning it.
         """
         for stream in run.streams:
             stream.local_dir.mkdir(parents=True, exist_ok=True)
@@ -222,7 +284,7 @@ class RealSteps:
         for stream in run.streams:
             for utc_date in utc_dates_needed(stream, d):
                 if utc_date > utc_today:
-                    continue  # not written yet (yesterday's D+2 VP window)
+                    continue  # not written yet
                 fetch_day_files(self._s3, stream, utc_date, log=log)
 
     def load_vp(self, run: AgencyRun, d: date) -> int:
@@ -260,16 +322,30 @@ class RealSteps:
             args.append("--force")
         return self._run(args)
 
-    def derive(self, run: AgencyRun, d: date) -> int:
-        """Run the per-date pipeline chain for ``d`` only, without housekeeping."""
+    def derive(self, run: AgencyRun, d: date, exclude: list[date]) -> int:
+        """Run the per-date chain for ``d`` only, never aggregating ``exclude`` dates."""
+        args = [
+            "pipelines.run_daily_batch",
+            "--agency",
+            run.name,
+            "--date",
+            d.isoformat(),
+            "--skip-housekeeping",
+        ]
+        for x in exclude:
+            args += ["--exclude-date", x.isoformat()]
+        return self._run(args)
+
+    def clean_state(self, run: AgencyRun, d: date) -> int:
+        """Delete trip_update_state before ``min(d, today - 7)`` and VACUUM the table."""
         return self._run(
             [
-                "pipelines.run_daily_batch",
+                "pipelines.cleanup_trip_update_state",
                 "--agency",
                 run.name,
-                "--date",
+                "--before-date",
                 d.isoformat(),
-                "--skip-housekeeping",
+                "--vacuum",
             ]
         )
 
@@ -299,7 +375,7 @@ class RealSteps:
                 for line in summarize_prune(f"prune {stream.label}", decisions, dry_run=False):
                     log(line)
         except Exception as exc:
-            log(f"prune {run.name}: FAILED ({exc!r}) — files kept, next run retries")
+            log(f"prune {run.name}: FAILED ({exc!r}) — files kept")
         finally:
             session.close()
 
@@ -308,7 +384,7 @@ class RealSteps:
         return self._run(["pipelines.run_daily_batch", "--housekeeping-only"])
 
     def cleanup(self, agency: str) -> int:
-        """Run ``cleanup_trip_update_state`` for a non-default agency."""
+        """Run ``cleanup_trip_update_state`` (7-day window) for a non-default agency."""
         return self._run(["pipelines.cleanup_trip_update_state", "--agency", agency])
 
 
@@ -316,15 +392,18 @@ def process_date(run: AgencyRun, d: date, steps, force: bool) -> str:
     """Run every step for one (agency, date) and return its final status.
 
     Records progress after the derive (``derived``/``held``/``failed``)
-    and again after the prune (``done``). A date already ``derived`` (the
-    previous run died between derive and prune) only re-runs the prune.
+    and again after the prune (``done``). A date already ``derived`` whose
+    runs exist (the previous run died between derive and prune) only
+    re-runs the prune; without runs it is processed from the top.
     """
     label = f"{run.name} {d}"
     if run.progress.status(d) == DERIVED and not force:
-        log(f"== {label}: derived earlier, finishing the prune")
-        steps.prune(run, d)
-        run.progress.record(d, DONE)
-        return DONE
+        if d in run.dates_with_runs:
+            log(f"== {label}: derived earlier, finishing the prune")
+            steps.prune(run, d)
+            run.progress.record(d, DONE)
+            return DONE
+        log(f"== {label}: progress says derived but runs has no rows — processing in full")
 
     log(f"== {label}: fetch")
     try:
@@ -346,21 +425,34 @@ def process_date(run: AgencyRun, d: date, steps, force: bool) -> str:
             return FAILED
 
     log(f"== {label}: derive")
-    rc = steps.derive(run, d)
-    if rc == 0:
+    rc = steps.derive(run, d, run.excluded_for(d))
+    detail = ""
+    if rc in (0, BATCH_GUARD_ERROR):
         status = DERIVED
+        run.dates_with_runs.add(d)
+        if rc == BATCH_GUARD_ERROR:
+            detail = "match-rate guard could not run; derived unchecked"
+            run.warnings.append(f"{d}: {detail}")
+            log(f"== {label}: WARNING {detail}")
     elif rc == EXIT_HELD_ONLY:
         status = HELD
+        detail = "match-rate guard held the date"
     else:
         run.progress.record(d, FAILED, f"derive rc={rc}")
         log(f"== {label}: FAILED at derive (rc={rc})")
         return FAILED
-    run.progress.record(d, status, "" if status == DERIVED else "match-rate guard held the date")
+    run.progress.record(d, status, detail)
+
+    log(f"== {label}: trip_update_state cleanup (before {d})")
+    rc = steps.clean_state(run, d)
+    if rc != 0:
+        run.warnings.append(f"{d}: per-date trip_update_state cleanup rc={rc}")
+        log(f"== {label}: WARNING state cleanup rc={rc} (non-fatal; table grows until it works)")
 
     log(f"== {label}: prune")
     steps.prune(run, d)
     if status == DERIVED:
-        run.progress.record(d, DONE)
+        run.progress.record(d, DONE, detail)
         status = DONE
     log(f"== {label}: {status}")
     return status
@@ -370,15 +462,16 @@ def run_refresh(runs: list[AgencyRun], steps, force: bool, housekeeping: bool) -
     """Process every agency's dates interleaved oldest-first; return the exit code.
 
     Exit codes: 0 everything done; 3 the only problem was held dates;
-    1 any hard failure (date, housekeeping, or cleanup).
+    1 any hard failure, end-of-run housekeeping/cleanup failure, or warning
+    (guard could not run, per-date state cleanup failed).
     """
     all_dates = sorted({d for r in runs for d in r.dates})
     for d in all_dates:
         for run in runs:
             if run.stopped or d not in run.dates:
                 continue
-            if run.progress.status(d) == DONE and not force:
-                log(f"== {run.name} {d}: already done (progress file), skipping")
+            if run.is_done(d) and not force:
+                log(f"== {run.name} {d}: already done (progress + runs), skipping")
                 run.outcomes[d] = DONE
                 continue
             status = process_date(run, d, steps, force)
@@ -395,25 +488,29 @@ def run_refresh(runs: list[AgencyRun], steps, force: bool, housekeeping: bool) -
     for run in runs:
         worked = any(s in (DONE, HELD) for s in run.outcomes.values())
         failed = any(s == FAILED for s in run.outcomes.values())
+        if not worked:
+            continue
+        if failed:
+            log(
+                f"== {run.name}: end-of-run "
+                f"{'housekeeping' if run.name == 'wmata' else 'trip_update_state cleanup'} "
+                "skipped — a date failed this run; its un-derived state is left for the retry"
+            )
+            continue
         if run.name == "wmata":
-            if worked and housekeeping:
+            if housekeeping:
                 log("== wmata: housekeeping (once, after all dates)")
                 if steps.housekeeping() != 0:
                     end_rc = 1
-            elif worked:
+            else:
                 log("== wmata: housekeeping skipped (--skip-housekeeping)")
-        elif worked and not failed:
+        else:
             log(f"== {run.name}: trip_update_state cleanup (once, after all dates)")
             if steps.cleanup(run.name) != 0:
                 end_rc = 1
-        elif failed:
-            log(
-                f"== {run.name}: trip_update_state cleanup skipped — a date failed this run; "
-                "its un-derived state is left for the retry"
-            )
 
     log("== summary")
-    any_failed = any_held = False
+    any_failed = any_held = any_warning = False
     for run in runs:
         counts: dict[str, list[str]] = {}
         for d, s in sorted(run.outcomes.items()):
@@ -424,22 +521,55 @@ def run_refresh(runs: list[AgencyRun], steps, force: bool, housekeeping: bool) -
         for s in (HELD, FAILED):
             if s in counts:
                 log(f"    {s}: {' '.join(counts[s])}")
+        for w in run.warnings:
+            log(f"    WARNING {w}")
         if not_attempted:
             log(
                 f"    not attempted: {not_attempted[0]} .. {not_attempted[-1]} ({len(not_attempted)})"
             )
         any_failed |= FAILED in counts
         any_held |= HELD in counts
-    if any_failed or end_rc:
+        any_warning |= bool(run.warnings)
+    if any_failed or end_rc or any_warning:
         return EXIT_FAILED
     if any_held:
         return EXIT_HELD_ONLY
     return EXIT_OK
 
 
-def default_dates(session, lookback_days: int, today: date) -> list[date]:
-    """Dates after the latest ``runs`` date through yesterday, plus recent zero-runs holes.
+def last_complete_date(tz_name: str, margin: timedelta, now_utc: datetime) -> date:
+    """Latest service date D whose raw window is complete at ``now_utc``.
 
+    Complete = ``now_utc >= local midnight after D (as UTC) + margin``.
+    """
+    d = local_date_from_naive_utc(now_utc, tz_name) - timedelta(days=1)
+    while local_midnight_as_utc(d + timedelta(days=1), tz_name) + margin > now_utc:
+        d -= timedelta(days=1)
+    return d
+
+
+@dataclass
+class DefaultSelection:
+    """Result of the default date selection for one agency."""
+
+    dates: list[date]
+    deferred: list[date]
+    stale_held: list[date]
+
+
+def default_dates(
+    session,
+    lookback_days: int,
+    today: date,
+    last_complete: date | None = None,
+    progress: Progress | None = None,
+) -> DefaultSelection:
+    """Default per-agency dates: after latest runs, recent holes, and unfinished progress.
+
+    ``last_complete`` (default: yesterday) caps every rule; dates after it
+    up to yesterday are returned as ``deferred``. ``progress`` adds its
+    ``failed``/``derived`` dates of any age and ``held`` dates within the
+    lookback window; older held dates come back as ``stale_held``.
     Raises ``RuntimeError`` when ``runs`` is empty (no anchor — pass an
     explicit range instead).
     """
@@ -448,13 +578,14 @@ def default_dates(session, lookback_days: int, today: date) -> list[date]:
     from src.models import Run
 
     yesterday = today - timedelta(days=1)
+    cap = min(last_complete or yesterday, yesterday)
     latest = session.query(func.max(Run.service_date)).scalar()
     if latest is None:
         raise RuntimeError("runs is empty — pass --start/--end or --date explicitly")
     latest_date = date.fromisoformat(latest)
-    dates = set()
+    dates: set[date] = set()
     d = latest_date + timedelta(days=1)
-    while d <= yesterday:
+    while d <= cap:
         dates.add(d)
         d += timedelta(days=1)
     hole_start = max(today - timedelta(days=lookback_days), DATA_FLOOR)
@@ -465,11 +596,42 @@ def default_dates(session, lookback_days: int, today: date) -> list[date]:
         .distinct()
     }
     d = hole_start
-    while d <= min(yesterday, latest_date):
+    while d <= min(cap, latest_date):
         if d.isoformat() not in have_runs:
             dates.add(d)
         d += timedelta(days=1)
-    return sorted(dates)
+    stale_held: list[date] = []
+    if progress is not None:
+        for x in progress.dates_with(FAILED, DERIVED):
+            if DATA_FLOOR <= x <= cap:
+                dates.add(x)
+        for x in progress.dates_with(HELD):
+            if hole_start <= x <= cap:
+                dates.add(x)
+            elif x < hole_start:
+                stale_held.append(x)
+    deferred = []
+    d = cap + timedelta(days=1)
+    while d <= yesterday:
+        deferred.append(d)
+        d += timedelta(days=1)
+    return DefaultSelection(sorted(dates), deferred, stale_held)
+
+
+def runs_dates(session, dates: list[date]) -> set[date]:
+    """Subset of ``dates`` that have at least one ``runs`` row."""
+    from src.models import Run
+
+    if not dates:
+        return set()
+    lo, hi = min(dates).isoformat(), max(dates).isoformat()
+    found = {
+        date.fromisoformat(row[0])
+        for row in session.query(Run.service_date)
+        .filter(Run.service_date >= lo, Run.service_date <= hi)
+        .distinct()
+    }
+    return found & set(dates)
 
 
 def explicit_dates(args) -> list[date] | None:
@@ -502,8 +664,73 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
     p.add_argument("--progress-dir", type=Path, default=REPO_ROOT / "logs")
-    p.add_argument("--dry-run", action="store_true", help="print the per-agency plan and exit")
+    p.add_argument("--dry-run", action="store_true", help="print the plan and exit; writes nothing")
     return p
+
+
+def plan_runs(args, explicit: list[date] | None, now_utc: datetime) -> list[AgencyRun] | int:
+    """Build each selected agency's AgencyRun (or return an exit code on a usage error)."""
+    from src.database import get_session
+
+    agencies = AGENCIES if args.agency == "both" else (args.agency,)
+    runs: list[AgencyRun] = []
+    for name in agencies:
+        cfg = load_agency_config(name)
+        today = local_today(cfg.timezone)
+        complete = last_complete_date(cfg.timezone, WINDOW_MARGIN[name], now_utc)
+        progress = Progress(
+            args.progress_dir / f"refresh_progress_{name}.json", read_only=args.dry_run
+        )
+        session = get_session(db_url=resolve_agency_db_url(cfg))
+        try:
+            if explicit is not None:
+                dates = explicit
+                for d in dates:
+                    if complete < d < today:
+                        log(
+                            f"WARNING ({name}): {d}'s raw window is not complete yet (needs "
+                            f"local midnight after it + {WINDOW_MARGIN[name]}); it will be "
+                            "derived from partial data and marked done — rerun it later with "
+                            "--date --force"
+                        )
+            else:
+                try:
+                    sel = default_dates(session, args.lookback_days, today, complete, progress)
+                except RuntimeError as exc:
+                    print(f"ERROR ({name}): {exc}", file=sys.stderr)
+                    return EXIT_USAGE
+                dates = sel.dates
+                for d in sel.deferred:
+                    log(
+                        f"plan {name}: deferring {d} — raw window completes at local midnight "
+                        f"after it + {WINDOW_MARGIN[name]} (last scheduled arrival + upload lag)"
+                    )
+                if sel.stale_held:
+                    log(
+                        f"plan {name}: held dates older than --lookback-days, NOT retried: "
+                        f"{' '.join(x.isoformat() for x in sel.stale_held)} — reload GTFS, then "
+                        f"`bin/pull-and-derive.sh --agency {name} --date D`"
+                    )
+            too_old = [d for d in dates if d < DATA_FLOOR]
+            too_new = [d for d in dates if d >= today]
+            if too_old or too_new:
+                print(
+                    f"ERROR ({name}): dates must be in [{DATA_FLOOR}, {today - timedelta(days=1)}] "
+                    f"(agency-local yesterday); got {(too_old or too_new)[0]}",
+                    file=sys.stderr,
+                )
+                return EXIT_USAGE
+            with_runs = runs_dates(session, dates)
+        finally:
+            session.close()
+        tu, vp = streams_for_agency(
+            cfg,
+            REPO_ROOT,
+            tu_dir=os.environ.get(DIR_ENV[(name, "tu")]) or None,
+            vp_dir=os.environ.get(DIR_ENV[(name, "vp")]) or None,
+        )
+        runs.append(AgencyRun(name, cfg.timezone, tu, vp, progress, dates, with_runs))
+    return runs
 
 
 def main(argv=None) -> int:
@@ -516,45 +743,13 @@ def main(argv=None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    agencies = AGENCIES if args.agency == "both" else (args.agency,)
-    runs: list[AgencyRun] = []
-    for name in agencies:
-        cfg = load_agency_config(name)
-        today = local_today(cfg.timezone)
-        if explicit is not None:
-            dates = explicit
-        else:
-            from src.database import get_session
-
-            session = get_session(db_url=resolve_agency_db_url(cfg))
-            try:
-                dates = default_dates(session, args.lookback_days, today)
-            except RuntimeError as exc:
-                print(f"ERROR ({name}): {exc}", file=sys.stderr)
-                return EXIT_USAGE
-            finally:
-                session.close()
-        too_old = [d for d in dates if d < DATA_FLOOR]
-        too_new = [d for d in dates if d >= today]
-        if too_old or too_new:
-            print(
-                f"ERROR ({name}): dates must be in [{DATA_FLOOR}, {today - timedelta(days=1)}] "
-                f"(agency-local yesterday); got {(too_old or too_new)[0]}",
-                file=sys.stderr,
-            )
-            return EXIT_USAGE
-        tu, vp = streams_for_agency(
-            cfg,
-            REPO_ROOT,
-            tu_dir=os.environ.get(DIR_ENV[(name, "tu")]) or None,
-            vp_dir=os.environ.get(DIR_ENV[(name, "vp")]) or None,
-        )
-        progress = Progress(args.progress_dir / f"refresh_progress_{name}.json")
-        runs.append(AgencyRun(name, cfg.timezone, tu, vp, progress, dates))
-
+    planned = plan_runs(args, explicit, utcnow_naive())
+    if isinstance(planned, int):
+        return planned
+    runs = planned
     for run in runs:
         span = f"{run.dates[0]} .. {run.dates[-1]}" if run.dates else "none"
-        done = sum(1 for d in run.dates if run.progress.status(d) == DONE)
+        done = sum(1 for d in run.dates if run.is_done(d))
         log(f"plan {run.name}: {len(run.dates)} date(s) {span} ({done} already done)")
     if args.dry_run:
         for run in runs:
@@ -562,11 +757,27 @@ def main(argv=None) -> int:
                 needs = {
                     s.kind: [u.isoformat() for u in utc_dates_needed(s, d)] for s in run.streams
                 }
-                log(f"  {run.name} {d}: status={run.progress.status(d)} needs {needs}")
+                log(
+                    f"  {run.name} {d}: progress={run.progress.status(d)} "
+                    f"runs={'yes' if d in run.dates_with_runs else 'no'} needs {needs}"
+                )
         return EXIT_OK
 
-    steps = RealSteps(min_free_gb=args.min_free_gb)
-    return run_refresh(runs, steps, force=args.force, housekeeping=not args.skip_housekeeping)
+    own_lock = not run_lock.held_by_parent()
+    if own_lock:
+        try:
+            run_lock.acquire(
+                os.getpid(), "pipelines.refresh_by_day " + " ".join(argv or sys.argv[1:])
+            )
+        except run_lock.LockHeldError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return run_lock.EXIT_LOCKED
+    try:
+        steps = RealSteps(min_free_gb=args.min_free_gb)
+        return run_refresh(runs, steps, force=args.force, housekeeping=not args.skip_housekeeping)
+    finally:
+        if own_lock:
+            run_lock.release(os.getpid())
 
 
 if __name__ == "__main__":

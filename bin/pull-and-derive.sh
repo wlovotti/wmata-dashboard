@@ -1,47 +1,43 @@
 #!/usr/bin/env bash
 # bin/pull-and-derive.sh — Path 2a freshness, one service date at a time:
 # reload stale static GTFS, then for each date fetch just that date's raw
-# files from S3, load VP, replay trip updates, derive, and prune the local
-# raw files no later date needs (issue #261). Run on demand.
+# files from S3, load VP, replay trip updates, derive, clean old
+# trip_update_state, and prune the local raw files no later date needs
+# (issue #261). Run on demand.
 #
-#   bin/pull-and-derive.sh                                 # catch up to yesterday (both agencies)
+#   bin/pull-and-derive.sh                                 # catch up (both agencies)
 #   bin/pull-and-derive.sh --start 2026-09-29 --end 2026-11-23
 #   bin/pull-and-derive.sh --agency wmata --date 2026-09-29 --skip-housekeeping
 #   bin/pull-and-derive.sh --date 2026-10-03 --agency sfmta --force   # re-derive a done date
-#   bin/pull-and-derive.sh --dry-run                       # print the plan only
+#   bin/pull-and-derive.sh --dry-run                       # plan only: no reload, no lock, no writes
 #   bin/pull-and-derive.sh 35                              # legacy: = --lookback-days 35
 #
-# Every argument is passed to pipelines/refresh_by_day.py (see its module
-# docstring for the full contract). The default range, per agency, is the
-# day after the latest derived service date (max runs.service_date)
-# through agency-local yesterday, plus any zero-runs date in the last
-# --lookback-days (default 14). Dates run oldest first, interleaved by
-# agency; for each (agency, date):
+# Every argument is passed to pipelines/refresh_by_day.py — its module
+# docstring is the full contract (date selection incl. the raw-window
+# completeness margin, progress file vs DB, failure policy, per-date
+# trip_update_state cleanup). For each (agency, date), oldest first:
 #
-#   1. fetch from S3 only that date's files — trip updates UTC D and D+1
-#      (replay's primary + late-evening supplement), vehicle positions UTC
-#      D..D+2 (the derive's VP window, local midnight D to local midnight
-#      D+2, widened by the loader's 30-min timestamp guard);
-#   2. load VP for those UTC days (pipelines/load_vp_archive.py --utc-date;
-#      a day whose rows were pruned is reloaded whole, atomically);
-#   3. replay trip updates for D (replay_archive_to_state.py; SFMTA keeps
-#      --allow-empty, WMATA stays strict);
-#   4. derive D (run_daily_batch.py --date D --skip-housekeeping; its
-#      per-date GTFS snapshot + match-rate guard from issue #258 apply —
-#      exit 3 marks the date "held" and the run continues);
-#   5. prune local raw files dated before the next date's first needed UTC
-#      date, but only those byte-identical in S3 (size + ETag) and recorded
-#      in tu_archive_replayed_files / vp_archive_loaded_files.
+#   1. fetch from S3 only that date's files — trip updates UTC D and D+1,
+#      vehicle positions UTC D..D+2 — verified by size + ETag;
+#   2. load VP for those UTC days (load_vp_archive.py --utc-date);
+#   3. replay trip updates for D (SFMTA keeps --allow-empty);
+#   4. derive D (run_daily_batch.py --date D --skip-housekeeping
+#      --exclude-date <held/failed dates>); exit 3 = "held", run continues;
+#   5. delete trip_update_state before min(D, today-7) and VACUUM it;
+#   6. prune local raw files dated before the next date's first needed UTC
+#      date, only if byte-identical in S3 and recorded in the manifests.
 #
-# Peak extra disk: ~2 UTC days of TU + 3 of VP per agency (~3 GB WMATA,
-# ~1 GB SFMTA). A hard failure stops that agency at the failed date (the
-# other agency continues); progress is in logs/refresh_progress_<agency>.json
-# so rerunning resumes there. After the last date: WMATA housekeeping once
-# (run_daily_batch.py --housekeeping-only — includes WMATA's
-# trip_update_state cleanup and the ~1.5 h diagnostic refresh; skip with
-# --skip-housekeeping), and SFMTA's cleanup_trip_update_state once unless an
-# SFMTA date failed. Neither runs between dates, so each date's replayed
-# state survives until its own derive is done.
+# After the last date: WMATA housekeeping once (~1.5 h; skipped if a WMATA
+# date failed, or with --skip-housekeeping) and SFMTA's 7-day
+# cleanup_trip_update_state once (skipped if an SFMTA date failed).
+#
+# Single instance: a non-dry run holds logs/.pull-and-derive.lock.d
+# (src/run_lock.py) for the whole run, GTFS reload included; a second run
+# exits 75 naming the holder. bin/pull-and-derive-nightly.sh relies on this
+# lock instead of taking its own.
+#
+# --dry-run writes nothing: it skips the GTFS reload and the lock and only
+# prints the plan. --agency X reloads only X's GTFS.
 #
 # Free-disk floor: a date refuses to start below --min-free-gb (default 15).
 # To clear an already-full local archive: scripts/prune_local_archive.py
@@ -49,8 +45,9 @@
 #
 # The trip_id match-rate canary that used to run here
 # (scripts/gtfs_trip_match_canary.py, still usable by hand) is superseded by
-# run_daily_batch.py's per-date guard, which checks every derived date —
-# not just yesterday — against that date's own resolved GTFS snapshot.
+# run_daily_batch.py's per-date guard, which checks every derived date
+# against that date's own resolved GTFS snapshot (exit 4 = the guard could
+# not run; reported as a warning).
 #
 # Requires: AWS credentials with read access (s3:ListBucket + s3:GetObject)
 # to the four raw-jsonl-archive S3 prefixes (root, sfmta/, vp/, sfmta_vp/),
@@ -77,25 +74,57 @@ if [ "$#" -eq 1 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
   args=(--lookback-days "$1")
 fi
 
-echo "== GTFS reload if stale (>7 days), per agency =="
+dry_run=0
+agency="both"
+prev=""
+for a in ${args[@]+"${args[@]}"}; do
+  case "$a" in
+    --dry-run) dry_run=1 ;;
+    --agency=*) agency="${a#--agency=}" ;;
+  esac
+  if [ "$prev" = "--agency" ]; then agency="$a"; fi
+  prev="$a"
+done
+
+if [ "$dry_run" -eq 1 ]; then
+  echo "== dry run: no GTFS reload, no lock, nothing written =="
+  PYTHONUNBUFFERED=1 uv run python -m pipelines.refresh_by_day ${args[@]+"${args[@]}"}
+  exit $?
+fi
+
+lock_rc=0
+uv run python -m src.run_lock acquire --pid $$ --label "bin/pull-and-derive.sh $*" || lock_rc=$?
+if [ "$lock_rc" -ne 0 ]; then
+  echo "pull-and-derive: could not take the refresh lock (rc=$lock_rc) — see above." >&2
+  exit "$lock_rc"
+fi
+trap 'uv run python -m src.run_lock release --pid $$ >/dev/null 2>&1 || true' EXIT
+export PULL_AND_DERIVE_LOCK_PID=$$
+
+echo "== GTFS reload if stale (>7 days): agency=$agency =="
 # A transient WMATA (or SFMTA) API failure here must not block an
 # otherwise-healthy freshness run — stale-but-valid GTFS is the status quo.
 # Capture each agency's exit code and keep going. A reload landing a feed
 # effective today does not hurt older dates: run_daily_batch.py resolves
 # the GTFS snapshot per service date (issue #258).
 gtfs_rc_wmata=0
-PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --agency wmata --max-age-days 7 || gtfs_rc_wmata=$?
 gtfs_rc_sfmta=0
-PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --agency sfmta --max-age-days 7 || gtfs_rc_sfmta=$?
+if [ "$agency" = "both" ] || [ "$agency" = "wmata" ]; then
+  PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --agency wmata --max-age-days 7 || gtfs_rc_wmata=$?
+fi
+if [ "$agency" = "both" ] || [ "$agency" = "sfmta" ]; then
+  PYTHONUNBUFFERED=1 uv run python scripts/run_gtfs_reload.py --agency sfmta --max-age-days 7 || gtfs_rc_sfmta=$?
+fi
 
-echo "== per-day refresh (fetch → load VP → replay → derive → prune), per agency =="
+echo "== per-day refresh (fetch → load VP → replay → derive → clean state → prune) =="
 refresh_rc=0
 PYTHONUNBUFFERED=1 uv run python -m pipelines.refresh_by_day ${args[@]+"${args[@]}"} || refresh_rc=$?
 
 if [ "$gtfs_rc_wmata" -ne 0 ] || [ "$gtfs_rc_sfmta" -ne 0 ] || [ "$refresh_rc" -ne 0 ]; then
   echo "== summary: step(s) reported errors ==" >&2
   echo "  gtfs_reload wmata rc=$gtfs_rc_wmata sfmta rc=$gtfs_rc_sfmta (a transient API failure just leaves that agency's GTFS stale; rerun to retry)" >&2
-  echo "  refresh rc=$refresh_rc (1 = a date, housekeeping, or cleanup failed — see the refresh summary above;" >&2
+  echo "  refresh rc=$refresh_rc (1 = a date failed, a warning (guard could not run / state cleanup)," >&2
+  echo "  or end-of-run housekeeping/cleanup failed — see the refresh summary above;" >&2
   echo "  3 = only match-rate-held dates: reload that agency's GTFS, then rerun — docs/DEPLOYMENT.md 12.1;" >&2
   echo "  2 = bad arguments). Rerunning resumes at the first unfinished date." >&2
   echo "Done (with errors — see summary above)." >&2

@@ -26,7 +26,15 @@ are named by the UTC date of each row's ``collected_at``
 (``JsonlArchiveWriter``), so "rows with ``collected_at`` on day U" and
 "rows loaded from files ``U.*``" are the same set — provided every row
 came from those files, which the reconcile step checks (DB rows <=
-manifested rows) before it will delete anything.
+manifested rows) before it will delete anything. A day with more rows
+than its manifest (the VM era, through 2026-08-22) is left untouched when
+there is nothing new to load, and refused when there is.
+
+No VP retention runs today ("pruned" above means a future retention PR or
+a manual delete). WARNING for that PR: ``pipelines/archive_vehicle_positions.py``
+partitions by ``DATE(timestamp)``, not ``collected_at`` — a retention cut on
+``timestamp`` splits UTC days differently from these files, which reconcile
+then sees as a partial day and reloads whole (safe, but slower).
 """
 
 import argparse
@@ -286,8 +294,10 @@ def manifested_day(session, utc_date: date) -> dict[str, int]:
     }
 
 
-def reconcile_utc_day(session, utc_date: date, force: bool = False) -> str:
-    """Decide how to load one UTC day: ``"incremental"`` or ``"reload"``.
+def reconcile_utc_day(
+    session, utc_date: date, force: bool = False, local_names: set[str] | None = None
+) -> str:
+    """Decide how to load one UTC day: ``"incremental"``, ``"reload"`` or ``"noop"``.
 
     Compares the rows present for the day (by ``collected_at``) with the
     rows its manifested files inserted (each file's rows and manifest row
@@ -295,19 +305,32 @@ def reconcile_utc_day(session, utc_date: date, force: bool = False) -> str:
 
     - equal (and not ``force``) → ``"incremental"``: everything already
       loaded is still there; load only not-yet-manifested files.
-    - fewer rows than manifested (retention pruned some or all of them),
-      or ``force`` → ``"reload"``: rebuild the whole day from its files.
-    - MORE rows than manifested → :class:`UnknownProvenanceError`, with or
-      without ``force``: rows the manifest can't account for are neither
-      deleted nor loaded on top of.
+    - fewer rows than manifested (something deleted some or all of them —
+      no VP retention runs today, but a later retention PR or a manual
+      delete would), or ``force`` → ``"reload"``: rebuild the whole day.
+    - MORE rows than manifested: rows the manifest can't account for
+      (every day through 2026-08-22 holds rows written straight to the DB
+      by the old VM collector) are never deleted or loaded on top of.
+      Without ``force`` and with no unmanifested file among
+      ``local_names`` there is nothing to do → ``"noop"`` (logged);
+      otherwise :class:`UnknownProvenanceError`.
     """
     present = day_row_count(session, utc_date)
-    manifested = sum(manifested_day(session, utc_date).values())
+    manifest = manifested_day(session, utc_date)
+    manifested = sum(manifest.values())
     if present > manifested:
+        unmanifested = sorted(set(local_names or ()) - set(manifest))
+        if not force and not unmanifested:
+            print(
+                f"  {utc_date}: {present} rows vs {manifested} manifested (rows of unknown "
+                "provenance) and no new local files — leaving the day untouched"
+            )
+            return "noop"
         raise UnknownProvenanceError(
             f"{utc_date}: vehicle_positions holds {present} rows with collected_at on this "
             f"UTC day but its manifested archive files account for only {manifested}; "
             "refusing to delete or add rows for a day with rows of unknown provenance"
+            + (f" ({len(unmanifested)} unmanifested local file(s))" if unmanifested else "")
         )
     if force or present < manifested:
         return "reload"
@@ -390,8 +413,12 @@ def load_utc_days(session, archive_root: Path, utc_dates: list[date], force: boo
     for utc_date in sorted(set(utc_dates)):
         paths = day_paths(archive_root, utc_date)
         try:
-            mode = reconcile_utc_day(session, utc_date, force=force)
+            mode = reconcile_utc_day(
+                session, utc_date, force=force, local_names={p.name for p in paths}
+            )
             session.rollback()  # end the read-only transaction the counts opened
+            if mode == "noop":
+                continue
             if mode == "reload":
                 reload_utc_day(session, utc_date, paths)
                 continue

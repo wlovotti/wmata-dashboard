@@ -451,13 +451,10 @@ def test_reload_refuses_when_a_manifested_file_is_missing(pg_session, tmp_path):
 
 
 @pytest.mark.integration
-def test_rows_of_unknown_provenance_block_reload_and_load(pg_session, tmp_path):
-    """More rows than the manifest accounts for → refuse to delete or add anything."""
-    from pipelines.load_vp_archive import load_utc_days
+def _add_legacy_row(pg_session):
+    """Insert one RELOAD_DAY row no archive file accounts for (VM-era shape)."""
     from src.models import VehiclePosition
 
-    _write_day_files(tmp_path)
-    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
     pg_session.add(
         VehiclePosition(
             vehicle_id="legacy",
@@ -468,10 +465,40 @@ def test_rows_of_unknown_provenance_block_reload_and_load(pg_session, tmp_path):
         )
     )
     pg_session.commit()
-    for force in (False, True):
-        failures = load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=force)
-        assert len(failures) == 1 and "unknown provenance" in failures[0]
-        assert _day_state(pg_session) == (7, 2, 6)
+
+
+@pytest.mark.integration
+def test_unknown_provenance_day_with_nothing_new_is_a_noop(pg_session, tmp_path):
+    """More rows than manifested but no unmanifested local file → untouched, not an error.
+
+    This is every VM-era day (through 2026-08-22); failing here would stop
+    the agency for any ``--date`` that old (PR #264 review).
+    """
+    from pipelines.load_vp_archive import load_utc_days
+
+    _write_day_files(tmp_path)
+    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    _add_legacy_row(pg_session)
+    assert load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False) == []
+    assert _day_state(pg_session) == (7, 2, 6)
+    # with no local files at all, too
+    assert load_utc_days(pg_session, tmp_path / "empty", [RELOAD_DAY], force=False) == []
+
+
+@pytest.mark.integration
+def test_unknown_provenance_day_with_new_files_or_force_is_refused(pg_session, tmp_path):
+    """More rows than manifested AND a file to load (or --force) → refuse, change nothing."""
+    from pipelines.load_vp_archive import load_utc_days
+
+    first, second = _write_day_files(tmp_path)
+    second.rename(tmp_path.parent / second.name)
+    load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    _add_legacy_row(pg_session)
+    assert load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=True)[0].count("unknown")
+    (tmp_path.parent / second.name).rename(second)
+    failures = load_utc_days(pg_session, tmp_path, [RELOAD_DAY], force=False)
+    assert len(failures) == 1 and "unknown provenance" in failures[0]
+    assert _day_state(pg_session) == (4, 1, 3)
 
 
 def test_main_force_requires_utc_date():

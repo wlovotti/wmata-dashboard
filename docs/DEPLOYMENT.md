@@ -843,19 +843,23 @@ loses them (a later run sees non-zero `runs` and never revisits it), and
 the trip_update_state cleanup step then prunes their still-relevant
 state. SFMTA's owl service runs to ~03:00 Pacific = 06:00 Eastern — later
 than WMATA's cutoff — so it's the binding constraint, not WMATA's own
-Eastern day-roll.
+Eastern day-roll. (Correction, issue #261: current Muni GTFS schedules
+owl trips of service day D to 30:53 = 06:53 PT on D+1, so 06:30 ET is
+too early for SFMTA. The per-day refresh no longer depends on fire
+time: it only derives a date by default once its raw window is
+complete — §12.3.)
 
-**Single-instance lock (review finding, PR #259):** launchd's
-catch-up-on-wake behavior means a missed 06:30 fire can run hours later,
-which could otherwise land in the middle of a manual
-`bin/pull-and-derive.sh` run or overlap a second catch-up fire.
-`bin/pull-and-derive-nightly.sh` takes an exclusive lock before running
-(`flock` on Linux/newer macOS, an atomic `mkdir` lock as a fallback where
-`flock(1)` isn't installed) and exits 0 without running if the lock is
-already held. **`bin/pull-and-derive.sh` itself does not take this
-lock** — only the nightly wrapper does, so it stays usable standalone
-the way it always has. Avoid running it manually while the nightly job
-might fire (or take `logs/.pull-and-derive.lock` yourself first).
+**Single-instance lock (review finding, PR #259; moved by issue #261):**
+launchd's catch-up-on-wake behavior means a missed 06:30 fire can run
+hours later, which could otherwise land in the middle of a manual
+`bin/pull-and-derive.sh` run or overlap a second catch-up fire. Since
+issue #261 **`bin/pull-and-derive.sh` itself** takes the lock — the
+directory `logs/.pull-and-derive.lock.d` with a `holder.json` naming
+pid/host/start/command (`src/run_lock.py`; a dead holder's lock is taken
+over) — for every non-dry run, manual or nightly, and exits 75 naming the
+holder when another run has it. The nightly wrapper no longer locks
+itself and treats 75 as "skip, exit 0". `pipelines/refresh_by_day.py`
+run directly takes the same lock.
 
 **Install:**
 
@@ -1089,62 +1093,117 @@ time, oldest first, agencies interleaved**:
 | Step | What | Files / command |
 |---|---|---|
 | fetch | only that date's raw files from S3 (size + ETag verified, `.part` then rename) | TU: UTC D, D+1 (replay's primary + supplement). VP: UTC D..D+2 (the derive's VP window, local midnight D → local midnight D+2, widened by the loader's 30-min timestamp guard) |
-| load VP | per UTC day; a day whose rows were pruned is reloaded whole | `load_vp_archive.py --utc-date U ...` |
+| load VP | per UTC day; a day whose rows were deleted is reloaded whole | `load_vp_archive.py --utc-date U ...` |
 | replay | TU for D (SFMTA `--allow-empty`) | `replay_archive_to_state.py --date D` |
-| derive | per-date chain, no housekeeping | `run_daily_batch.py --date D --skip-housekeeping` |
+| derive | per-date chain, no housekeeping, held/failed dates excluded | `run_daily_batch.py --date D --skip-housekeeping --exclude-date …` |
+| clean state | delete `trip_update_state` for service dates before `min(D, today − 7)`, then `VACUUM (ANALYZE)` | `cleanup_trip_update_state.py --before-date D --vacuum` |
 | prune | local files dated before the next date's first needed UTC day, only if S3-identical + manifested | `src/raw_archive.py:prune_stream` |
 
+The derive also gets `--exclude-date` for every date the progress file
+has as held/failed, and `run_daily_batch` refuses to aggregate a
+non-target date that has no `runs` of its own — otherwise date D's
+owl-corrected rows written under a held D−1 would aggregate D−1 into a
+near-empty day that reads as a real 0% (the #258 failure, across two
+invocations).
+
+**trip_update_state between dates.** Derive of D reads only
+`service_date = D`; D's completeness rollup reads state polled inside
+local day D, which includes D−1's owl trips. So after D, state before D
+(but never inside the normal 7-day window) is dead: the per-date cleanup
+deletes it and VACUUMs on its own autocommit connection (VACUUM cannot
+run in a transaction; plain VACUUM takes only SHARE UPDATE EXCLUSIVE),
+so the next date's replay reuses that space and the table stays at its
+current size instead of growing ~0.43 GB/day (WMATA) + ~0.28 GB/day
+(SFMTA) for the whole backfill. Autovacuum would also fire (deleting a
+day of a ~2-day table is far past the 20% scale factor) but on its own
+schedule, possibly after the next replay already extended the file.
 After the last date: WMATA housekeeping once (`run_daily_batch.py
---housekeeping-only`, ~1.5 h — the diagnostic-profile refresh; also
-WMATA's `trip_update_state` cleanup) unless `--skip-housekeeping`, and
-SFMTA's `cleanup_trip_update_state.py --agency sfmta` once unless an
-SFMTA date failed. Nothing prunes `trip_update_state` between dates, so
-a weeks-old date's replayed state survives until its own derive has
-finished even though cleanup's cutoff (local today − 7) is far past it.
+--housekeeping-only`, ~1.5 h — the diagnostic refreshes plus WMATA's
+7-day cleanup) and SFMTA's 7-day cleanup once; each is skipped if a date
+of that agency failed this run (so the failed date's state survives for
+the retry), and WMATA's with `--skip-housekeeping`.
 
 **Which dates.** Default, per agency: the day after `max(runs.service_date)`
-through agency-local yesterday, plus zero-`runs` dates in the last
-`--lookback-days` (default 14). Or `--start A --end B` / `--date D`
-(repeatable). `--dry-run` prints the plan and the UTC files each date
-needs. Dates before 2026-06-14 are refused.
+through the latest date whose **raw window is complete**, plus zero-`runs`
+dates in the last `--lookback-days` (default 14), plus every `failed` /
+`derived` date in the progress file (any age — a date can fail after
+`aggregate_runs` wrote runs) and `held` dates inside the lookback (older
+held dates are listed as "not retried"; rerun them with `--date D` after
+a GTFS reload). Complete = now ≥ agency-local midnight after D + 4 h
+(WMATA, last scheduled arrival 26:58 ET) / 8 h (SFMTA, owl service to
+30:53 PT), covering lateness, the 15-min archive rotation and upload lag;
+later dates are printed as deferred. `--start A --end B` / `--date D`
+select explicitly (an incomplete date then gets a loud warning). Dates
+before 2026-06-14 are refused. `--dry-run` prints the plan and writes
+nothing (no GTFS reload, no lock, no progress file).
 
 **Resume / failure.** `logs/refresh_progress_<agency>.json` records each
 date (`done`, `held`, `failed`, or `derived` = derive committed, prune
-pending). A rerun skips `done` dates and resumes at the first unfinished
-one (`--force` re-does `done` dates and forces the replay). A hard
-failure (fetch, VP load, replay, derive exit 1, or free disk below
-`--min-free-gb`, default 15) **stops that agency** — the other continues
-— and keeps the failed date's raw files; a failure is almost always
-systemic, so carrying on would fail and re-download N more times. A
-`held` date (match-rate guard, exit 3) is reported and the run
-continues; its files are pruned (S3 has them) and it is retried on later
-runs.
+pending). It is a hint; the DB wins: a date counts as done only if the
+file says `done` AND `runs` has rows for it, a `derived` date without
+runs is re-run in full, and an unreadable file is moved aside with a
+warning. A rerun therefore resumes at the first unfinished date, for an
+explicit range too; `--force` re-does done dates and forces the replay.
+A hard failure (fetch, VP load, replay, derive exit 1, or free disk below
+`--min-free-gb`) **stops that agency** — the other continues — and keeps
+the failed date's raw files; failures are almost always systemic, so
+carrying on would fail and re-download N more times. A `held` date
+(match-rate guard, exit 3) is reported and the run continues. A date
+whose guard could not run (batch exit 4) is derived, listed as a warning,
+and makes the run exit 1.
 
-**Disk.** Peak raw-file footprint ≈ 2 UTC days of TU + 3 of VP per
-agency: ~2.9 GB WMATA + ~0.9 GB SFMTA (from the 2026-09-29→11-24 S3
-listings: WMATA TU max 1.44 GB/day, SFMTA TU max 0.42 GB/day, VP
-0.04/0.01 GB/day). The DB still grows by each date's VP +
-`trip_update_state` + derived rows.
+**Single instance.** A non-dry run holds `logs/.pull-and-derive.lock.d`
+(§12.0). A second run exits 75 naming the holder.
+
+**Disk budget for the 2026-09-29 → yesterday backfill (56 dates).**
+
+- Raw files: peak ≈ 2 UTC days of TU + 3 of VP per agency ≈ 2.9 GB
+  WMATA + 0.9 GB SFMTA (S3 listings: WMATA TU max 1.44 GB/day, SFMTA TU
+  max 0.42 GB/day, VP 0.04/0.01 GB/day).
+- `trip_update_state`: bounded by the per-date cleanup at its current
+  on-disk size (WMATA 3.1 GB, SFMTA 2.2 GB — already allocated, so ~0
+  new; it does not shrink, VACUUM FULL would).
+- Permanent DB growth (stop_events, runs, vehicle_positions, rollups):
+  reviewer-measured all-in growth was ~0.88 GB/day WMATA + ~0.48 GB/day
+  SFMTA including state; minus state (~0.43 + ~0.28) that is ~0.65
+  GB/day, **≈ 36 GB for 56 dates**, plus some WAL/temp headroom. Nothing
+  in this PR removes it (retention is the next PR).
+- So the backfill needs roughly **40 GB** free beyond today's usage.
+  With 61 GB free now, run the archive prune first (+~50 GB) to finish
+  with ~70 GB free; without it the run would approach the floor near the
+  end.
+- The 15 GB `--min-free-gb` floor is checked once per date before its
+  fetch. It stops a backfill from *starting* a date with the disk nearly
+  full; it does not bound what one date writes (~1.5 GB incl. raw), does
+  not watch other disk consumers, and does not reserve space for
+  Postgres WAL spikes or VACUUM.
 
 **Pruning an existing local archive.** `scripts/prune_local_archive.py`
 (dry run by default; `--apply` deletes) applies the same rule to the
 whole local archive with "needed" = dated after the agency's latest
-`runs.service_date`. It prints per-directory counts/bytes and every
+`runs.service_date` (an older hole/held date re-derived later simply
+re-fetches from S3). It prints per-directory counts/bytes and every
 refusal (missing from S3, size or checksum mismatch, not in the
 manifest, unrecognized name). Directories that aren't one of the four
 streams — `archive/trip_update_snapshots/` (the retired May 2026
 `trip_update_snapshots` parquet export, no S3 copy) — are listed and
-never touched.
+never touched; that directory and the 889 MB orphan
+`raw_snapshots/2026-08-28.307981.1786210105.jsonl.zst` (not in S3, not in
+the manifest) are left for the owner to upload or delete.
 
 **VP reload idempotency.** `vehicle_positions` has no natural unique key,
 so the manifest is what stops duplicates. `--utc-date U` compares the
 rows with `collected_at` on U against the manifest's row counts for
 files `U.*` (files are named by each row's `collected_at` UTC date, so
 the two describe the same set): equal → load only new files; fewer
-(retention pruned some) or `--force` → delete U's rows and manifest rows
-and re-insert every `U.*` file in one transaction; more → refuse (rows
-of unknown provenance). A reload also refuses if any manifested `U.*`
-file is not local.
+(rows deleted — no VP retention runs today, but a future retention or a
+manual delete) or `--force` → delete U's rows and manifest rows and
+re-insert every `U.*` file in one transaction; more (VM-era days through
+2026-08-22, written straight to the DB) → no-op when there is nothing
+new to load, refusal when there is (or with `--force`). A reload also
+refuses if any manifested `U.*` file is not local. Note for the
+retention PR: `pipelines/archive_vehicle_positions.py` partitions by
+`DATE(timestamp)`, not `collected_at`.
 
 ## 13. Stateless collector (nano) — live topology
 

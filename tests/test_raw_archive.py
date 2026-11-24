@@ -189,6 +189,18 @@ def test_fetch_downloads_missing_and_mismatched_skips_present(tmp_path):
 
 
 @pytest.mark.smoke
+def test_fetch_refetches_same_size_local_file_with_wrong_checksum(tmp_path):
+    """A same-size but corrupt local file is not reused — it is re-downloaded."""
+    stream = _stream(tmp_path)
+    s3 = FakeS3({"raw-jsonl-archive/2026-10-03.1.1.jsonl.zst": b"good"})
+    stream.local_dir.mkdir(parents=True)
+    (stream.local_dir / "2026-10-03.1.1.jsonl.zst").write_bytes(b"bad!")
+    result = fetch_day_files(s3, stream, date(2026, 10, 3), log=lambda m: None)
+    assert result.downloaded == ["2026-10-03.1.1.jsonl.zst"]
+    assert (stream.local_dir / "2026-10-03.1.1.jsonl.zst").read_bytes() == b"good"
+
+
+@pytest.mark.smoke
 def test_fetch_rejects_corrupt_download_and_leaves_no_partial(tmp_path):
     """A download whose checksum doesn't match S3 raises and leaves nothing behind."""
     stream = _stream(tmp_path)

@@ -7,8 +7,12 @@ plan_prune``):
 
 - its name is a recognized archive filename (``YYYY-MM-DD[.<pid>.<epoch>].jsonl.zst``);
 - its UTC date is no later than the agency's latest derived service date
-  (``max(runs.service_date)``) — the next date to derive reads TU UTC
-  D, D+1 and VP UTC D..D+2, all after that, so nothing older is needed;
+  L (``max(runs.service_date)``) — the next date after L reads only files
+  dated after L. This is not a guarantee that nothing older will ever be
+  read: a hole, held or failed date at or before L re-derives later and
+  needs its files again; the refresh then re-fetches them from S3 (the
+  cost of a re-download, never data loss — every deleted file is verified
+  in S3 first);
 - it is recorded in its manifest (``tu_archive_replayed_files`` for trip
   updates, ``vp_archive_loaded_files`` for vehicle positions);
 - the same key exists in S3 with the same byte size AND the same

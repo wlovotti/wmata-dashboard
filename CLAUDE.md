@@ -9,8 +9,9 @@ database on the collector box). API + frontend run locally against the
 local DB. Freshness is on demand: run `bin/pull-and-derive.sh` by hand
 — one service date at a time it fetches just that date's raw files from
 S3, loads VP, replays, derives, and deletes the local raw files once
-verified in S3 (`pipelines/refresh_by_day.py`; the laptop keeps no raw
-archive, S3 is the raw store; no tunnel or VM access needed).
+verified in S3 (`pipelines/refresh_by_day.py`; S3 is the raw store — the
+laptop keeps only the next couple of days' raw files plus anything the
+prune refused; no tunnel or VM access needed).
 The nightly launchd wrapper/plist from PR #259 (`deployment/launchd/`,
 `docs/DEPLOYMENT.md` §12) still exist but are not deployed and not the
 intended mode (#260 closed as not planned). Topology/ops detail: `docs/DEPLOYMENT.md`.

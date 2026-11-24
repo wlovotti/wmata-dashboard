@@ -7,7 +7,7 @@ line each per-date pipeline receives) — not a full behavioral suite for
 the pre-existing orchestration logic.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -243,7 +243,7 @@ def test_run_batch_aggregates_day_shifted_dates_from_derive_output(tmp_path, mon
 
     log_path = tmp_path / "test.log"
     with log_path.open("a") as log_handle:
-        run_batch([date(2026, 7, 23)], log_handle)
+        run_batch([date(2026, 7, 23)], log_handle, has_runs=lambda d: True)
 
     aggregate_dates = {
         cmd[cmd.index("--date") + 1]
@@ -285,14 +285,155 @@ def _capture_subprocess(monkeypatch):
     captured_cmds = []
 
     class _FakeCompletedProcess:
+        """A successful subprocess result."""
+
         returncode = 0
 
     def _fake_subprocess_run(cmd, **kwargs):
+        """Record ``cmd`` and report success."""
         captured_cmds.append(cmd)
         return _FakeCompletedProcess()
 
     monkeypatch.setattr(run_daily_batch_module.subprocess, "run", _fake_subprocess_run)
     return captured_cmds
+
+
+def _owl_shift_subprocess(monkeypatch, runs_written: set):
+    """Fake subprocess.run: derive of D reports writing D-1; aggregate_runs records its date.
+
+    ``runs_written`` stands in for the ``runs`` table across invocations.
+    """
+    import pipelines.run_daily_batch as run_daily_batch_module
+
+    captured_cmds = []
+
+    class _FakeCompletedProcess:
+        """A successful subprocess result."""
+
+        returncode = 0
+
+    def _fake_subprocess_run(cmd, **kwargs):
+        """Record ``cmd``; emulate the owl correction and aggregate_runs' writes."""
+        captured_cmds.append(cmd)
+        d = date.fromisoformat(cmd[cmd.index("--date") + 1])
+        if cmd[2] == "pipelines.derive_stop_events_from_state":
+            prev = (d - timedelta(days=1)).isoformat()
+            kwargs["stdout"].write(f"SERVICE_DATES_WRITTEN:{prev},{d.isoformat()}\n")
+            kwargs["stdout"].flush()
+        if cmd[2] == "pipelines.aggregate_runs":
+            runs_written.add(d)
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(run_daily_batch_module.subprocess, "run", _fake_subprocess_run)
+    return captured_cmds
+
+
+def test_date_held_in_earlier_invocation_is_not_aggregated_by_next_date(tmp_path, monkeypatch):
+    """PR #264 review (blocking): per-date invocations must not undo the #258 hold.
+
+    Invocation 1 targets D-1 and the guard holds it (no runs). Invocation 2
+    targets D, whose derive writes owl-corrected rows under D-1. D-1 must
+    not be aggregated — via the zero-runs rule alone, and via the explicit
+    exclude list the refresh passes.
+    """
+    from pipelines.run_daily_batch import run_batch
+    from src.trip_match_rate import TripMatchResult
+
+    d_prev, d = date(2026, 10, 2), date(2026, 10, 3)
+    runs: set = set()
+    cmds = _owl_shift_subprocess(monkeypatch, runs)
+    guard = {
+        d_prev: TripMatchResult(9000, 0, 0.0, gtfs_snapshot_id=1),
+        d: TripMatchResult(100, 100, 1.0, gtfs_snapshot_id=1),
+    }
+    held: set = set()
+    with (tmp_path / "1.log").open("a") as log_handle:
+        assert (
+            run_batch(
+                [d_prev],
+                log_handle,
+                snapshot_resolver=lambda x: None,
+                match_guard=lambda x, c: guard[x],
+                guard_skipped=held,
+                housekeeping=False,
+                has_runs=lambda x: x in runs,
+            )
+            == 0
+        )
+    assert held == {d_prev} and runs == set()
+
+    for exclude in (set(), {d_prev}):
+        cmds.clear()
+        with (tmp_path / "2.log").open("a") as log_handle:
+            run_batch(
+                [d],
+                log_handle,
+                snapshot_resolver=lambda x: None,
+                match_guard=lambda x, c: guard[x],
+                housekeeping=False,
+                has_runs=lambda x: x in runs,
+                exclude_dates=exclude,
+            )
+        aggregated = {c[c.index("--date") + 1] for c in cmds if c[2] == "pipelines.aggregate_runs"}
+        assert aggregated == {d.isoformat()}
+        assert d_prev not in runs
+        runs.discard(d)
+
+
+def test_excluded_date_with_runs_is_not_reaggregated(tmp_path, monkeypatch):
+    """A date that failed after aggregate_runs (so it HAS runs) is still protected by exclude."""
+    from pipelines.run_daily_batch import run_batch
+
+    d_prev, d = date(2026, 10, 2), date(2026, 10, 3)
+    runs = {d_prev}
+    cmds = _owl_shift_subprocess(monkeypatch, runs)
+    with (tmp_path / "x.log").open("a") as log_handle:
+        run_batch(
+            [d],
+            log_handle,
+            snapshot_resolver=lambda x: None,
+            match_guard=lambda x, c: None,
+            housekeeping=False,
+            has_runs=lambda x: x in runs,
+            exclude_dates={d_prev},
+        )
+    aggregated = {c[c.index("--date") + 1] for c in cmds if c[2] == "pipelines.aggregate_runs"}
+    assert aggregated == {d.isoformat()}
+
+
+def test_guard_error_is_reported(tmp_path, monkeypatch):
+    """A match-guard exception derives the date anyway and lands in guard_errors."""
+    from pipelines.run_daily_batch import run_batch
+
+    _capture_subprocess(monkeypatch)
+    errors: set = set()
+
+    def _boom(d, c):
+        """Simulate the guard's DB query failing."""
+        raise RuntimeError("db hiccup")
+
+    with (tmp_path / "g.log").open("a") as log_handle:
+        rc = run_batch(
+            [date(2026, 10, 3)],
+            log_handle,
+            snapshot_resolver=lambda x: None,
+            match_guard=_boom,
+            housekeeping=False,
+            guard_errors=errors,
+        )
+    assert rc == 0 and errors == {date(2026, 10, 3)}
+
+
+def test_housekeeping_only_refuses_non_default_agency(monkeypatch):
+    """--housekeeping-only --agency sfmta is a usage error, not a silent no-op."""
+    import pipelines.run_daily_batch as mod
+
+    monkeypatch.setattr(
+        mod.sys, "argv", ["run_daily_batch.py", "--housekeeping-only", "--agency", "sfmta"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 2
 
 
 def test_run_batch_skip_housekeeping_runs_only_per_date_pipelines(tmp_path, monkeypatch):

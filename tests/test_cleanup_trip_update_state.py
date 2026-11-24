@@ -323,3 +323,41 @@ def test_main_default_agency_is_wmata(db_session, monkeypatch):
     cleanup_module.main()
 
     assert len(seen_db_urls) == 1  # resolve_agency_db_url(wmata_cfg) — whatever DATABASE_URL is
+
+
+@pytest.mark.integration
+def test_cleanup_before_date_keeps_the_date_just_derived_and_later(pg_session):
+    """Per-date cleanup (PR #264 review): cutoff = min(before_date, today - retention).
+
+    During a backfill of a weeks-old date D, rows for dates before D go —
+    D itself (whose state D+1's completeness check can still read) and
+    everything after it stay, even though all of them are past the normal
+    7-day window.
+    """
+    from pipelines.cleanup_trip_update_state import run_cleanup
+
+    today = eastern_today()
+    d = today - timedelta(days=40)
+    pg_session.add_all(
+        [
+            _make_state_row("T_bd_m2", 1, service_date=d - timedelta(days=2)),
+            _make_state_row("T_bd_m1", 1, service_date=d - timedelta(days=1)),
+            _make_state_row("T_bd_d", 1, service_date=d),
+            _make_state_row("T_bd_p1", 1, service_date=d + timedelta(days=1)),
+            _make_state_row("T_bd_recent", 1, service_date=today - timedelta(days=3)),
+        ]
+    )
+    pg_session.commit()
+    ids = ["T_bd_m2", "T_bd_m1", "T_bd_d", "T_bd_p1", "T_bd_recent"]
+
+    def _remaining() -> set[str]:
+        """Which of this test's rows survive."""
+        stmt = select(TripUpdateState).where(TripUpdateState.trip_id.in_(ids))
+        return {r.trip_id for r in pg_session.execute(stmt).scalars()}
+
+    run_cleanup(pg_session, before_date=d)
+    assert _remaining() == {"T_bd_d", "T_bd_p1", "T_bd_recent"}
+
+    # A recent date keeps the normal retention window instead.
+    run_cleanup(pg_session, before_date=today - timedelta(days=1))
+    assert _remaining() == {"T_bd_recent"}
