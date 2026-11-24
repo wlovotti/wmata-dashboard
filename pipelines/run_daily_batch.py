@@ -63,6 +63,17 @@ needed this since they don't bucket by hour. `run_daily_batch.py --agency
 sfmta` now writes correct EWT/bunching numbers alongside OTP/service-
 delivered.
 
+Per-date GTFS snapshot (issue #258): every per-date pipeline is pinned to
+the GTFS snapshot resolved for *that* service date by
+`src/gtfs_versioning.py:resolve_gtfs_snapshot_for_date` (the newest
+snapshot whose calendar covers the date; see its docstring for the
+fallback). Before this, every date was derived against `is_current`, so a
+reload that landed a feed starting "today" before "yesterday" was derived
+collapsed yesterday's trip match to 0% (WMATA 2026-09-12). When the
+resolved snapshot IS the current one, no `--gtfs-snapshot-id` is passed —
+the steady-state command lines are unchanged. Each choice is logged as a
+`gtfs_snapshot:` line per date.
+
 Usage:
   uv run python pipelines/run_daily_batch.py
   uv run python pipelines/run_daily_batch.py --lookback-days 14   # wider catch-up
@@ -76,6 +87,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import date as date_type
 from datetime import timedelta
 from pathlib import Path
@@ -85,8 +97,10 @@ from dotenv import load_dotenv
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.database import get_session
 from src.date_ranges import iter_eastern_dates
+from src.gtfs_versioning import SnapshotChoice, resolve_gtfs_snapshot_for_date
 from src.models import Route, Run
 from src.timezones import eastern_today, local_today
+from src.trip_match_rate import DEFAULT_THRESHOLD, TripMatchResult, compute_trip_match_rate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
@@ -289,6 +303,116 @@ def list_active_route_ids(agency: str = DEFAULT_AGENCY) -> list[str]:
         db.close()
 
 
+def make_snapshot_resolver(
+    agency: str = DEFAULT_AGENCY,
+) -> Callable[[date_type], SnapshotChoice | None]:
+    """Build a cached ``service_date -> SnapshotChoice`` resolver for one agency.
+
+    Each date is resolved once per batch (a few small queries against
+    ``calendar`` / ``calendar_dates`` / ``gtfs_snapshots``) on a
+    short-lived session against the agency's own database, in its own
+    timezone.
+    """
+    cfg = load_agency_config(agency)
+    cache: dict[date_type, SnapshotChoice] = {}
+
+    def _resolve(service_date: date_type) -> SnapshotChoice:
+        """Resolve (and memoize) the snapshot for ``service_date``."""
+        if service_date not in cache:
+            db = get_session(db_url=resolve_agency_db_url(cfg))
+            try:
+                cache[service_date] = resolve_gtfs_snapshot_for_date(db, service_date, cfg.timezone)
+            finally:
+                db.close()
+        return cache[service_date]
+
+    return _resolve
+
+
+def resolve_choice_logged(
+    resolver: Callable[[date_type], SnapshotChoice | None],
+    service_date: date_type,
+    log_handle,
+) -> SnapshotChoice | None:
+    """Resolve one date's GTFS snapshot via ``resolver`` and log the choice.
+
+    A resolver error is logged loudly and returns None, which means
+    "fall back to ``is_current``" — the pre-#258 behaviour — rather than
+    aborting the date; the per-date match-rate guard in `run_batch` still
+    catches the collapse a wrong schedule would produce.
+    """
+    try:
+        choice = resolver(service_date)
+    except Exception as exc:
+        log_handle.write(
+            f"WARN gtfs_snapshot: resolution failed for {service_date.isoformat()} "
+            f"({exc!r}) — falling back to is_current\n"
+        )
+        log_handle.flush()
+        return None
+    if choice is None:
+        return None
+    log_handle.write(
+        f"gtfs_snapshot: service_date={service_date.isoformat()} "
+        f"snapshot_id={choice.snapshot_id} reason={choice.reason} "
+        f"current={choice.current_snapshot_id}"
+        f"{'' if choice.override_id is None else ' (PINNED to non-current snapshot)'}\n"
+    )
+    log_handle.flush()
+    return choice
+
+
+def snapshot_args(choice: SnapshotChoice | None) -> list[str]:
+    """Return the ``--gtfs-snapshot-id`` CLI args for a resolved choice.
+
+    Empty when there is no choice or it is the current snapshot, so
+    steady-state commands are unchanged.
+    """
+    if choice is None or choice.override_id is None:
+        return []
+    return ["--gtfs-snapshot-id", str(choice.override_id)]
+
+
+# SnapshotChoice.reason used when resolution failed and pipelines fall back
+# to is_current (no --gtfs-snapshot-id).
+IS_CURRENT_FALLBACK_REASON = "is_current_after_resolution_error"
+
+# run_daily_batch.py exit code when the only problem was guard-skipped dates
+# (no pipeline failed). bin/pull-and-derive.sh treats it as "derived, with
+# dates held back" — see `main`.
+EXIT_GUARD_SKIPS_ONLY = 3
+
+
+def make_match_guard(
+    agency: str = DEFAULT_AGENCY,
+) -> Callable[[date_type, SnapshotChoice | None], TripMatchResult]:
+    """Build the per-date pre-derive match-rate check for one agency.
+
+    Returns ``(service_date, snapshot_choice) -> TripMatchResult``: the
+    same observed-vs-scheduled trip_id intersection the post-replay canary
+    computes, against the snapshot this date will be derived with.
+    """
+    cfg = load_agency_config(agency)
+
+    def _guard(service_date: date_type, choice: SnapshotChoice | None) -> TripMatchResult:
+        """Compute ``service_date``'s match rate on a short-lived session.
+
+        ``choice=None`` means `run_batch`'s resolution failed and the derive
+        will run against ``is_current`` — so check against exactly that
+        (an explicit no-override choice), never a fresh re-resolution that
+        could land on a different snapshot than the derive uses.
+        """
+        if choice is None:
+            choice = SnapshotChoice(None, None, IS_CURRENT_FALLBACK_REASON)
+        db = get_session(db_url=resolve_agency_db_url(cfg))
+        try:
+            return compute_trip_match_rate(db, service_date, cfg.timezone, snapshot_choice=choice)
+        finally:
+            db.close()
+
+    return _guard
+
+
 def run_housekeeping_pipeline(
     module: str,
     log_handle,
@@ -332,9 +456,10 @@ def run_pipeline(
     SERVICE_DATES_WRITTEN marker — empty for pipelines that don't print
     one) are returned.
 
-    ``extra_args`` is appended after ``--all-routes --date X`` for pipelines
-    that need additional flags. None of the currently-configured pipelines
-    use it; the hook remains for future per-pipeline overrides.
+    ``extra_args`` is appended after ``--all-routes --date X``. `run_batch`
+    uses it for the per-date ``--gtfs-snapshot-id N`` (issue #258) when a
+    date resolves to a non-current snapshot, plus any per-pipeline
+    ``extra_args`` configured in ``PIPELINES``.
 
     ``agency`` (NOTES-100 multi-agency) is always appended as
     `--agency <agency>` — every per-date pipeline this wrapper drives
@@ -403,8 +528,34 @@ def run_batch(
     log_handle,
     dry_run: bool = False,
     agency: str = DEFAULT_AGENCY,
+    snapshot_resolver: Callable[[date_type], SnapshotChoice | None] | None = None,
+    match_guard: Callable[[date_type, SnapshotChoice | None], TripMatchResult | None] | None = None,
+    guard_skipped: set[date_type] | None = None,
 ) -> int:
     """Drive all per-date pipelines across every (pipeline, target_date) cell.
+
+    ``snapshot_resolver`` maps a service date to its GTFS snapshot (issue
+    #258); default is `make_snapshot_resolver(agency)`. Every per-date
+    pipeline for a date — derive, aggregate, bunching, both rollups —
+    gets the same ``--gtfs-snapshot-id`` so the stop_events, the runs,
+    and the scheduled side of service-delivered all read one schedule.
+
+    ``match_guard`` (default `make_match_guard`) runs before each target
+    date's derive: if that date's observed trip_ids match less than
+    ``DEFAULT_THRESHOLD`` of the resolved snapshot's trips, the date is
+    skipped loudly (reported separately, see below) instead of writing a near-empty
+    day. That near-empty day is worse than a gap: its `runs` rows display
+    as a real 0% and stop `determine_target_dates` from ever revisiting
+    the date (WMATA 2026-09-12, catch-up-derived on 9/29 against the wrong
+    snapshot: 14 stop_events, OTP 0.0% — issue #258 comment). The
+    post-replay canary only checks "yesterday"; this covers catch-up
+    dates too. No observed trip_ids at all (rate None) is not a collapse —
+    the date derives as before. Skipped dates are NOT counted in the
+    returned failure count; they are added to ``guard_skipped`` (when the
+    caller passes a set) so `main` can report them separately, and they are
+    excluded from Phase 2 even if another date's derive reports writing
+    rows under them (owl correction onto N-1). A guard error is logged and the date
+    proceeds. Not run under ``dry_run``.
 
     Returns the number of (pipeline, date) combinations that failed —
     callers turn a non-zero into a non-zero process exit so launchd can
@@ -446,16 +597,71 @@ def run_batch(
     derive_pipelines = [p for p in PIPELINES if p["depends_on"] is None]
     downstream_pipelines = [p for p in PIPELINES if p["depends_on"] is not None]
 
+    if snapshot_resolver is None:
+        snapshot_resolver = make_snapshot_resolver(agency)
+    if match_guard is None and not dry_run:
+        match_guard = make_match_guard(agency)
+    choices: dict[date_type, SnapshotChoice | None] = {}
+
+    def _choice_for(service_date: date_type) -> SnapshotChoice | None:
+        """Resolve (once per batch) and log the date's GTFS snapshot."""
+        if service_date not in choices:
+            choices[service_date] = resolve_choice_logged(
+                snapshot_resolver, service_date, log_handle
+            )
+        return choices[service_date]
+
+    def _args_for(pipeline: dict, service_date: date_type) -> list[str]:
+        """Per-pipeline extra args plus the date's resolved snapshot args."""
+        return list(pipeline.get("extra_args") or []) + snapshot_args(_choice_for(service_date))
+
+    def _collapsed(service_date: date_type) -> bool:
+        """Run the pre-derive match-rate guard; True means skip this date."""
+        if dry_run or match_guard is None:
+            return False
+        choice = _choice_for(service_date)
+        try:
+            result = match_guard(service_date, choice)
+        except Exception as exc:
+            log_handle.write(
+                f"WARN match_guard: could not check {service_date.isoformat()} ({exc!r}) "
+                "— deriving anyway\n"
+            )
+            log_handle.flush()
+            return False
+        if result is None or result.rate is None:
+            return False
+        log_handle.write(
+            f"match_guard: service_date={service_date.isoformat()} "
+            f"{result.matched_count}/{result.observed_count} observed trip_ids in snapshot "
+            f"{result.gtfs_snapshot_id} ({result.rate * 100:.1f}%)\n"
+        )
+        log_handle.flush()
+        return result.rate < DEFAULT_THRESHOLD
+
     # Phase 1: derive_stop_events* for every target date, collecting the
     # full set of service dates (target dates plus any day-shifted dates)
     # before any aggregation runs.
     all_service_dates: set[date_type] = set(target_dates)
+    skipped_dates: set[date_type] = set()
     for service_date in target_dates:
         log_handle.write(f"\n=== derive: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
+        if _collapsed(service_date):
+            log_handle.write(
+                f"SKIP all pipelines for {service_date.isoformat()} — observed trip_ids "
+                f"match < {DEFAULT_THRESHOLD * 100:.0f}% of the resolved GTFS snapshot's "
+                "trips; deriving would write a near-empty day that reads as a real 0% "
+                "and blocks the zero-runs auto-revisit. See docs/DEPLOYMENT.md 12.1.\n"
+            )
+            log_handle.flush()
+            skipped_dates.add(service_date)
+            if guard_skipped is not None:
+                guard_skipped.add(service_date)
+            continue
         for pipeline in derive_pipelines:
+            extra_args = _args_for(pipeline, service_date)
             if dry_run:
-                extra_args = pipeline.get("extra_args", []) or []
                 extra_str = " ".join(extra_args)
                 log_handle.write(
                     f"DRY-RUN would run {pipeline['module']} "
@@ -469,7 +675,7 @@ def run_batch(
                 pipeline["module"],
                 service_date,
                 log_handle,
-                extra_args=pipeline.get("extra_args"),
+                extra_args=extra_args,
                 agency=agency,
             )
             results[service_date][pipeline["name"]] = rc
@@ -487,7 +693,10 @@ def run_batch(
             log_handle.flush()
 
     # Phase 2: aggregate_runs + downstream across the full union, ascending.
-    for service_date in sorted(all_service_dates):
+    # A guard-skipped date stays skipped even if a later date's derive wrote a
+    # day-shifted row under it: aggregating it from that handful of trips
+    # would write exactly the near-empty day the guard exists to prevent.
+    for service_date in sorted(all_service_dates - skipped_dates):
         log_handle.write(f"\n=== aggregate: service_date={service_date.isoformat()} ===\n")
         log_handle.flush()
         for pipeline in downstream_pipelines:
@@ -504,8 +713,8 @@ def run_batch(
                 results[service_date][pipeline["name"]] = -1
                 continue
 
+            extra_args = _args_for(pipeline, service_date)
             if dry_run:
-                extra_args = pipeline.get("extra_args", []) or []
                 extra_str = " ".join(extra_args)
                 log_handle.write(
                     f"DRY-RUN would run {pipeline['module']} "
@@ -519,7 +728,7 @@ def run_batch(
                 pipeline["module"],
                 service_date,
                 log_handle,
-                extra_args=pipeline.get("extra_args"),
+                extra_args=extra_args,
                 agency=agency,
             )
             results[service_date][pipeline["name"]] = rc
@@ -651,17 +860,35 @@ def main() -> int:
         print(f"run_daily_batch: log={log_path}")
         print(f"run_daily_batch: target_dates={[d.isoformat() for d in target_dates]}")
 
+        guard_skipped: set[date_type] = set()
         failure_count = run_batch(
-            target_dates, log_handle, dry_run=args.dry_run, agency=args.agency
+            target_dates,
+            log_handle,
+            dry_run=args.dry_run,
+            agency=args.agency,
+            guard_skipped=guard_skipped,
         )
+        skipped_str = ",".join(d.isoformat() for d in sorted(guard_skipped)) or "none"
 
         log_handle.write(
             f"\n========== run_daily_batch done — "
-            f"{failure_count} (pipeline, date) failures ==========\n"
+            f"{failure_count} (pipeline, date) failures; "
+            f"guard-skipped dates: {skipped_str} ==========\n"
         )
 
     print(f"run_daily_batch: {failure_count} (pipeline, date) failures")
-    return 0 if failure_count == 0 else 1
+    print(f"run_daily_batch: guard-skipped dates (match-rate collapse, not derived): {skipped_str}")
+    # Exit codes: 0 clean; 1 any pipeline failure; EXIT_GUARD_SKIPS_ONLY (3)
+    # when every pipeline that ran succeeded but >=1 date was held back by
+    # the match-rate guard. The distinct code lets bin/pull-and-derive.sh
+    # still run SFMTA trip_update_state cleanup (a held-back date is
+    # recoverable from the raw S3 archive via replay --force, so it must not
+    # block retention forever) while still failing the overall run loudly.
+    if failure_count:
+        return 1
+    if guard_skipped:
+        return EXIT_GUARD_SKIPS_ONLY
+    return 0
 
 
 if __name__ == "__main__":

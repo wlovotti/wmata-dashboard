@@ -181,8 +181,9 @@ def test_reload_complete_gtfs_targets_agency_database(db_session, monkeypatch):
         "timepoints": [],
         "timepoint_times": [],
     }
-    monkeypatch.setattr(reload_module, "_download_and_parse_gtfs", lambda cfg: stub_gtfs_data)
-    monkeypatch.setattr(reload_module, "apply_gtfs_to_db", lambda db, gtfs_data: 1)
+    monkeypatch.setattr(reload_module, "_download_gtfs_zip", lambda cfg: _build_zip_bytes({}))
+    monkeypatch.setattr(reload_module, "parse_gtfs_zip", lambda zip_bytes, cfg: stub_gtfs_data)
+    monkeypatch.setattr(reload_module, "apply_gtfs_to_db", lambda db, gtfs_data, **kwargs: 1)
 
     seen_db_urls = []
 
@@ -192,6 +193,343 @@ def test_reload_complete_gtfs_targets_agency_database(db_session, monkeypatch):
 
     monkeypatch.setattr(reload_module, "get_session", _fake_get_session)
 
-    reload_module.reload_complete_gtfs(agency="sfmta")
+    reload_module.reload_complete_gtfs(agency="sfmta", archive=False)
 
     assert seen_db_urls == ["postgresql:///sfmta_test"]
+
+
+# ---------------------------------------------------------------------------
+# Raw-zip archive + unchanged-feed skip
+# ---------------------------------------------------------------------------
+
+
+def _build_zip_bytes_with(files: dict[str, str], date_time: tuple, reverse: bool = False) -> bytes:
+    """Build a GTFS zip with a fixed member timestamp and optional reversed member order."""
+    buf = io.BytesIO()
+    names = sorted(files, reverse=reverse)
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name in names:
+            zf.writestr(zipfile.ZipInfo(name, date_time=date_time), files[name])
+    return buf.getvalue()
+
+
+class _FakeS3:
+    """Records put_object/head_object calls; can simulate failures or a short write."""
+
+    def __init__(self, fail_put: bool = False, stored_size_delta: int = 0):
+        """Configure the fake's failure mode."""
+        self.fail_put = fail_put
+        self.stored_size_delta = stored_size_delta
+        self.objects: dict[tuple[str, str], dict] = {}
+        self.calls: list[str] = []
+
+    def put_object(self, Bucket, Key, Body, ContentType=None, Metadata=None):
+        """Store the object (or raise when configured to fail)."""
+        self.calls.append("put_object")
+        if self.fail_put:
+            raise RuntimeError("simulated S3 outage")
+        self.objects[(Bucket, Key)] = {"Body": Body, "Metadata": Metadata}
+
+    def head_object(self, Bucket, Key):
+        """Report the stored object's size (optionally skewed) and metadata."""
+        self.calls.append("head_object")
+        obj = self.objects[(Bucket, Key)]
+        return {
+            "ContentLength": len(obj["Body"]) + self.stored_size_delta,
+            "Metadata": obj["Metadata"] or {},
+        }
+
+    def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+        """List stored keys under ``Prefix`` (single page)."""
+        self.calls.append("list_objects_v2")
+        return {
+            "Contents": [
+                {"Key": k} for (b, k) in self.objects if b == Bucket and k.startswith(Prefix)
+            ],
+            "IsTruncated": False,
+        }
+
+
+@pytest.mark.smoke
+def test_content_hash_ignores_zip_packaging_but_not_content():
+    """Same member bytes re-zipped with other timestamps/order -> same hash; any
+    content change -> different hash."""
+    from scripts.reload_gtfs_complete import gtfs_content_sha256
+
+    a = _build_zip_bytes_with(MINIMAL_FILES, (2026, 1, 1, 0, 0, 0))
+    b = _build_zip_bytes_with(MINIMAL_FILES, (2026, 9, 13, 4, 0, 0), reverse=True)
+    assert a != b
+    assert gtfs_content_sha256(a) == gtfs_content_sha256(b)
+
+    changed = dict(MINIMAL_FILES)
+    changed["calendar.txt"] = "service_id,monday\nWK,0\n"
+    assert gtfs_content_sha256(_build_zip_bytes(changed)) != gtfs_content_sha256(a)
+
+
+@pytest.mark.smoke
+def test_archive_key_scheme():
+    """gtfs-archive/<agency>/<UTC ts>_<feed_version>_<sha12>.zip, feed_version sanitised."""
+    from datetime import datetime
+
+    from scripts.reload_gtfs_complete import gtfs_archive_key
+
+    sha = "ab" * 32
+    when = datetime(2026, 9, 13, 8, 15, 38)
+    assert (
+        gtfs_archive_key("wmata", when, "S1000251", sha)
+        == "gtfs-archive/wmata/20260913T081538Z_S1000251_abababababab.zip"
+    )
+    assert gtfs_archive_key("sfmta", when, None, sha).endswith("_unknown_abababababab.zip")
+    assert "/" not in gtfs_archive_key("sfmta", when, "a/b c", sha).split("sfmta/")[1]
+
+
+@pytest.mark.smoke
+def test_archive_gtfs_zip_verifies_stored_size():
+    """A short write reported by head_object raises GTFSArchiveError."""
+    from scripts.reload_gtfs_complete import GTFSArchiveError, archive_gtfs_zip
+
+    ok = _FakeS3()
+    assert archive_gtfs_zip(ok, "bkt", "k.zip", b"1234", {}) == "s3://bkt/k.zip"
+    with pytest.raises(GTFSArchiveError, match="expected 4"):
+        archive_gtfs_zip(_FakeS3(stored_size_delta=-1), "bkt", "k.zip", b"1234", {})
+    with pytest.raises(GTFSArchiveError, match="simulated S3 outage"):
+        archive_gtfs_zip(_FakeS3(fail_put=True), "bkt", "k.zip", b"1234", {})
+
+
+def _stub_reload(monkeypatch, db_session, current_notes: str | None):
+    """Wire reload_complete_gtfs to an in-memory zip and the test session.
+
+    Seeds a current snapshot (id 7) whose notes are ``current_notes`` and
+    records apply_gtfs_to_db calls. Returns (module, zip_bytes, applied).
+    """
+    from datetime import datetime
+
+    import scripts.reload_gtfs_complete as reload_module
+    from src.models import GTFSSnapshot, Route
+
+    zip_bytes = _build_zip_bytes({**MINIMAL_FILES, **WMATA_PLUS_FILES})
+    if current_notes is not None:
+        db_session.add(
+            GTFSSnapshot(snapshot_id=7, snapshot_date=datetime(2026, 9, 13), notes=current_notes)
+        )
+        db_session.flush()
+        db_session.add(Route(route_id="R1", route_short_name="R1", snapshot_id=7, is_current=True))
+        db_session.commit()
+
+    applied = []
+
+    def _fake_apply(db, gtfs_data, content_sha256=None, archive_uri=None):
+        """Record the apply call instead of loading."""
+        applied.append({"content_sha256": content_sha256, "archive_uri": archive_uri})
+        return 8
+
+    class _NoCloseSession:
+        """Proxy that keeps the test session open across reload's close()."""
+
+        def __getattr__(self, name):
+            """Delegate everything to the real test session."""
+            return getattr(db_session, name)
+
+        def close(self):
+            """No-op so the fixture can still roll back."""
+
+        def rollback(self):
+            """No-op: the fixture owns the outer transaction's rollback."""
+
+    monkeypatch.setattr(reload_module, "_download_gtfs_zip", lambda cfg: zip_bytes)
+    monkeypatch.setattr(reload_module, "apply_gtfs_to_db", _fake_apply)
+    monkeypatch.setattr(reload_module, "get_session", lambda db_url=None: _NoCloseSession())
+    return reload_module, zip_bytes, applied
+
+
+@pytest.mark.smoke
+def test_reload_skips_unchanged_feed(db_session, monkeypatch):
+    """Current snapshot already carries this feed's content hash AND an archive URI
+    -> no snapshot, no S3 traffic at all."""
+    from scripts.reload_gtfs_complete import gtfs_content_sha256
+
+    sha = gtfs_content_sha256(_build_zip_bytes({**MINIMAL_FILES, **WMATA_PLUS_FILES}))
+    reload_module, _zip, applied = _stub_reload(
+        monkeypatch,
+        db_session,
+        current_notes=(
+            f"Auto-reload at x; content_sha256={sha}; archive=s3://wmata-dashboard-backups/k.zip"
+        ),
+    )
+    s3 = _FakeS3()
+
+    assert reload_module.reload_complete_gtfs(agency="wmata", s3_client=s3) is None
+    assert applied == []
+    assert s3.calls == []
+
+
+@pytest.mark.smoke
+def test_reload_force_loads_unchanged_feed(db_session, monkeypatch):
+    """--force loads a new snapshot even when the hash matches."""
+    from scripts.reload_gtfs_complete import gtfs_content_sha256
+
+    sha = gtfs_content_sha256(_build_zip_bytes({**MINIMAL_FILES, **WMATA_PLUS_FILES}))
+    reload_module, _zip, applied = _stub_reload(
+        monkeypatch, db_session, current_notes=f"content_sha256={sha}"
+    )
+
+    assert reload_module.reload_complete_gtfs(agency="wmata", force=True, s3_client=_FakeS3()) == 8
+    assert len(applied) == 1
+
+
+@pytest.mark.smoke
+def test_reload_archives_exact_bytes_before_loading_a_changed_feed(db_session, monkeypatch):
+    """Legacy current snapshot (no hash) -> archive the exact zip bytes to the
+    agency bucket under gtfs-archive/, then load with hash + URI in the notes."""
+    reload_module, zip_bytes, applied = _stub_reload(
+        monkeypatch, db_session, current_notes="Auto-reload at 2026-09-29T13:27:23"
+    )
+    s3 = _FakeS3()
+
+    assert reload_module.reload_complete_gtfs(agency="wmata", s3_client=s3) == 8
+
+    [(bucket, key)] = list(s3.objects)
+    assert bucket == "wmata-dashboard-backups"
+    assert key.startswith("gtfs-archive/wmata/")
+    assert s3.objects[(bucket, key)]["Body"] == zip_bytes
+    meta = s3.objects[(bucket, key)]["Metadata"]
+    assert meta["content-sha256"] == applied[0]["content_sha256"]
+    assert applied[0]["archive_uri"] == f"s3://{bucket}/{key}"
+
+
+@pytest.mark.smoke
+def test_reload_fails_without_touching_db_when_archive_fails(db_session, monkeypatch):
+    """S3 upload failure aborts the reload before apply_gtfs_to_db runs."""
+    from scripts.reload_gtfs_complete import GTFSArchiveError
+
+    reload_module, _zip, applied = _stub_reload(monkeypatch, db_session, current_notes=None)
+
+    with pytest.raises(GTFSArchiveError):
+        reload_module.reload_complete_gtfs(agency="wmata", s3_client=_FakeS3(fail_put=True))
+    assert applied == []
+
+
+@pytest.mark.smoke
+def test_reload_no_archive_loads_without_upload(db_session, monkeypatch, capsys):
+    """archive=False (--no-archive) skips S3 and warns loudly on stderr."""
+    reload_module, _zip, applied = _stub_reload(monkeypatch, db_session, current_notes=None)
+    s3 = _FakeS3()
+
+    assert reload_module.reload_complete_gtfs(agency="wmata", archive=False, s3_client=s3) == 8
+    assert s3.calls == []
+    assert applied[0]["archive_uri"] is None
+    assert "--no-archive" in capsys.readouterr().err
+
+
+@pytest.mark.smoke
+def test_unchanged_feed_loaded_with_no_archive_gets_archived_not_skipped(db_session, monkeypatch):
+    """Hash matches but the current snapshot has no archive= token (it was loaded
+    with --no-archive) -> upload the zip, record the URI on that snapshot, create
+    no new snapshot. The next unchanged run then skips with zero S3 traffic."""
+    from scripts.reload_gtfs_complete import current_snapshot_hash_info, gtfs_content_sha256
+
+    sha = gtfs_content_sha256(_build_zip_bytes({**MINIMAL_FILES, **WMATA_PLUS_FILES}))
+    reload_module, zip_bytes, applied = _stub_reload(
+        monkeypatch, db_session, current_notes=f"Auto-reload at x; content_sha256={sha}"
+    )
+    s3 = _FakeS3()
+
+    assert reload_module.reload_complete_gtfs(agency="wmata", s3_client=s3) is None
+    assert applied == []
+    [(bucket, key)] = list(s3.objects)
+    assert s3.objects[(bucket, key)]["Body"] == zip_bytes
+    snap_id, recorded_sha, recorded_uri = current_snapshot_hash_info(db_session)
+    assert (snap_id, recorded_sha, recorded_uri) == (7, sha, f"s3://{bucket}/{key}")
+
+    s3.calls.clear()
+    assert reload_module.reload_complete_gtfs(agency="wmata", s3_client=s3) is None
+    assert s3.calls == []
+
+
+@pytest.mark.smoke
+def test_retry_after_failed_load_reuses_the_archived_zip(db_session, monkeypatch):
+    """Archive succeeded, DB load failed; the retry finds the same-content object
+    under the agency prefix and does not upload a second copy."""
+    reload_module, _zip, applied = _stub_reload(monkeypatch, db_session, current_notes=None)
+    s3 = _FakeS3()
+
+    def _failing_apply(db, gtfs_data, content_sha256=None, archive_uri=None):
+        """Simulate the transactional load blowing up after the upload."""
+        raise RuntimeError("load failed")
+
+    monkeypatch.setattr(reload_module, "apply_gtfs_to_db", _failing_apply)
+    with pytest.raises(RuntimeError, match="load failed"):
+        reload_module.reload_complete_gtfs(agency="wmata", s3_client=s3)
+    assert len(s3.objects) == 1
+    [(bucket, key)] = list(s3.objects)
+
+    recorded = []
+
+    def _ok_apply(db, gtfs_data, content_sha256=None, archive_uri=None):
+        """Record the archive URI the retry loads with."""
+        recorded.append(archive_uri)
+        return 9
+
+    monkeypatch.setattr(reload_module, "apply_gtfs_to_db", _ok_apply)
+    assert reload_module.reload_complete_gtfs(agency="wmata", s3_client=s3) == 9
+    assert len(s3.objects) == 1
+    assert s3.calls.count("put_object") == 1
+    assert recorded == [f"s3://{bucket}/{key}"]
+
+
+@pytest.mark.smoke
+def test_download_error_never_leaks_the_query_param_api_key(monkeypatch):
+    """SFMTA query-param auth: an HTTPError's message carries the full URL incl.
+    api_key=...; the re-raised error must redact it and suppress the original."""
+    import requests
+
+    from scripts.reload_gtfs_complete import _download_gtfs_zip
+
+    monkeypatch.setenv("SFMTA_API_KEY", "SUPERSECRET123")
+    cfg = load_agency_config("sfmta")
+
+    class _ErrResponse:
+        """A 401 whose raise_for_status embeds the keyed URL, like requests does."""
+
+        content = b""
+
+        def raise_for_status(self):
+            """Raise the way requests.Response does for a 4xx."""
+            raise requests.HTTPError(
+                "401 Client Error: Unauthorized for url: "
+                "https://api.511.org/transit/datafeeds?api_key=SUPERSECRET123&operator_id=SF"
+            )
+
+    monkeypatch.setattr("scripts.reload_gtfs_complete.requests.get", lambda *a, **k: _ErrResponse())
+    with pytest.raises(RuntimeError) as excinfo:
+        _download_gtfs_zip(cfg)
+    assert "SUPERSECRET123" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value)
+    assert excinfo.value.__suppress_context__
+
+    def _conn_error(*args, **kwargs):
+        """Connection failures also embed the URL."""
+        raise requests.ConnectionError("Max retries exceeded with url: /x?api_key=SUPERSECRET123")
+
+    monkeypatch.setattr("scripts.reload_gtfs_complete.requests.get", _conn_error)
+    with pytest.raises(RuntimeError) as excinfo:
+        _download_gtfs_zip(cfg)
+    assert "SUPERSECRET123" not in str(excinfo.value)
+
+    # A key with URL-special characters reaches the error message percent-encoded
+    # (requests encodes query params), not verbatim — both encodings are redacted.
+    from urllib.parse import quote, quote_plus
+
+    special_key = "ab+c/d=e&f g"
+    monkeypatch.setenv("SFMTA_API_KEY", special_key)
+    for encoded in (quote(special_key, safe=""), quote_plus(special_key)):
+
+        def _encoded_error(*args, _encoded=encoded, **kwargs):
+            """Raise with the percent-encoded key embedded in the URL."""
+            raise requests.HTTPError(f"401 for url: https://x/y?api_key={_encoded}&operator_id=SF")
+
+        monkeypatch.setattr("scripts.reload_gtfs_complete.requests.get", _encoded_error)
+        with pytest.raises(RuntimeError) as excinfo:
+            _download_gtfs_zip(cfg)
+        assert encoded not in str(excinfo.value)
+        assert "<redacted>" in str(excinfo.value)

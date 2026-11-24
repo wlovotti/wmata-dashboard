@@ -50,6 +50,7 @@ def materialize_bunching_for_route_date(
     service_date: date_type,
     verbose: bool = False,
     tz_name: str = "America/New_York",
+    gtfs_snapshot_id: int | None = None,
 ) -> dict:
     """Compute and upsert bunching rows for one (route, service_date).
 
@@ -63,9 +64,14 @@ def materialize_bunching_for_route_date(
     agency-local, GTFS clock time). Without this, a non-Eastern agency's
     cell-hour join is degenerate — see the agency-local hour bucketing
     fix, PR #190.
+
+    `gtfs_snapshot_id` pins the scheduled-headway thresholds to one GTFS
+    snapshot (issue #258); default is the live `is_current` snapshot.
     """
     start_ts = time.time()
-    rows = compute_bunching_for_route_date(db, route_id, service_date, tz_name=tz_name)
+    rows = compute_bunching_for_route_date(
+        db, route_id, service_date, tz_name=tz_name, gtfs_snapshot_id=gtfs_snapshot_id
+    )
 
     computed_at = utcnow_naive()
     insert_rows = [
@@ -128,11 +134,13 @@ def materialize_for_routes(
     route_ids: list[str],
     service_dates: list[date_type],
     tz_name: str = "America/New_York",
+    gtfs_snapshot_id: int | None = None,
 ) -> list[dict]:
     """Drive `materialize_bunching_for_route_date` over a (routes × dates) grid.
 
-    `tz_name` (NOTES-103 multi-agency; default Eastern) is forwarded to
-    every per-(route, date) call.
+    `tz_name` (NOTES-103 multi-agency; default Eastern) and
+    `gtfs_snapshot_id` (issue #258) are forwarded to every per-(route,
+    date) call.
     """
     return run_route_date_grid(
         materialize_bunching_for_route_date,
@@ -141,6 +149,7 @@ def materialize_for_routes(
         service_dates,
         verbose=True,
         tz_name=tz_name,
+        gtfs_snapshot_id=gtfs_snapshot_id,
     )
 
 
@@ -171,9 +180,11 @@ def main():
         type=int,
         default=None,
         help=(
-            "List routes from this historical GTFS snapshot instead of the "
-            "current one (bunching itself reads runs, not the schedule) — "
-            "for backfilling dates whose schedule has been superseded."
+            "Use this historical GTFS snapshot instead of the current one, "
+            "both for the route list and for the scheduled headways that set "
+            "each cell-hour's bunching threshold — for dates whose schedule "
+            "has been superseded (run_daily_batch.py passes it per date, "
+            "issue #258)."
         ),
     )
     parser.add_argument(
@@ -241,7 +252,13 @@ def main():
             ]
             print(f"Processing {len(route_ids)} routes × {len(service_dates)} dates...")
 
-        results = materialize_for_routes(db, route_ids, service_dates, tz_name=cfg.timezone)
+        results = materialize_for_routes(
+            db,
+            route_ids,
+            service_dates,
+            tz_name=cfg.timezone,
+            gtfs_snapshot_id=args.gtfs_snapshot_id,
+        )
 
         rows_written = sum(r["rows_written"] for r in results)
         bunched_total = sum(r["bunched_total"] for r in results)

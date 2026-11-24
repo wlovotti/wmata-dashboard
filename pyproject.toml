@@ -17,9 +17,17 @@ dependencies = [
     "zstandard>=0.25.0",
     "boto3>=1.43.9",
     "pyarrow>=24.0.0",
+    # SQLAlchemy's default `postgresql://` driver. Core, not an extra:
+    # src/database.py requires Postgres everywhere (no SQLite fallback), so
+    # every entry point needs it. As an optional extra it was silently
+    # dropped whenever uv rebuilt the venv via a bare `uv run` / `uv sync`
+    # (the 2026-10-25 gtfs-reload failure, see PR for issue #258).
+    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]
+# Kept so existing `uv sync --extra postgres` invocations (CI, docs) keep
+# working; psycopg2-binary itself is now a core dependency above.
 postgres = [
     "psycopg>=3.1.0",
     "psycopg2-binary>=2.9.0",

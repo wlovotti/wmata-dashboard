@@ -25,17 +25,67 @@ GTFS-Plus extension; other agencies' zips simply won't have them, and
 that's tolerated (empty lists) rather than an error — every other GTFS
 file is still required.
 
+Raw-zip archive + unchanged-feed skip (issue #258 PR): before this, the
+downloaded zip only ever lived in memory, so the database was the sole
+copy of every past schedule — and every reload inserted a full new
+snapshot even when the agency had republished nothing (by 2026-11
+WMATA's DB held 15 snapshots spanning only 4 feed_versions, each a full
+copy of stop_times). Now each reload:
+
+  1. Downloads the zip and computes a *content* hash
+     (`gtfs_content_sha256`: sha256 over the sorted member names and
+     member bytes, so a server that re-packs byte-identical files with
+     fresh zip timestamps still hashes the same).
+  2. Compares it with the hash recorded on the current snapshot (stored
+     as a ``content_sha256=<hex>`` token in `gtfs_snapshots.notes` — an
+     existing free-text column, so no schema migration is needed). A
+     match means the feed is unchanged: exit 0 without touching the DB
+     or S3. feed_version + row counts are deliberately NOT used as the
+     identity test: WMATA snapshots 11 and 12 share feed_version
+     S1000249 and every count, yet 12's calendar runs a week longer.
+     A snapshot loaded before this change carries no hash, so the first
+     reload after it always loads (once) and records one.
+  3. Uploads the exact downloaded bytes to
+     ``s3://<cfg.s3_bucket>/gtfs-archive/<agency>/<UTC ts>_<feed_version>_<sha12>.zip``
+     and verifies the stored byte count — BEFORE any DB write. An upload
+     failure aborts the reload with the DB untouched (still on the
+     previous snapshot; `run_gtfs_reload.py` fires its failure
+     notification and the next run retries). Rationale: the archive
+     exists so the DB is never again the only copy of a schedule; a
+     snapshot that loads without its archive silently recreates exactly
+     that gap, while failing costs ~nothing in practice
+     (`bin/pull-and-derive.sh` needs the same AWS credentials for its S3
+     sync and cannot run without them anyway). `--no-archive` is the
+     deliberate, logged operator escape hatch.
+  4. Applies the snapshot in one transaction exactly as before,
+     recording the content hash and archive URI in the snapshot's notes.
+
+An upload first looks for an object with the same content hash under the
+agency prefix and reuses it, so a retry after a failed DB load doesn't
+pile up copies. The unchanged-feed skip only fires outright when the
+current snapshot also carries an ``archive=`` token; a snapshot loaded
+with ``--no-archive`` gets its zip archived (and the URI recorded) on the
+next unchanged run instead of being skipped un-archived forever.
+
+`--force` loads a new snapshot even when the content hash matches.
+
 Usage:
   uv run python scripts/reload_gtfs_complete.py
   uv run python scripts/reload_gtfs_complete.py --agency sfmta
+  uv run python scripts/reload_gtfs_complete.py --force        # load even if unchanged
+  uv run python scripts/reload_gtfs_complete.py --no-archive   # skip the S3 copy (logged)
 """
 
 import argparse
 import csv
+import hashlib
 import io
 import os
+import re
 import sys
+import urllib.parse
 import zipfile
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -88,6 +138,19 @@ GTFS_FILES = [
 # error — every other file in GTFS_FILES is still required.
 OPTIONAL_GTFS_FILES = {"timepoints.txt", "timepoint_times.txt"}
 
+# S3 key prefix for the raw downloaded zips; the bucket comes from the
+# agency config (`s3.bucket`, shared with the raw-jsonl-archive prefixes).
+GTFS_ARCHIVE_PREFIX = "gtfs-archive"
+
+# Token recorded in gtfs_snapshots.notes carrying the feed's content hash.
+CONTENT_HASH_NOTE_RE = re.compile(r"content_sha256=([0-9a-f]{64})")
+# Token recorded in gtfs_snapshots.notes carrying the zip's S3 archive URI.
+ARCHIVE_NOTE_RE = re.compile(r"archive=(s3://[^;\s]+)")
+
+
+class GTFSArchiveError(RuntimeError):
+    """Raised when the downloaded zip could not be archived to S3 (and verified)."""
+
 
 def parse_csv(zip_file: zipfile.ZipFile, filename: str) -> list[dict]:
     """Parse a CSV file out of the GTFS zip into a list of dicts."""
@@ -116,8 +179,8 @@ def _require_field(row: dict, field: str, context: str) -> str:
         ) from None
 
 
-def _download_and_parse_gtfs(cfg: AgencyConfig) -> dict[str, list[dict]]:
-    """Download ``cfg``'s static GTFS zip and return a dict keyed by filename stem.
+def _download_gtfs_zip(cfg: AgencyConfig) -> bytes:
+    """Download ``cfg``'s static GTFS zip and return its exact bytes.
 
     Auth style (header vs query) and the download URL/params come from
     ``cfg`` (NOTES-100 multi-agency) — see the module docstring.
@@ -127,23 +190,51 @@ def _download_and_parse_gtfs(cfg: AgencyConfig) -> dict[str, list[dict]]:
         raise RuntimeError(f"{cfg.api_key_env} not found in environment variables")
 
     print(f"\nDownloading {cfg.display_name} GTFS data...")
-    if cfg.auth_style == "header":
-        response = requests.get(
-            cfg.static_gtfs_url,
-            headers={"api_key": api_key},
-            timeout=30,
-        )
-    else:
-        response = requests.get(
-            cfg.static_gtfs_url,
-            params={"api_key": api_key, **cfg.static_gtfs_params},
-            timeout=30,
-        )
-    response.raise_for_status()
-    print("✓ Downloaded GTFS data")
+    try:
+        if cfg.auth_style == "header":
+            response = requests.get(
+                cfg.static_gtfs_url,
+                headers={"api_key": api_key},
+                timeout=30,
+            )
+        else:
+            response = requests.get(
+                cfg.static_gtfs_url,
+                params={"api_key": api_key, **cfg.static_gtfs_params},
+                timeout=30,
+            )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        # Query-param auth (SFMTA/511.org) puts `api_key=<key>` in the URL,
+        # and requests' HTTPError / ConnectionError messages embed that URL —
+        # which the wrapper then writes into logs/gtfs_reload_*.log via the
+        # traceback. Re-raise with the key redacted and the original
+        # exception suppressed (`from None`) so it never reaches a log.
+        # Redact the raw key AND its percent-encoded forms: requests encodes
+        # query params, so a key containing `+ / = &` appears in the URL as
+        # quote()/quote_plus() output, not verbatim.
+        message = str(exc)
+        for form in {
+            api_key,
+            urllib.parse.quote(api_key, safe=""),
+            urllib.parse.quote_plus(api_key),
+        }:
+            message = message.replace(form, "<redacted>")
+        raise RuntimeError(
+            f"GTFS download failed for {cfg.name}: {type(exc).__name__}: {message}"
+        ) from None
+    print(f"✓ Downloaded GTFS data ({len(response.content):,} bytes)")
+    return response.content
 
+
+def parse_gtfs_zip(zip_bytes: bytes, cfg: AgencyConfig) -> dict[str, list[dict]]:
+    """Parse a GTFS zip's bytes into a dict of row lists keyed by filename stem.
+
+    Optional GTFS-Plus files (``OPTIONAL_GTFS_FILES``) absent from the zip
+    become empty lists; any other missing file raises ``KeyError``.
+    """
     print("\nParsing GTFS files...")
-    zip_file = zipfile.ZipFile(io.BytesIO(response.content))
+    zip_file = zipfile.ZipFile(io.BytesIO(zip_bytes))
     zip_names = set(zip_file.namelist())
 
     gtfs_data: dict[str, list[dict]] = {}
@@ -162,12 +253,191 @@ def _download_and_parse_gtfs(cfg: AgencyConfig) -> dict[str, list[dict]]:
     return gtfs_data
 
 
-def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
+def _download_and_parse_gtfs(cfg: AgencyConfig) -> dict[str, list[dict]]:
+    """Download ``cfg``'s static GTFS zip and return a dict keyed by filename stem."""
+    return parse_gtfs_zip(_download_gtfs_zip(cfg), cfg)
+
+
+def gtfs_content_sha256(zip_bytes: bytes) -> str:
+    """Return a hash of a GTFS zip's *contents*, independent of zip packaging.
+
+    Hashes each member's name and the sha256 of its bytes, in sorted name
+    order. Zip container metadata (member timestamps, compression level,
+    member order) is ignored, so an agency endpoint that re-packs
+    byte-identical files on every request still hashes identically —
+    which is what the unchanged-feed skip needs. Directory entries are
+    skipped.
+    """
+    outer = hashlib.sha256()
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for name in sorted(n for n in zf.namelist() if not n.endswith("/")):
+            outer.update(name.encode("utf-8"))
+            outer.update(b"\0")
+            outer.update(hashlib.sha256(zf.read(name)).hexdigest().encode("ascii"))
+            outer.update(b"\n")
+    return outer.hexdigest()
+
+
+def feed_version_from_gtfs(gtfs_data: dict[str, list[dict]]) -> str | None:
+    """Return ``feed_info.feed_version`` from parsed GTFS data, or None if absent."""
+    feed_info = gtfs_data.get("feed_info") or []
+    return feed_info[0].get("feed_version") if feed_info else None
+
+
+def current_snapshot_hash_info(db: Session) -> tuple[int | None, str | None, str | None]:
+    """Return ``(snapshot_id, content_sha256, archive_uri)`` for the current snapshot.
+
+    The current snapshot is the one owning the ``is_current`` routes rows
+    (the same definition `pipelines/refresh_corridors.py` uses). The hash
+    and archive URI come from the ``content_sha256=`` / ``archive=`` tokens
+    in its notes; either is None when absent (a pre-#258 snapshot, or one
+    loaded with ``--no-archive``).
+    """
+    current_id = (
+        db.query(Route.snapshot_id)
+        .filter(Route.is_current, Route.snapshot_id.isnot(None))
+        .order_by(Route.snapshot_id.desc())
+        .limit(1)
+        .scalar()
+    )
+    if current_id is None:
+        return None, None, None
+    notes = db.query(GTFSSnapshot.notes).filter(GTFSSnapshot.snapshot_id == current_id).scalar()
+    sha = CONTENT_HASH_NOTE_RE.search(notes or "")
+    uri = ARCHIVE_NOTE_RE.search(notes or "")
+    return current_id, (sha.group(1) if sha else None), (uri.group(1) if uri else None)
+
+
+def current_snapshot_content_hash(db: Session) -> str | None:
+    """Return the content hash recorded on the current GTFS snapshot, if any."""
+    return current_snapshot_hash_info(db)[1]
+
+
+def gtfs_archive_key(
+    agency: str, when: datetime, feed_version: str | None, content_sha: str
+) -> str:
+    """Build the S3 key for one downloaded GTFS zip.
+
+    ``gtfs-archive/<agency>/<YYYYMMDDTHHMMSSZ>_<feed_version>_<sha12>.zip``
+    (``when`` is naive UTC, per the project's storage convention). The UTC
+    timestamp sorts keys chronologically and makes every download unique;
+    feed_version (sanitised to ``[A-Za-z0-9.-]``, ``unknown`` when absent)
+    and the first 12 hex chars of the content hash make a listing
+    readable without opening any object.
+    """
+    version = re.sub(r"[^A-Za-z0-9.-]", "-", feed_version or "") or "unknown"
+    return (
+        f"{GTFS_ARCHIVE_PREFIX}/{agency}/{when.strftime('%Y%m%dT%H%M%SZ')}_"
+        f"{version}_{content_sha[:12]}.zip"
+    )
+
+
+def find_archived_zip(s3_client, bucket: str, agency: str, content_sha: str) -> str | None:
+    """Return the URI of an already-archived zip with this content hash, or None.
+
+    Lists ``gtfs-archive/<agency>/`` for keys ending ``_<sha12>.zip`` and
+    confirms the full hash from the object's ``content-sha256`` metadata.
+    Prevents a retry after a failed DB load (zip archived, load rolled
+    back) from uploading another copy of the same feed on every attempt.
+    Listing errors raise `GTFSArchiveError` — the upload would almost
+    certainly fail the same way, and the reload must not proceed
+    un-archived.
+    """
+    prefix = f"{GTFS_ARCHIVE_PREFIX}/{agency}/"
+    suffix = f"_{content_sha[:12]}.zip"
+    try:
+        token = None
+        while True:
+            kwargs = {"Bucket": bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            page = s3_client.list_objects_v2(**kwargs)
+            for obj in page.get("Contents", []) or []:
+                key = obj["Key"]
+                if not key.endswith(suffix):
+                    continue
+                head = s3_client.head_object(Bucket=bucket, Key=key)
+                if (head.get("Metadata") or {}).get("content-sha256") == content_sha:
+                    return f"s3://{bucket}/{key}"
+            if not page.get("IsTruncated"):
+                return None
+            token = page.get("NextContinuationToken")
+    except Exception as exc:  # boto3/botocore raise a wide family of errors
+        raise GTFSArchiveError(f"failed to list s3://{bucket}/{prefix}: {exc}") from exc
+
+
+def ensure_gtfs_zip_archived(
+    s3_client,
+    cfg: AgencyConfig,
+    zip_bytes: bytes,
+    content_sha: str,
+    feed_version: str | None,
+) -> str:
+    """Return an S3 URI holding these exact feed contents, uploading only if needed."""
+    existing = find_archived_zip(s3_client, cfg.s3_bucket, cfg.name, content_sha)
+    if existing:
+        print(f"\n✓ Feed already archived at {existing}; not uploading another copy")
+        return existing
+    key = gtfs_archive_key(cfg.name, utcnow_naive(), feed_version, content_sha)
+    print(f"\nArchiving GTFS zip to s3://{cfg.s3_bucket}/{key} ...")
+    uri = archive_gtfs_zip(
+        s3_client,
+        cfg.s3_bucket,
+        key,
+        zip_bytes,
+        metadata={
+            "agency": cfg.name,
+            "feed-version": feed_version or "unknown",
+            "content-sha256": content_sha,
+            "zip-sha256": hashlib.sha256(zip_bytes).hexdigest(),
+        },
+    )
+    print(f"✓ Archived {len(zip_bytes):,} bytes to {uri}")
+    return uri
+
+
+def archive_gtfs_zip(s3_client, bucket: str, key: str, zip_bytes: bytes, metadata: dict) -> str:
+    """Upload the exact zip bytes to ``s3://bucket/key`` and verify the stored size.
+
+    Returns the ``s3://`` URI. Raises `GTFSArchiveError` on any upload
+    error or on a byte-count mismatch reported by ``head_object`` —
+    callers treat that as fatal for the reload (see the module docstring).
+    """
+    uri = f"s3://{bucket}/{key}"
+    try:
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=zip_bytes,
+            ContentType="application/zip",
+            Metadata=metadata,
+        )
+        head = s3_client.head_object(Bucket=bucket, Key=key)
+    except Exception as exc:  # boto3/botocore raise a wide family of errors
+        raise GTFSArchiveError(f"failed to archive GTFS zip to {uri}: {exc}") from exc
+    stored = head.get("ContentLength")
+    if stored != len(zip_bytes):
+        raise GTFSArchiveError(
+            f"archived GTFS zip at {uri} has {stored} bytes, expected {len(zip_bytes)}"
+        )
+    return uri
+
+
+def apply_gtfs_to_db(
+    db: Session,
+    gtfs_data: dict[str, list[dict]],
+    content_sha256: str | None = None,
+    archive_uri: str | None = None,
+) -> int:
     """
     Apply parsed GTFS data to the DB inside the caller's transaction.
 
     Caller owns commit/rollback. On any exception, callers should rollback
     so the DB returns to its pre-call state.
+
+    ``content_sha256`` / ``archive_uri``, when given, are recorded in the
+    snapshot's ``notes`` (``content_sha256=<hex>`` is what the next
+    reload's unchanged-feed check reads back).
 
     Returns the snapshot_id of the newly created GTFSSnapshot row.
     """
@@ -176,9 +446,12 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
     print("\nCreating new GTFS snapshot...")
     print("-" * 70)
 
-    feed_version = (
-        gtfs_data["feed_info"][0].get("feed_version") if gtfs_data.get("feed_info") else None
-    )
+    feed_version = feed_version_from_gtfs(gtfs_data)
+    notes = f"Auto-reload at {now.isoformat()}"
+    if content_sha256:
+        notes += f"; content_sha256={content_sha256}"
+    if archive_uri:
+        notes += f"; archive={archive_uri}"
     snapshot = GTFSSnapshot(
         snapshot_date=now,
         feed_version=feed_version,
@@ -189,7 +462,7 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
         shapes_count=len(gtfs_data.get("shapes", [])),
         calendar_entries=len(gtfs_data["calendar"]),
         calendar_exceptions=len(gtfs_data["calendar_dates"]),
-        notes=f"Auto-reload at {now.isoformat()}",
+        notes=notes,
     )
     db.add(snapshot)
     db.flush()
@@ -509,24 +782,91 @@ def apply_gtfs_to_db(db: Session, gtfs_data: dict[str, list[dict]]) -> int:
     return snapshot_id
 
 
-def reload_complete_gtfs(agency: str = DEFAULT_AGENCY):
-    """Download an agency's GTFS feed and apply it in a single transaction.
+def reload_complete_gtfs(
+    agency: str = DEFAULT_AGENCY,
+    force: bool = False,
+    archive: bool = True,
+    s3_client=None,
+) -> int | None:
+    """Download an agency's GTFS feed, archive it, and apply it in one transaction.
 
     Args:
         agency: Agency name matching ``config/agencies/<agency>.yaml``
             (NOTES-100 multi-agency; default ``"wmata"``). Selects the
-            download source and the target database.
+            download source, the archive bucket, and the target database.
+        force: Load a new snapshot even when the feed's content hash
+            matches the current snapshot's.
+        archive: Upload the downloaded zip to S3 before loading (default).
+            ``False`` skips the upload — an explicit operator choice that
+            is logged loudly.
+        s3_client: Injected boto3 S3 client (tests); built lazily when None.
+
+    Returns:
+        The new snapshot_id, or None when the feed was unchanged and no
+        snapshot was created.
     """
     cfg = load_agency_config(agency)
     print("=" * 70)
     print(f"Complete GTFS Data Reload ({cfg.display_name})")
     print("=" * 70)
 
-    gtfs_data = _download_and_parse_gtfs(cfg)
+    zip_bytes = _download_gtfs_zip(cfg)
+    content_sha = gtfs_content_sha256(zip_bytes)
+    print(f"  content_sha256={content_sha}")
+
+    if archive and s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
 
     db = get_session(db_url=resolve_agency_db_url(cfg))
     try:
-        snapshot_id = apply_gtfs_to_db(db, gtfs_data)
+        current_id, current_sha, current_archive = current_snapshot_hash_info(db)
+        if not force and current_sha == content_sha:
+            if current_archive or not archive:
+                print(
+                    "\n✓ GTFS feed unchanged (content hash matches the current snapshot); "
+                    "no new snapshot created. Pass --force to load anyway."
+                )
+                return None
+            # Unchanged, but the current snapshot was loaded with --no-archive:
+            # archive it now (no new snapshot) and record the URI so later
+            # unchanged runs can skip outright.
+            current_version = (
+                db.query(GTFSSnapshot.feed_version)
+                .filter(GTFSSnapshot.snapshot_id == current_id)
+                .scalar()
+            )
+            uri = ensure_gtfs_zip_archived(s3_client, cfg, zip_bytes, content_sha, current_version)
+            snap = db.query(GTFSSnapshot).filter(GTFSSnapshot.snapshot_id == current_id).one()
+            snap.notes = f"{snap.notes or ''}; archive={uri}"
+            db.commit()
+            print(
+                f"\n✓ GTFS feed unchanged; archived the current snapshot {current_id}'s "
+                "zip (it was loaded with --no-archive). No new snapshot created."
+            )
+            return None
+
+        gtfs_data = parse_gtfs_zip(zip_bytes, cfg)
+        feed_version = feed_version_from_gtfs(gtfs_data)
+
+        # Archive BEFORE any DB write: an upload failure raises out of here
+        # with the DB untouched (see module docstring for why that's fatal).
+        archive_uri = None
+        if archive:
+            archive_uri = ensure_gtfs_zip_archived(
+                s3_client, cfg, zip_bytes, content_sha, feed_version
+            )
+        else:
+            print(
+                "\n!! --no-archive: the downloaded GTFS zip is NOT being saved to S3; "
+                "the database will be the only copy of this snapshot.",
+                file=sys.stderr,
+            )
+
+        snapshot_id = apply_gtfs_to_db(
+            db, gtfs_data, content_sha256=content_sha, archive_uri=archive_uri
+        )
         db.commit()
 
         print("\n" + "=" * 70)
@@ -537,13 +877,14 @@ def reload_complete_gtfs(agency: str = DEFAULT_AGENCY):
         print(f"  Agencies:        {len(gtfs_data['agency'])}")
         print(f"  Routes:          {len(gtfs_data['routes'])}")
         print(f"  Stops:           {len(gtfs_data['stops'])}")
-        print(f"  Trips:           {db.query(Trip).count()}")
+        print(f"  Trips:           {len(gtfs_data.get('trips', []))}")
         print(f"  Stop Times:      {len(gtfs_data['stop_times'])}")
-        print(f"  Shapes:          {db.query(Shape).count()}")
+        print(f"  Shapes:          {len(gtfs_data.get('shapes', []))}")
         print(f"  Calendar:        {len(gtfs_data['calendar'])}")
         print(f"  Calendar Dates:  {len(gtfs_data['calendar_dates'])}")
         print(f"  Timepoints:      {len(gtfs_data['timepoints'])}")
         print(f"  Timepoint Times: {len(gtfs_data['timepoint_times'])}")
+        return snapshot_id
     except Exception as e:
         db.rollback()
         print(f"\n✗ Reload failed; transaction rolled back. DB state is unchanged.\n  {e}")
@@ -562,5 +903,17 @@ if __name__ == "__main__":
         default=DEFAULT_AGENCY,
         help=(f"Agency name matching config/agencies/<agency>.yaml (default: {DEFAULT_AGENCY!r})."),
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Load a new snapshot even if the feed's content hash matches the current one.",
+    )
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Skip uploading the downloaded zip to S3 (the DB becomes the only copy).",
+    )
     cli_args = parser.parse_args()
-    reload_complete_gtfs(agency=cli_args.agency)
+    reload_complete_gtfs(
+        agency=cli_args.agency, force=cli_args.force, archive=not cli_args.no_archive
+    )

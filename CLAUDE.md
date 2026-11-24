@@ -45,7 +45,7 @@ Every open issue either serves this or is explicitly parked
 ## Commands
 
 ```bash
-uv sync --extra dev                          # install (--extra viz --extra postgres for matplotlib/psycopg2 scripts)
+uv sync --extra dev                          # install (psycopg2 is core; --extra viz for matplotlib scripts)
 uv run uvicorn api.main:app --reload         # API on :8000
 cd frontend && npm run dev                   # frontend on :5173
 bin/pull-and-derive.sh                       # freshness: sync S3 raw archives + load + replay + derive + prune SFMTA trip_update_state locally
@@ -78,9 +78,13 @@ cd frontend && npm run lint && npm test && npm run build         # frontend gate
   land in `system_metrics_daily`.
 - **GTFS is versioned via `is_current`** — every query on
   routes/stops/trips/stop_times/calendar/calendar_dates must filter
-  `is_current=True`. Refresh only via
+  `is_current=True` — except per-service-date pipelines, which take
+  `gtfs_version_filter(model, gtfs_snapshot_id)`; `run_daily_batch.py`
+  passes the snapshot `src/gtfs_versioning.py:resolve_gtfs_snapshot_for_date`
+  picks for each date (issue #258). Refresh only via
   `scripts/reload_gtfs_complete.py` (single transaction,
-  all-or-nothing rollback).
+  all-or-nothing rollback; archives the zip to S3 `gtfs-archive/` first
+  and skips unchanged feeds).
 - **Datetime storage is naive UTC**; service-date semantics ("today",
   "last 7 days") are Eastern — use `src/timezones.py`. Never
   `datetime.now()` for date math, never `datetime.fromtimestamp()`

@@ -53,7 +53,7 @@ def test_materialize_forwards_tz_name_to_compute_bunching(db_session, monkeypatc
 
     seen_tz_names = []
 
-    def _fake_compute_bunching(db, route_id, service_date, tz_name="America/New_York"):
+    def _fake_compute_bunching(db, route_id, service_date, tz_name="America/New_York", **kwargs):
         seen_tz_names.append(tz_name)
         return []  # empty -> materialize skips upsert_rows entirely
 
@@ -75,7 +75,7 @@ def test_materialize_defaults_tz_name_to_eastern(db_session, monkeypatch):
 
     seen_tz_names = []
 
-    def _fake_compute_bunching(db, route_id, service_date, tz_name="America/New_York"):
+    def _fake_compute_bunching(db, route_id, service_date, tz_name="America/New_York", **kwargs):
         seen_tz_names.append(tz_name)
         return []
 
@@ -99,7 +99,7 @@ def test_materialize_for_routes_forwards_tz_name(db_session, monkeypatch):
 
     seen_tz_names = []
 
-    def _fake_compute_bunching(db, route_id, service_date, tz_name="America/New_York"):
+    def _fake_compute_bunching(db, route_id, service_date, tz_name="America/New_York", **kwargs):
         seen_tz_names.append(tz_name)
         return []
 
@@ -126,7 +126,9 @@ def test_main_forwards_cfg_timezone_to_materialize_for_routes(db_session, monkey
 
     captured = {}
 
-    def _fake_materialize_for_routes(db, route_ids, service_dates, tz_name="America/New_York"):
+    def _fake_materialize_for_routes(
+        db, route_ids, service_dates, tz_name="America/New_York", **kwargs
+    ):
         captured["tz_name"] = tz_name
         return []
 
