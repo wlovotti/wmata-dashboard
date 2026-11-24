@@ -159,9 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=date.fromisoformat,
         default=[],
         help=(
-            "prune this date (repeatable) although its aggregates are not final (partial stamp, "
-            "NULL OTP/service-delivered, missing overlay/headway rows) — such dates are "
-            "otherwise kept forever. Progress and re-derivability guards still apply."
+            "prune this date (repeatable) although its aggregates are not final: a partial "
+            "stamp, one NULL headline (OTP or service-delivered), or missing overlay/headway "
+            "rows — such dates are otherwise kept forever. Still refused when the date has no "
+            "system_metrics_daily row or its row has no observed value at all (then the "
+            "stop-level rows are the only record). Progress and re-derivability guards apply."
         ),
     )
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)

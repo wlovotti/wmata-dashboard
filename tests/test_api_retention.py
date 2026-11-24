@@ -173,3 +173,24 @@ def test_scorecard_and_route_detail_carry_retention(client, seeded):
     assert body["retention"]["pruned_dates_in_window"] == 1
     body = client.get("/api/routes?days=7").json()
     assert body["retention"]["window_truncated"] is False
+
+
+def test_retention_block_failure_never_breaks_the_endpoint(client, seeded, monkeypatch):
+    """Review nit: a failing retention note is logged and the block omitted, not a 500."""
+    import api.main
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api.main, "retention_note", _boom)
+    r = client.get("/api/routes?days=30")
+    assert r.status_code == 200 and "retention" not in r.json()
+
+
+def test_routes_window_uses_the_agency_service_day():
+    """SFMTA's /api/routes window starts from Pacific "today", WMATA's from Eastern."""
+    from api.main import _agency_today
+    from src.timezones import local_today
+
+    assert _agency_today("sfmta") == local_today("America/Los_Angeles")
+    assert _agency_today("wmata") == local_today("America/New_York")

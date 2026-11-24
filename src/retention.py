@@ -218,6 +218,38 @@ def aggregate_status(session: Session, service_date: date) -> str:
     return STATUS_OK
 
 
+def release_blocker(session: Session, service_date: date) -> str | None:
+    """Why ``--release-date`` must not free ``service_date``, or None if it may.
+
+    Releasing accepts losing the stop-level rows of a date whose aggregates
+    are imperfect (partial stamp, one NULL headline, missing overlay or
+    headway rows) because *some* observed daily record survives. With no
+    ``system_metrics_daily`` row, or a row with no observed value at all
+    (OTP, EWT, bunching all NULL and service-delivered NULL/0), the
+    stop-level rows are the only record of the day, so release refuses.
+    """
+    row = session.execute(
+        select(
+            SystemMetricsDaily.otp_percentage,
+            SystemMetricsDaily.ewt_seconds,
+            SystemMetricsDaily.bunching_rate,
+            SystemMetricsDaily.service_delivered_ratio,
+        ).where(SystemMetricsDaily.service_date == _iso(service_date))
+    ).first()
+    if row is None:
+        return "no system_metrics_daily row (the stop-level rows are the only record)"
+    if (
+        row.otp_percentage is None
+        and row.ewt_seconds is None
+        and row.bunching_rate is None
+        and not row.service_delivered_ratio
+    ):
+        return (
+            "system_metrics_daily has no observed value (the stop-level rows are the only record)"
+        )
+    return None
+
+
 def read_progress_statuses(path: Path | None) -> dict[date, str]:
     """Read ``refresh_progress_<agency>.json`` (read-only) into ``{date: status}``.
 
@@ -301,9 +333,23 @@ def dates_missing_vp(
     (:func:`is_rederivable`; the refresh fetches and loads it), or every
     UTC day of the window up to ``utc_today`` still has rows in the DB
     (VM-era days that were never pruned). Deriving a date without either
-    would rebuild only ``trip_update`` rows — the refresh refuses it.
+    would rebuild only ``trip_update`` rows — the refresh refuses it. With
+    an empty manifest (archive start unknown) nothing is refused; a warning
+    is logged. Caveat: :func:`vp_day_has_rows` is an any-row test, so a
+    VM-era day left partly deleted by an interrupted VP retention run still
+    counts as present — rerun retention to finish it before re-deriving.
     """
     archive_start = vp_archive_start(session)
+    if archive_start is None:
+        # E.g. a dev copy restored without vp_archive_loaded_files: the
+        # archive start is unknown, so nothing can be judged — don't refuse.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "vp_archive_loaded_files is empty: S3 JSONL VP archive start unknown; "
+            "not checking dates for a VP source"
+        )
+        return []
     out = []
     for d in dates:
         if is_rederivable(d, tz_name, archive_start):
@@ -524,10 +570,9 @@ def plan_retention(
         reason = None
         if utc_day in protected:
             reason = f"needed by not-yet-derived {protected[utc_day]}"
-        elif rows > manifested and not include_unmanifested_vp:
-            reason = (
-                f"{rows - manifested} rows not from manifested archive files "
-                "(VM era; S3 JSONL cannot reload them)"
+        elif rows > manifested:
+            reason = unmanifested_vp_refusal(
+                utc_day, rows - manifested, archive_start, include_unmanifested_vp
             )
         plan.vp_days.append(VpDayPlan(utc_day, rows, manifested, reason))
 
@@ -554,10 +599,38 @@ def stop_level_refusal(
     if status in UNFINISHED_STATUSES:
         return f"refresh progress says {status!r}"
     agg = aggregate_status(session, service_date)
-    if agg != STATUS_OK and not release:
-        return f"aggregates not final: {agg} (kept until released with --release-date)"
+    if agg != STATUS_OK:
+        if not release:
+            return f"aggregates not final: {agg} (kept until released with --release-date)"
+        blocker = release_blocker(session, service_date)
+        if blocker:
+            return f"cannot be released: {blocker}"
     if not allow_unrederivable and not is_rederivable(service_date, tz_name, archive_start):
         return NOT_AUTO_REDERIVABLE
+    return None
+
+
+def unmanifested_vp_refusal(
+    utc_day: date, extra: int, archive_start: datetime | None, include_unmanifested_vp: bool
+) -> str | None:
+    """Why a VP day holding ``extra`` rows the manifest can't account for must be kept.
+
+    ``--include-unmanifested-vp`` releases only VM-era days strictly before
+    the JSONL archive's first day (the runbook's copy covers
+    ``collected_at < 2026-08-23``). Unmanifested rows on or after that day
+    are an anomaly (a manual load, a lost manifest row) that no copy covers,
+    so they are never deleted.
+    """
+    if archive_start is None or utc_day >= archive_start.date():
+        return (
+            f"{extra} rows not from manifested archive files on/after the JSONL archive start "
+            "— never deleted (not covered by the VM-era copy; investigate)"
+        )
+    if not include_unmanifested_vp:
+        return (
+            f"{extra} rows not from manifested archive files (VM era; S3 JSONL cannot reload "
+            "them; --include-unmanifested-vp after copying them out)"
+        )
     return None
 
 
@@ -728,11 +801,12 @@ def apply_retention(
             reason = "inside the window"
         elif vp.utc_day in protected:
             reason = f"needed by not-yet-derived {protected[vp.utc_day]}"
-        elif (
-            _vp_day_rows(session, vp.utc_day) > _manifested_rows(session, vp.utc_day)
-            and not include_unmanifested_vp
-        ):
-            reason = "rows not from manifested archive files"
+        else:
+            extra = _vp_day_rows(session, vp.utc_day) - _manifested_rows(session, vp.utc_day)
+            if extra > 0:
+                reason = unmanifested_vp_refusal(
+                    vp.utc_day, extra, archive_start, include_unmanifested_vp
+                )
         session.rollback()
         if reason:
             result.skipped.append(f"VP {vp.utc_day}: {reason}")

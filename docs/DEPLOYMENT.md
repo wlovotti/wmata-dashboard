@@ -1281,7 +1281,7 @@ refresh run lock):
 
 | Delete path | Unit | Guards (all must pass) |
 |---|---|---|
-| `runs`, then `stop_events` | service date D < anchor − (stop_level_days − 1) | D's `system_metrics_daily` is `complete` with non-null OTP and service-delivered, and D has `route_metrics_daily_overlay` and `route_headway_metrics` rows (`--release-date D` releases a date whose aggregates are not final); D is not `failed`/`held`/`deferred`/`derived` in `logs/refresh_progress_<agency>.json`; D's VP window starts at or after the first manifested S3 JSONL VP file (2026-08-22 20:54 UTC), i.e. the automated per-day path can re-derive D — unless `--allow-unrederivable` (see "Where older data exists") |
+| `runs`, then `stop_events` | service date D < anchor − (stop_level_days − 1) | D's `system_metrics_daily` is `complete` with non-null OTP and service-delivered, and D has `route_metrics_daily_overlay` and `route_headway_metrics` rows (`--release-date D` releases a date whose aggregates are not final, but never one without an observed `system_metrics_daily` row); D is not `failed`/`held`/`deferred`/`derived` in `logs/refresh_progress_<agency>.json`; D's VP window starts at or after the first manifested S3 JSONL VP file (2026-08-22 20:54 UTC), i.e. the automated per-day path can re-derive D — unless `--allow-unrederivable` (see "Where older data exists") |
 | `vehicle_positions` | UTC day of `collected_at` before the first VP day the raw window needs | every row of the day came from manifested archive files (rows ≤ `vp_archive_loaded_files` count — VM-era days are kept unless `--include-unmanifested-vp`); no not-yet-derived date (no `system_metrics_daily` row, or an unfinished progress status) reads the day. Manifest rows are **kept**, so `load_vp_archive --utc-date U` sees "fewer rows than manifested" and reloads the whole day when `refresh_by_day --date D` needs it |
 | `trip_update_state` | `service_date < local today − raw_days` | the existing `cleanup_trip_update_state.run_cleanup` (a date whose state goes before it is derived re-folds from S3 on replay) |
 
@@ -1302,11 +1302,33 @@ tiers keep.
   destination OTP, `route_headway_metrics` ← `trip_update` stop_events;
   service-delivered ← `runs`. So a re-derive that rebuilds only trip-update
   rows (VP gone) cannot null a kept proximity OTP.
+  **If it refuses inside a refresh** (`bin/pull-and-derive.sh --date D`),
+  the derive fails, the date is recorded `failed`, that agency stops, and
+  default runs keep re-selecting it. Choose one:
+  - the raw inputs are genuinely gone and the kept aggregates are the best
+    record of D (the usual case) → keep them and stop the retries:
+    `bin/pull-and-derive.sh --agency X --abandon-date D`, adding
+    `--abandon-derived` when D still has `runs` (the refusal itself means
+    some rows were rebuilt);
+  - the stop-level rows are complete again (e.g. you loaded D's VP from the
+    parquet archive) but some *other* source is still absent, or you have
+    checked that the kept values are wrong → overwrite deliberately, per
+    rollup, outside the refresh:
+    `uv run python -m pipelines.upsert_system_metrics_daily --agency X --date D --force-overwrite-aggregates`
+    (same flag for `pipelines.upsert_route_metrics_overlay` and
+    `pipelines.compute_bunching --all-routes`). Never use it just to make a
+    refusal go away — it replaces kept values with whatever the current
+    rows compute.
 - `refresh_by_day` (and so `bin/pull-and-derive.sh`) refuses any date whose
   VP read window is neither inside the S3 JSONL VP archive nor still in the
   DB (`src/retention.py:dates_missing_vp`); `--allow-missing-vp` overrides.
   Re-deriving a date inside the archive with `--date D` reloads its raw
-  data first and works normally.
+  data first and works normally. With an empty `vp_archive_loaded_files`
+  (e.g. a dev copy restored without it) the archive start is unknown and
+  nothing is refused (a warning is logged). The "still in the DB" test is
+  any-row per UTC day, so a VM-era day left partly deleted by an
+  interrupted `--include-unmanifested-vp` run counts as present: rerun
+  retention to finish deleting it before re-deriving any date that reads it.
 - The zero-runs "hole" scans (`refresh_by_day` default selection,
   `run_daily_batch` catch-up) never reach past `today − stop_level_days`,
   so a pruned date is re-derived only when named with `--date`.
@@ -1328,12 +1350,20 @@ tiers keep.
   anchor date, never a pruned one.)
 
 **Dates kept forever unless released.** A date whose aggregates are not
-final — `partial` stamp, NULL OTP or service-delivered (e.g. WMATA 5/07,
-SFMTA 7/22 and 8/28), or missing overlay / headway rows (WMATA 5/02–5/03) —
-keeps its stop-level rows, because deleting them would leave no complete
-record of that day. To release one deliberately, after looking at it:
-`apply_retention --agency X --apply --release-date YYYY-MM-DD` (repeatable;
-the progress-file and re-derivability guards still apply).
+final keeps its stop-level rows. `apply_retention --agency X --apply
+--release-date YYYY-MM-DD` (repeatable; the progress-file and
+re-derivability guards still apply) releases one deliberately when an
+observed daily record survives:
+
+- releasable: a `partial` stamp (WMATA 5/29, 7/11, 7/12, 7/17; SFMTA 7/21),
+  one NULL headline with other observed values (SFMTA 7/22 and 8/28 —
+  OTP, EWT and bunching present, service-delivered NULL), or missing
+  overlay / headway rows (WMATA 5/02–5/03, whose system row is fully
+  observed);
+- **never releasable**: no `system_metrics_daily` row at all (WMATA 5/24),
+  or a row with no observed value (OTP, EWT, bunching all NULL and
+  service-delivered NULL/0 — WMATA 5/07, checked read-only) — there the
+  stop-level rows are the only record of the day. The dry run says `cannot be released` for these.
 
 **Where older data exists (checked 2026-11-24, read-only).**
 
@@ -1358,6 +1388,13 @@ for u in D D+1 D+2; do uv run python pipelines/load_vp_from_parquet.py --date $u
 uv run python pipelines/replay_archive_to_state.py --agency wmata --date D --force
 uv run python pipelines/run_daily_batch.py --agency wmata --date D --skip-housekeeping
 ```
+
+The parquet files are partitioned by `DATE(timestamp)` (the vehicle's
+fix time, UTC), while the JSONL files and the loader's day unit are by
+`collected_at`; the derive reads a `timestamp` window from local midnight
+D to local midnight D+2. So load every UTC day that window touches —
+`src/raw_archive.py:vp_utc_dates(D, tz)`, i.e. D, D+1 and D+2 for WMATA —
+not only D's own file.
 
 That path is not tested end to end by this PR (the per-date GTFS snapshot
 resolution and the TU replay are; the parquet loader has its own test),
@@ -1495,7 +1532,19 @@ overrides the read-only ones); `--apply` takes the lock itself.
       DB=wmata_dashboard; A=wmata; C=2026-08-16; V=2026-11-17   # from the dry run
       psql -d $DB -c "\copy (SELECT * FROM stop_events WHERE service_date < '$C') TO PROGRAM 'zstd -T0 > ~/backups/${A}_stop_events_before_$C.csv.zst' CSV HEADER"
       psql -d $DB -c "\copy (SELECT * FROM runs WHERE service_date < '$C') TO PROGRAM 'zstd -T0 > ~/backups/${A}_runs_before_$C.csv.zst' CSV HEADER"
-      # only for --include-unmanifested-vp (WMATA ~44M rows, ~10 GB in the DB; days 6/11–8/22):
+      # only for --include-unmanifested-vp (WMATA ~44M rows, ~10 GB in the DB; days 6/11–8/22).
+      # First check that NO day on/after the JSONL archive start has rows the manifest can't
+      # account for — the copy below only covers collected_at < 2026-08-23 (read-only, no backfill):
+      #   psql -d $DB -c "WITH m AS (SELECT left(filename,10)::date AS d, sum(row_count) AS n
+      #       FROM vp_archive_loaded_files GROUP BY 1)
+      #     SELECT d, n, (SELECT count(*) FROM vehicle_positions v
+      #       WHERE v.collected_at >= m.d AND v.collected_at < m.d + 1) AS rows
+      #     FROM m WHERE d > '2026-08-22' AND (SELECT count(*) FROM vehicle_positions v
+      #       WHERE v.collected_at >= m.d AND v.collected_at < m.d + 1) > n ORDER BY d"
+      # If it returns any row, do not use --include-unmanifested-vp until that is explained.
+      # (The tool also never deletes unmanifested rows on/after the archive's first day, and
+      # the dry run lists any such day — including days with no manifest row at all — as
+      # "never deleted".)
       psql -d $DB -c "\copy (SELECT * FROM vehicle_positions WHERE collected_at < '2026-08-23') TO PROGRAM 'zstd -T0 > ~/backups/${A}_vp_vm_era.csv.zst' CSV HEADER"
       ```
 
@@ -1508,17 +1557,20 @@ overrides the read-only ones); `--apply` takes the lock itself.
    c. Upload and **verify before deleting anything**:
 
       ```bash
-      for f in ~/backups/${A}_*_before_$C.csv.zst; do
+      for f in ~/backups/${A}_*_before_$C.csv.zst ~/backups/${A}_vp_vm_era.csv.zst; do
+        [ -e "$f" ] || continue   # the VP copy exists only if you made it
         aws s3 cp "$f" s3://wmata-dashboard-backups/retention-exports/
         echo "$f local=$(stat -f%z "$f") s3=$(aws s3api head-object --bucket wmata-dashboard-backups \
           --key retention-exports/$(basename "$f") --query ContentLength --output text)"
         echo "  rows in file: $(zstd -dc "$f" | tail -n +2 | wc -l)"
       done
       psql -d $DB -Atc "SELECT (SELECT count(*) FROM stop_events WHERE service_date < '$C'), (SELECT count(*) FROM runs WHERE service_date < '$C')"
+      # with the VP copy:
+      psql -d $DB -Atc "SELECT count(*) FROM vehicle_positions WHERE collected_at < '2026-08-23'"
       ```
 
-      Sizes must match, and each file's row count must equal the live
-      count printed by the last line (and the dry run's totals for the
+      Sizes must match, and each file's row count must equal the matching
+      live count printed by the `psql` lines (and the dry run's totals for the
       dates it marks deletable plus the dates it keeps — the copy is of
       everything below C). Rows containing newlines in a CSV field would
       make `wc -l` overcount; none of these tables has free-text columns

@@ -465,8 +465,7 @@ async def get_routes(
         # block flags the pieces still pooled live from runs/stop_events
         # (excess-trip-time, dates with no overlay row) when dates in the
         # window were pruned.
-        start = eastern_today() - timedelta(days=days)
-        return {**result, "retention": retention_note(db, agency, start)}
+        return _with_retention(result, db, agency, _agency_today(agency) - timedelta(days=days))
     finally:
         db.close()
 
@@ -607,8 +606,7 @@ async def get_route(
         )
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
-        start = eastern_today() - timedelta(days=days)
-        return {**result, "retention": retention_note(db, agency, start)}
+        return _with_retention(result, db, agency, _agency_today(agency) - timedelta(days=days))
     finally:
         db.close()
 
@@ -1048,8 +1046,7 @@ async def get_route_stop_diagnostics_endpoint(
             direction_id=direction_id,
             otp_window=otp_window,
         )
-        start = eastern_today() - timedelta(days=days)
-        return {**result, "retention": retention_note(db, agency, start)}
+        return _with_retention(result, db, agency, eastern_today() - timedelta(days=days))
     finally:
         db.close()
 
@@ -1125,8 +1122,7 @@ async def get_route_bunching_causes_endpoint(
             day_type=day_type,
             period=period,
         )
-        start = eastern_today() - timedelta(days=days)
-        return {**result, "retention": retention_note(db, agency, start)}
+        return _with_retention(result, db, agency, eastern_today() - timedelta(days=days))
     finally:
         db.close()
 
@@ -1295,6 +1291,26 @@ def _parse_service_date_param(service_date: str | None):
             status_code=400,
             detail=f"Invalid service_date {service_date!r}; expected YYYY-MM-DD",
         ) from exc
+
+
+def _agency_today(agency: str):
+    """The agency's own service-day "today" (Pacific for SFMTA, Eastern for WMATA)."""
+    from src.timezones import local_today
+
+    return local_today(_load_agency_config_cached(agency).timezone)
+
+
+def _with_retention(result: dict, db, agency: str, window_start) -> dict:
+    """Return ``result`` plus a ``retention`` block; on any failure log it and omit the block.
+
+    The block is an additive signal (issue #265) — it must never turn a
+    working endpoint into a 500.
+    """
+    try:
+        return {**result, "retention": retention_note(db, agency, window_start)}
+    except Exception:
+        logger.exception("retention note failed for agency=%r", agency)
+        return result
 
 
 def _require_detail_or_410(db, agency: str, service_date) -> None:

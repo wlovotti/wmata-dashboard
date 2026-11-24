@@ -311,13 +311,21 @@ def test_vp_days_prune_only_manifested_finished_days_and_keep_manifest(db_sessio
     needed_day = ANCHOR - timedelta(days=25)
     for d in (old_ok, unknown, needed_day):
         _vp(db_session, datetime.combine(d, datetime.min.time()) + timedelta(hours=12), 3)
+    # The JSONL archive "starts" the day after `unknown`, so `unknown` is a
+    # VM-era day (releasable with --include-unmanifested-vp).
+    start_epoch = int(
+        (
+            datetime.combine(unknown + timedelta(days=1), datetime.min.time())
+            - datetime(1970, 1, 1)
+        ).total_seconds()
+    )
     for d in (old_ok, needed_day):
         db_session.add(
-            VpArchiveLoadedFile(filename=f"{d.isoformat()}.1.{EARLY_EPOCH}.jsonl.zst", row_count=3)
+            VpArchiveLoadedFile(filename=f"{d.isoformat()}.1.{start_epoch}.jsonl.zst", row_count=3)
         )
     db_session.add(  # unknown: 3 rows but manifest only accounts for 1
         VpArchiveLoadedFile(
-            filename=f"{unknown.isoformat()}.1.{EARLY_EPOCH}.jsonl.zst", row_count=1
+            filename=f"{unknown.isoformat()}.1.{start_epoch}.jsonl.zst", row_count=1
         )
     )
     # Every service date in range has an aggregate row except needed_day - 1.
@@ -524,3 +532,54 @@ def test_cli_dry_run_refuses_while_a_refresh_holds_the_lock(tmp_path, monkeypatc
         assert mod.main(["--agency", "wmata"]) == run_lock.EXIT_LOCKED
     finally:
         shutil.rmtree(lock_dir, ignore_errors=True)
+
+
+@pytest.mark.smoke
+def test_release_refuses_a_date_without_a_system_metrics_row(db_session):
+    """Review: --release-date must not free a date whose only record is its stop-level rows."""
+    _manifest_everything(db_session)
+    _add_day(db_session, ANCHOR)
+    old = ANCHOR - timedelta(days=30)
+    _add_day(db_session, old, quality=None)  # stop-level rows, no system_metrics_daily row
+    (p,) = plan_retention(db_session, "wmata", TZ, POLICY, release_dates={old}).dates
+    assert "cannot be released" in p.reason and "no system_metrics_daily row" in p.reason
+
+
+@pytest.mark.smoke
+def test_release_refuses_a_row_without_observed_values(db_session):
+    """A schedule-only row (no OTP/EWT/bunching, SD 0) is not an observed record either."""
+    _manifest_everything(db_session)
+    _add_day(db_session, ANCHOR)
+    old = ANCHOR - timedelta(days=30)
+    _add_day(db_session, old, otp=None, sd=0.0)
+    (p,) = plan_retention(db_session, "wmata", TZ, POLICY, release_dates={old}).dates
+    assert "no observed value" in p.reason
+
+
+@pytest.mark.smoke
+def test_unmanifested_vp_after_archive_start_is_never_deleted(db_session):
+    """Review: --include-unmanifested-vp only covers VM-era days before the JSONL start."""
+    _add_day(db_session, ANCHOR)
+    late = ANCHOR - timedelta(days=20)
+    _vp(db_session, datetime.combine(late, datetime.min.time()) + timedelta(hours=12), 3)
+    _manifest_everything(db_session)  # archive starts 2023 -> `late` is after it
+    d = late - timedelta(days=3)
+    while d < ANCHOR:  # every date "derived", so no day is protected
+        db_session.add(SystemMetricsDaily(service_date=d.isoformat(), otp_percentage=1.0))
+        d += timedelta(days=1)
+    db_session.add(
+        VpArchiveLoadedFile(filename=f"{late.isoformat()}.1.{EARLY_EPOCH}.jsonl.zst", row_count=1)
+    )
+    db_session.commit()
+    plan = plan_retention(db_session, "wmata", TZ, POLICY, include_unmanifested_vp=True)
+    (v,) = [v for v in plan.vp_days if v.utc_day == late]
+    assert "never deleted" in v.reason
+
+
+@pytest.mark.smoke
+def test_dates_missing_vp_with_empty_manifest_refuses_nothing(db_session, caplog):
+    """Review nit: an empty manifest means "archive start unknown", not "refuse everything"."""
+    from src.retention import dates_missing_vp
+
+    assert dates_missing_vp(db_session, [date(2026, 7, 15)], TZ, date(2026, 11, 24)) == []
+    assert "archive start unknown" in caplog.text
