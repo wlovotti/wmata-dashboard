@@ -224,6 +224,55 @@ def test_route_set_mismatch_is_refused_and_not_writable(pg_session):
 
 
 @pytest.mark.integration
+def test_stored_route_with_observations_missing_from_recompute_is_refused(pg_session):
+    """A stored route that has observed headways but no recomputed row would stay uncapped."""
+    _seed(pg_session)
+    (plan,) = tool.plan_recompute(
+        pg_session,
+        WMATA,
+        D,
+        D,
+        compute_overlay=_fake_overlay(routes=("D50",)),
+        compute_system=_fake_system(),
+    )
+    assert plan.status == "refused"
+    assert "with observed headways" in plan.reason
+
+
+@pytest.mark.integration
+def test_stored_no_observation_route_is_kept_as_stored(pg_session):
+    """A schedule-only stored route the recompute drops is kept as is; only computed_at moves."""
+    _seed(pg_session)
+    row = (
+        pg_session.query(RouteMetricsDailyOverlay).filter_by(route_id="D10", service_date=ISO).one()
+    )
+    row.ewt_n_observed_headways = 0
+    row.ewt_obs_sum_h = 0.0
+    row.ewt_obs_sum_h_sq = 0.0
+    pg_session.flush()
+    _, ov_before = _snapshot(pg_session)
+    (plan,) = tool.plan_recompute(
+        pg_session,
+        WMATA,
+        D,
+        D,
+        compute_overlay=_fake_overlay(routes=("D50",)),
+        compute_system=_fake_system(),
+    )
+    assert plan.status == "write"
+    assert plan.kept_routes == ["D10"]
+    assert "kept as stored" in tool.format_plan(plan)
+    now = datetime(2026, 11, 27, 12, 0, 0)
+    tool.apply_plan(pg_session, plan, now=now)
+    _, ov_after = _snapshot(pg_session)
+    assert {k: v for k, v in ov_after["D10"].items() if k != "computed_at"} == {
+        k: v for k, v in ov_before["D10"].items() if k != "computed_at"
+    }
+    assert ov_after["D10"]["computed_at"] == now
+    assert {c: ov_after["D50"][c] for c in tool.EWT_OVERLAY_COLUMNS} == NEW_EWT
+
+
+@pytest.mark.integration
 def test_nulling_stored_ewt_is_refused(pg_session):
     """A recompute that would null a stored system EWT is refused."""
     _seed(pg_session)

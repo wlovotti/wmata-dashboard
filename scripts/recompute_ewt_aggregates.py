@@ -42,9 +42,12 @@ delivered was computed earlier.
 
 Refused (skipped and listed; nothing written for the date):
 
-- the route set differs between the stored overlay and the recompute
-  (a route would need inserting, which needs a completeness stamp, or a
-  stored route would be left on the old method);
+- a recomputed route has no stored overlay row (inserting it would need a
+  completeness stamp), or a stored route WITH observed headways is absent
+  from the recompute (it would stay on the old method). A stored route
+  with no observed headways that the recompute no longer produces is
+  harmless — the cap cannot change it — so it is kept as stored and only
+  its ``computed_at`` is stamped (reported as "kept as stored");
 - the recompute would null a stored non-null system ``ewt_seconds``.
 
 Failures (an exception while computing or writing) are reported separately
@@ -142,6 +145,7 @@ class DatePlan:
     overlay_new: dict[str, dict] = field(default_factory=dict)
     system_new: dict = field(default_factory=dict)
     n_routes: int = 0
+    kept_routes: list[str] = field(default_factory=list)
 
     @property
     def ewt_changes(self) -> dict[str, int]:
@@ -258,12 +262,22 @@ def plan_date(
 
     missing = sorted(set(new_by_route) - set(stored_rows))
     extra = sorted(set(stored_rows) - set(new_by_route))
-    if missing or extra:
+    # A stored route the recompute no longer produces is harmless when it has
+    # no observed headways: the cap cannot change it (typically a route from
+    # a schedule-only overlay row whose snapshot resolution has since moved).
+    # It is kept as stored (only computed_at is stamped); one WITH observed
+    # headways would stay uncapped, so the date is refused.
+    plan.kept_routes = [r for r in extra if not stored_rows[r].ewt_n_observed_headways]
+    extra_observed = [r for r in extra if r not in plan.kept_routes]
+    if missing or extra_observed:
         parts = []
         if missing:
             parts.append(f"{len(missing)} recomputed route(s) have no stored row ({missing[:5]})")
-        if extra:
-            parts.append(f"{len(extra)} stored route(s) absent from the recompute ({extra[:5]})")
+        if extra_observed:
+            parts.append(
+                f"{len(extra_observed)} stored route(s) with observed headways absent from "
+                f"the recompute ({extra_observed[:5]})"
+            )
         plan.status, plan.reason = "refused", "; ".join(parts)
     elif stored_system.ewt_seconds is not None and new_system.get("ewt_seconds") is None:
         plan.status, plan.reason = "refused", "recompute would null a stored ewt_seconds"
@@ -317,12 +331,25 @@ def apply_plan(db: Session, plan: DatePlan, now: datetime | None = None) -> None
             .all()
         )
         overlay_payload = []
+        kept_payload = []
         for row in stored:
             d = _row_dict(row)
             d.pop("id", None)
-            d.update(plan.overlay_new[row.route_id])
             d["computed_at"] = now
-            overlay_payload.append(d)
+            if row.route_id in plan.overlay_new:
+                d.update(plan.overlay_new[row.route_id])
+                overlay_payload.append(d)
+            else:  # a no-observation route kept as stored (see plan_date)
+                kept_payload.append(d)
+        if kept_payload:
+            upsert_rows(
+                db,
+                RouteMetricsDailyOverlay,
+                kept_payload,
+                OVERLAY_CONSTRAINT,
+                ["computed_at"],
+                commit=False,
+            )
         if overlay_payload:
             upsert_rows(
                 db,
@@ -371,6 +398,11 @@ def format_plan(plan: DatePlan, applied: bool = False) -> str:
         f"swt {_fmt(swt_old)} -> {_fmt(swt_new)}; overlay EWT sums changed on "
         f"{routes}/{plan.n_routes} routes"
     )
+    if plan.kept_routes:
+        line += (
+            f"; {len(plan.kept_routes)} stored no-observation route(s) kept as stored "
+            f"({plan.kept_routes[:5]})"
+        )
     if plan.other_changes:
         line += "; NOT written (differs on recompute): " + ", ".join(
             f"{c}x{n}" for c, n in sorted(plan.other_changes.items())
