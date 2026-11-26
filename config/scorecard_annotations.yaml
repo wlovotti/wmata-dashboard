@@ -1,0 +1,26 @@
+# Hand-entered known data issues referenced by generated scorecards
+# (src/scorecard.py, issue #267). Annotations only add issue references to a
+# report (which labels them as hand-entered); they never change, drop or
+# reweight a figure, and they are not checked against the data. Remove an
+# entry once its issue is fixed and the affected dates are re-derived. The
+# agency must match a config/agencies/<name>.yaml or loading fails.
+
+# Routes with a known cause behind a dominated pooled figure (see
+# src/scorecard.py:is_dominated). A dominated route not listed here is
+# reported as "not yet tracked".
+routes:
+  - agency: wmata
+    route_id: D50
+    issue: "#269"
+    note: "a few very long observed headways dominate the route's pooled EWT"
+  - agency: wmata
+    route_id: D10
+    issue: "#269"
+    note: "a few very long observed headways dominate the route's pooled EWT"
+
+# Specific agency-dates with a known data problem.
+dates:
+  - agency: sfmta
+    date: "2026-10-21"
+    issue: "#270"
+    note: "stamped complete (coverage 0.564) despite outage-like metrics"
