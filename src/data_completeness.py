@@ -51,9 +51,9 @@ The coverage signals:
   live (heartbeats + VP + TU), replayed-only (TU), and
   archive-loaded-to-laptop (VP + TU). A total collector outage shows up
   as a gap in it exactly as it did in heartbeats: no poll, no snapshot
-  timestamps, and the first poll after the outage finalizes every stop
-  passed during it with that single poll's timestamp, so it cannot
-  back-fill the gap.
+  timestamps. A stop passed during the outage is never seen again after
+  the last pre-outage poll, so it keeps that poll's timestamp — nothing
+  lands inside the gap, and it cannot be back-filled.
 
 The gap legs' timestamps:
 
@@ -74,17 +74,38 @@ The gap legs' timestamps:
   ``collected_at``, so the leg is assessable only when every UTC day the
   service window overlaps has at least one row.
 
-Honesty about missing inputs: raw VP and ``trip_update_state`` are kept
-only 7 days (``retention.raw_days``), so re-aggregating an older date
-sees neither. A leg whose inputs are absent is *not assessable*: it never
-stamps a date ``partial`` and never upgrades one. When a date that
-already carries a stamp is re-evaluated with any leg not assessable, the
-stored stamp and its coverage are kept (``kept``), unless an assessable
-gap leg fails outright — a real gap is real evidence. A date stamped for
-the first time with a leg not assessable is decided by the legs that are
-(and the decision records which leg was skipped): the WMATA pull
-tolerates a VP loader failure by design, and such a day is still stamped
-from the trip-update legs, with a loud warning.
+Empty vs pruned — decided from evidence, not assumed. Raw VP and
+``trip_update_state`` are kept only 7 days (``retention.raw_days``), so a
+leg with no rows may mean "the feed delivered nothing" (an outage) or
+"the rows were pruned" (retention, cleanup). The never-pruned load
+manifests tell them apart:
+
+- Trip updates: ``tu_archive_replayed_files`` has one row per (file,
+  target date) with the snapshot rows it folded, written in the same
+  transaction as the state. Files replayed for D with ZERO rows in total
+  and no state for D → the feed delivered nothing → the leg is assessed
+  with the whole window as its gap. Rows replayed but no state now →
+  pruned → *not assessable*. No manifest entry (dates before the manifest
+  existed, 2026-08-29, or never replayed) → *not assessable*.
+- Vehicle positions, per UTC day: ``vp_archive_loaded_files`` rows and
+  the day's rows are equal after every load (``load_vp_archive``). Equal
+  (even both 0 with files loaded) → usable; more rows than manifested →
+  rows written straight by the old VM collector → usable; fewer rows
+  than manifested (fully OR partially pruned) or no rows and no manifest
+  → *not assessable*.
+
+``trip_update_state`` is deleted one whole service date per transaction
+(``pipelines/cleanup_trip_update_state.run_cleanup``), so a date's state
+is never left as a sparse remnant that would read as a gap.
+
+A leg that is not assessable never demotes a date that already carries a
+stamp and never upgrades one: the stored stamp and its coverage are kept
+(``kept``), unless a leg that *is* assessable fails — a real gap is real
+evidence. A date being stamped for the FIRST time has earned nothing to
+keep, so there a leg that cannot be assessed counts as a failure: a day
+is certified ``complete`` only on evidence from both feeds. (In
+``refresh_by_day`` both are present at first stamp — a failed VP load or
+replay stops the date before it is derived.)
 
 ``trip_update_snapshots`` has been retired (Phase F, PR #155) and plays
 no part here.
@@ -376,15 +397,18 @@ class FeedGap:
 
     Attributes:
         feed: ``TRIP_UPDATE_FEED`` or ``VEHICLE_POSITION_FEED``.
-        assessable: False when the feed's rows for the date are absent
-            (pruned, never loaded, or the date predates collection); the
-            gap fields are then None and the leg decides nothing.
+        assessable: False when the manifests show the feed's rows for the
+            date were pruned, or there is no evidence either way (never
+            loaded, or before the manifests existed); the gap fields are
+            then None. True also when the manifests show the feed delivered
+            nothing — then the whole window is the gap.
         longest_gap_min: Longest gap in minutes, including the stretch from
             the window start to the first poll and from the last poll to the
             window end (so an outage running into midnight counts).
         gap_start_utc: Naive-UTC start of that gap.
         gap_end_utc: Naive-UTC end of that gap.
-        note: Why the leg is not assessable (empty when it is).
+        note: Why the leg is not assessable, or why an assessed leg had no
+            rows at all (empty otherwise).
     """
 
     feed: str
@@ -401,6 +425,7 @@ class FeedGap:
         return (
             f"{self.feed} longest gap {self.longest_gap_min:.0f} min "
             f"({self.gap_start_utc:%H:%M}Z-{self.gap_end_utc:%H:%M}Z)"
+            + (f" [{self.note}]" if self.note else "")
         )
 
 
@@ -452,7 +477,15 @@ def trip_update_feed_gap(
     Timestamps are ``trip_update_state.final_snapshot_ts`` of the date's
     own rows (``service_date = service_date``) — see the module docstring
     for why the row's service date, not the clock window, decides which
-    rows count. Not assessable when the date has no state rows at all.
+    rows count. When the date has no state rows, the replay manifest
+    (``tu_archive_replayed_files``) decides what that means:
+
+    - files replayed for the date with zero snapshot rows in total → the
+      feed delivered nothing for the date: assessed, the whole window is
+      the gap;
+    - rows replayed but no state now → pruned: not assessable;
+    - no manifest entry (never replayed, or before the manifest existed)
+      → not assessable.
 
     Args:
         db: SQLAlchemy session.
@@ -463,11 +496,30 @@ def trip_update_feed_gap(
     Returns:
         A :class:`FeedGap` for ``TRIP_UPDATE_FEED``.
     """
-    if not has_trip_update_signal(db, service_date, tz_name):
-        return FeedGap(
-            TRIP_UPDATE_FEED, False, note="no trip_update_state rows for the date (pruned?)"
-        )
     start_utc, end_utc = service_window_utc(service_date, tz_name, policy)
+    if not has_trip_update_signal(db, service_date, tz_name):
+        files, replayed_rows = db.execute(
+            text(
+                "SELECT COUNT(*), COALESCE(SUM(row_count), 0) FROM tu_archive_replayed_files "
+                "WHERE target_service_date = :sd"
+            ),
+            {"sd": service_date},
+        ).one()
+        if files and not replayed_rows:
+            gap, gap_start, gap_end = longest_gap((), start_utc, end_utc)
+            return FeedGap(
+                TRIP_UPDATE_FEED,
+                True,
+                gap,
+                gap_start,
+                gap_end,
+                note=f"{files} archive file(s) replayed, 0 rows for the date: feed delivered nothing",
+            )
+        if files:
+            note = f"state pruned ({replayed_rows} snapshot rows were replayed, none retained)"
+        else:
+            note = "no trip_update_state rows and no replay manifest entry for the date"
+        return FeedGap(TRIP_UPDATE_FEED, False, note=note)
     rows = db.execute(
         text(
             "SELECT DISTINCT final_snapshot_ts FROM trip_update_state "
@@ -480,6 +532,49 @@ def trip_update_feed_gap(
     return FeedGap(TRIP_UPDATE_FEED, True, gap, gap_start, gap_end)
 
 
+def vp_utc_day_status(db: Session, utc_day: date_type) -> str:
+    """Return why one UTC day of ``vehicle_positions`` can't be used, or ``""`` if it can.
+
+    ``pipelines/load_vp_archive.py`` commits each file's rows together with
+    its manifest row, so after any sequence of loads a day's rows equal its
+    manifested rows; retention and manual deletes keep the manifest. So:
+
+    - rows == manifested, with at least one file → usable (0 == 0 means
+      the loaded files were empty: a real silence);
+    - rows > manifested → rows written straight to the DB by the old VM
+      collector (through 2026-08-22) → usable;
+    - rows < manifested → fully or partly pruned → not usable;
+    - no rows and no manifest entry → no evidence → not usable.
+
+    Args:
+        db: SQLAlchemy session.
+        utc_day: UTC calendar day of ``collected_at``.
+
+    Returns:
+        Empty string when the day is usable, else a short reason.
+    """
+    day_start = datetime.combine(utc_day, time())
+    present = db.execute(
+        text(
+            "SELECT COUNT(*) FROM vehicle_positions "
+            "WHERE collected_at >= :start AND collected_at < :end"
+        ),
+        {"start": day_start, "end": day_start + timedelta(days=1)},
+    ).scalar_one()
+    files, manifested = db.execute(
+        text(
+            "SELECT COUNT(*), COALESCE(SUM(row_count), 0) FROM vp_archive_loaded_files "
+            "WHERE filename LIKE :prefix"
+        ),
+        {"prefix": f"{utc_day.isoformat()}.%"},
+    ).one()
+    if present < manifested:
+        return f"vehicle_positions on UTC {utc_day} pruned ({present} of {manifested} rows left)"
+    if present == 0 and not files:
+        return f"no vehicle_positions and no load manifest entry for UTC {utc_day}"
+    return ""
+
+
 def vehicle_position_feed_gap(
     db: Session,
     service_date: date_type,
@@ -489,12 +584,13 @@ def vehicle_position_feed_gap(
     """Measure the vehicle-position feed's longest service-hours gap for a date.
 
     Timestamps are distinct ``vehicle_positions.collected_at`` (poll time).
-    VP is loaded and pruned in whole UTC days of ``collected_at``, so the
-    leg is assessable only when every UTC day the service window overlaps
-    has at least one row; otherwise a pruned or never-loaded day would read
-    as a many-hour gap. (A real outage covering an entire UTC day is
-    therefore reported as not assessable, not as a gap — the trip-update
-    legs still apply.)
+    VP is loaded and pruned in whole UTC days of ``collected_at``, so each
+    UTC day the service window overlaps is checked against the load
+    manifest (``vp_archive_loaded_files``, files named by UTC day; see
+    :func:`vp_utc_day_status`). Any day that is pruned (fully or partly)
+    or has neither rows nor manifest entries makes the leg not assessable,
+    so missing rows never read as a many-hour gap. A day whose files were
+    loaded but held no rows is a real silence and is measured.
 
     Args:
         db: SQLAlchemy session.
@@ -508,20 +604,9 @@ def vehicle_position_feed_gap(
     start_utc, end_utc = service_window_utc(service_date, tz_name, policy)
     utc_day = start_utc.date()
     while datetime.combine(utc_day, time()) < end_utc:
-        day_start = datetime.combine(utc_day, time())
-        present = db.execute(
-            text(
-                "SELECT 1 FROM vehicle_positions "
-                "WHERE collected_at >= :start AND collected_at < :end LIMIT 1"
-            ),
-            {"start": day_start, "end": day_start + timedelta(days=1)},
-        ).first()
-        if present is None:
-            return FeedGap(
-                VEHICLE_POSITION_FEED,
-                False,
-                note=f"no vehicle_positions collected on UTC {utc_day} (pruned or not loaded)",
-            )
+        problem = vp_utc_day_status(db, utc_day)
+        if problem:
+            return FeedGap(VEHICLE_POSITION_FEED, False, note=problem)
         utc_day += timedelta(days=1)
     rows = db.execute(
         text(
@@ -544,8 +629,10 @@ class QualityDecision:
             ``coverage_measured``, else the prior row's stored value
             (possibly None for rows that predate the column).
         coverage_measured: False when the coverage was carried over from
-            the prior row because an input was absent; callers must then
-            leave the stored ``coverage_pct`` untouched.
+            the prior row because an input was absent. ``coverage_pct`` is
+            then the stored value itself, so callers can always write
+            ``coverage_pct`` back; tools that must not touch rows whose
+            stamp is unchanged (the restamp CLI) check this flag.
         kept: True when the prior stamp was kept because a leg could not be
             assessed (the stamp is neither demoted nor upgraded).
         measured_coverage: The raw coverage measured now, for disclosure
@@ -623,25 +710,28 @@ def assess_data_quality(
 
     The rule (see the module docstring for the why):
 
-    1. Measure coverage and both feed-gap legs. A gap leg is assessable
-       only when its feed has rows for the date; the coverage leg is
-       assessed when every input is present, or when the date has never
+    1. Measure coverage and both feed-gap legs. Whether a gap leg is
+       assessable is decided from the load manifests (module docstring):
+       a feed that delivered nothing is assessed (whole-window gap); one
+       whose rows were pruned, or with no evidence, is not. The coverage
+       leg is assessed when both gap legs are, or when the date has never
        been stamped (``prior`` is None).
     2. Any assessed failure — coverage below ``threshold``, or a feed gap
        longer than ``gap_policy.feed_gap_max_minutes`` — makes the date
-       ``partial``. (With a prior and a missing input, the stored coverage
-       is carried over rather than replaced by an understated number.)
+       ``partial``. On a FIRST stamp (``prior`` is None) a leg that is not
+       assessable is also a failure: nothing has been earned, and a day is
+       certified only on evidence from both feeds. (With a prior and a
+       missing input, the stored coverage is carried over rather than
+       replaced by an understated number.)
     3. Otherwise, if every leg was assessed, the date is ``complete``.
-    4. Otherwise (a leg is not assessable and nothing assessed failed): a
-       date with a prior stamp keeps it and its stored coverage
-       (``kept``) — never demoted for missing inputs, never upgraded; a
-       date stamped for the first time is ``complete`` on the legs that
-       were assessed, and ``not_assessed`` records the skipped leg.
+    4. Otherwise (a prior exists, a leg is not assessable, and nothing
+       assessed failed) the prior stamp and its stored coverage are kept
+       (``kept``) — never demoted for missing inputs, never upgraded.
 
     This keeps the NOTES-104 retention rule (an earned ``complete`` is not
     demoted once its trip-update rows are pruned) and extends it to the gap
-    legs; a genuine outage still stamps ``partial`` at first
-    materialization, while the inputs are present, and stays so.
+    legs; a genuine outage — including a feed that delivered nothing all
+    day — still stamps ``partial`` at first materialization and stays so.
 
     Args:
         db: SQLAlchemy session.
@@ -676,6 +766,13 @@ def assess_data_quality(
                 f"{g.feed} gap {g.longest_gap_min:.0f} min > {policy.feed_gap_max_minutes} min "
                 f"({g.gap_start_utc:%Y-%m-%d %H:%M}Z-{g.gap_end_utc:%H:%M}Z)"
             )
+    if prior is None:
+        # First stamp: nothing earned to keep, so missing evidence fails.
+        reasons.extend(
+            f"{g.feed} not assessable at first stamp ({g.note})"
+            for g in (tu_gap, vp_gap)
+            if not g.assessable
+        )
 
     stored = pct if coverage_measured else prior[1]
     common = {
@@ -690,7 +787,7 @@ def assess_data_quality(
         return QualityDecision(
             "partial", stored, coverage_measured, False, reasons=tuple(reasons), **common
         )
-    if all_assessable or prior is None:
+    if all_assessable:
         return QualityDecision("complete", stored, coverage_measured, False, **common)
     return QualityDecision(prior[0], prior[1], False, True, **common)
 

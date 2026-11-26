@@ -45,12 +45,12 @@ from src.database import get_session
 from src.models import TripUpdateState
 from src.timezones import local_today
 
-# Rows deleted per DELETE statement / commit. A single unbatched DELETE
-# is sized for a daily WMATA increment, not a multi-million-row backlog
-# (SFMTA's first run under the PR #229 retention hookup deletes ~10.7M of
-# ~13M rows on a 2.7GB table in one shot without this) -- batching keeps
-# each statement's lock and transaction size bounded regardless of how
-# large the eligible set is.
+# Rows deleted per DELETE statement. A single unbatched DELETE is sized
+# for a daily WMATA increment, not a multi-million-row backlog (SFMTA's
+# first run under the PR #229 retention hookup deletes ~10.7M of ~13M rows
+# on a 2.7GB table in one shot without this) -- batching keeps each
+# statement bounded, and committing once per service date keeps each
+# transaction to one day of state (~0.5M rows) however large the backlog.
 DEFAULT_BATCH_SIZE = 50_000
 
 
@@ -64,9 +64,11 @@ def run_cleanup(
 ) -> dict[str, int]:
     """Delete rows with ``service_date`` older than ``retention_days`` ago.
 
-    Deletes run in batches of ``batch_size`` rows, each its own statement
-    and commit, rather than one unbatched ``DELETE`` -- see
-    ``DEFAULT_BATCH_SIZE`` above for why. Batches are selected by primary
+    Deletes one service date per transaction, oldest first, each date in
+    statements of at most ``batch_size`` rows and committed only once the
+    whole date is gone -- so an interrupted cleanup never leaves a date
+    with a remnant of its rows (which the completeness check would read as
+    a sparse feed); see ``DEFAULT_BATCH_SIZE`` above for the sizing. Batches are selected by primary
     key (``trip_id``, ``stop_sequence``, ``service_date``) rather than a
     backend-specific physical row id, so the same code path works against
     both Postgres (production/dev) and the in-memory SQLite used by
@@ -74,7 +76,7 @@ def run_cleanup(
 
     Args:
         db: Active SQLAlchemy session. For a real (non-dry-run) cleanup,
-            this function commits after each batch itself -- the caller
+            this function commits after each service date itself -- the caller
             does not need to commit afterward. For ``dry_run``, nothing
             is deleted or committed, so there is nothing for the caller
             to roll back either.
@@ -124,22 +126,43 @@ def run_cleanup(
     # ("StatementTooComplex: stack depth limit exceeded"); a subquery
     # keeps the statement's parameter count constant regardless of
     # batch_size.
-    batch_subq = select(*pk_cols).where(TripUpdateState.service_date < cutoff).limit(batch_size)
-    batch_stmt = delete(TripUpdateState).where(tuple_(*pk_cols).in_(batch_subq))
-    total_deleted = 0
-    while True:
-        result = db.execute(batch_stmt)
-        deleted = result.rowcount or 0
-        if deleted == 0:
-            break
-        db.commit()
-        total_deleted += deleted
-        print(
-            f"cleanup_trip_update_state: deleted batch of {deleted} rows "
-            f"(running total {total_deleted})"
+    #
+    # One service date per transaction, oldest first (issue #270 review):
+    # committing every batch regardless of date meant an interrupted
+    # cleanup could leave a date with a scattered remnant of its rows,
+    # which the completeness check would then read as a sparse feed (a
+    # many-hour trip-update gap) and demote the date on its next
+    # re-aggregation. Batches still bound each statement's size; the
+    # commit happens only once the whole date is gone, so every date is
+    # either fully present or fully absent.
+    dates = (
+        db.execute(
+            select(TripUpdateState.service_date)
+            .where(TripUpdateState.service_date < cutoff)
+            .distinct()
+            .order_by(TripUpdateState.service_date)
         )
-        if deleted < batch_size:
-            break
+        .scalars()
+        .all()
+    )
+    total_deleted = 0
+    for service_date in dates:
+        batch_subq = (
+            select(*pk_cols).where(TripUpdateState.service_date == service_date).limit(batch_size)
+        )
+        batch_stmt = delete(TripUpdateState).where(tuple_(*pk_cols).in_(batch_subq))
+        date_deleted = 0
+        while True:
+            deleted = db.execute(batch_stmt).rowcount or 0
+            date_deleted += deleted
+            if deleted < batch_size:
+                break
+        db.commit()
+        total_deleted += date_deleted
+        print(
+            f"cleanup_trip_update_state: deleted {date_deleted} rows for service date "
+            f"{service_date} (running total {total_deleted})"
+        )
     return {"deleted": total_deleted}
 
 

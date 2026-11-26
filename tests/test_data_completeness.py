@@ -614,8 +614,9 @@ def test_dst_day_with_full_data_is_complete(pg_session):
 
 def test_vp_leg_not_assessable_when_a_utc_day_is_missing(pg_session):
     """VP is pruned in whole UTC days. If one UTC day the window overlaps has
-    no rows, the leg is not assessable: it neither stamps partial nor lets a
-    prior partial be upgraded, and the decision says so."""
+    no rows and no manifest entry, the leg is not assessable. On a first
+    stamp that is a failure (no evidence, nothing earned); with a prior it
+    neither demotes nor upgrades the stored stamp."""
     # Rows only for the first local hours (UTC TEST_DATE); the window's
     # second UTC day (TEST_DATE + 1, from 19:00 local) has none.
     _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440)
@@ -623,7 +624,10 @@ def test_vp_leg_not_assessable_when_a_utc_day_is_missing(pg_session):
 
     fresh = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, None)
     assert not fresh.vehicle_position_gap.assessable
-    assert fresh.data_quality == "complete"  # first stamp: decided by assessed legs
+    assert fresh.data_quality == "partial"  # first stamp: missing evidence fails
+    assert fresh.reasons == (
+        f"vehicle_position not assessable at first stamp ({fresh.vehicle_position_gap.note})",
+    )
     assert any(n.startswith("vehicle_position") for n in fresh.not_assessed)
 
     kept = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("partial", 0.42))
@@ -716,3 +720,176 @@ def test_two_run_backfill_leaves_boundary_stamp_and_coverage_unchanged(pg_sessio
 
     row = pg_session.get(SystemMetricsDaily, BOUNDARY.isoformat())
     assert (row.data_quality, row.coverage_pct) == stored
+
+
+# ---------------------------------------------------------------------------
+# Issue #270 review: empty vs pruned, decided from the load manifests
+# ---------------------------------------------------------------------------
+
+
+def _insert_tu_manifest(db, service_date: date, files: int, rows_each: int) -> None:
+    """Record ``files`` replayed archive files for ``service_date`` (tu_archive_replayed_files)."""
+    for i in range(files):
+        db.execute(
+            text(
+                "INSERT INTO tu_archive_replayed_files "
+                "(filename, target_service_date, row_count, replayed_at) "
+                "VALUES (:f, :sd, :n, :now)"
+            ),
+            {
+                "f": f"{service_date.isoformat()}.1.{i}.jsonl.zst",
+                "sd": service_date,
+                "n": rows_each,
+                "now": datetime(2099, 12, 31),
+            },
+        )
+    db.flush()
+
+
+def _manifest_vp_days(db, service_date: date, tz_name: str = EASTERN_TZ) -> None:
+    """Manifest every UTC day the date's window overlaps with exactly its current row count.
+
+    Mirrors what ``load_vp_archive`` leaves behind: one file per UTC day
+    whose ``row_count`` equals the rows present (0 when the files were empty).
+    """
+    start, end = service_window_utc(service_date, tz_name)
+    day = start.date()
+    while datetime.combine(day, time()) < end:
+        lo = datetime.combine(day, time())
+        n = db.execute(
+            text(
+                "SELECT COUNT(*) FROM vehicle_positions "
+                "WHERE collected_at >= :a AND collected_at < :b"
+            ),
+            {"a": lo, "b": lo + timedelta(days=1)},
+        ).scalar_one()
+        db.execute(
+            text(
+                "INSERT INTO vp_archive_loaded_files (filename, row_count, dropped_count, loaded_at) "
+                "VALUES (:f, :n, 0, :now)"
+            ),
+            {"f": f"{day.isoformat()}.1.1.jsonl.zst", "n": n, "now": datetime(2099, 12, 31)},
+        )
+        day += timedelta(days=1)
+    db.flush()
+
+
+def _full_vp(db, service_date: date) -> None:
+    """VP every minute over the local day and the next, manifested like a real load."""
+    for d in (service_date, service_date + timedelta(days=1)):
+        _insert_vehicle_position_minutes(db, d, minute_count=1440)
+    _manifest_vp_days(db, service_date)
+
+
+def test_all_day_trip_update_outage_at_wmata_first_stamp_is_partial(pg_session):
+    """The reviewer's case: WMATA's trip-update feed dies the evening before
+    and stays down all of D. The UTC-D archive files exist (D-1's trips), so
+    the strict replay succeeds and manifests them with 0 rows for D; VP alone
+    gives coverage 1.0. The manifest proves the feed delivered nothing, so the
+    trip-update leg is assessed with the whole window as its gap."""
+    _full_vp(pg_session, TEST_DATE)
+    _insert_tu_manifest(pg_session, TEST_DATE, files=4, rows_each=0)
+
+    decision = assess_data_quality(
+        pg_session, TEST_DATE, 0.80, EASTERN_TZ, None, WMATA.completeness
+    )
+
+    assert decision.measured_coverage == pytest.approx(1.0)
+    assert decision.data_quality == "partial"
+    assert decision.trip_update_gap.assessable
+    assert decision.trip_update_gap.longest_gap_min == pytest.approx(19 * 60)
+    assert "feed delivered nothing" in decision.trip_update_gap.note
+    assert decision.reasons[0].startswith("trip_update gap 1140 min")
+    # The same evidence demotes a date stamped complete under the old rule.
+    later = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 1.0))
+    assert later.data_quality == "partial" and not later.kept
+
+
+def test_trip_update_leg_without_any_evidence_fails_only_a_first_stamp(pg_session):
+    """No state and no replay manifest: a first stamp has no evidence for the
+    feed and is partial; a date that already carries a stamp (legacy era,
+    before the manifest existed) keeps it."""
+    _full_vp(pg_session, TEST_DATE)
+
+    fresh = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, None)
+    assert fresh.data_quality == "partial"
+    assert fresh.reasons == (
+        "trip_update not assessable at first stamp (no trip_update_state rows and no "
+        "replay manifest entry for the date)",
+    )
+
+    kept = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 0.99))
+    assert (kept.data_quality, kept.coverage_pct, kept.kept) == ("complete", 0.99, True)
+
+
+def test_pruned_trip_update_state_with_manifest_is_kept(pg_session):
+    """Rows were replayed (manifest row_count > 0) but no state is left: that
+    is pruning, not an outage — the stored stamp and coverage are kept."""
+    _full_vp(pg_session, TEST_DATE)
+    _insert_tu_manifest(pg_session, TEST_DATE, files=3, rows_each=50_000)
+
+    decision = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 1.0))
+
+    assert not decision.trip_update_gap.assessable
+    assert "state pruned" in decision.trip_update_gap.note
+    assert (decision.data_quality, decision.coverage_pct, decision.kept) == ("complete", 1.0, True)
+
+
+def test_vp_manifest_distinguishes_empty_pruned_and_remnant_days(pg_session):
+    """VP per UTC day against ``vp_archive_loaded_files``: files loaded but
+    empty → a real silence (assessed); rows fully or partly deleted after
+    loading (fewer rows than manifested) → not assessable, stamp kept."""
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440)
+
+    # Loaded-but-empty files for both UTC days: the feed delivered nothing.
+    _manifest_vp_days(pg_session, TEST_DATE)
+    empty = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 1.0))
+    assert empty.vehicle_position_gap.assessable
+    assert empty.data_quality == "partial"
+    assert empty.reasons[0].startswith("vehicle_position gap 1140 min")
+
+    # Now the days were loaded with rows (manifest says 500 each) and a
+    # cleanup left only a remnant behind: not assessable, not a gap.
+    pg_session.execute(text("UPDATE vp_archive_loaded_files SET row_count = 500"))
+    _insert_vehicle_position_minutes(pg_session, TEST_DATE, minute_count=1440, step_minutes=97)
+    remnant = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 1.0))
+    assert not remnant.vehicle_position_gap.assessable
+    assert "pruned" in remnant.vehicle_position_gap.note
+    assert (remnant.data_quality, remnant.kept) == ("complete", True)
+
+
+def test_rederived_old_date_is_assessed_normally(pg_session):
+    """``refresh_by_day --date D`` reloads VP and replays TU before deriving,
+    so an old date with a prior stamp is re-assessed on full evidence (a
+    real gap demotes it; nothing is kept)."""
+    _full_vp(pg_session, TEST_DATE)
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440, skip=(600, 799))
+    _insert_tu_manifest(pg_session, TEST_DATE, files=4, rows_each=10_000)
+
+    decision = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 1.0))
+
+    assert decision.coverage_measured and not decision.kept
+    assert decision.data_quality == "partial"
+    assert len(decision.reasons) == 1
+    assert decision.reasons[0].startswith("trip_update gap 201 min")
+
+
+def test_trip_update_gap_query_keys_on_the_dates_own_rows(pg_session):
+    """A neighbouring date's rows polled inside D's gap must not fill it:
+    D's own rows have a 201-minute hole that D+1's rows (service_date D+1)
+    cover by clock time. Dropping ``service_date = :sd`` from the gap query
+    would hide the outage."""
+    _full_vp(pg_session, TEST_DATE)
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440, skip=(600, 799))
+    _insert_trip_update_state_minutes(
+        pg_session,
+        TEST_DATE,
+        minute_count=200,
+        offset_minutes=600,
+        state_service_date=TEST_DATE + timedelta(days=1),
+    )
+
+    decision = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, None)
+
+    assert decision.trip_update_gap.longest_gap_min == pytest.approx(201.0)
+    assert decision.data_quality == "partial"

@@ -253,11 +253,6 @@ def upsert_system_metrics_for_date(
         print(
             f"  ⚠ System metrics for {service_date_iso}: flagging as partial — {decision.describe()}"
         )
-    elif decision.not_assessed:
-        print(
-            f"  ⚠ System metrics for {service_date_iso}: complete on the legs that could be "
-            f"assessed; NOT assessed: {'; '.join(decision.not_assessed)}"
-        )
     print(f"  · completeness {service_date_iso}: {decision.describe()}")
 
     try:
@@ -275,10 +270,10 @@ def upsert_system_metrics_for_date(
         existing.swt_seconds = metrics["swt_seconds"]
         existing.bunching_rate = metrics["bunching_rate"]
         existing.data_quality = data_quality
-        if decision.coverage_measured:
-            # Coverage carried over from the prior row (an input is
-            # pruned) is deliberately not re-measured or overwritten.
-            existing.coverage_pct = pct
+        # When an input is pruned the decision carries this row's stored
+        # coverage back unchanged (it was the prior), so this write never
+        # replaces a real value with an understated re-measurement.
+        existing.coverage_pct = pct
         existing.computed_at = utcnow_naive()
     else:
         db.add(

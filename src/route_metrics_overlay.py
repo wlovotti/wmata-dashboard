@@ -308,11 +308,6 @@ def upsert_route_metrics_for_date(
             f"  ⚠ Route metrics overlay for {service_date_iso}: flagging as partial — "
             f"{decision.describe()}"
         )
-    elif decision.not_assessed:
-        print(
-            f"  ⚠ Route metrics overlay for {service_date_iso}: complete on the legs that "
-            f"could be assessed; NOT assessed: {'; '.join(decision.not_assessed)}"
-        )
 
     try:
         rows = compute_route_metrics_overlay_for_date(
@@ -331,10 +326,10 @@ def upsert_route_metrics_for_date(
                     continue
                 setattr(existing, key, value)
             existing.data_quality = data_quality
-            if decision.coverage_measured:
-                # Coverage carried over from the prior row (an input is
-                # pruned) is deliberately not re-measured or overwritten.
-                existing.coverage_pct = pct
+            # When an input is pruned the decision carries the date's stored
+            # coverage (from the representative row) back unchanged, so this
+            # never replaces a real value with an understated re-measurement.
+            existing.coverage_pct = pct
             existing.computed_at = now
         else:
             db.add(

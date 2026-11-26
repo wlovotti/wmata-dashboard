@@ -3,8 +3,10 @@
 import pytest
 
 from src.agency_config import (
+    CompletenessPolicy,
     MissingAgencyDatabaseUrlError,
     load_agency_config,
+    parse_completeness,
     request_kwargs,
     resolve_agency_db_url,
 )
@@ -106,3 +108,44 @@ def test_vp_and_s3_fields_load_for_both_agencies():
     assert sfmta.s3_bucket == "wmata-dashboard-backups"
     assert sfmta.s3_tu_prefix == "raw-jsonl-archive/sfmta/"
     assert sfmta.s3_vp_prefix == "raw-jsonl-archive/sfmta_vp/"
+
+
+# --- completeness: block (issue #270) ---------------------------------------
+
+
+def test_completeness_block_loads_for_both_agencies():
+    """Both agency YAMLs carry the investigated defaults (90 min, 05-24)."""
+    for name in ("wmata", "sfmta"):
+        assert load_agency_config(name).completeness == CompletenessPolicy(90, 5, 24)
+
+
+def test_parse_completeness_defaults_and_overrides():
+    """A missing block gives the defaults; keys override individually."""
+    assert parse_completeness(None) == CompletenessPolicy()
+    assert parse_completeness({}) == CompletenessPolicy()
+    assert parse_completeness({"feed_gap_max_minutes": 60}) == CompletenessPolicy(60, 5, 24)
+    assert parse_completeness(
+        {"service_start_hour": 0, "service_end_hour": 24}
+    ) == CompletenessPolicy(90, 0, 24)
+
+
+@pytest.mark.parametrize(
+    "raw, message",
+    [
+        ({"feed_gap_minutes": 90}, "Unknown completeness key"),
+        ({"feed_gap_max_minutes": "90"}, "must be an integer"),
+        ({"feed_gap_max_minutes": 90.0}, "must be an integer"),
+        ({"feed_gap_max_minutes": True}, "must be an integer"),
+        ({"service_start_hour": None}, "must be an integer"),
+        ({"feed_gap_max_minutes": 0}, "must be positive"),
+        ({"service_start_hour": -1}, "0 <= start < end <= 24"),
+        ({"service_end_hour": 25}, "0 <= start < end <= 24"),
+        ({"service_start_hour": 10, "service_end_hour": 10}, "0 <= start < end <= 24"),
+        ({"service_start_hour": 12, "service_end_hour": 6}, "0 <= start < end <= 24"),
+        ([90], "must be a mapping"),
+    ],
+)
+def test_parse_completeness_rejects_bad_values(raw, message):
+    """Typos, non-integers (bools included), and empty/out-of-day windows fail loudly."""
+    with pytest.raises(ValueError, match=message):
+        parse_completeness(raw, "test.yaml")
