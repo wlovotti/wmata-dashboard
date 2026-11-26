@@ -1426,6 +1426,16 @@ def build_agency_section(
     return section
 
 
+# The day PR #274 (issues #270 / #272) merged and the feed-gap leg of the
+# completeness stamp took effect. Stamps written before it were decided on
+# coverage alone. Not used to classify dates: a stored row's `computed_at`
+# cannot tell which rule decided its stamp, because a hand-corrected stamp
+# (the #274 owner SQL) leaves `computed_at` alone and the EWT-only recompute
+# (`scripts/recompute_ewt_aggregates.py`) bumps it without re-assessing the
+# stamp. The report therefore states the date and gives no per-rule count.
+COMPLETENESS_GAP_RULE_SINCE = "2026-11-26"
+
+
 def completeness_rule(cfg) -> dict:
     """The agency's two-part ``data_quality`` rule as recorded in the scorecard JSON.
 
@@ -1448,6 +1458,7 @@ def completeness_rule(cfg) -> dict:
         "feed_gap_max_minutes": policy.feed_gap_max_minutes,
         "service_start_hour": policy.service_start_hour,
         "service_end_hour": policy.service_end_hour,
+        "gap_rule_since": COMPLETENESS_GAP_RULE_SINCE,
     }
 
 
@@ -1919,14 +1930,32 @@ def _render_crosscheck(section: dict) -> list[str]:
     return lines
 
 
+def _data_quality_rule_sentence(section: dict) -> str:
+    """The completeness-rule sentence on an agency's Data quality line.
+
+    Older JSON (no ``completeness`` block) keeps the original
+    coverage-only sentence verbatim.
+    """
+    if section.get("completeness") is None:
+        return (
+            f"Completeness threshold for this agency: ingest coverage >= "
+            f"{section['completeness_threshold']:.3f}."
+        )
+    return (
+        f"Completeness rule for this agency: {completeness_rule_text(section)}. Dates stamped "
+        f"before {section['completeness'].get('gap_rule_since', COMPLETENESS_GAP_RULE_SINCE)} "
+        "were judged on coverage alone (plus any hand corrections). A date's stored coverage "
+        "can sit on either side of the threshold when its stamp was decided by the feed-gap "
+        "test, was hand-corrected, or was kept from an earlier assessment."
+    )
+
+
 def _render_data_quality(section: dict) -> list[str]:
     """Exclusions, flagged days, schedule exceptions and the per-date table."""
     lines = [
         f"Dates in period: {section['n_days']}; stamped complete: {section['n_days_complete']} "
         f"(coverage {_fmt_pct(section['n_days_complete'] / section['n_days'])}). "
-        f"Completeness rule for this agency: {completeness_rule_text(section)}. A date's "
-        "stored coverage can sit on either side of the threshold when its stamp was decided "
-        "by the feed-gap test, or was kept from when its raw inputs were still present.",
+        + _data_quality_rule_sentence(section),
         "",
     ]
     any_excluded = False
@@ -2239,15 +2268,37 @@ def _ewt_long_gap_sentence(method: dict, sections: dict[str, dict] | None = None
     return text
 
 
+def _exclusion_stamp_clause(sections: list[dict]) -> str:
+    """The stamp part of the Method "Exclusions" sentence.
+
+    Scorecard JSON that predates the recorded completeness rule (no
+    ``completeness`` block in some section) gets the original wording
+    verbatim, so re-rendering a committed report reproduces it byte for
+    byte; newer JSON gets the two-part rule from `_completeness_method_text`.
+    """
+    if not sections or any(s.get("completeness") is None for s in sections):
+        return (
+            "when its row is not stamped `complete` (ingest coverage below the agency's "
+            "threshold), or when the metric is null that day."
+        )
+    return (
+        "when its row is not stamped `complete`, or when the metric is null that day."
+        + _completeness_method_text(sections)
+    )
+
+
 def _completeness_method_text(sections: list[dict]) -> str:
     """Method-section sentences for the two-part completeness rule, per agency.
 
-    Empty when the JSON predates the recorded rule (the per-agency
-    threshold is then still printed under Data quality).
+    Only called when every section carries its ``completeness`` block.
+    Says plainly which rule decided which stamps: the feed-gap leg exists
+    only since ``COMPLETENESS_GAP_RULE_SINCE``; older stamps were decided on
+    coverage alone (plus hand corrections). No per-rule count is given
+    because the stored rows do not record it — see
+    ``COMPLETENESS_GAP_RULE_SINCE`` for why ``computed_at`` cannot.
     """
-    if not sections or any(s.get("completeness") is None for s in sections):
-        return ""
     per_agency = "; ".join(f"{s['display_name']}: {completeness_rule_text(s)}" for s in sections)
+    since = sections[0]["completeness"].get("gap_rule_since", COMPLETENESS_GAP_RULE_SINCE)
     return (
         " A date is stamped `complete` only if (1) enough of the day's data landed: the share "
         "of its minutes with at least one vehicle-position, trip-update or collector-heartbeat "
@@ -2256,9 +2307,12 @@ def _completeness_method_text(sections: list[dict]) -> str:
         "limit inside the agency-local service window (each feed checked separately). "
         f"Per agency: {per_agency}. Dates failing either test are stamped `partial` and "
         "excluded. The rule measures whether the data was collected, not how good the service "
-        "was: a day of poor service with complete data is included. When a feed's raw records "
-        "for an older date have since been pruned, that test is not re-run and the date keeps "
-        "the stamp it earned when the data was present."
+        f"was: a day of poor service with complete data is included. Test (2) exists since "
+        f"{since}: a date stamped before then was judged on coverage alone (plus any hand "
+        "corrections recorded in the annotations), and the gap test applies to dates stamped "
+        "or re-assessed since. The stored rows do not record which rule decided a stamp, so "
+        "this report does not count dates per rule. When a feed's raw records for a date have "
+        "since been pruned, its test is not re-run and the date keeps its existing stamp."
     )
 
 
@@ -2364,8 +2418,7 @@ def render_markdown(scorecard: dict) -> str:
         "shows the pooled alternative for system figures.",
         "",
         "**Exclusions.** A date is excluded from a metric when it has no daily system row, "
-        "when its row is not stamped `complete`, or when the metric is null that day."
-        + _completeness_method_text([subject, *peers])
+        + _exclusion_stamp_clause([subject, *peers])
         + " Excluded dates are listed under "
         "Data quality and never averaged in. Route figures use only dates whose system row is "
         "complete and only per-route rows that are themselves complete. A day whose value is "

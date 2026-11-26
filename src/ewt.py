@@ -322,6 +322,8 @@ MAX_OBSERVED_HEADWAY_SEC = 120 * 60
 # by rewriting every date that still has trip_update rows; a date pruned
 # before being recomputed keeps whatever its timestamp says. A dedicated
 # per-row marker would need a schema change; this was judged not worth one.
+# Assumes no aggregate is written by pre-#273 code after this instant: the
+# runbook merges #273 before any pull-and-derive / refresh_by_day run.
 EWT_LONG_GAP_RULE_SINCE_UTC = datetime(2026, 11, 26, 6, 0, 0)
 
 

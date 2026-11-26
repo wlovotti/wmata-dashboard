@@ -1126,5 +1126,25 @@ def test_changed_gap_config_changes_json_and_rendered_text(db_session, monkeypat
     assert "more than 45 minutes between 06:00-22:00 Pacific" in md
     assert "more than 90 minutes between 05:00-24:00 Eastern" in md
     assert "measures whether the data was collected, not how good the service was" in md
-    assert "keeps the stamp it earned when the data was present" in md
+    assert "a date stamped before then was judged on coverage alone" in md
+    assert "this report does not count dates per rule" in md
+    assert "the date keeps its existing stamp" in md
+    assert "keeps the stamp it earned" not in md  # would imply both legs were passed
+    assert card["agencies"]["sfmta"]["completeness"]["gap_rule_since"] == "2026-11-26"
     assert "stored coverage can sit on either side of the threshold" in md
+
+
+@pytest.mark.smoke
+def test_committed_october_report_rerenders_byte_identical():
+    """Re-rendering the committed October JSON reproduces the committed Markdown exactly.
+
+    Guards the older-JSON fallbacks: sentences added since that report
+    (completeness rule, EWT long-gap method) must appear only when their
+    JSON blocks are present.
+    """
+    from pathlib import Path
+
+    reports = Path(__file__).resolve().parent.parent / "reports"
+    stem = "scorecard_wmata_2026-10-01_2026-10-31"
+    card = json.loads((reports / f"{stem}.json").read_text())
+    assert sc.render_markdown(card) == (reports / f"{stem}.md").read_text()
