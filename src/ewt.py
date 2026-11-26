@@ -8,6 +8,8 @@ headway ≤ 15 min):
   - AWT = mean(h²) / (2 · mean(h))  over observed headways at frequent cells
   - SWT = same formula over scheduled headways at frequent cells
   - EWT = AWT − SWT  (in seconds)
+  - headways longer than 120 min are dropped from both pools (issue #269;
+    see "Long-gap cap" below)
 
 Why cell-level frequency
 ------------------------
@@ -49,7 +51,10 @@ Observed vs scheduled sources
   - Observed: `stop_events` rows with `source='trip_update'` (the primary
     derivation, PR #43) and non-null `observed_arrival_ts`. Skipped trips
     naturally widen the observed gap and bunched arrivals naturally narrow
-    it — both feed into AWT correctly.
+    it — both feed into AWT correctly, up to the long-gap cap below.
+    Pairing is `pair_observed_headways`, the single implementation every
+    EWT path (per-route, vectorized, multi-date, and the system rollup in
+    `api/aggregations.py`) shares.
 
   - Scheduled: `stop_times` joined to `trips`, filtered to the service_ids
     resolved for the EXACT `service_date` passed in (see "Calendar
@@ -57,6 +62,39 @@ Observed vs scheduled sources
     computed). GTFS `arrival_time` is parsed to seconds before sorting
     (string MIN/MAX is broken on WMATA's unpadded single-digit hours,
     e.g. `"10:00:07" < "9:58:27"` lexicographically).
+
+Long-gap cap (issue #269)
+-------------------------
+Any headway longer than `MAX_OBSERVED_HEADWAY_SEC` (120 minutes) is
+dropped from EWT, whatever its cause — on the observed side (AWT) and the
+scheduled side (SWT) alike. Pairing consecutive arrivals at a (direction,
+stop) and bucketing by the earlier arrival's hour lets one pair span a
+period with no service at the stop: a missing or early last trip before a
+scheduled break (D50: 04:48 paired with 21:36), a run of SKIPPED calls
+(D10 2026-10-25), or an origin stop `trip_update` cannot observe (C53).
+Because AWT weights by h², one such 6-20 h "headway" dominated whole
+route-days. The cap is the bunching metric's existing filter
+(`src/bunching.py` imports the same constant), applied flat rather than by
+cause: it matched a three-part classified rule (scheduled break / SKIPPED
+run / origin stop) on all but 2 of 1,942 WMATA route-days in October 2026,
+and is simpler to state. Trade-off: a genuine service outage longer than
+2 h is no longer counted as wait — it is a service-delivered problem, which
+that metric still sees.
+
+Precedent: TfL's QSI method (the origin of EWT) computes AWT/SWT per hour
+block and sets the first bus's headway to zero, so the overnight or
+start-of-service gap never enters the average; it has no numeric cap. No
+agency or TRB source found sets a 120-minute figure — it is this repo's
+own convention (bunching, `src/analytics.py`), kept because on October
+2026 it reproduces the classified rule almost exactly (system 131.75 s vs
+131.34 s), while a 60-minute or 3x-scheduled cap starts cutting real long
+waits (124.90 s / 125.63 s).
+
+The scheduled side gets the same cap so AWT and SWT pool comparable
+headways; the frequent-cell gate still classifies each cell-hour on its
+full scheduled list, so which cells are frequent does not change. Stored
+daily aggregates computed before this rule keep the old method unless
+their date still has stop-level rows and is recomputed.
 
 Aggregation to time_period
 --------------------------
@@ -142,6 +180,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Hashable, Iterable
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from threading import Lock
@@ -235,6 +274,89 @@ DAY_TYPE_REPRESENTATIVE_FIELD = {
 }
 
 CellHour = tuple[int, str, int]  # (direction_id, stop_id, hour)
+
+# Headways longer than this are dropped from EWT — observed AND scheduled
+# (issue #269) — and from bunching (observed). One shared constant; bunching
+# re-exports it from here. A gap this long between two consecutive arrivals
+# at one (direction, stop) is not a wait a rider experiences inside a
+# frequent hour: in practice it is a service break the pair jumps across
+# (a missing or early last trip before a scheduled break, a run of SKIPPED
+# calls, or an origin stop the trip_update feed cannot observe). Because
+# AWT weights by h², a single 6-20 h "headway" otherwise dominates a whole
+# route-day (D50 2026-10-02: ~13 such pairs of ~60,400 s each carried most
+# of the day's Σh², putting AWT at 6,508 s). The rule is flat — any pair
+# over 120 min is dropped whatever its cause — so a genuine > 2 h service
+# outage is also no longer counted as wait; the
+# classified alternative (scheduled-break / SKIPPED-run / origin-stop
+# exclusion) agreed with this rule on all but 2 of 1,942 WMATA route-days in
+# October 2026. Matches the filter in `src/analytics.py:calculate_headways_batch`.
+MAX_OBSERVED_HEADWAY_SEC = 120 * 60
+
+
+def _is_countable_headway(delta: float) -> bool:
+    """True when a headway enters EWT: positive and at most `MAX_OBSERVED_HEADWAY_SEC`.
+
+    A zero/negative delta is a duplicate or out-of-order arrival; anything
+    over the cap is a service break, not a wait (see the constant's comment).
+    Exactly 120 min is kept — the same boundary bunching uses.
+    """
+    return 0 < delta <= MAX_OBSERVED_HEADWAY_SEC
+
+
+def _capped_scheduled(headways: list[float]) -> list[float]:
+    """Scheduled headways that enter the SWT pool: those at most `MAX_OBSERVED_HEADWAY_SEC`.
+
+    The scheduled side gets the same cap as the observed side so AWT and SWT
+    are computed over comparable pools — a scheduled service break inside a
+    frequent cell-hour would otherwise inflate SWT (and so shrink EWT) by
+    exactly the kind of gap the observed side no longer counts. The
+    frequent-cell gate (`_is_cell_hour_frequent`) still classifies a cell on
+    its full scheduled headway list, so which cells are frequent is unchanged.
+    """
+    return [h for h in headways if h <= MAX_OBSERVED_HEADWAY_SEC]
+
+
+def pair_observed_headways(
+    rows: Iterable[tuple[Hashable, int, str, datetime]],
+    tz: ZoneInfo,
+) -> dict[Hashable, dict[CellHour, list[float]]]:
+    """Pair consecutive observed arrivals into EWT headways, per group and cell-hour.
+
+    The one implementation of the observed-headway pairing every EWT path
+    uses (`_observed_headways_by_cell_hour`, `compute_ewt_headline_for_routes`,
+    `compute_ewt_headline_for_routes_multi_date`, and
+    `api.aggregations._system_ewt_and_bunching_for_date`) — they previously
+    each carried a copy, which is how the long-gap rule (issue #269) would
+    have had to be patched in four places.
+
+    Args:
+        rows: ``(group, direction_id, stop_id, observed_ts)`` tuples, sorted
+            by ``(group, direction_id, stop_id, observed_ts)``. ``group`` is
+            any hashable the caller pools by (a route_id, a
+            ``(service_date, route_id)`` pair, or a constant). Pairing resets
+            whenever ``(group, direction_id, stop_id)`` changes, so pairs
+            never cross a route, direction, stop or date boundary.
+        tz: Agency-local zone; each headway is bucketed by the **earlier**
+            arrival's local hour (naive-UTC timestamps, see `_hour_in_zone`).
+
+    Returns:
+        ``{group: {(direction_id, stop_id, hour): [headway_sec, ...]}}``.
+        Only headways passing `_is_countable_headway` are kept: positive and
+        no longer than `MAX_OBSERVED_HEADWAY_SEC` (120 min).
+    """
+    out: dict[Hashable, dict[CellHour, list[float]]] = defaultdict(lambda: defaultdict(list))
+    prev_key: tuple | None = None
+    prev_ts: datetime | None = None
+    for group, direction_id, stop_id, ts in rows:
+        key = (group, direction_id, stop_id)
+        if prev_key == key and prev_ts is not None:
+            delta = (ts - prev_ts).total_seconds()
+            if _is_countable_headway(delta):
+                out[group][(direction_id, stop_id, _hour_in_zone(prev_ts, tz))].append(delta)
+        prev_key = key
+        prev_ts = ts
+    return out
+
 
 # Calendar column name -> Python `date.weekday()` index (Mon=0..Sun=6).
 _CALENDAR_FIELD_TO_WEEKDAY_INDEX = {
@@ -698,7 +820,8 @@ def _observed_headways_by_cell_hour(
     (direction, stop), bucketed by the **earlier** arrival's local hour in
     `tz_name` (NOTES-103 multi-agency; defaults to Eastern). Source is
     restricted to `trip_update` (the primary derivation, PR #43) so each
-    actual arrival contributes exactly one row.
+    actual arrival contributes exactly one row. Pairing (and the 120-min
+    long-gap drop, issue #269) is `pair_observed_headways`.
     """
     rows = (
         db.query(StopEvent.direction_id, StopEvent.stop_id, StopEvent.observed_arrival_ts)
@@ -712,19 +835,11 @@ def _observed_headways_by_cell_hour(
         .all()
     )
 
-    tz = ZoneInfo(tz_name)
-    by_cell_hour: dict[CellHour, list[float]] = defaultdict(list)
-    prev_key: tuple[int, str] | None = None
-    prev_ts: datetime | None = None
-    for direction_id, stop_id, ts in rows:
-        key = (direction_id, stop_id)
-        if prev_key == key and prev_ts is not None:
-            delta = (ts - prev_ts).total_seconds()
-            if delta > 0:
-                by_cell_hour[(direction_id, stop_id, _hour_in_zone(prev_ts, tz))].append(delta)
-        prev_key = key
-        prev_ts = ts
-    return by_cell_hour
+    paired = pair_observed_headways(
+        ((None, direction_id, stop_id, ts) for direction_id, stop_id, ts in rows),
+        ZoneInfo(tz_name),
+    )
+    return paired.get(None, defaultdict(list))
 
 
 def _scheduled_headways_by_cell_hour(
@@ -894,7 +1009,7 @@ def compute_ewt_for_route_date(
             continue
         _direction, _stop, hour = cell_hour
         period = _period_for_hour(hour)
-        sched_pool[period].extend(sched_headways)
+        sched_pool[period].extend(_capped_scheduled(sched_headways))
         obs_pool[period].extend(obs_by_cell_hour.get(cell_hour, []))
         freq_cell_count[period] += 1
 
@@ -1083,7 +1198,7 @@ def compute_ewt_headline_for_route(
         _direction, _stop, hour = cell_hour
         if not is_hour_in_period(hour, period_key):
             continue
-        sched_pool.extend(sched_headways)
+        sched_pool.extend(_capped_scheduled(sched_headways))
         obs_pool.extend(obs_by_cell_hour.get(cell_hour, []))
         freq_cells += 1
 
@@ -1395,22 +1510,7 @@ def compute_ewt_headline_for_routes(
     if route_ids is not None:
         obs_q = obs_q.filter(StopEvent.route_id.in_(route_ids))
 
-    tz = ZoneInfo(tz_name)
-    obs_by_route_cell_hour: dict[str, dict[CellHour, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    prev_key: tuple[str, int, str] | None = None
-    prev_ts: datetime | None = None
-    for route_id, direction_id, stop_id, ts in obs_q.all():
-        key = (route_id, direction_id, stop_id)
-        if prev_key == key and prev_ts is not None:
-            delta = (ts - prev_ts).total_seconds()
-            if delta > 0:
-                obs_by_route_cell_hour[route_id][
-                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
-                ].append(delta)
-        prev_key = key
-        prev_ts = ts
+    obs_by_route_cell_hour = pair_observed_headways(obs_q.all(), ZoneInfo(tz_name))
 
     # Per-route headline aggregation.
     all_routes = set(sched_by_route_cell_hour.keys())
@@ -1428,7 +1528,7 @@ def compute_ewt_headline_for_routes(
         for cell_hour, sched_headways in sched_cells.items():
             if not _is_cell_hour_frequent(sched_headways, gate_sec):
                 continue
-            sched_pool.extend(sched_headways)
+            sched_pool.extend(_capped_scheduled(sched_headways))
             obs_pool.extend(obs_cells.get(cell_hour, []))
             freq_cells += 1
         results[route_id] = _ewt_headline_from_pools(
@@ -1544,22 +1644,13 @@ def compute_ewt_headline_for_routes_multi_date(
     # `{(service_date_str, route_id): {cell_hour: [headways]}}` — pairing is
     # reset every time the (service_date, route, direction, stop) key changes,
     # so per-(date, route) pools never cross day boundaries.
-    tz = ZoneInfo(tz_name)
-    obs_by_date_route_cell_hour: dict[tuple[str, str], dict[CellHour, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
+    obs_by_date_route_cell_hour = pair_observed_headways(
+        (
+            ((service_date_str, route_id), direction_id, stop_id, ts)
+            for service_date_str, route_id, direction_id, stop_id, ts, _sr in observed_rows
+        ),
+        ZoneInfo(tz_name),
     )
-    prev_key: tuple[str, str, int, str] | None = None
-    prev_ts: datetime | None = None
-    for service_date_str, route_id, direction_id, stop_id, ts, _sr in observed_rows:
-        key = (service_date_str, route_id, direction_id, stop_id)
-        if prev_key == key and prev_ts is not None:
-            delta = (ts - prev_ts).total_seconds()
-            if delta > 0:
-                obs_by_date_route_cell_hour[(service_date_str, route_id)][
-                    (direction_id, stop_id, _hour_in_zone(prev_ts, tz))
-                ].append(delta)
-        prev_key = key
-        prev_ts = ts
 
     results: dict[str, dict[str, dict]] = {ds: {} for ds in date_strs}
     for service_date_str in date_strs:
@@ -1578,7 +1669,7 @@ def compute_ewt_headline_for_routes_multi_date(
             for cell_hour, sched_headways in sched_cells.items():
                 if not _is_cell_hour_frequent(sched_headways, gate_sec):
                     continue
-                sched_pool.extend(sched_headways)
+                sched_pool.extend(_capped_scheduled(sched_headways))
                 obs_pool.extend(obs_cells.get(cell_hour, []))
                 freq_cells += 1
             results[service_date_str][route_id] = _ewt_headline_from_pools(

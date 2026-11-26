@@ -31,6 +31,7 @@ from src.bunching import (
 )
 from src.diagnosis_hash import compute_profile_hash, compute_system_snapshot_hash
 from src.ewt import (
+    _capped_scheduled,
     _day_type_for,
     _db_identity,
     _hour_in_zone,
@@ -41,6 +42,7 @@ from src.ewt import (
     compute_ewt_headline_for_route,
     compute_ewt_headline_for_routes,
     fetch_scheduled_cell_hours_for_date,
+    pair_observed_headways,
 )
 from src.excess_trip_time import compute_excess_trip_time
 from src.frequent_routes import get_cell_hour_gate_sec, load_frequent_route_ids
@@ -2612,7 +2614,11 @@ def _system_ewt_and_bunching_for_date(
     a single rider-weighted AWT/SWT pair. Mathematically equivalent to "EWT
     across the whole system at every cell where service is actually frequent
     on this date." Average-of-route-EWTs is wrong (averaging AWTs is wrong);
-    pooling is the only correct cross-route aggregation.
+    pooling is the only correct cross-route aggregation. Observed pairing is
+    the shared `src.ewt.pair_observed_headways`, and headways over 120 min
+    are dropped from both the observed and scheduled pools (issue #269 —
+    see the "Long-gap cap" section of `src/ewt.py`), exactly as the
+    per-route paths do.
 
     Bunching uses the same pool of routes' (direction, stop, hour) cells;
     `bunched / total` is naturally pair-weighted, so the per-route headline
@@ -2682,28 +2688,25 @@ def _system_ewt_and_bunching_for_date(
     )
 
     # Two parallel observed pools per (route, direction, stop, hour):
-    #   - ewt: every observed pair (matches src/ewt.py)
+    #   - ewt: every observed pair, via the shared `src.ewt.pair_observed_headways`
+    #     (which also drops pairs over 120 min, issue #269)
     #   - bun: only schedule_relationship='SCHEDULED' (matches src/bunching.py)
     tz = ZoneInfo(tz_name)
-    obs_ewt: dict[tuple[str, int, str, int], list[float]] = defaultdict(list)
+    obs_rows = obs_q.all()
+    obs_ewt = pair_observed_headways(
+        (
+            (route_id, direction_id, stop_id, ts)
+            for route_id, direction_id, stop_id, ts, _sr in obs_rows
+        ),
+        tz,
+    )
     obs_bun: dict[tuple[str, int, str, int], list[float]] = defaultdict(list)
 
-    prev_key_ewt: tuple[str, int, str] | None = None
-    prev_ts_ewt: datetime | None = None
     prev_key_bun: tuple[str, int, str] | None = None
     prev_ts_bun: datetime | None = None
 
-    for route_id, direction_id, stop_id, ts, sched_rel in obs_q.all():
+    for route_id, direction_id, stop_id, ts, sched_rel in obs_rows:
         key = (route_id, direction_id, stop_id)
-        # EWT pool: no schedule_relationship filter.
-        if prev_key_ewt == key and prev_ts_ewt is not None:
-            delta = (ts - prev_ts_ewt).total_seconds()
-            if delta > 0:
-                obs_ewt[(route_id, direction_id, stop_id, _hour_in_zone(prev_ts_ewt, tz))].append(
-                    delta
-                )
-        prev_key_ewt = key
-        prev_ts_ewt = ts
         # Bunching pool: SCHEDULED only — keeps its own consecutive-arrival walk so
         # an ADDED row between two SCHEDULED rows doesn't fabricate a phantom pair.
         if sched_rel == "SCHEDULED":
@@ -2726,9 +2729,8 @@ def _system_ewt_and_bunching_for_date(
         for cell_hour, sched_headways in sched_cells.items():
             if not _is_cell_hour_frequent(sched_headways, gate_sec):
                 continue
-            sched_pool.extend(sched_headways)
-            obs_key = (route_id, *cell_hour)
-            obs_pool.extend(obs_ewt.get(obs_key, []))
+            sched_pool.extend(_capped_scheduled(sched_headways))
+            obs_pool.extend(obs_ewt.get(route_id, {}).get(cell_hour, []))
     awt = compute_awt(obs_pool)
     swt = compute_awt(sched_pool)
     if awt is not None and swt is not None:

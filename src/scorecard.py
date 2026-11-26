@@ -72,7 +72,7 @@ from api.aggregations import (
 from src.agency_config import CONFIG_DIR as AGENCY_CONFIG_DIR
 from src.agency_config import load_agency_config
 from src.data_completeness import agency_coverage_threshold
-from src.ewt import _day_type_for, bus_route_ids
+from src.ewt import MAX_OBSERVED_HEADWAY_SEC, _day_type_for, bus_route_ids
 from src.frequent_routes import (
     HIGH_FREQ_GATE_SEC,
     MEDIUM_FREQ_GATE_SEC,
@@ -1455,6 +1455,10 @@ def build_scorecard(
                 "day_type_rule": "calendar weekday; holiday-type dates footnoted",
             },
             "ewt_gate_sec": {"high_freq": HIGH_FREQ_GATE_SEC, "medium_freq": MEDIUM_FREQ_GATE_SEC},
+            # Issue #269: observed and scheduled headways longer than this are
+            # dropped from EWT/SWT. Dates whose stop-level rows were pruned
+            # before the rule keep aggregates computed without it.
+            "ewt_max_headway_sec": MAX_OBSERVED_HEADWAY_SEC,
             "outlier_rule": {"mad_multiplier": OUTLIER_MAD_MULTIPLIER, "mad_to_sd": _MAD_TO_SD},
             "sources": {
                 "system": "system_metrics_daily",
@@ -1990,6 +1994,28 @@ def _dated_label(metric_summary: dict, iso: str) -> str:
     return iso
 
 
+def _ewt_long_gap_sentence(method: dict) -> str:
+    """Method-text sentence for the EWT long-gap rule (issue #269), or "" for older JSON.
+
+    Keyed on ``method["ewt_max_headway_sec"]`` so re-rendering a scorecard
+    JSON generated before the rule existed does not claim it was applied.
+    """
+    cap = method.get("ewt_max_headway_sec")
+    if cap is None:
+        return ""
+    return (
+        f" Any headway longer than {cap // 60} minutes, observed or scheduled, is left out "
+        "of both averages whatever its cause: such a gap is almost always a service break "
+        "that two consecutive arrivals happen to span (a missing last trip before a "
+        "scheduled break, a run of skipped stops, or a first stop the real-time feed cannot "
+        "see), and because waits are weighted by the square of the headway, one such gap "
+        "would otherwise outweigh a whole day of normal service. The trade-off is that a "
+        "genuine gap of more than two hours is not counted as waiting time; it still shows "
+        "in service delivered. Dates whose stop-level rows were pruned by retention before "
+        "this rule was introduced keep values computed without it."
+    )
+
+
 def render_markdown(scorecard: dict) -> str:
     """Render the scorecard dict as a Markdown report.
 
@@ -2075,7 +2101,8 @@ def render_markdown(scorecard: dict) -> str:
         "pooled over (direction, stop, hour) cells whose scheduled headway is at most "
         f"{m['ewt_gate_sec']['high_freq'] // 60} minutes ({m['ewt_gate_sec']['medium_freq'] // 60} "
         "minutes for WMATA medium-frequency routes). Source: `trip_update` stop events. "
-        "Lower is better. Scheduled wait time (SWT) is the scheduled side of the same pool.",
+        "Lower is better. Scheduled wait time (SWT) is the scheduled side of the same pool."
+        + _ewt_long_gap_sentence(m),
         "- Bunching rate: share of observed consecutive-arrival headways shorter than "
         "max(0.25 x scheduled headway, 2 minutes) (source: `trip_update` stop events, "
         "SCHEDULED trips only). Lower is better.",

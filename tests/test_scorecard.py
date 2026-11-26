@@ -481,6 +481,13 @@ def test_build_scorecard_end_to_end(db_session):
     assert "may not be reachable after a squash merge" in md
     assert "Known issue for 2026-10-02 (hand-entered annotation): test (#999)" in md
     assert "sha256 `1111111111111111` over 1 files" in md
+    # Issue #269: the EWT long-gap rule is stated in the Method section.
+    assert card["method"]["ewt_max_headway_sec"] == 7200
+    assert "Any headway longer than 120 minutes, observed or scheduled" in md
+    assert "keep values computed without it" in md
+    # A scorecard JSON generated before the rule re-renders without claiming it.
+    del card["method"]["ewt_max_headway_sec"]
+    assert "Any headway longer than" not in sc.render_markdown(card)
 
 
 @pytest.mark.smoke
