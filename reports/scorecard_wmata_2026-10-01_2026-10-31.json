@@ -6,10 +6,10 @@
     "end": "2026-10-31",
     "n_days": 31
   },
-  "generated_at_utc": "2026-11-26T16:19:39",
+  "generated_at_utc": "2026-11-26T16:32:16",
   "generator": "scripts/generate_scorecard.py",
   "provenance": {
-    "git_commit": "64cf61466edfce593151035362626c7b331eb9cb",
+    "git_commit": "8455713b9b365b5a5592659c22b527b6476a0db4",
     "git_dirty_paths": [],
     "source_sha256": {
       "api/__init__.py": "e2580af7cfcec064492588a87e83020869db0d4d5c828664c812c58ed6ba0546",
@@ -17,7 +17,7 @@
       "config/agencies/sfmta.yaml": "334c8e6b4f8eeaa1483b5ecdf312771d7a4c5599b5931a43197ae65bf83eff30",
       "config/agencies/wmata.yaml": "c1d35cc3b7af76275a58655c36ce95a1eebf9f9ad9d2848bb780ccbe580235a3",
       "config/frequent_routes.yaml": "01d0952f2674a6bf9efd50d0674cce5b38621c262bdc090e45a0a865349ca691",
-      "config/scorecard_annotations.yaml": "49ab26da79795cf564f80c89b0691de2635e74761df32c964c8cae234016169b",
+      "config/scorecard_annotations.yaml": "a9d1023b70978dc1057a46ceb5bdd558fd47e0c4df128f9f0e4e15ac3ea393cf",
       "scripts/generate_scorecard.py": "c9519636399b3647007d5ed8da07234a5c2ef81cb1b1971babce5e3275926f30",
       "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "src/agency_config.py": "95073452cc613b0e4e60eb153d8d9e82ec96ed5740b5e598bb3b58daa0cc268b",
@@ -35,14 +35,14 @@
       "src/otp_constants.py": "4e13e84cc670015df4fb09cd54930ea5a287e963924660e7f05e4e65e2291424",
       "src/otp_metrics.py": "62ea77456abc3cd959e1a23651d12cc1957e91dd65f62839c8226a3c72c2d075",
       "src/route_targets.py": "eb98f9ac64b30c635f23d74de7a8edae4ee0a0c7f937ee6b893c9deb337c48d9",
-      "src/scorecard.py": "77bd7e08394c5e7e4543402b33042f81ea190502ec073f9639f20030a82aa77d",
+      "src/scorecard.py": "e2b599c85fda0b657c7becc23ab7f723051bce927a1c0042cf847466a785d098",
       "src/service_delivered.py": "8710a5a1e2be3c84746fa272a590e143f9b369e7ad2ecb7e04e2c7c25cd286f6",
       "src/service_profile.py": "c14eee937468259dc0b60516106cb1030bb6e9d22a94c594088f4b39dbfe1fe4",
       "src/shape_simplify.py": "22bd7d7bdbb447e7daa9c6c415c6e84c04dee4ed4cbfcbacdc18e4bccd84a887",
       "src/time_periods.py": "20be4ebc7ceef4f734d161411042541894126f1c34dc5f0087d3f2ab27f6cc31",
       "src/timezones.py": "92c0168fda1794d546c938386a9b78471ddf765a415daefb4d2613cd682ef610"
     },
-    "source_digest": "76ce7e66bd339b133fea492ff292b276b80d8da414491ff49c83adcc6d0afa56"
+    "source_digest": "4fb57389fda291ef7d27d30538b78f3808cfffaaede015e2ba8a6a1be55ed4cb"
   },
   "subject": "wmata",
   "peers": [
@@ -912,7 +912,17 @@
           "2026-10-30",
           "2026-10-31"
         ],
-        "old_method_dates": []
+        "old_method_dates": [],
+        "means_by_method": {
+          "capped": {
+            "n_days": 31,
+            "mean": 131.7470596555883
+          },
+          "old": {
+            "n_days": 0,
+            "mean": null
+          }
+        }
       },
       "aggregates_computed_at_utc": {
         "min": "2026-11-26T15:07:42",
@@ -2177,7 +2187,17 @@
           "2026-10-17",
           "2026-10-18",
           "2026-10-19"
-        ]
+        ],
+        "means_by_method": {
+          "capped": {
+            "n_days": 11,
+            "mean": 97.65211717817893
+          },
+          "old": {
+            "n_days": 19,
+            "mean": 173.53156164647766
+          }
+        }
       },
       "aggregates_computed_at_utc": {
         "min": "2026-11-24T21:10:48",
