@@ -1058,3 +1058,73 @@ def test_annotation_with_unknown_agency_fails(tmp_path):
     good = tmp_path / "ok.yaml"
     good.write_text('routes:\n  - agency: wmata\n    route_id: D50\n    issue: "#269"\n')
     assert sc.load_annotations(good)["routes"][0]["route_id"] == "D50"
+
+
+# ---------------------------------------------------------------------------
+# Completeness rule wording (#274's two-part rule, read from agency config)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+def test_completeness_rule_reads_configured_values():
+    """Both legs come from config: cadence-derived coverage and the per-feed gap policy."""
+    from src.agency_config import load_agency_config
+
+    wmata = sc.completeness_rule(load_agency_config("wmata"))
+    sfmta = sc.completeness_rule(load_agency_config("sfmta"))
+    assert wmata["coverage_threshold"] == pytest.approx(0.80)
+    assert wmata["cadence_ceiling"] == pytest.approx(1.0)
+    assert sfmta["coverage_threshold"] == pytest.approx(0.80 * 4 / 6)
+    assert sfmta["cadence_ceiling"] == pytest.approx(4 / 6)
+    for rule in (wmata, sfmta):
+        assert (rule["feed_gap_max_minutes"], rule["service_start_hour"]) == (90, 5)
+        assert rule["service_end_hour"] == 24
+    text = sc.completeness_rule_text({"completeness": sfmta, "timezone": "America/Los_Angeles"})
+    assert "ingest coverage >= 0.533, i.e. 0.80 x the 0.667 ceiling" in text
+    assert "silent for more than 90 minutes between 05:00-24:00 Pacific" in text
+    # Older JSON without the recorded rule keeps the coverage-only wording.
+    assert sc.completeness_rule_text({"completeness_threshold": 0.8}) == "ingest coverage >= 0.800"
+
+
+def test_changed_gap_config_changes_json_and_rendered_text(db_session, monkeypatch):
+    """Changing the configured gap limit / window changes both the JSON and the report text."""
+    import dataclasses
+
+    from src.agency_config import CompletenessPolicy, load_agency_config
+
+    real = load_agency_config
+
+    def _patched(name):
+        """Load the real config, with a non-default gap policy for SFMTA."""
+        cfg = real(name)
+        if name == "sfmta":
+            cfg = dataclasses.replace(
+                cfg,
+                completeness=CompletenessPolicy(
+                    feed_gap_max_minutes=45, service_start_hour=6, service_end_hour=22
+                ),
+            )
+        return cfg
+
+    monkeypatch.setattr(sc, "load_agency_config", _patched)
+    _seed(db_session)
+    card = sc.build_scorecard(
+        {"wmata": db_session, "sfmta": db_session},
+        START,
+        END,
+        generated_at_utc=GENERATED,
+        annotations={"routes": [], "dates": []},
+    )
+    sf = card["agencies"]["sfmta"]["completeness"]
+    assert (sf["feed_gap_max_minutes"], sf["service_start_hour"], sf["service_end_hour"]) == (
+        45,
+        6,
+        22,
+    )
+    assert card["agencies"]["wmata"]["completeness"]["feed_gap_max_minutes"] == 90
+    md = sc.render_markdown(card)
+    assert "more than 45 minutes between 06:00-22:00 Pacific" in md
+    assert "more than 90 minutes between 05:00-24:00 Eastern" in md
+    assert "measures whether the data was collected, not how good the service was" in md
+    assert "keeps the stamp it earned when the data was present" in md
+    assert "stored coverage can sit on either side of the threshold" in md

@@ -71,7 +71,7 @@ from api.aggregations import (
 )
 from src.agency_config import CONFIG_DIR as AGENCY_CONFIG_DIR
 from src.agency_config import load_agency_config
-from src.data_completeness import agency_coverage_threshold
+from src.data_completeness import MIN_COVERAGE_FOR_MATERIALIZATION, agency_coverage_threshold
 from src.ewt import (
     EWT_LONG_GAP_RULE_SINCE_UTC,
     MAX_OBSERVED_HEADWAY_SEC,
@@ -1401,6 +1401,7 @@ def build_agency_section(
             "vehicle_positions_sec": cfg.tick_sec * cfg.vehicle_positions_every_ticks,
         },
         "completeness_threshold": agency_coverage_threshold(cfg),
+        "completeness": completeness_rule(cfg),
         "n_days": len(dates),
         "n_days_complete": len(eligible),
         "metrics": metrics,
@@ -1425,6 +1426,64 @@ def build_agency_section(
     return section
 
 
+def completeness_rule(cfg) -> dict:
+    """The agency's two-part ``data_quality`` rule as recorded in the scorecard JSON.
+
+    Leg 1 (coverage): the share of the day's minutes with any vehicle-position,
+    trip-update or collector-heartbeat record must reach
+    ``coverage_threshold`` = ``coverage_target`` (0.80) x ``cadence_ceiling``
+    (the coverage achievable at the agency's polling cadence;
+    ``src.data_completeness.agency_coverage_threshold``). Leg 2 (feed gaps):
+    neither feed may be silent longer than ``feed_gap_max_minutes`` between
+    ``service_start_hour`` and ``service_end_hour`` agency-local
+    (``AgencyConfig.completeness``, issue #270). All values are read from
+    ``config/agencies/<agency>.yaml``.
+    """
+    threshold = agency_coverage_threshold(cfg)
+    policy = cfg.completeness
+    return {
+        "coverage_threshold": threshold,
+        "coverage_target": MIN_COVERAGE_FOR_MATERIALIZATION,
+        "cadence_ceiling": threshold / MIN_COVERAGE_FOR_MATERIALIZATION,
+        "feed_gap_max_minutes": policy.feed_gap_max_minutes,
+        "service_start_hour": policy.service_start_hour,
+        "service_end_hour": policy.service_end_hour,
+    }
+
+
+_ZONE_LABELS = {"America/New_York": "Eastern", "America/Los_Angeles": "Pacific"}
+
+
+def _local_window(section: dict) -> str:
+    """``05:00-24:00 Eastern``-style label for an agency's gap-rule window."""
+    rule = section["completeness"]
+    zone = _ZONE_LABELS.get(section.get("timezone"), section.get("timezone") or "local")
+    return f"{rule['service_start_hour']:02d}:00-{rule['service_end_hour']:02d}:00 {zone}"
+
+
+def completeness_rule_text(section: dict) -> str:
+    """One agency's completeness rule in plain words, from its section's ``completeness`` block.
+
+    Falls back to the coverage-only wording for scorecard JSON generated
+    before the gap rule was recorded.
+    """
+    rule = section.get("completeness")
+    if rule is None:
+        return f"ingest coverage >= {section['completeness_threshold']:.3f}"
+    ceiling = rule["cadence_ceiling"]
+    ceiling_note = (
+        ""
+        if abs(ceiling - 1.0) < 1e-9
+        else f", i.e. {rule['coverage_target']:.2f} x the {ceiling:.3f} ceiling its polling "
+        "cadence allows"
+    )
+    return (
+        f"ingest coverage >= {rule['coverage_threshold']:.3f}{ceiling_note}, and neither the "
+        f"trip-update nor the vehicle-position feed silent for more than "
+        f"{rule['feed_gap_max_minutes']} minutes between {_local_window(section)}"
+    )
+
+
 def comparability_caveats(sections: dict[str, dict]) -> list[str]:
     """Plain-language caveats for reading the peer columns next to WMATA.
 
@@ -1434,7 +1493,7 @@ def comparability_caveats(sections: dict[str, dict]) -> list[str]:
     cadence = "; ".join(
         f"{s['display_name']}: trip updates every {s['polling']['trip_updates_sec']} s, "
         f"vehicle positions every {s['polling']['vehicle_positions_sec']} s, "
-        f"'complete' at coverage >= {s['completeness_threshold']:.3f}"
+        f"'complete' at {completeness_rule_text(s)}"
         for s in sections.values()
     )
     return [
@@ -1865,8 +1924,9 @@ def _render_data_quality(section: dict) -> list[str]:
     lines = [
         f"Dates in period: {section['n_days']}; stamped complete: {section['n_days_complete']} "
         f"(coverage {_fmt_pct(section['n_days_complete'] / section['n_days'])}). "
-        f"Completeness threshold for this agency: ingest coverage >= "
-        f"{section['completeness_threshold']:.3f}.",
+        f"Completeness rule for this agency: {completeness_rule_text(section)}. A date's "
+        "stored coverage can sit on either side of the threshold when its stamp was decided "
+        "by the feed-gap test, or was kept from when its raw inputs were still present.",
         "",
     ]
     any_excluded = False
@@ -2179,6 +2239,29 @@ def _ewt_long_gap_sentence(method: dict, sections: dict[str, dict] | None = None
     return text
 
 
+def _completeness_method_text(sections: list[dict]) -> str:
+    """Method-section sentences for the two-part completeness rule, per agency.
+
+    Empty when the JSON predates the recorded rule (the per-agency
+    threshold is then still printed under Data quality).
+    """
+    if not sections or any(s.get("completeness") is None for s in sections):
+        return ""
+    per_agency = "; ".join(f"{s['display_name']}: {completeness_rule_text(s)}" for s in sections)
+    return (
+        " A date is stamped `complete` only if (1) enough of the day's data landed: the share "
+        "of its minutes with at least one vehicle-position, trip-update or collector-heartbeat "
+        "record reaches 80% of what the agency's polling cadence can achieve, and (2) neither "
+        "the trip-update nor the vehicle-position feed went silent for longer than the gap "
+        "limit inside the agency-local service window (each feed checked separately). "
+        f"Per agency: {per_agency}. Dates failing either test are stamped `partial` and "
+        "excluded. The rule measures whether the data was collected, not how good the service "
+        "was: a day of poor service with complete data is included. When a feed's raw records "
+        "for an older date have since been pruned, that test is not re-run and the date keeps "
+        "the stamp it earned when the data was present."
+    )
+
+
 def render_markdown(scorecard: dict) -> str:
     """Render the scorecard dict as a Markdown report.
 
@@ -2281,8 +2364,9 @@ def render_markdown(scorecard: dict) -> str:
         "shows the pooled alternative for system figures.",
         "",
         "**Exclusions.** A date is excluded from a metric when it has no daily system row, "
-        "when its row is not stamped `complete` (ingest coverage below the agency's "
-        "threshold), or when the metric is null that day. Excluded dates are listed under "
+        "when its row is not stamped `complete`, or when the metric is null that day."
+        + _completeness_method_text([subject, *peers])
+        + " Excluded dates are listed under "
         "Data quality and never averaged in. Route figures use only dates whose system row is "
         "complete and only per-route rows that are themselves complete. A day whose value is "
         f"more than {m['outlier_rule']['mad_multiplier']:g} robust standard deviations "
