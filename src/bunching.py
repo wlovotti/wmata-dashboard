@@ -82,6 +82,7 @@ from sqlalchemy.orm import Session
 
 from src.ewt import (
     EWT_TIME_PERIODS,
+    MAX_OBSERVED_HEADWAY_SEC,
     _day_type_for,
     _hour_in_zone,
     _period_for_hour,
@@ -103,10 +104,11 @@ UTC = ZoneInfo("UTC")
 BUNCHING_RATIO = 0.25
 BUNCHING_ABSOLUTE_FLOOR_SEC = 120.0
 
-# Drop observed pairs above this — they're service breaks (depot pull-out,
-# overnight quiet), not headways. Matches the filter in
-# `src/analytics.py:calculate_headways_batch`.
-MAX_OBSERVED_HEADWAY_SEC = 120 * 60
+# `MAX_OBSERVED_HEADWAY_SEC` (imported from `src.ewt` above, and re-exported
+# from here for existing importers): observed pairs above it are dropped —
+# they're service breaks (depot pull-out, overnight quiet), not headways.
+# EWT applies the same constant (issue #269), so the two metrics share one
+# definition of "too long to be a headway".
 
 CellHour = tuple[int, str, int]  # (direction_id, stop_id, hour)
 

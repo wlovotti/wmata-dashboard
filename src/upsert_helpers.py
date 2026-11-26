@@ -32,6 +32,8 @@ def upsert_rows(
     rows: list[dict[str, Any]],
     constraint_name: str,
     update_cols: list[str],
+    *,
+    commit: bool = True,
 ) -> None:
     """Upsert a list of row dicts into a PostgreSQL table via ON CONFLICT DO UPDATE.
 
@@ -56,6 +58,10 @@ def upsert_rows(
     update_cols:
         Column names to overwrite when a conflict is detected.  All names must
         be present in *rows*.
+    commit:
+        Commit after the statement (default).  Pass ``False`` to group several
+        upserts into one caller-managed transaction (e.g. two tables written
+        together for one service date).
 
     Raises
     ------
@@ -76,7 +82,8 @@ def upsert_rows(
     set_ = {c: stmt.excluded[c] for c in update_cols}
     stmt = stmt.on_conflict_do_update(constraint=constraint_name, set_=set_)
     db.execute(stmt)
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def upsert_trip_update_state(db: Session, rows: list[dict[str, Any]]) -> int:

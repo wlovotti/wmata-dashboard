@@ -481,6 +481,97 @@ def test_build_scorecard_end_to_end(db_session):
     assert "may not be reachable after a squash merge" in md
     assert "Known issue for 2026-10-02 (hand-entered annotation): test (#999)" in md
     assert "sha256 `1111111111111111` over 1 files" in md
+    # Issue #269: the EWT long-gap rule is stated in the Method section.
+    assert card["method"]["ewt_max_headway_sec"] == 7200
+    assert "any headway longer than 120 minutes, observed or scheduled" in md
+    assert "When the trips did not run it still shows in service delivered" in md
+    # Seeded rows were computed 2026-11-02, before the rule: both agencies are
+    # uniformly old-method, which the report says instead of claiming the rule.
+    assert w["ewt_method"]["status"] == "old"
+    assert w["ewt_method"]["old_method_dates"] == ["2026-10-01", "2026-10-02"]
+    assert f"{w['display_name']}: 0 of 2 dates" in md
+    assert "all 2 excess-wait-time dates were computed before the 120-minute" in md
+    assert card["comparison"]["sfmta"]["ewt"]["method_comparable"] is True
+    # A scorecard JSON generated before the rule re-renders without claiming it.
+    del card["method"]["ewt_max_headway_sec"]
+    assert "any headway longer than" not in sc.render_markdown(card)
+
+
+def _ewt_cov(status: str, capped: list[str], old: list[str]) -> dict:
+    """An `ewt_method` coverage block for comparability / rendering tests."""
+    return {
+        "rule_since_utc": "2026-11-26T06:00:00",
+        "status": status,
+        "n_dates": len(capped) + len(old),
+        "capped_dates": capped,
+        "old_method_dates": old,
+    }
+
+
+@pytest.mark.smoke
+def test_ewt_method_coverage_classifies_by_computed_at(db_session):
+    """A date is capped only when its system row and every overlay row postdate the rule."""
+    after = sc.EWT_LONG_GAP_RULE_SINCE_UTC + timedelta(hours=1)
+    before = sc.EWT_LONG_GAP_RULE_SINCE_UTC - timedelta(hours=1)
+    rows = {}
+    for iso, sys_at, ov_at in [
+        ("2026-10-01", after, after),  # capped
+        ("2026-10-02", after, before),  # an overlay row is old -> old
+        ("2026-10-03", before, after),  # system row is old -> old
+    ]:
+        db_session.add(_sys_row(iso, ewt=10.0))
+        ov = _overlay("D50", iso)
+        ov.computed_at = ov_at
+        db_session.add(ov)
+        rows[iso] = {"computed_at": sys_at}
+    db_session.flush()
+    dates = [date(2026, 10, d) for d in (1, 2, 3, 4)]
+    summary = {"excluded": [{"date": "2026-10-04", "reason": "missing"}]}
+    cov = sc.ewt_method_coverage(db_session, dates, rows, summary)
+    assert cov["status"] == "mixed"
+    assert cov["capped_dates"] == ["2026-10-01"]
+    assert cov["old_method_dates"] == ["2026-10-02", "2026-10-03"]
+    assert cov["n_dates"] == 3
+
+
+@pytest.mark.smoke
+def test_ewt_methods_comparable_truth_table():
+    """Only uniformly-capped or uniformly-old pairs compare; mixed or differing never do."""
+    capped = _ewt_cov("capped", ["2026-10-01"], [])
+    old = _ewt_cov("old", [], ["2026-10-01"])
+    mixed = _ewt_cov("mixed", ["2026-10-01"], ["2026-10-02"])
+    assert sc.ewt_methods_comparable(capped, capped)
+    assert sc.ewt_methods_comparable(old, old)
+    assert not sc.ewt_methods_comparable(capped, old)
+    assert not sc.ewt_methods_comparable(mixed, mixed)
+    assert not sc.ewt_methods_comparable(capped, mixed)
+    assert sc.ewt_methods_comparable(None, capped)  # older JSON
+
+
+def test_mixed_ewt_method_feeds_not_a_finding_and_lists_dates(db_session):
+    """A peer whose period mixes methods makes the EWT comparison 'not a finding'."""
+    _seed(db_session)
+    card = sc.build_scorecard(
+        {"wmata": db_session, "sfmta": db_session},
+        START,
+        END,
+        generated_at_utc=GENERATED,
+        annotations={"routes": [], "dates": []},
+    )
+    card["agencies"]["wmata"]["ewt_method"] = _ewt_cov("capped", ["2026-10-01", "2026-10-02"], [])
+    card["agencies"]["sfmta"]["ewt_method"] = _ewt_cov("mixed", ["2026-10-02"], ["2026-10-01"])
+    card["comparison"] = sc.compare_direction(card["agencies"], "wmata")
+    comp = card["comparison"]["sfmta"]["ewt"]
+    assert comp["method_comparable"] is False
+    assert comp["direction_robust"] is False
+    # Other metrics are untouched by the EWT method check.
+    assert card["comparison"]["sfmta"]["otp"]["method_comparable"] is True
+    md = sc.render_markdown(card)
+    peer = card["agencies"]["sfmta"]["display_name"]
+    assert "were not all computed under the same method" in md
+    assert f"- {peer}: 1 of 2 excess-wait-time dates were computed before" in md
+    assert "(2026-10-01)" in md
+    assert f"{peer}: 1 of 2 dates (the rest predate the rule" in md
 
 
 @pytest.mark.smoke
@@ -967,3 +1058,93 @@ def test_annotation_with_unknown_agency_fails(tmp_path):
     good = tmp_path / "ok.yaml"
     good.write_text('routes:\n  - agency: wmata\n    route_id: D50\n    issue: "#269"\n')
     assert sc.load_annotations(good)["routes"][0]["route_id"] == "D50"
+
+
+# ---------------------------------------------------------------------------
+# Completeness rule wording (#274's two-part rule, read from agency config)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+def test_completeness_rule_reads_configured_values():
+    """Both legs come from config: cadence-derived coverage and the per-feed gap policy."""
+    from src.agency_config import load_agency_config
+
+    wmata = sc.completeness_rule(load_agency_config("wmata"))
+    sfmta = sc.completeness_rule(load_agency_config("sfmta"))
+    assert wmata["coverage_threshold"] == pytest.approx(0.80)
+    assert wmata["cadence_ceiling"] == pytest.approx(1.0)
+    assert sfmta["coverage_threshold"] == pytest.approx(0.80 * 4 / 6)
+    assert sfmta["cadence_ceiling"] == pytest.approx(4 / 6)
+    for rule in (wmata, sfmta):
+        assert (rule["feed_gap_max_minutes"], rule["service_start_hour"]) == (90, 5)
+        assert rule["service_end_hour"] == 24
+    text = sc.completeness_rule_text({"completeness": sfmta, "timezone": "America/Los_Angeles"})
+    assert "ingest coverage >= 0.533, i.e. 0.80 x the 0.667 ceiling" in text
+    assert "silent for more than 90 minutes between 05:00-24:00 Pacific" in text
+    # Older JSON without the recorded rule keeps the coverage-only wording.
+    assert sc.completeness_rule_text({"completeness_threshold": 0.8}) == "ingest coverage >= 0.800"
+
+
+def test_changed_gap_config_changes_json_and_rendered_text(db_session, monkeypatch):
+    """Changing the configured gap limit / window changes both the JSON and the report text."""
+    import dataclasses
+
+    from src.agency_config import CompletenessPolicy, load_agency_config
+
+    real = load_agency_config
+
+    def _patched(name):
+        """Load the real config, with a non-default gap policy for SFMTA."""
+        cfg = real(name)
+        if name == "sfmta":
+            cfg = dataclasses.replace(
+                cfg,
+                completeness=CompletenessPolicy(
+                    feed_gap_max_minutes=45, service_start_hour=6, service_end_hour=22
+                ),
+            )
+        return cfg
+
+    monkeypatch.setattr(sc, "load_agency_config", _patched)
+    _seed(db_session)
+    card = sc.build_scorecard(
+        {"wmata": db_session, "sfmta": db_session},
+        START,
+        END,
+        generated_at_utc=GENERATED,
+        annotations={"routes": [], "dates": []},
+    )
+    sf = card["agencies"]["sfmta"]["completeness"]
+    assert (sf["feed_gap_max_minutes"], sf["service_start_hour"], sf["service_end_hour"]) == (
+        45,
+        6,
+        22,
+    )
+    assert card["agencies"]["wmata"]["completeness"]["feed_gap_max_minutes"] == 90
+    md = sc.render_markdown(card)
+    assert "more than 45 minutes between 06:00-22:00 Pacific" in md
+    assert "more than 90 minutes between 05:00-24:00 Eastern" in md
+    assert "measures whether the data was collected, not how good the service was" in md
+    assert "a date stamped before then was judged on coverage alone" in md
+    assert "this report does not count dates per rule" in md
+    assert "the date keeps its existing stamp" in md
+    assert "keeps the stamp it earned" not in md  # would imply both legs were passed
+    assert card["agencies"]["sfmta"]["completeness"]["gap_rule_since"] == "2026-11-26"
+    assert "stored coverage can sit on either side of the threshold" in md
+
+
+@pytest.mark.smoke
+def test_committed_october_report_rerenders_byte_identical():
+    """Re-rendering the committed October JSON reproduces the committed Markdown exactly.
+
+    Guards the older-JSON fallbacks: sentences added since that report
+    (completeness rule, EWT long-gap method) must appear only when their
+    JSON blocks are present.
+    """
+    from pathlib import Path
+
+    reports = Path(__file__).resolve().parent.parent / "reports"
+    stem = "scorecard_wmata_2026-10-01_2026-10-31"
+    card = json.loads((reports / f"{stem}.json").read_text())
+    assert sc.render_markdown(card) == (reports / f"{stem}.md").read_text()
