@@ -1,14 +1,16 @@
 # Hand-entered known data issues referenced by generated scorecards
 # (src/scorecard.py, issue #267). Annotations only add issue references to a
 # report (which labels them as hand-entered); they never change, drop or
-# reweight a figure, and they are not checked against the data. Remove an
-# entry once its issue is fixed and the affected dates are re-derived. The
-# agency must match a config/agencies/<name>.yaml or loading fails.
+# reweight a figure, and they are not checked against the data. Remove a
+# known-issue entry once its issue is fixed and the affected dates are
+# re-derived. The agency must match a config/agencies/<name>.yaml or loading
+# fails.
 #
-# A report shows only the date entries inside its period, so entries for
-# other months stay here as the durable record without cluttering it. Hand
-# corrections to a stored completeness stamp (data_quality) are recorded as
-# date entries too: the scorecard's method text points here for them.
+# Exception: entries recording a hand correction to a stored completeness
+# stamp (data_quality) stay as the durable record after their issue closes;
+# the scorecard's method text points here for them. A report shows only the
+# date entries inside its period, so entries for other months stay here
+# without cluttering it.
 
 # Routes with a known cause behind a dominated pooled figure (see
 # src/scorecard.py:is_dominated). A dominated route not listed here is

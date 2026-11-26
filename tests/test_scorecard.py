@@ -574,6 +574,114 @@ def test_mixed_ewt_method_feeds_not_a_finding_and_lists_dates(db_session):
     assert f"{peer}: 1 of 2 dates (the rest predate the rule" in md
 
 
+def _mixed_card(db_session) -> dict:
+    """A seeded scorecard whose peer (sfmta) has a mixed EWT period: 10/01 old, 10/02 capped.
+
+    The peer's 10/01 EWT is also flagged unusual and its robustness note is
+    forced on, so every mixed-method marker has something to attach to.
+    """
+    _seed(db_session)
+    card = sc.build_scorecard(
+        {"wmata": db_session, "sfmta": db_session},
+        START,
+        END,
+        generated_at_utc=GENERATED,
+        annotations={"routes": [], "dates": []},
+    )
+    card["agencies"]["wmata"]["ewt_method"] = _ewt_cov("capped", ["2026-10-01", "2026-10-02"], [])
+    peer = card["agencies"]["sfmta"]
+    cov = _ewt_cov("mixed", ["2026-10-02"], ["2026-10-01"])
+    cov["means_by_method"] = {
+        "capped": {"n_days": 1, "mean": 80.0},
+        "old": {"n_days": 1, "mean": 170.0},
+    }
+    peer["ewt_method"] = cov
+    peer["metrics"]["ewt"]["flagged_days"] = [{"date": "2026-10-01", "value": 371.0}]
+    peer["robustness"]["ewt"].update(
+        {"moved": True, "flagged_dates": ["2026-10-01"], "mean_excluding_flagged": 100.0}
+    )
+    card["comparison"] = sc.compare_direction(card["agencies"], "wmata")
+    return card
+
+
+def test_mixed_ewt_method_marks_every_ewt_figure(db_session):
+    """A mixed-method agency's EWT figures outside the Summary say so (issue #275 review).
+
+    The KPI row, the day-type row, the unusual-day list, the robustness
+    note and the daily table each carry a marker; only old-method dates
+    get the dagger; per-method counts and means appear under the KPI table.
+    """
+    card = _mixed_card(db_session)
+    md = sc.render_markdown(card)
+    peer = card["agencies"]["sfmta"]["display_name"]
+    label = "Excess wait time (frequent service) (mixed method, see Summary)"
+    assert f"| {label} | **" in md  # KPI row
+    assert f"| {label} | " in md.split("By day type")[2]  # peer's day-type row
+    assert (
+        "Note: excess wait time mixes methods (mixed method, see Summary). Of its 2 dates, "
+        "1 predate the 120-minute long-gap rule (mean of those days 2.83 min (170 s)) and "
+        "1 are under it (mean of those days 1.33 min (80 s))." in md
+    )
+    assert "neither per-method mean is a headline figure" in md
+    assert (
+        "- Unusual days for Excess wait time (frequent service) (included in the mean; mixed "
+        "method, see Summary): 2026-10-01 (6.18 min (371 s); old-method value, which may "
+        "reflect long-gap inflation rather than service)" in md
+    )
+    assert f"{peer} excess wait time (frequent service): without its unusual days" in md
+    assert "Both variants mix methods too (see the method coverage note below)." in md
+    peer_dq = md.split(f"### {peer}")[-1]
+    rows = {line.split(" | ")[0].lstrip("| "): line for line in peer_dq.splitlines()}
+    assert sc.OLD_METHOD_MARK in rows["2026-10-01"].split(" | ")[6]
+    assert sc.OLD_METHOD_MARK not in rows["2026-10-02"]
+    assert "Excess wait time computed before the 120-minute long-headway rule" in peer_dq
+    # The capped subject agency carries none of it.
+    subject_dq = md.split("## Data quality")[1].split(f"### {peer}")[0]
+    assert sc.OLD_METHOD_MARK not in subject_dq
+    assert "mixed method" not in subject_dq
+
+
+@pytest.mark.parametrize("status", ["capped", "old", "none", None])
+def test_non_mixed_ewt_method_renders_like_no_block(db_session, status):
+    """Capped, old, none or absent coverage renders the agency sections byte-identically.
+
+    The mixed-method markers are driven only by a ``mixed`` status, so a
+    WMATA-style all-capped section (and older JSON without the block) is
+    unchanged.
+    """
+    _seed(db_session)
+    card = sc.build_scorecard(
+        {"wmata": db_session}, START, END, generated_at_utc=GENERATED, annotations=None
+    )
+    section = card["agencies"]["wmata"]
+    bare = {k: v for k, v in section.items() if k != "ewt_method"}
+    if status is None:
+        section = bare
+    else:
+        section = {**bare, "ewt_method": _ewt_cov(status, ["2026-10-01"], ["2026-10-02"])}
+    for render in (sc._render_headline, sc._render_day_types, sc._render_data_quality):
+        assert render(section) == render(bare)
+
+
+@pytest.mark.smoke
+def test_ewt_method_coverage_means_by_method(db_session):
+    """``means_by_method`` averages each method's stored daily system EWT."""
+    after = sc.EWT_LONG_GAP_RULE_SINCE_UTC + timedelta(hours=1)
+    before = sc.EWT_LONG_GAP_RULE_SINCE_UTC - timedelta(hours=1)
+    rows = {
+        "2026-10-01": {"computed_at": after, "ewt": 80.0},
+        "2026-10-02": {"computed_at": before, "ewt": 150.0},
+        "2026-10-03": {"computed_at": before, "ewt": 190.0},
+    }
+    dates = [date(2026, 10, d) for d in (1, 2, 3)]
+    cov = sc.ewt_method_coverage(db_session, dates, rows, {"excluded": []})
+    assert cov["status"] == "mixed"
+    assert cov["means_by_method"] == {
+        "capped": {"n_days": 1, "mean": 80.0},
+        "old": {"n_days": 2, "mean": 170.0},
+    }
+
+
 @pytest.mark.smoke
 def test_build_scorecard_issues_only_selects(db_session):
     """The generator never writes: every statement it issues is a SELECT."""

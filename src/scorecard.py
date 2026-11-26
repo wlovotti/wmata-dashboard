@@ -1192,7 +1192,10 @@ def ewt_method_coverage(
     ``src.ewt.EWT_LONG_GAP_RULE_SINCE_UTC`` (``ewt_computed_with_cap``).
     Only dates whose system EWT is included in the period figure are
     classified. ``status`` is ``capped`` (all), ``old`` (none), ``mixed``
-    or ``none`` (no EWT dates).
+    or ``none`` (no EWT dates). ``means_by_method`` gives, per method
+    (``capped`` / ``old``), the number of dates and the mean of their stored
+    daily system EWT, so a mixed period's two halves are citable; neither
+    is a headline figure (issue #275).
     """
     excluded = {e["date"] for e in ewt_summary["excluded"]}
     included = [d.isoformat() for d in dates if d.isoformat() not in excluded]
@@ -1223,12 +1226,19 @@ def ewt_method_coverage(
         status = "old"
     else:
         status = "mixed"
+
+    def _method_mean(isos: list[str]) -> dict:
+        """Date count and mean stored daily system EWT over ``isos`` (None if none)."""
+        values = [float(v) for iso in isos if (v := (rows.get(iso) or {}).get("ewt")) is not None]
+        return {"n_days": len(isos), "mean": _mean_skip_null(values)}
+
     return {
         "rule_since_utc": EWT_LONG_GAP_RULE_SINCE_UTC.isoformat(timespec="seconds"),
         "status": status,
         "n_dates": len(included),
         "capped_dates": capped,
         "old_method_dates": old,
+        "means_by_method": {"capped": _method_mean(capped), "old": _method_mean(old)},
     }
 
 
@@ -1659,20 +1669,94 @@ def _md_table(header: list[str], body: list[list[str]]) -> list[str]:
     return lines
 
 
+OLD_METHOD_MARK = "\u2020"  # dagger: an EWT value computed before the long-gap rule
+MIXED_METHOD_NOTE = "mixed method, see Summary"
+
+
+def _mixed_ewt_old_dates(section: dict) -> set[str] | None:
+    """Old-method EWT dates when the section's period mixes EWT methods, else None.
+
+    Driven only by the section's ``ewt_method`` block (see
+    `ewt_method_coverage`): a ``capped``, ``old`` or ``none`` status, or a
+    JSON without the block, returns None so every mixed-method marker is a
+    no-op and older reports re-render unchanged.
+    """
+    cov = section.get("ewt_method")
+    if cov is None or cov.get("status") != "mixed":
+        return None
+    return set(cov["old_method_dates"])
+
+
+def _ewt_label(metric: str, old_dates: set[str] | None) -> str:
+    """Metric label, with the mixed-method note appended to EWT when ``old_dates`` is set."""
+    label = METRIC_LABELS[metric]
+    if metric == "ewt" and old_dates is not None:
+        return f"{label} ({MIXED_METHOD_NOTE})"
+    return label
+
+
+def _ewt_date_mark(metric: str, iso: str, old_dates: set[str] | None) -> str:
+    """The old-method mark for an EWT value dated ``iso`` in a mixed period, else ''."""
+    if metric == "ewt" and old_dates is not None and iso in old_dates:
+        return f" {OLD_METHOD_MARK}"
+    return ""
+
+
+def _mixed_ewt_headline_note(section: dict) -> list[str]:
+    """Note under an agency's KPI table when its EWT period mixes methods ([] otherwise).
+
+    States the per-method date counts and, when the JSON carries
+    ``means_by_method``, the mean of each method's days -- explicitly not
+    as headline figures.
+    """
+    old_dates = _mixed_ewt_old_dates(section)
+    if old_dates is None:
+        return []
+    cov = section["ewt_method"]
+    minutes = MAX_OBSERVED_HEADWAY_SEC // 60
+    by = cov.get("means_by_method") or {}
+
+    def _part(n: int, key: str, what: str) -> str:
+        """``n`` dates ``what``, with that method's mean of days when known."""
+        mean = (by.get(key) or {}).get("mean")
+        suffix = f" (mean of those days {fmt_metric('ewt', mean)})" if mean is not None else ""
+        return f"{n} {what}{suffix}"
+
+    return [
+        "",
+        f"Note: excess wait time mixes methods ({MIXED_METHOD_NOTE}). Of its "
+        f"{cov['n_dates']} dates, "
+        + _part(len(cov["old_method_dates"]), "old", f"predate the {minutes}-minute long-gap rule")
+        + " and "
+        + _part(len(cov["capped_dates"]), "capped", "are under it")
+        + ". The period figure, median day, day range and day-type means mix both, and "
+        f"neither per-method mean is a headline figure. {OLD_METHOD_MARK} marks an "
+        "old-method date.",
+    ]
+
+
 def _render_headline(section: dict) -> list[str]:
-    """System KPI table for one agency: period mean, median, range, days used."""
+    """System KPI table for one agency: period mean, median, range, days used.
+
+    When the agency's EWT period mixes methods, the EWT row carries the
+    mixed-method note, old-method range endpoints are marked, and a note
+    with the per-method counts follows the table.
+    """
+    old_dates = _mixed_ewt_old_dates(section)
     body = []
     for metric in SYSTEM_METRICS:
         s = section["metrics"][metric]
         rng = (
-            f"{fmt_metric(metric, s['min']['value'])} ({s['min']['date']}) to "
-            f"{fmt_metric(metric, s['max']['value'])} ({s['max']['date']})"
+            f"{fmt_metric(metric, s['min']['value'])} ({s['min']['date']}"
+            f"{_ewt_date_mark(metric, s['min']['date'], old_dates)}) to "
+            f"{fmt_metric(metric, s['max']['value'])} ({s['max']['date']}"
+            f"{_ewt_date_mark(metric, s['max']['date'], old_dates)})"
             if s["min"]
             else "n/a"
         )
         body.append(
             [
-                METRIC_LABELS[metric],
+                _ewt_label(metric, old_dates),
                 f"**{fmt_metric(metric, s['mean'])}**",
                 fmt_metric(metric, s["median"]),
                 rng,
@@ -1682,14 +1766,19 @@ def _render_headline(section: dict) -> list[str]:
     return _md_table(
         ["Metric", "Period figure (mean of days)", "Median day", "Lowest to highest day", "Days"],
         body,
-    )
+    ) + _mixed_ewt_headline_note(section)
 
 
 def _render_day_types(section: dict) -> list[str]:
-    """Weekday / Saturday / Sunday table of mean daily values."""
+    """Weekday / Saturday / Sunday table of mean daily values.
+
+    A mixed-method EWT period labels the EWT row and the EWT figure in the
+    holiday-type note with the mixed-method note (see `_mixed_ewt_old_dates`).
+    """
+    old_dates = _mixed_ewt_old_dates(section)
     body = []
     for metric in SYSTEM_METRICS:
-        row = [METRIC_LABELS[metric]]
+        row = [_ewt_label(metric, old_dates)]
         for day_type in DAY_TYPES:
             cell = section["day_types"][day_type][metric]
             row.append(f"{fmt_metric(metric, cell['mean'])} (n={cell['n_days_included']})")
@@ -1706,7 +1795,9 @@ def _render_day_types(section: dict) -> list[str]:
         )
         excl = block["excluding_holiday_type"]
         means = ", ".join(
-            f"{METRIC_LABELS[m].lower()} {fmt_metric(m, excl[m]['mean'])}" for m in HEADLINE_METRICS
+            f"{METRIC_LABELS[m].lower()} {fmt_metric(m, excl[m]['mean'])}"
+            + (f" ({MIXED_METHOD_NOTE})" if m == "ewt" and old_dates is not None else "")
+            for m in HEADLINE_METRICS
         )
         lines += [
             "",
@@ -1951,7 +2042,13 @@ def _data_quality_rule_sentence(section: dict) -> str:
 
 
 def _render_data_quality(section: dict) -> list[str]:
-    """Exclusions, flagged days, schedule exceptions and the per-date table."""
+    """Exclusions, flagged days, schedule exceptions and the per-date table.
+
+    When the agency's EWT period mixes methods, the EWT unusual-day line
+    carries the mixed-method note and calls out old-method dates, and each
+    old-method EWT cell in the daily table is marked, with a footnote.
+    """
+    old_dates = _mixed_ewt_old_dates(section)
     lines = [
         f"Dates in period: {section['n_days']}; stamped complete: {section['n_days_complete']} "
         f"(coverage {_fmt_pct(section['n_days_complete'] / section['n_days'])}). "
@@ -1974,11 +2071,20 @@ def _render_data_quality(section: dict) -> list[str]:
         flagged = section["metrics"][metric]["flagged_days"]
         if flagged:
             any_flagged = True
+            mixed = metric == "ewt" and old_dates is not None
             lines.append(
-                f"- Unusual days for {METRIC_LABELS[metric]} (included in the mean): "
+                f"- Unusual days for {METRIC_LABELS[metric]} (included in the mean"
+                + (f"; {MIXED_METHOD_NOTE}" if mixed else "")
+                + "): "
                 + ", ".join(
                     f"{f['date']} ({fmt_metric(metric, f['value'])}"
                     + (f"; {f['issue']}" if f.get("issue") else "")
+                    + (
+                        "; old-method value, which may reflect long-gap inflation rather "
+                        "than service"
+                        if mixed and f["date"] in old_dates
+                        else ""
+                    )
                     + ")"
                     for f in flagged
                 )
@@ -2013,7 +2119,11 @@ def _render_data_quality(section: dict) -> list[str]:
             r["day_type"],
             r["data_quality"] or "missing",
             _fmt_pct(r["coverage_pct"], 1),
-            *[fmt_metric(m, r[m]) for m in SYSTEM_METRICS],
+            *[
+                fmt_metric(m, r[m])
+                + (_ewt_date_mark(m, r["date"], old_dates) if r[m] is not None else "")
+                for m in SYSTEM_METRICS
+            ],
         ]
         for r in section["daily"]
     ]
@@ -2031,6 +2141,14 @@ def _render_data_quality(section: dict) -> list[str]:
         ],
         body,
     )
+    if old_dates is not None:
+        lines += [
+            "",
+            f"{OLD_METHOD_MARK} Excess wait time computed before the "
+            f"{MAX_OBSERVED_HEADWAY_SEC // 60}-minute long-headway rule and not recomputed: not "
+            "comparable with unmarked days, so a change between marked and unmarked days is "
+            "partly a method change, not a service change.",
+        ]
     lines += ["", "</details>"]
     return lines
 
@@ -2130,10 +2248,16 @@ def _render_summary(scorecard: dict, subject: dict, peers: list[dict]) -> list[s
                         f"without routes whose figures are dominated by a few days ({which}) "
                         f"it is {fmt_metric(metric, rob['mean_excluding_routes'])}"
                     )
+                mixed_note = (
+                    " Both variants mix methods too (see the method coverage note below)."
+                    if metric == "ewt" and _mixed_ewt_old_dates(s) is not None
+                    else ""
+                )
                 notes.append(
                     f"{s['display_name']} {METRIC_LABELS[metric].lower()}: "
                     + "; ".join(parts)
                     + "."
+                    + mixed_note
                 )
                 cell += f" [{len(notes)}]"
             row.append(cell)
