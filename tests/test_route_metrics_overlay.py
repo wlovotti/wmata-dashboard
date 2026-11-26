@@ -21,6 +21,7 @@ from api.aggregations import (
     _read_overlay_for_dates,
     get_all_routes_scorecard,
 )
+from src.data_completeness import QualityDecision
 from src.models import RouteMetricsDailyOverlay
 from src.route_metrics_overlay import (
     compute_route_metrics_overlay_for_date,
@@ -42,7 +43,7 @@ def test_overlay_upsert_partial_day_writes_zero_rows(db_session):
 
     An empty test DB has zero ingest rows in ``collector_heartbeats``,
     ``vehicle_positions``, and ``trip_update_state``, so
-    :func:`resolve_data_quality` measures 0.0 coverage and stamps
+    :func:`assess_data_quality` measures 0.0 coverage and stamps
     ``partial``. Under NOTES-76 the guard is a *flagger*: the upsert proceeds
     but flags each written row as ``data_quality='partial'``. When there are
     no source rows (empty DB → zero routes with data), the function returns
@@ -126,11 +127,11 @@ def test_upsert_route_metrics_forwards_completeness_threshold(db_session, monkey
 
     seen_thresholds = []
 
-    def _fake_resolve(db, service_date, threshold=0.80, tz_name="America/New_York", prior=None):
+    def _fake_resolve(db, service_date, threshold=0.80, tz_name="America/New_York", **kwargs):
         seen_thresholds.append(threshold)
-        return "complete", 1.0, False
+        return QualityDecision.fixed("complete", 1.0)
 
-    monkeypatch.setattr("src.data_completeness.resolve_data_quality", _fake_resolve)
+    monkeypatch.setattr("src.data_completeness.assess_data_quality", _fake_resolve)
 
     target = date(2026, 5, 6)
     upsert_route_metrics_for_date(db_session, target, completeness_threshold=0.5333)

@@ -10,25 +10,35 @@ stamps on history go stale even though the metric values themselves are
 unchanged. This pipeline re-evaluates only the stamp for a date range and
 rewrites those two columns in place. It never touches a metric column.
 
-What it can and cannot change:
+The stamp is re-decided by ``src.data_completeness.assess_data_quality``
+— coverage leg plus the per-feed gap leg (issue #270) — so what this tool
+can change is bounded by which inputs are still in the database:
 
-- It can **promote** ``partial`` → ``complete`` when the current signal
-  clears the agency threshold.
-- It can **demote** ``complete`` → ``partial`` only when the trip-update
-  signal is present for the date and thin — i.e. a real outage that an
-  earlier, weaker check missed. It will NOT demote a date whose
-  trip-update rows have been pruned by retention or that predates
-  trip-update collection: ``resolve_data_quality`` keeps the earned
-  stamp, reports it as ``kept``, and writes nothing for that date (its
-  stored coverage — possibly NULL on rows that predate the column — is
-  left exactly as it is). A wide ``--start`` over old history is
-  therefore safe, and every kept date is listed so the decision is
-  visible.
+- It can **promote** ``partial`` → ``complete`` only when every leg is
+  assessable (the date's ``trip_update_state`` rows AND its raw
+  ``vehicle_positions`` UTC days are present) and all pass.
+- It can **demote** ``complete`` → ``partial`` when an assessable leg
+  fails — a real outage an earlier, weaker check missed (e.g. a feed gap
+  longer than the agency's ``completeness.feed_gap_max_minutes``).
+- It will NOT change a date whose inputs are pruned (raw VP and
+  trip-update state are kept only ``retention.raw_days``, 7): the stored
+  stamp is reported ``kept`` and nothing is written. That is why the
+  2026-11 SFMTA corrections (10/21, 8/08, 8/09 → partial; 9/29 →
+  complete) need an owner-run UPDATE instead (see the #270/#272 PR).
+
+Only dates whose stamp FLIPS are written (issue #272): an unchanged
+stamp's stored ``coverage_pct`` is never rewritten, and a flip writes the
+new coverage only when it was actually re-measured with every input
+present — so the tool can never replace a real stored coverage with the
+~0 a pruned date measures. A wide ``--start`` over old history is
+therefore safe, and every kept date is listed so the decision is visible.
 
 Dry-run by default: prints one line per date with the current and
-proposed stamp and the number of rows affected, and writes nothing.
-``--apply`` performs the update inside a single transaction across the
-whole range; any failure rolls the entire range back.
+proposed stamp, the number of rows affected, and the decision's
+disclosure (coverage, each feed's longest gap, the rule that made it
+partial, any leg not assessed); writes nothing. ``--apply`` performs the
+update inside a single transaction across the whole range; any failure
+rolls the entire range back.
 
 Usage::
 
@@ -44,8 +54,8 @@ materialized. A date with overlay rows but no system row (the system
 pipeline failed while the overlay one succeeded) is still re-stamped on
 the overlay side.
 
-Cost: one coverage query per non-absent date (~0.2 s on SFMTA's retained
-window, ~0.45 s on WMATA's).
+Cost: one coverage query plus two gap queries per non-absent date (well
+under a few seconds per date on either agency's retained window).
 """
 
 import argparse
@@ -57,7 +67,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from src.agency_config import AgencyConfig, load_agency_config, resolve_agency_db_url
-from src.data_completeness import agency_coverage_threshold, resolve_data_quality
+from src.data_completeness import QualityDecision, agency_coverage_threshold, assess_data_quality
 from src.database import get_session
 from src.models import RouteMetricsDailyOverlay, SystemMetricsDaily
 
@@ -74,6 +84,8 @@ class RestampRow:
     new_quality: str | None
     new_coverage: float | None
     kept: bool
+    coverage_measured: bool = False
+    decision: QualityDecision | None = None
 
     @property
     def absent(self) -> bool:
@@ -129,8 +141,13 @@ def plan_restamp(db: Session, cfg: AgencyConfig, start: date, end: date) -> list
             rows.append(RestampRow(d, False, 0, None, None, None, None, False))
         else:
             prior = (prior_row.data_quality, prior_row.coverage_pct)
-            new_quality, new_pct, kept = resolve_data_quality(
-                db, d, threshold=threshold, tz_name=cfg.timezone, prior=prior
+            decision = assess_data_quality(
+                db,
+                d,
+                threshold=threshold,
+                tz_name=cfg.timezone,
+                prior=prior,
+                gap_policy=cfg.completeness,
             )
             rows.append(
                 RestampRow(
@@ -139,9 +156,11 @@ def plan_restamp(db: Session, cfg: AgencyConfig, start: date, end: date) -> list
                     overlay_rows=overlay_count,
                     old_quality=prior[0],
                     old_coverage=prior[1],
-                    new_quality=new_quality,
-                    new_coverage=new_pct,
-                    kept=kept,
+                    new_quality=decision.data_quality,
+                    new_coverage=decision.coverage_pct,
+                    kept=decision.kept,
+                    coverage_measured=decision.coverage_measured,
+                    decision=decision,
                 )
             )
         d += timedelta(days=1)
@@ -149,14 +168,17 @@ def plan_restamp(db: Session, cfg: AgencyConfig, start: date, end: date) -> list
 
 
 def apply_restamp(db: Session, rows: list[RestampRow]) -> int:
-    """Write the proposed stamps for every row that needs one, in one transaction.
+    """Write the proposed stamps for every date whose stamp flips, in one transaction.
 
-    Updates ``data_quality`` and ``coverage_pct`` on ``system_metrics_daily``
-    (when the date has a row) and on every ``route_metrics_daily_overlay``
-    row for the date. Absent dates and ``kept`` dates are skipped entirely:
-    a kept stamp is by definition the stored one, and its stored coverage
-    (possibly NULL on rows that predate the column) must not be touched.
-    Commits once at the end; rolls everything back on error.
+    Updates ``data_quality`` on ``system_metrics_daily`` (when the date has
+    a row) and on every ``route_metrics_daily_overlay`` row for the date,
+    plus ``coverage_pct`` when the new coverage was re-measured with every
+    input present. Dates whose stamp does not change — including absent
+    and ``kept`` dates — are skipped entirely (issue #272): their stored
+    coverage (possibly NULL on rows that predate the column, or a real
+    value measured before the inputs were pruned) must not be overwritten
+    by a re-measurement that may be missing inputs. Commits once at the
+    end; rolls everything back on error.
 
     Args:
         db: Session bound to the target database.
@@ -168,10 +190,12 @@ def apply_restamp(db: Session, rows: list[RestampRow]) -> int:
     written = 0
     try:
         for row in rows:
-            if row.absent or row.kept:
+            if not row.changed:
                 continue
             iso = row.service_date.isoformat()
-            values = {"data_quality": row.new_quality, "coverage_pct": row.new_coverage}
+            values = {"data_quality": row.new_quality}
+            if row.coverage_measured:
+                values["coverage_pct"] = row.new_coverage
             if row.has_system_row:
                 db.execute(
                     update(SystemMetricsDaily)
@@ -200,12 +224,18 @@ def _format_row(row: RestampRow) -> str:
     old = f"{row.old_quality}{old_cov}"
     new_cov = f" {row.new_coverage:.3f}" if row.new_coverage is not None else " (null)"
     tables = ("sys+" if row.has_system_row else "sys-") + f"overlay={row.overlay_rows}"
-    flag = (
-        "  FLIP"
-        if row.changed
-        else ("  kept (TU signal not retained; no write)" if row.kept else "")
-    )
-    return f"{row.service_date}  old={old:<17} new={row.new_quality}{new_cov}  {tables}{flag}"
+    if row.changed:
+        flag = "  FLIP" + ("" if row.coverage_measured else " (stamp only; coverage kept)")
+    elif row.kept:
+        flag = "  kept (an input is no longer retained; no write)"
+    else:
+        flag = "  unchanged (no write)"
+    line = f"{row.service_date}  old={old:<17} new={row.new_quality}{new_cov}  {tables}{flag}"
+    if row.decision is not None:
+        line += f"\n    {row.decision.describe()}"
+        for note in row.decision.not_assessed:
+            line += f"\n    not assessed: {note}"
+    return line
 
 
 def main() -> int:
@@ -240,6 +270,9 @@ def main() -> int:
         absent = sum(1 for r in rows if r.absent)
         print(
             f"agency={cfg.name} threshold={agency_coverage_threshold(cfg):.3f} "
+            f"feed_gap_max={cfg.completeness.feed_gap_max_minutes}min "
+            f"service_hours={cfg.completeness.service_start_hour:02d}-"
+            f"{cfg.completeness.service_end_hour:02d} "
             f"dates={len(rows)} flips={flips} kept={kept} absent={absent}"
         )
         if not args.apply:

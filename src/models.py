@@ -822,10 +822,14 @@ class SystemMetricsDaily(Base):
 
     `service_date` is the primary key (`YYYY-MM-DD`, Eastern operational day).
 
-    `data_quality` is either ``'complete'`` (ingest coverage ≥ 80%) or
-    ``'partial'`` (ingest coverage below threshold — row inserted as a
-    flagger so the UI can render an explicit "partial day" badge instead of
-    a silent gap). `coverage_pct` is the raw fraction for diagnostics.
+    `data_quality` is either ``'complete'`` (ingest coverage at or above the
+    agency's cadence-aware threshold AND no feed silent for longer than the
+    agency's service-hours gap limit — see
+    ``src.data_completeness.assess_data_quality``) or ``'partial'`` (row
+    inserted as a flagger so the UI can render an explicit "partial day"
+    badge instead of a silent gap). `coverage_pct` is the raw coverage
+    fraction for diagnostics (kept from the earlier measurement when a later
+    re-aggregation finds the inputs pruned).
     """
 
     __tablename__ = "system_metrics_daily"

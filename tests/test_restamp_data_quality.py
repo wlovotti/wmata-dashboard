@@ -57,6 +57,31 @@ def _seed_trip_update_minutes(db, service_date: date, minute_count: int, tz_name
     db.flush()
 
 
+def _seed_vehicle_positions(
+    db, service_date: date, tz_name: str, skip: tuple[int, int] | None = None
+) -> None:
+    """One VP row every 3 minutes (SFMTA cadence) over the local day and the next.
+
+    Two local days so every UTC day the service window overlaps has rows
+    (the #270 VP gap leg is otherwise not assessable). ``skip`` is a
+    ``(first, last)`` minute-offset range of ``service_date`` left empty.
+    """
+    start_utc, _ = local_day_bounds_utc(service_date, tz_name)
+    for minute in range(0, 2 * 1440, 3):
+        if skip is not None and skip[0] <= minute <= skip[1]:
+            continue
+        ts = start_utc + timedelta(minutes=minute)
+        db.execute(
+            text(
+                "INSERT INTO vehicle_positions "
+                "(vehicle_id, latitude, longitude, timestamp, collected_at) "
+                "VALUES ('v', 37.7, -122.4, :ts, :ts)"
+            ),
+            {"ts": ts},
+        )
+    db.flush()
+
+
 def _stamps(db, iso: str) -> tuple[tuple[str, float | None], set[tuple[str, float | None]]]:
     """Return (system stamp, set of overlay stamps) for ``iso``."""
     sysrow = db.get(SystemMetricsDaily, iso)
@@ -76,6 +101,7 @@ def test_plan_reports_flip_and_absent_without_writing(pg_session):
     nothing."""
     _seed_partial_day(pg_session, TEST_DATE)
     _seed_trip_update_minutes(pg_session, TEST_DATE, 1440, SFMTA.timezone)
+    _seed_vehicle_positions(pg_session, TEST_DATE, SFMTA.timezone)
 
     rows = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE + timedelta(days=1))
 
@@ -97,6 +123,7 @@ def test_apply_rewrites_both_tables_and_skips_absent(pg_session):
     for the date, leaves metric columns alone, and skips absent dates."""
     _seed_partial_day(pg_session, TEST_DATE)
     _seed_trip_update_minutes(pg_session, TEST_DATE, 1440, SFMTA.timezone)
+    _seed_vehicle_positions(pg_session, TEST_DATE, SFMTA.timezone)
     rows = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE + timedelta(days=1))
 
     written = apply_restamp(pg_session, rows)
@@ -167,6 +194,7 @@ def test_plan_and_apply_handle_overlay_only_dates(pg_session):
     )
     pg_session.flush()
     _seed_trip_update_minutes(pg_session, TEST_DATE, 1440, SFMTA.timezone)
+    _seed_vehicle_positions(pg_session, TEST_DATE, SFMTA.timezone)
 
     (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
 
@@ -187,3 +215,73 @@ def test_plan_keeps_partial_when_coverage_stays_low(pg_session):
     (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
 
     assert row.new_quality == "partial" and not row.changed
+
+
+def test_apply_never_rewrites_coverage_of_an_unchanged_stamp(pg_session):
+    """Issue #272: a date whose stamp does not flip is not written at all,
+    even when every input is present and the re-measured coverage differs
+    from the stored one."""
+    _seed_partial_day(pg_session, TEST_DATE, overlay_routes=2)
+    _seed_trip_update_minutes(pg_session, TEST_DATE, 200, SFMTA.timezone)
+    _seed_vehicle_positions(pg_session, TEST_DATE, SFMTA.timezone)
+
+    (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
+    assert row.new_quality == "partial" and not row.changed
+    assert row.coverage_measured and row.new_coverage != pytest.approx(0.33)
+
+    assert apply_restamp(pg_session, [row]) == 0
+    assert _stamps(pg_session, TEST_DATE.isoformat()) == (
+        ("partial", 0.33),
+        {("partial", 0.33)},
+    )
+
+
+def test_pruned_boundary_date_is_kept_not_zeroed(pg_session):
+    """SFMTA 9/29 shape: the date's own state and VP are gone, only a few of
+    the next date's rows sit in its evening window. The plan keeps the
+    stored stamp and apply writes nothing — the stored coverage is never
+    replaced by the ~0 measured now (issue #272)."""
+    iso = TEST_DATE.isoformat()
+    pg_session.add(SystemMetricsDaily(service_date=iso, data_quality="partial", coverage_pct=0.336))
+    pg_session.flush()
+    start_utc, end_utc = local_day_bounds_utc(TEST_DATE, SFMTA.timezone)
+    for i in range(5):
+        pg_session.execute(
+            text(
+                "INSERT INTO trip_update_state "
+                "(trip_id, stop_sequence, service_date, stop_id, final_snapshot_ts) "
+                "VALUES (:t, 1, :sd, 's', :ts)"
+            ),
+            {
+                "t": f"next-{i}",
+                "sd": TEST_DATE + timedelta(days=1),
+                "ts": end_utc - timedelta(minutes=5 - i),
+            },
+        )
+    pg_session.flush()
+
+    (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
+
+    assert row.kept and not row.changed and not row.coverage_measured
+    assert (row.new_quality, row.new_coverage) == ("partial", 0.336)
+    assert row.decision.measured_coverage < 0.05
+    assert apply_restamp(pg_session, [row]) == 0
+    assert pg_session.get(SystemMetricsDaily, iso).coverage_pct == 0.336
+
+
+def test_gap_demotion_with_pruned_tu_writes_stamp_but_keeps_coverage(pg_session):
+    """A complete date whose VP (still present) shows a 3-hour service-hours
+    gap flips to partial (#270) even though its trip-update rows are gone,
+    but only ``data_quality`` is written: the coverage could not be
+    re-measured without the trip-update leg."""
+    iso = TEST_DATE.isoformat()
+    pg_session.add(SystemMetricsDaily(service_date=iso, data_quality="complete", coverage_pct=0.66))
+    pg_session.flush()
+    _seed_vehicle_positions(pg_session, TEST_DATE, SFMTA.timezone, skip=(600, 780))
+
+    (row,) = plan_restamp(pg_session, SFMTA, TEST_DATE, TEST_DATE)
+
+    assert row.changed and row.new_quality == "partial" and not row.coverage_measured
+    assert any(r.startswith("vehicle_position gap") for r in row.decision.reasons)
+    assert apply_restamp(pg_session, [row]) == 1
+    assert _stamps(pg_session, iso)[0] == ("partial", 0.66)

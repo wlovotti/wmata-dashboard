@@ -213,30 +213,35 @@ def test_cleanup_tz_name_changes_cutoff(pg_session, monkeypatch):
 
 
 @pytest.mark.integration
-def test_cleanup_batches_deletes_committing_per_batch(pg_session, monkeypatch):
-    """PR #229 review: a single unbatched DELETE is sized for a daily WMATA
-    increment, not SFMTA's first run (~10.7M of ~13M rows on a 2.7GB
-    table). run_cleanup must delete in batches of ``batch_size``,
-    committing after each batch, rather than one statement/transaction.
-
-    Verified two ways: all eligible rows are still gone by the end
-    (correctness unchanged), and with batch_size=3 against 7 eligible
-    rows, at least 3 commits happen from inside run_cleanup itself (a
-    single unbatched DELETE would commit exactly once).
+def test_cleanup_commits_once_per_service_date_in_batches(pg_session, monkeypatch):
+    """PR #229 review kept statements bounded (``batch_size``); issue #270's
+    review requires each service date to be deleted in ONE transaction, so
+    an interrupted cleanup never leaves a remnant of a date. Two eligible
+    dates of 7 rows each with batch_size=3: every row goes, and one commit
+    happens per date although each date takes three statements.
     """
     from pipelines.cleanup_trip_update_state import run_cleanup
 
     today = eastern_today()
-    old_date = today - timedelta(days=10)
-    pg_session.add_all(
-        [_make_state_row(f"T_batch_{i}", 1, service_date=old_date) for i in range(7)]
-    )
+    for days in (10, 11):
+        d = today - timedelta(days=days)
+        pg_session.add_all(
+            [_make_state_row(f"T_batch_{days}_{i}", 1, service_date=d) for i in range(7)]
+        )
     pg_session.commit()
+    eligible_dates = len(
+        pg_session.execute(
+            select(TripUpdateState.service_date)
+            .where(TripUpdateState.service_date < today - timedelta(days=7))
+            .distinct()
+        ).all()
+    )
 
     commit_count = 0
     original_commit = pg_session.commit
 
     def _counting_commit():
+        """Count commits issued from inside run_cleanup."""
         nonlocal commit_count
         commit_count += 1
         return original_commit()
@@ -245,15 +250,56 @@ def test_cleanup_batches_deletes_committing_per_batch(pg_session, monkeypatch):
 
     counts = run_cleanup(pg_session, batch_size=3)
 
-    remaining = {
-        r.trip_id
-        for r in pg_session.execute(
-            select(TripUpdateState).where(TripUpdateState.trip_id.like("T_batch_%"))
-        ).scalars()
-    }
-    assert remaining == set()
-    assert counts["deleted"] >= 7
-    assert commit_count >= 3
+    remaining = pg_session.execute(
+        select(TripUpdateState).where(TripUpdateState.trip_id.like("T_batch_%"))
+    ).all()
+    assert remaining == []
+    assert counts["deleted"] >= 14
+    assert commit_count == eligible_dates  # == 2 on a clean test DB; per-batch would be >= 6
+
+
+@pytest.mark.integration
+def test_interrupted_cleanup_never_leaves_a_partial_date(pg_session, monkeypatch):
+    """A cleanup that dies while deleting the second date leaves the first
+    date fully gone and the second fully present — never a scattered
+    remnant that the completeness check would read as a sparse feed
+    (issue #270 review item 2). Dates are deleted oldest first.
+    """
+    from pipelines.cleanup_trip_update_state import run_cleanup
+
+    today = eastern_today()
+    older, newer = today - timedelta(days=12), today - timedelta(days=11)
+    for d in (older, newer):
+        pg_session.add_all([_make_state_row(f"T_int_{d}_{i}", 1, service_date=d) for i in range(5)])
+    pg_session.commit()
+
+    calls = 0
+    original_commit = pg_session.commit
+
+    def _dies_on_second_commit():
+        """Commit the first date, then simulate a crash before the second commits."""
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated crash mid-cleanup")
+        return original_commit()
+
+    monkeypatch.setattr(pg_session, "commit", _dies_on_second_commit)
+    with pytest.raises(RuntimeError):
+        run_cleanup(pg_session, batch_size=2)
+    pg_session.rollback()
+
+    def _left(d):
+        """Rows of this test left for service date ``d``."""
+        return len(
+            pg_session.execute(
+                select(TripUpdateState).where(
+                    TripUpdateState.trip_id.like("T_int_%"), TripUpdateState.service_date == d
+                )
+            ).all()
+        )
+
+    assert (_left(older), _left(newer)) == (0, 5)
 
 
 @pytest.mark.integration

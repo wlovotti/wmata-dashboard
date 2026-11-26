@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from src.data_completeness import QualityDecision
 from src.models import Run, StopEvent, SystemMetricsDaily
 from src.system_metrics import compute_system_metrics_for_date, upsert_system_metrics_for_date
 from src.timezones import eastern_today
@@ -192,8 +193,8 @@ def test_pipeline_upserts_system_metrics_row(db_session, sample_routes, monkeypa
     minimum useful setup for testing the upsert path.
     """
     monkeypatch.setattr(
-        "src.data_completeness.resolve_data_quality",
-        lambda *args, **kwargs: ("complete", 1.0, False),
+        "src.data_completeness.assess_data_quality",
+        lambda *args, **kwargs: QualityDecision.fixed("complete", 1.0),
     )
     target_date = eastern_today() - timedelta(days=4)
     target_iso = target_date.isoformat()
@@ -314,11 +315,11 @@ def test_upsert_system_metrics_forwards_completeness_threshold(
     """
     seen_thresholds = []
 
-    def _fake_resolve(db, service_date, threshold=0.80, tz_name="America/New_York", prior=None):
+    def _fake_resolve(db, service_date, threshold=0.80, tz_name="America/New_York", **kwargs):
         seen_thresholds.append(threshold)
-        return "complete", 1.0, False
+        return QualityDecision.fixed("complete", 1.0)
 
-    monkeypatch.setattr("src.data_completeness.resolve_data_quality", _fake_resolve)
+    monkeypatch.setattr("src.data_completeness.assess_data_quality", _fake_resolve)
 
     target_date = eastern_today() - timedelta(days=6)
     upsert_system_metrics_for_date(db_session, target_date, completeness_threshold=0.5333)
@@ -375,11 +376,11 @@ def test_upsert_system_metrics_default_threshold_is_the_flat_constant(
 
     seen_thresholds = []
 
-    def _fake_resolve(db, service_date, threshold=0.80, tz_name="America/New_York", prior=None):
+    def _fake_resolve(db, service_date, threshold=0.80, tz_name="America/New_York", **kwargs):
         seen_thresholds.append(threshold)
-        return "complete", 1.0, False
+        return QualityDecision.fixed("complete", 1.0)
 
-    monkeypatch.setattr("src.data_completeness.resolve_data_quality", _fake_resolve)
+    monkeypatch.setattr("src.data_completeness.assess_data_quality", _fake_resolve)
 
     target_date = eastern_today() - timedelta(days=7)
     upsert_system_metrics_for_date(db_session, target_date)

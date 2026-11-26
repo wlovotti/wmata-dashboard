@@ -71,12 +71,18 @@ trip_update_state: after each derived (or held) date D, state for service
 dates before ``min(D, local today - 7)`` is deleted and the table is
 vacuumed, so a backfill reuses the same space instead of growing a day of
 state per date. D itself survives because D+1's completeness rollup reads
-state polled inside local day D+1, which includes D's owl trips; nothing
-reads older state (derive reads only ``service_date == D``). End of run:
-WMATA housekeeping once (skipped if a WMATA date failed this run, or with
-``--skip-housekeeping``) and SFMTA's 7-day cleanup once (skipped if an
-SFMTA date failed). A date whose state was deleted before it was derived
-self-heals: replay re-folds a date with neither state nor runs.
+state polled inside local day D+1, which includes D's owl trips, and
+D+1's derive re-aggregates D (owl-corrected rows) with D's trip-update gap
+leg still assessable; nothing reads older state (derive reads only
+``service_date == D``). End of run: WMATA housekeeping once (skipped if a
+WMATA date failed this run, or with ``--skip-housekeeping``) and SFMTA's
+7-day cleanup once (skipped if an SFMTA date failed). Those may delete the
+last processed date's state; when the next run re-aggregates that date as
+D-1 its trip-update leg is then not assessable, so
+``src.data_completeness.assess_data_quality`` keeps its stamp and stored
+coverage instead of re-measuring from VP alone (issue #272). A date whose
+state was deleted before it was derived self-heals: replay re-folds a
+date with neither state nor runs.
 
 Retention (opt-in, default OFF): with ``--apply-retention``, or
 ``retention.apply_after_refresh: true`` in the agency YAML, each agency

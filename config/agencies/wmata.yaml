@@ -21,6 +21,16 @@ collector:
   vp_archive_dir: archive/vp_snapshots
   pid_file: logs/collector.pid
   heartbeat_name: combined
+# Completeness stamp (src/data_completeness.py, issue #270). The coverage
+# threshold is derived from the collector cadence above; this block sets the
+# per-feed gap rule: a date is stamped 'partial' when trip updates OR vehicle
+# positions go silent for more than feed_gap_max_minutes inside the
+# agency-local window service_start_hour..service_end_hour (24 = midnight).
+# 90 min / 05-24 flagged exactly the known outage days across both DBs.
+completeness:
+  feed_gap_max_minutes: 90
+  service_start_hour: 5
+  service_end_hour: 24
 database:
   url_env: DATABASE_URL
 healthcheck:

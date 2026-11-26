@@ -20,6 +20,7 @@ from datetime import date as date_type
 
 from sqlalchemy.orm import Session
 
+from src.agency_config import CompletenessPolicy
 from src.bunching import compute_bunching_headline_for_routes_multi_date
 from src.ewt import (
     _day_type_for,
@@ -202,6 +203,7 @@ def upsert_route_metrics_for_date(
     completeness_threshold: float | None = None,
     agency: str = "wmata",
     force: bool = False,
+    gap_policy: CompletenessPolicy | None = None,
 ) -> int | None:
     """Compute and upsert overlay rows for every route active on `service_date`.
 
@@ -242,10 +244,15 @@ def upsert_route_metrics_for_date(
     ``src.system_metrics.AggregateOverwriteRefused`` is raised before
     anything is written (retention keeps aggregates forever but prunes
     the rows they were computed from).
+
+    ``gap_policy``: the agency's per-feed gap rule
+    (``AgencyConfig.completeness``, issue #270); None uses the defaults
+    (90 min inside 05:00–24:00 local). See
+    ``src.data_completeness.assess_data_quality`` for the whole rule.
     """
     from src.data_completeness import (
         MIN_COVERAGE_FOR_MATERIALIZATION,
-        resolve_data_quality,
+        assess_data_quality,
     )
 
     threshold = (
@@ -270,28 +277,36 @@ def upsert_route_metrics_for_date(
         )
     # Every overlay row for a date carries the same date-level stamp
     # (this function writes them all in one pass), so the lowest route_id
-    # is a deterministic representative. It lets resolve_data_quality keep
-    # an earned 'complete' when the trip-update signal has since been
-    # pruned by retention (NOTES-104) instead of misreporting an outage.
+    # is a deterministic representative. It lets assess_data_quality keep
+    # an earned stamp when an input (trip_update_state, raw VP) has since
+    # been pruned (NOTES-104, issues #270/#272) instead of misreporting an
+    # outage.
     prior_row = existing_by_route[min(existing_by_route)] if existing_by_route else None
     prior = (prior_row.data_quality, prior_row.coverage_pct) if prior_row else None
-    data_quality, pct, kept = resolve_data_quality(
-        db, service_date, threshold=threshold, tz_name=tz_name, prior=prior
+    decision = assess_data_quality(
+        db,
+        service_date,
+        threshold=threshold,
+        tz_name=tz_name,
+        prior=prior,
+        gap_policy=gap_policy,
     )
+    data_quality, pct = decision.data_quality, decision.coverage_pct
     is_complete = data_quality == "complete"
 
-    if kept:
+    if decision.kept:
         # See the matching note in src/system_metrics.py: the stamp is
         # preserved, the metrics are still re-derived from current rows.
         print(
-            f"  ⚠ Route metrics overlay for {service_date_iso}: trip-update signal no "
-            f"longer retained; keeping prior 'complete' stamp and its stored coverage, "
-            f"but re-deriving metrics from current stop_events — check they are non-null"
+            f"  ⚠ Route metrics overlay for {service_date_iso}: an input is no longer "
+            f"retained ({'; '.join(decision.not_assessed)}); keeping prior "
+            f"'{data_quality}' stamp and its stored coverage, but re-deriving metrics "
+            f"from current stop_events — check they are non-null"
         )
     elif not is_complete:
         print(
-            f"  ⚠ Route metrics overlay for {service_date_iso}: "
-            f"ingest coverage {pct:.1%} below threshold — flagging as partial"
+            f"  ⚠ Route metrics overlay for {service_date_iso}: flagging as partial — "
+            f"{decision.describe()}"
         )
 
     try:
@@ -311,9 +326,10 @@ def upsert_route_metrics_for_date(
                     continue
                 setattr(existing, key, value)
             existing.data_quality = data_quality
-            if not kept:
-                # A kept stamp's coverage is deliberately not re-measured.
-                existing.coverage_pct = pct
+            # When an input is pruned the decision carries the date's stored
+            # coverage (from the representative row) back unchanged, so this
+            # never replaces a real value with an understated re-measurement.
+            existing.coverage_pct = pct
             existing.computed_at = now
         else:
             db.add(
