@@ -708,6 +708,8 @@ def _aggregate_ewt_window(daily_ewt: list[dict]) -> dict | None:
 
     Delegates shared null-filtering and route-id threading to
     `aggregate_metric_window`; metric-specific logic lives in `_reduce_ewt`.
+    Days computed before and after the issue #269 long-gap cap pool together
+    without distinction — see `_compute_live_metrics_for_window_uncached`.
     """
     return aggregate_metric_window(daily_ewt, _reduce_ewt)
 
@@ -887,6 +889,16 @@ def _compute_live_metrics_for_window_uncached(
 
     Anything resolved from tiers 2 or 3 is stashed into the in-memory
     per-date cache, so subsequent window slides reuse it as tier 1.
+
+    EWT method mixing (issue #269, documented, not corrected): tier 2 returns
+    whatever EWT sums the overlay row holds, and rows computed before the
+    120-minute long-gap cap (`src.ewt.EWT_LONG_GAP_RULE_SINCE_UTC`) hold
+    uncapped sums until `scripts/recompute_ewt_aggregates.py` rewrites them;
+    tier 3 always computes with the cap. A window spanning not-yet-recomputed
+    dates therefore pools both methods. Re-deriving those dates live would
+    cost ~35 s per 7 days and is impossible once stop-level rows are pruned,
+    so the dashboard accepts the mix; the scorecard, which states a method,
+    detects and discloses it instead (`src.scorecard.ewt_method_coverage`).
     """
     from src.bunching import compute_bunching_headline_for_routes_multi_date
     from src.ewt import (

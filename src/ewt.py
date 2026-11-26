@@ -77,9 +77,20 @@ route-days. The cap is the bunching metric's existing filter
 (`src/bunching.py` imports the same constant), applied flat rather than by
 cause: it matched a three-part classified rule (scheduled break / SKIPPED
 run / origin stop) on all but 2 of 1,942 WMATA route-days in October 2026,
-and is simpler to state. Trade-off: a genuine service outage longer than
-2 h is no longer counted as wait — it is a service-delivered problem, which
-that metric still sees.
+and is simpler to state. Trade-off: a genuine gap longer than 2 h inside
+frequent service is no longer counted as wait. What else sees it depends on
+the cause:
+
+  - trips that did not run (cancelled / missing): service delivered counts
+    them as scheduled-but-not-delivered;
+  - runs that operated but skipped stops (SKIPPED calls): the trip counts
+    as delivered and the skipped stops have no observed arrival, so neither
+    service delivered nor OTP sees the gap — with this rule no headline
+    metric does;
+  - a real-time feed outage (trips ran, nothing was recorded): not a rider
+    wait at all; it can only show up in the date's completeness stamp;
+  - an origin stop `trip_update` cannot observe: a measurement artifact,
+    nothing a rider experienced.
 
 Precedent: TfL's QSI method (the origin of EWT) computes AWT/SWT per hour
 block and sets the first bus's headway to zero, so the overnight or
@@ -92,9 +103,17 @@ waits (124.90 s / 125.63 s).
 
 The scheduled side gets the same cap so AWT and SWT pool comparable
 headways; the frequent-cell gate still classifies each cell-hour on its
-full scheduled list, so which cells are frequent does not change. Stored
-daily aggregates computed before this rule keep the old method unless
-their date still has stop-level rows and is recomputed.
+full scheduled list, so which cells are frequent does not change.
+
+Stored daily aggregates computed before this rule keep the old (uncapped)
+method until they are recomputed (`scripts/recompute_ewt_aggregates.py`),
+which is possible only while the date still has stop-level `trip_update`
+rows. Whether a stored row is capped is judged by `ewt_computed_with_cap`
+(its `computed_at` against `EWT_LONG_GAP_RULE_SINCE_UTC`); the scorecard
+uses it to list old-method dates and to withhold cross-agency EWT
+comparisons that mix methods. The dashboard's windowed reducer
+(`api/aggregations.py`) pools stored rows and live days without that check,
+so a window spanning not-yet-recomputed dates mixes methods.
 
 Aggregation to time_period
 --------------------------
@@ -285,12 +304,35 @@ CellHour = tuple[int, str, int]  # (direction_id, stop_id, hour)
 # AWT weights by h², a single 6-20 h "headway" otherwise dominates a whole
 # route-day (D50 2026-10-02: ~13 such pairs of ~60,400 s each carried most
 # of the day's Σh², putting AWT at 6,508 s). The rule is flat — any pair
-# over 120 min is dropped whatever its cause — so a genuine > 2 h service
-# outage is also no longer counted as wait; the
-# classified alternative (scheduled-break / SKIPPED-run / origin-stop
+# over 120 min is dropped whatever its cause — so a genuine > 2 h gap is
+# also no longer counted as wait (see the module docstring's "Long-gap cap"
+# for what else does and does not see each cause); the classified alternative (scheduled-break / SKIPPED-run / origin-stop
 # exclusion) agreed with this rule on all but 2 of 1,942 WMATA route-days in
 # October 2026. Matches the filter in `src/analytics.py:calculate_headways_batch`.
 MAX_OBSERVED_HEADWAY_SEC = 120 * 60
+
+# When the long-gap cap took effect (naive UTC). The stored aggregate tables
+# (`system_metrics_daily`, `route_metrics_daily_overlay`) carry no method
+# marker, so a row's EWT is treated as capped iff its `computed_at` is at or
+# after this instant: every writer of those columns from this code on (the
+# per-date rollup pipelines and `scripts/recompute_ewt_aggregates.py`, which
+# stamps `computed_at` when it rewrites the EWT columns) uses the cap.
+# Fragility, stated plainly: a row written by an *older checkout* after this
+# instant would be misread as capped. The recompute tool closes that window
+# by rewriting every date that still has trip_update rows; a date pruned
+# before being recomputed keeps whatever its timestamp says. A dedicated
+# per-row marker would need a schema change; this was judged not worth one.
+EWT_LONG_GAP_RULE_SINCE_UTC = datetime(2026, 11, 26, 6, 0, 0)
+
+
+def ewt_computed_with_cap(computed_at: datetime | None) -> bool:
+    """True when a stored aggregate row's EWT was computed under the 120-min cap.
+
+    Judged from the row's ``computed_at`` against `EWT_LONG_GAP_RULE_SINCE_UTC`
+    (see that constant for why a timestamp and what can fool it). A missing
+    timestamp counts as not capped.
+    """
+    return computed_at is not None and computed_at >= EWT_LONG_GAP_RULE_SINCE_UTC
 
 
 def _is_countable_headway(delta: float) -> bool:

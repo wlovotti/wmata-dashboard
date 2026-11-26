@@ -72,7 +72,13 @@ from api.aggregations import (
 from src.agency_config import CONFIG_DIR as AGENCY_CONFIG_DIR
 from src.agency_config import load_agency_config
 from src.data_completeness import agency_coverage_threshold
-from src.ewt import MAX_OBSERVED_HEADWAY_SEC, _day_type_for, bus_route_ids
+from src.ewt import (
+    EWT_LONG_GAP_RULE_SINCE_UTC,
+    MAX_OBSERVED_HEADWAY_SEC,
+    _day_type_for,
+    bus_route_ids,
+    ewt_computed_with_cap,
+)
 from src.frequent_routes import (
     HIGH_FREQ_GATE_SEC,
     MEDIUM_FREQ_GATE_SEC,
@@ -1175,14 +1181,83 @@ def headline_robustness(
     return out
 
 
+def ewt_method_coverage(
+    db: Session, dates: list[date_type], rows: dict[str, dict], ewt_summary: dict
+) -> dict:
+    """Which of the period's EWT dates were computed under the 120-minute cap (issue #269).
+
+    The stored tables carry no method marker; a date counts as capped when
+    its ``system_metrics_daily`` row AND every one of its ``complete``
+    overlay rows have ``computed_at`` at or after
+    ``src.ewt.EWT_LONG_GAP_RULE_SINCE_UTC`` (``ewt_computed_with_cap``).
+    Only dates whose system EWT is included in the period figure are
+    classified. ``status`` is ``capped`` (all), ``old`` (none), ``mixed``
+    or ``none`` (no EWT dates).
+    """
+    excluded = {e["date"] for e in ewt_summary["excluded"]}
+    included = [d.isoformat() for d in dates if d.isoformat() not in excluded]
+    overlay_min: dict[str, datetime] = {}
+    if included:
+        overlay_min = dict(
+            db.query(
+                RouteMetricsDailyOverlay.service_date,
+                func.min(RouteMetricsDailyOverlay.computed_at),
+            )
+            .filter(
+                RouteMetricsDailyOverlay.service_date.in_(included),
+                RouteMetricsDailyOverlay.data_quality == "complete",
+            )
+            .group_by(RouteMetricsDailyOverlay.service_date)
+            .all()
+        )
+    capped, old = [], []
+    for iso in included:
+        system_ok = ewt_computed_with_cap((rows.get(iso) or {}).get("computed_at"))
+        overlay_ok = iso not in overlay_min or ewt_computed_with_cap(overlay_min[iso])
+        (capped if system_ok and overlay_ok else old).append(iso)
+    if not included:
+        status = "none"
+    elif not old:
+        status = "capped"
+    elif not capped:
+        status = "old"
+    else:
+        status = "mixed"
+    return {
+        "rule_since_utc": EWT_LONG_GAP_RULE_SINCE_UTC.isoformat(timespec="seconds"),
+        "status": status,
+        "n_dates": len(included),
+        "capped_dates": capped,
+        "old_method_dates": old,
+    }
+
+
+def ewt_methods_comparable(a: dict | None, b: dict | None) -> bool:
+    """True when two agencies' EWT figures were computed under one method.
+
+    Comparable only when each agency's period is uniformly ``capped`` or
+    uniformly ``old`` and both agree. Missing coverage (older JSON) is
+    treated as comparable so old reports re-render unchanged.
+    """
+    if a is None or b is None:
+        return True
+    sa, sb = a["status"], b["status"]
+    if "none" in (sa, sb):
+        return True
+    return sa == sb and sa in ("capped", "old")
+
+
 def compare_direction(sections: dict[str, dict], subject: str) -> dict[str, dict]:
     """Whether the subject-vs-peer difference keeps its direction across robust variants.
 
     For each peer and headline metric, compares the sign of (subject -
     peer) using the period means, the median days, the means with flagged
     days removed, and the means with dominated routes removed (the same
-    rule applied to every agency; an agency with none keeps its mean). ``direction_robust`` is False when the signs disagree -- the
-    report then says the difference is not a finding.
+    rule applied to every agency; an agency with none keeps its mean).
+    ``direction_robust`` is False when the signs disagree -- the report then
+    says the difference is not a finding. For EWT it is also False when the
+    two agencies' periods were not computed under one method (issue #269
+    long-gap cap; ``method_comparable``, see `ewt_method_coverage`).
     """
     out: dict[str, dict] = {}
     s_rob = sections[subject]["robustness"]
@@ -1219,12 +1294,16 @@ def compare_direction(sections: dict[str, dict], subject: str) -> dict[str, dict
                 for name, (x, y) in variants.items()
                 if x is not None and y is not None
             }
+            comparable = metric != "ewt" or ewt_methods_comparable(
+                sections[subject].get("ewt_method"), section.get("ewt_method")
+            )
             out[peer][metric] = {
                 "differences": {
                     name: (x - y) if x is not None and y is not None else None
                     for name, (x, y) in variants.items()
                 },
-                "direction_robust": len(set(signs.values())) <= 1,
+                "direction_robust": len(set(signs.values())) <= 1 and comparable,
+                "method_comparable": comparable,
             }
     return out
 
@@ -1335,6 +1414,7 @@ def build_agency_section(
         "service_pattern_dates": service_patterns,
         "known_issues": known_dates,
         "dominated_routes": dominated,
+        "ewt_method": ewt_method_coverage(db, dates, rows, metrics["ewt"]),
         "aggregates_computed_at_utc": {
             "min": _iso_or_none(min(computed)) if computed else None,
             "max": _iso_or_none(max(computed)) if computed else None,
@@ -1456,8 +1536,9 @@ def build_scorecard(
             },
             "ewt_gate_sec": {"high_freq": HIGH_FREQ_GATE_SEC, "medium_freq": MEDIUM_FREQ_GATE_SEC},
             # Issue #269: observed and scheduled headways longer than this are
-            # dropped from EWT/SWT. Dates whose stop-level rows were pruned
-            # before the rule keep aggregates computed without it.
+            # dropped from EWT/SWT by the current code. Stored rows computed
+            # before the rule keep the old method until recomputed; each agency
+            # section's `ewt_method` says which in-period dates are which.
             "ewt_max_headway_sec": MAX_OBSERVED_HEADWAY_SEC,
             "outlier_rule": {"mad_multiplier": OUTLIER_MAD_MULTIPLIER, "mad_to_sd": _MAD_TO_SD},
             "sources": {
@@ -1972,18 +2053,73 @@ def _render_summary(scorecard: dict, subject: dict, peers: list[dict]) -> list[s
     if notes:
         lines += ["", "Figures materially moved by a few days or routes:", ""]
         lines += [f"{i}. {n}" for i, n in enumerate(notes, start=1)]
-    cautions = [
-        f"- {METRIC_LABELS[metric]}: the difference between {subject['display_name']} and "
-        f"{scorecard['agencies'][peer]['display_name']} changes direction depending on whether "
-        "the mean, the median day, or the mean without unusual days or routes is used, so it is "
-        "not a finding."
-        for peer, by_metric in (scorecard.get("comparison") or {}).items()
-        for metric, comp in by_metric.items()
-        if not comp["direction_robust"]
-    ]
+    cautions = []
+    for peer, by_metric in (scorecard.get("comparison") or {}).items():
+        peer_name = scorecard["agencies"][peer]["display_name"]
+        for metric, comp in by_metric.items():
+            if comp["direction_robust"]:
+                continue
+            if not comp.get("method_comparable", True):
+                cautions.append(
+                    f"- {METRIC_LABELS[metric]}: {subject['display_name']} and {peer_name} "
+                    "figures in this period were not all computed under the same method (the "
+                    "120-minute long-gap rule; see the method coverage note below), so the "
+                    "difference between them is not a finding."
+                )
+            else:
+                cautions.append(
+                    f"- {METRIC_LABELS[metric]}: the difference between "
+                    f"{subject['display_name']} and {peer_name} changes direction depending on "
+                    "whether the mean, the median day, or the mean without unusual days or "
+                    "routes is used, so it is not a finding."
+                )
     if cautions:
         lines += ["", "Differences that are not robust:", "", *cautions]
+    method_notes = [
+        n for s in [subject, *peers] if (n := _ewt_method_note(s, scorecard["method"])) is not None
+    ]
+    if method_notes:
+        lines += ["", "Excess wait time method coverage:", "", *method_notes]
     return lines
+
+
+def _date_runs(isos: list[str]) -> str:
+    """Compress ISO dates into ``a to b`` runs of consecutive days, comma-separated."""
+    runs: list[list[date_type]] = []
+    for iso in sorted(isos):
+        d = date_type.fromisoformat(iso)
+        if runs and (d - runs[-1][-1]).days == 1:
+            runs[-1].append(d)
+        else:
+            runs.append([d])
+    return ", ".join(
+        r[0].isoformat() if len(r) == 1 else f"{r[0].isoformat()} to {r[-1].isoformat()}"
+        for r in runs
+    )
+
+
+def _ewt_method_note(section: dict, method: dict) -> str | None:
+    """Summary bullet naming an agency's EWT dates computed without the long-gap rule.
+
+    None when the agency's EWT dates are all capped, it has none, or the
+    JSON predates method coverage.
+    """
+    cov = section.get("ewt_method")
+    if cov is None or cov["status"] in ("capped", "none") or "ewt_max_headway_sec" not in method:
+        return None
+    minutes = method["ewt_max_headway_sec"] // 60
+    n_old, n = len(cov["old_method_dates"]), cov["n_dates"]
+    if cov["status"] == "mixed":
+        return (
+            f"- {section['display_name']}: {n_old} of {n} excess-wait-time dates were computed "
+            f"before the {minutes}-minute long-gap rule and have not been recomputed, so they "
+            f"still count every gap ({_date_runs(cov['old_method_dates'])}). Their EWT is not "
+            "comparable with dates under the rule; the period mean mixes both."
+        )
+    return (
+        f"- {section['display_name']}: all {n} excess-wait-time dates were computed before "
+        f"the {minutes}-minute long-gap rule and still count every gap."
+    )
 
 
 def _dated_label(metric_summary: dict, iso: str) -> str:
@@ -1994,26 +2130,53 @@ def _dated_label(metric_summary: dict, iso: str) -> str:
     return iso
 
 
-def _ewt_long_gap_sentence(method: dict) -> str:
+def _ewt_long_gap_sentence(method: dict, sections: dict[str, dict] | None = None) -> str:
     """Method-text sentence for the EWT long-gap rule (issue #269), or "" for older JSON.
 
     Keyed on ``method["ewt_max_headway_sec"]`` so re-rendering a scorecard
     JSON generated before the rule existed does not claim it was applied.
+    When ``sections`` carry ``ewt_method`` coverage, the sentence says which
+    agencies' dates were computed under the rule rather than asserting it
+    for all of them.
     """
     cap = method.get("ewt_max_headway_sec")
     if cap is None:
         return ""
-    return (
-        f" Any headway longer than {cap // 60} minutes, observed or scheduled, is left out "
-        "of both averages whatever its cause: such a gap is almost always a service break "
-        "that two consecutive arrivals happen to span (a missing last trip before a "
-        "scheduled break, a run of skipped stops, or a first stop the real-time feed cannot "
-        "see), and because waits are weighted by the square of the headway, one such gap "
-        "would otherwise outweigh a whole day of normal service. The trade-off is that a "
-        "genuine gap of more than two hours is not counted as waiting time; it still shows "
-        "in service delivered. Dates whose stop-level rows were pruned by retention before "
-        "this rule was introduced keep values computed without it."
+    text = (
+        f" Under the current method any headway longer than {cap // 60} minutes, observed or "
+        "scheduled, is left out of both averages whatever its cause: such a gap is almost "
+        "always a service break that two consecutive arrivals happen to span (a missing last "
+        "trip before a scheduled break, a run of skipped stops, or a first stop the real-time "
+        "feed cannot see), and because waits are weighted by the square of the headway, one "
+        "such gap would otherwise outweigh a whole day of normal service. The trade-off is "
+        "that a genuine gap of more than two hours is not counted as waiting time. When the "
+        "trips did not run it still shows in service delivered; when buses ran but skipped "
+        "stops, no headline figure here captures it."
     )
+    covs = [
+        (s["display_name"], s["ewt_method"])
+        for s in (sections or {}).values()
+        if s.get("ewt_method") is not None
+    ]
+    if covs:
+        parts = []
+        for name, cov in covs:
+            if cov["status"] == "capped":
+                parts.append(f"{name}: all {cov['n_dates']} dates")
+            elif cov["status"] == "none":
+                parts.append(f"{name}: no EWT dates")
+            else:
+                parts.append(
+                    f"{name}: {len(cov['capped_dates'])} of {cov['n_dates']} dates "
+                    "(the rest predate the rule; listed in the Summary)"
+                )
+        text += (
+            " Stored daily values computed before the rule (introduced "
+            f"{covs[0][1]['rule_since_utc']} UTC) keep the old method until recomputed, which "
+            "is possible only while a date's stop-level rows are retained. Dates under the "
+            "rule in this report: " + "; ".join(parts) + "."
+        )
+    return text
 
 
 def render_markdown(scorecard: dict) -> str:
@@ -2102,7 +2265,7 @@ def render_markdown(scorecard: dict) -> str:
         f"{m['ewt_gate_sec']['high_freq'] // 60} minutes ({m['ewt_gate_sec']['medium_freq'] // 60} "
         "minutes for WMATA medium-frequency routes). Source: `trip_update` stop events. "
         "Lower is better. Scheduled wait time (SWT) is the scheduled side of the same pool."
-        + _ewt_long_gap_sentence(m),
+        + _ewt_long_gap_sentence(m, scorecard["agencies"]),
         "- Bunching rate: share of observed consecutive-arrival headways shorter than "
         "max(0.25 x scheduled headway, 2 minutes) (source: `trip_update` stop events, "
         "SCHEDULED trips only). Lower is better.",

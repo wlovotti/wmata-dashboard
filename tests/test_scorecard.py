@@ -483,11 +483,95 @@ def test_build_scorecard_end_to_end(db_session):
     assert "sha256 `1111111111111111` over 1 files" in md
     # Issue #269: the EWT long-gap rule is stated in the Method section.
     assert card["method"]["ewt_max_headway_sec"] == 7200
-    assert "Any headway longer than 120 minutes, observed or scheduled" in md
-    assert "keep values computed without it" in md
+    assert "any headway longer than 120 minutes, observed or scheduled" in md
+    assert "When the trips did not run it still shows in service delivered" in md
+    # Seeded rows were computed 2026-11-02, before the rule: both agencies are
+    # uniformly old-method, which the report says instead of claiming the rule.
+    assert w["ewt_method"]["status"] == "old"
+    assert w["ewt_method"]["old_method_dates"] == ["2026-10-01", "2026-10-02"]
+    assert f"{w['display_name']}: 0 of 2 dates" in md
+    assert "all 2 excess-wait-time dates were computed before the 120-minute" in md
+    assert card["comparison"]["sfmta"]["ewt"]["method_comparable"] is True
     # A scorecard JSON generated before the rule re-renders without claiming it.
     del card["method"]["ewt_max_headway_sec"]
-    assert "Any headway longer than" not in sc.render_markdown(card)
+    assert "any headway longer than" not in sc.render_markdown(card)
+
+
+def _ewt_cov(status: str, capped: list[str], old: list[str]) -> dict:
+    """An `ewt_method` coverage block for comparability / rendering tests."""
+    return {
+        "rule_since_utc": "2026-11-26T06:00:00",
+        "status": status,
+        "n_dates": len(capped) + len(old),
+        "capped_dates": capped,
+        "old_method_dates": old,
+    }
+
+
+@pytest.mark.smoke
+def test_ewt_method_coverage_classifies_by_computed_at(db_session):
+    """A date is capped only when its system row and every overlay row postdate the rule."""
+    after = sc.EWT_LONG_GAP_RULE_SINCE_UTC + timedelta(hours=1)
+    before = sc.EWT_LONG_GAP_RULE_SINCE_UTC - timedelta(hours=1)
+    rows = {}
+    for iso, sys_at, ov_at in [
+        ("2026-10-01", after, after),  # capped
+        ("2026-10-02", after, before),  # an overlay row is old -> old
+        ("2026-10-03", before, after),  # system row is old -> old
+    ]:
+        db_session.add(_sys_row(iso, ewt=10.0))
+        ov = _overlay("D50", iso)
+        ov.computed_at = ov_at
+        db_session.add(ov)
+        rows[iso] = {"computed_at": sys_at}
+    db_session.flush()
+    dates = [date(2026, 10, d) for d in (1, 2, 3, 4)]
+    summary = {"excluded": [{"date": "2026-10-04", "reason": "missing"}]}
+    cov = sc.ewt_method_coverage(db_session, dates, rows, summary)
+    assert cov["status"] == "mixed"
+    assert cov["capped_dates"] == ["2026-10-01"]
+    assert cov["old_method_dates"] == ["2026-10-02", "2026-10-03"]
+    assert cov["n_dates"] == 3
+
+
+@pytest.mark.smoke
+def test_ewt_methods_comparable_truth_table():
+    """Only uniformly-capped or uniformly-old pairs compare; mixed or differing never do."""
+    capped = _ewt_cov("capped", ["2026-10-01"], [])
+    old = _ewt_cov("old", [], ["2026-10-01"])
+    mixed = _ewt_cov("mixed", ["2026-10-01"], ["2026-10-02"])
+    assert sc.ewt_methods_comparable(capped, capped)
+    assert sc.ewt_methods_comparable(old, old)
+    assert not sc.ewt_methods_comparable(capped, old)
+    assert not sc.ewt_methods_comparable(mixed, mixed)
+    assert not sc.ewt_methods_comparable(capped, mixed)
+    assert sc.ewt_methods_comparable(None, capped)  # older JSON
+
+
+def test_mixed_ewt_method_feeds_not_a_finding_and_lists_dates(db_session):
+    """A peer whose period mixes methods makes the EWT comparison 'not a finding'."""
+    _seed(db_session)
+    card = sc.build_scorecard(
+        {"wmata": db_session, "sfmta": db_session},
+        START,
+        END,
+        generated_at_utc=GENERATED,
+        annotations={"routes": [], "dates": []},
+    )
+    card["agencies"]["wmata"]["ewt_method"] = _ewt_cov("capped", ["2026-10-01", "2026-10-02"], [])
+    card["agencies"]["sfmta"]["ewt_method"] = _ewt_cov("mixed", ["2026-10-02"], ["2026-10-01"])
+    card["comparison"] = sc.compare_direction(card["agencies"], "wmata")
+    comp = card["comparison"]["sfmta"]["ewt"]
+    assert comp["method_comparable"] is False
+    assert comp["direction_robust"] is False
+    # Other metrics are untouched by the EWT method check.
+    assert card["comparison"]["sfmta"]["otp"]["method_comparable"] is True
+    md = sc.render_markdown(card)
+    peer = card["agencies"]["sfmta"]["display_name"]
+    assert "were not all computed under the same method" in md
+    assert f"- {peer}: 1 of 2 excess-wait-time dates were computed before" in md
+    assert "(2026-10-01)" in md
+    assert f"{peer}: 1 of 2 dates (the rest predate the rule" in md
 
 
 @pytest.mark.smoke

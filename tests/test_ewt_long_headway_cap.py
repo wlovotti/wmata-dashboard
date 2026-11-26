@@ -22,6 +22,7 @@ from src.ewt import (
     _is_countable_headway,
     _observed_headways_by_cell_hour,
     compute_awt,
+    compute_ewt_for_route_date,
     compute_ewt_headline_for_route,
     compute_ewt_headline_for_routes,
     compute_ewt_headline_for_routes_multi_date,
@@ -262,3 +263,21 @@ class TestFourCallSitesAgree:
             assert res["n_observed_headways"] == 8
             assert res["awt_seconds"] == pytest.approx(awt, abs=0.01)
         assert sys_ewt == pytest.approx(awt - sys_swt, abs=0.01)
+
+
+class TestPerPeriodPathCapsScheduled:
+    """`compute_ewt_for_route_date` (per-period rows) applies the scheduled cap too."""
+
+    def test_am_peak_row_drops_long_scheduled_headway(self, db_session):
+        """The 7,260 s scheduled headway in hour 7 is left out of the AM Peak SWT pool."""
+        _seed_schedule(db_session)
+        _seed_observed(db_session, OBSERVED)
+        rows = {
+            r["time_period"]: r for r in compute_ewt_for_route_date(db_session, ROUTE, SERVICE_DATE)
+        }
+        am = rows["AM Peak (6-9)"]
+        assert am["frequent_cell_hours"] == 1
+        assert am["n_scheduled_headways"] == 8
+        assert am["swt_seconds"] == pytest.approx(30.0)
+        assert am["n_observed_headways"] == 7
+        assert am["awt_seconds"] == pytest.approx(30.0)
