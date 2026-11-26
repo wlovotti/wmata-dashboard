@@ -68,6 +68,7 @@ uv run python scripts/prune_local_archive.py # dry run: which local raw files ar
 uv run python -m pipelines.apply_retention --agency wmata   # dry run: what the retention tiers would delete (--apply deletes)
 uv run python scripts/dedup_gtfs_snapshots.py --agency wmata --metadata-only  # GTFS snapshot de-dup plan (--prove / --apply / export)
 uv run python pipelines/run_daily_batch.py   # derive + aggregate + rollup (--agency sfmta for Muni)
+uv run python scripts/generate_scorecard.py --start 2026-10-01 --end 2026-10-31  # read-only period scorecard → reports/*.md + .json (WMATA deep, Muni headline)
 psql -d wmata_dashboard                      # ad-hoc queries (Muni sidecar DB: sfmta_dashboard)
 uv run pytest -m smoke                       # fast tests
 bin/test-with-pg                             # full suite vs Postgres (mirrors CI); points DATABASE_URL/PG_TEST_DATABASE_URL/SFMTA_DATABASE_URL at a scratch DB for you
