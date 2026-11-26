@@ -6,17 +6,43 @@
     "end": "2026-10-31",
     "n_days": 31
   },
-  "generated_at_utc": "2026-11-26T04:01:22",
+  "generated_at_utc": "2026-11-26T04:23:13",
   "generator": "scripts/generate_scorecard.py",
   "provenance": {
-    "git_commit": "a2084456da12faec0fe46de799a9cd85fc09a522",
+    "git_commit": "083829d75403ebb751d5c60035d3196d212334b8",
     "git_dirty_paths": [],
     "source_sha256": {
-      "src/scorecard.py": "35a6061f03315ac505db60f4d65d0766e187a07279e2aa3cc57dbade602a4f56",
-      "scripts/generate_scorecard.py": "eda2025fe07024893538cd788b2395aead20b358fc47d70a1a009389089348b6",
-      "config/scorecard_annotations.yaml": "dca9b02b9e6e3a1c443c85101649e00f83cdfaf0e330c03c2e20720a25d4cc4b",
-      "config/frequent_routes.yaml": "01d0952f2674a6bf9efd50d0674cce5b38621c262bdc090e45a0a865349ca691"
-    }
+      "api/__init__.py": "e2580af7cfcec064492588a87e83020869db0d4d5c828664c812c58ed6ba0546",
+      "api/aggregations.py": "6146846495a2c33179a782225c73447ee2494c29f864c27d232a73c683d6c4e9",
+      "config/agencies/sfmta.yaml": "3769e8528132ed4d0b4a6684798e99ab3a97ff57e0dee0a346187ec3415dec75",
+      "config/agencies/wmata.yaml": "1bf440eac5cdaa1d9cb8bef7b056553158aa2f86c84808757b7c9dc4d8adf6b1",
+      "config/frequent_routes.yaml": "01d0952f2674a6bf9efd50d0674cce5b38621c262bdc090e45a0a865349ca691",
+      "config/scorecard_annotations.yaml": "5b130e0e39dc1eaadfc11e15e820f91722f4d1b1f5c2f08357a4c917b6d067dd",
+      "scripts/generate_scorecard.py": "c9519636399b3647007d5ed8da07234a5c2ef81cb1b1971babce5e3275926f30",
+      "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "src/agency_config.py": "9b4d99798755968b9d97554d3c23e04558224f606d16d02613bbd0e4da208d0e",
+      "src/analytics.py": "2d8d32f9a11606cb25cc7f425f116bdced69db7ce1b3e0429af83c437ae74a20",
+      "src/bunching.py": "513f11fadb90810e8515b30b84c7477ab24ef6b05368351ef50ec692cc0fb7ad",
+      "src/data_completeness.py": "6db5ec5b7a0127e441b7bdc0bfb332318065120e1ff8d6e26e6f242a14a987ce",
+      "src/database.py": "56346925bfcb28bbf718c9a6cb7be0ff089559cf2b2cff9f241395daaf58f539",
+      "src/diagnosis_hash.py": "0a97faeef982509cce5601c12d2b921e5d5c5c2141a4416475ab0f5fee8d88d1",
+      "src/ewt.py": "98c8490b49067ce6ee38ec9b79a5e1fd20b0863dd3f8c0699982101476441cbb",
+      "src/excess_trip_time.py": "dd0f8e746a140881187f7fc23c60d6ac9fbb522a9510d03e05b92a996690e3de",
+      "src/frequent_routes.py": "48e4fc8d158fc1e151b4dd5a5028d9e04337ea9e983ece15eaddac2abbc0db2c",
+      "src/gtfs_calendar.py": "0c2b836999863586a10c9ac7f4a9092b58e51fd10dc34e39d2c17ca363f65630",
+      "src/gtfs_versioning.py": "977a5fd56387d0c7e92d5aeb25efed4bafdb2023a44e7e6434f70109d8ba5e5f",
+      "src/models.py": "a540c36f78de04cf621196bbb988e0dfa5705820184e4f9b6d52c7c624d5b5e3",
+      "src/otp_constants.py": "4e13e84cc670015df4fb09cd54930ea5a287e963924660e7f05e4e65e2291424",
+      "src/otp_metrics.py": "62ea77456abc3cd959e1a23651d12cc1957e91dd65f62839c8226a3c72c2d075",
+      "src/route_targets.py": "eb98f9ac64b30c635f23d74de7a8edae4ee0a0c7f937ee6b893c9deb337c48d9",
+      "src/scorecard.py": "92d19a1e8df59dffd6fe645198c4f6d21b655e017c351dfd9a53da1c13821d9d",
+      "src/service_delivered.py": "8710a5a1e2be3c84746fa272a590e143f9b369e7ad2ecb7e04e2c7c25cd286f6",
+      "src/service_profile.py": "c14eee937468259dc0b60516106cb1030bb6e9d22a94c594088f4b39dbfe1fe4",
+      "src/shape_simplify.py": "22bd7d7bdbb447e7daa9c6c415c6e84c04dee4ed4cbfcbacdc18e4bccd84a887",
+      "src/time_periods.py": "20be4ebc7ceef4f734d161411042541894126f1c34dc5f0087d3f2ab27f6cc31",
+      "src/timezones.py": "92c0168fda1794d546c938386a9b78471ddf765a415daefb4d2613cd682ef610"
+    },
+    "source_digest": "570c203586e0f148941136f4377bdb6775ead4da1188304cc4bc71038b3a7b54"
   },
   "subject": "wmata",
   "peers": [
@@ -235,9 +261,10 @@
           "mean_excluding_flagged": 67.87044366589838,
           "routes_under_investigation": [
             "D10",
-            "D50"
+            "D50",
+            "M6X"
           ],
-          "mean_excluding_routes": 67.97799624631698,
+          "mean_excluding_routes": 67.9757035646168,
           "moved": false,
           "issues": []
         },
@@ -252,9 +279,10 @@
           "mean_excluding_flagged": 0.9593193935887442,
           "routes_under_investigation": [
             "D10",
-            "D50"
+            "D50",
+            "M6X"
           ],
-          "mean_excluding_routes": 0.9587428576530744,
+          "mean_excluding_routes": 0.958716257764756,
           "moved": false,
           "issues": []
         },
@@ -272,9 +300,10 @@
           "mean_excluding_flagged": 148.997851821793,
           "routes_under_investigation": [
             "D10",
-            "D50"
+            "D50",
+            "M6X"
           ],
-          "mean_excluding_routes": 145.48225806451612,
+          "mean_excluding_routes": 144.69064516129032,
           "moved": true,
           "issues": []
         },
@@ -287,9 +316,10 @@
           "mean_excluding_flagged": 0.038051963407834705,
           "routes_under_investigation": [
             "D10",
-            "D50"
+            "D50",
+            "M6X"
           ],
-          "mean_excluding_routes": 0.03772903225806452,
+          "mean_excluding_routes": 0.03769032258064516,
           "moved": false,
           "issues": []
         }
@@ -810,7 +840,8 @@
             "2026-10-29",
             "2026-10-30",
             "2026-10-31"
-          ]
+          ],
+          "dates_computed_before_load": []
         }
       ],
       "service_pattern_dates": [
@@ -819,51 +850,83 @@
           "day_type": "weekday",
           "kind": "reduced",
           "holiday_type": true,
+          "detail": null,
           "runs_as": null,
           "active_services": [
             "2"
           ],
           "usual_services": [
-            "10"
+            [
+              "10"
+            ]
           ],
           "scheduled_trips": 10498,
-          "usual_scheduled_trips": 13541,
-          "trip_ratio": 0.7752750904659922
+          "comparison_trips": 13539.0,
+          "trip_ratio": 0.7753896151857597
         },
         {
           "date": "2026-10-13",
           "day_type": "weekday",
           "kind": "substitution",
           "holiday_type": false,
+          "detail": null,
           "runs_as": null,
           "active_services": [
             "1"
           ],
           "usual_services": [
-            "10"
+            [
+              "10"
+            ]
           ],
           "scheduled_trips": 13492,
-          "usual_scheduled_trips": 13541,
-          "trip_ratio": 0.9963813603131231
+          "comparison_trips": 13539.0,
+          "trip_ratio": 0.9965285471600561
         },
         {
           "date": "2026-10-30",
           "day_type": "weekday",
           "kind": "substitution",
           "holiday_type": false,
+          "detail": null,
           "runs_as": null,
           "active_services": [
             "5"
           ],
           "usual_services": [
-            "7"
+            [
+              "7"
+            ]
           ],
           "scheduled_trips": 13488,
-          "usual_scheduled_trips": 13537,
-          "trip_ratio": 0.9963802910541479
+          "comparison_trips": 13541.0,
+          "trip_ratio": 0.9960859611550107
         }
       ],
       "known_issues": [],
+      "dominated_routes": [
+        {
+          "route_id": "D10",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": "#269"
+        },
+        {
+          "route_id": "D50",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": "#269"
+        },
+        {
+          "route_id": "M6X",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        }
+      ],
       "aggregates_computed_at_utc": {
         "min": "2026-11-24T20:33:04",
         "max": "2026-11-25T10:20:52"
@@ -899,7 +962,8 @@
                 "ewt_seconds_unclamped": 353.86,
                 "ewt_n_observed": 158895,
                 "ewt_coverage_ratio": 0.9121,
-                "days_with_data": 31
+                "days_with_data": 31,
+                "issue": "#269"
               },
               {
                 "route_id": "D50",
@@ -917,10 +981,10 @@
                 "ewt_seconds_unclamped": 1868.87,
                 "ewt_n_observed": 83595,
                 "ewt_coverage_ratio": 0.9042,
-                "days_with_data": 31
+                "days_with_data": 31,
+                "issue": "#269"
               }
             ],
-            "dominance_issue": "#269",
             "no_data": [],
             "best": [
               {
@@ -1120,7 +1184,6 @@
               "F83"
             ],
             "dominated": [],
-            "dominance_issue": "#269",
             "best": [
               {
                 "route_id": "F44",
@@ -1441,8 +1504,24 @@
           "median_day": 66.66008457981603,
           "flagged_dates": [],
           "mean_excluding_flagged": null,
-          "routes_under_investigation": [],
-          "mean_excluding_routes": null,
+          "routes_under_investigation": [
+            "19",
+            "28R",
+            "45",
+            "48",
+            "5R",
+            "7",
+            "8",
+            "9R",
+            "F",
+            "K",
+            "KBUS",
+            "L",
+            "M",
+            "NBUS",
+            "T"
+          ],
+          "mean_excluding_routes": 65.30807299767369,
           "moved": false,
           "issues": []
         },
@@ -1454,8 +1533,24 @@
             "2026-10-30"
           ],
           "mean_excluding_flagged": 0.9401043357999986,
-          "routes_under_investigation": [],
-          "mean_excluding_routes": null,
+          "routes_under_investigation": [
+            "19",
+            "28R",
+            "45",
+            "48",
+            "5R",
+            "7",
+            "8",
+            "9R",
+            "F",
+            "K",
+            "KBUS",
+            "L",
+            "M",
+            "NBUS",
+            "T"
+          ],
+          "mean_excluding_routes": 0.9227198753843998,
           "moved": false,
           "issues": [
             "#270"
@@ -1469,8 +1564,24 @@
             "2026-10-21"
           ],
           "mean_excluding_flagged": 156.52284326984753,
-          "routes_under_investigation": [],
-          "mean_excluding_routes": null,
+          "routes_under_investigation": [
+            "19",
+            "28R",
+            "45",
+            "48",
+            "5R",
+            "7",
+            "8",
+            "9R",
+            "F",
+            "K",
+            "KBUS",
+            "L",
+            "M",
+            "NBUS",
+            "T"
+          ],
+          "mean_excluding_routes": 202.3425806451613,
           "moved": true,
           "issues": [
             "#270"
@@ -1483,8 +1594,24 @@
             "2026-10-12"
           ],
           "mean_excluding_flagged": 0.05977381684429054,
-          "routes_under_investigation": [],
-          "mean_excluding_routes": null,
+          "routes_under_investigation": [
+            "19",
+            "28R",
+            "45",
+            "48",
+            "5R",
+            "7",
+            "8",
+            "9R",
+            "F",
+            "K",
+            "KBUS",
+            "L",
+            "M",
+            "NBUS",
+            "T"
+          ],
+          "mean_excluding_routes": 0.06011290322580645,
           "moved": false,
           "issues": []
         }
@@ -2005,7 +2132,8 @@
             "2026-10-29",
             "2026-10-30",
             "2026-10-31"
-          ]
+          ],
+          "dates_computed_before_load": []
         }
       ],
       "service_pattern_dates": [
@@ -2014,15 +2142,18 @@
           "day_type": "weekday",
           "kind": "other_day_type",
           "holiday_type": true,
+          "detail": null,
           "runs_as": "saturday",
           "active_services": [
             "79536"
           ],
           "usual_services": [
-            "78968"
+            [
+              "78968"
+            ]
           ],
           "scheduled_trips": 7861,
-          "usual_scheduled_trips": 9482,
+          "comparison_trips": 9482.0,
           "trip_ratio": 0.8290445053786121
         }
       ],
@@ -2032,6 +2163,114 @@
           "date": "2026-10-21",
           "issue": "#270",
           "note": "stamped complete (coverage 0.564) despite outage-like metrics"
+        }
+      ],
+      "dominated_routes": [
+        {
+          "route_id": "19",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "28R",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "45",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "48",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "5R",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "7",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "8",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "9R",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "F",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "K",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "KBUS",
+          "metrics": [
+            "ewt",
+            "otp"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "L",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "M",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "NBUS",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
+        },
+        {
+          "route_id": "T",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
         }
       ],
       "aggregates_computed_at_utc": {
@@ -2047,7 +2286,7 @@
           "mean": 1.9706295764895998,
           "median_day": 1.1298222336899642,
           "excluding_flagged": 2.0664200619791018,
-          "subject_excluding_routes": 2.1739726423977004
+          "excluding_routes": 2.667630566943103
         },
         "direction_robust": true
       },
@@ -2056,7 +2295,7 @@
           "mean": 0.025105947976715615,
           "median_day": 0.018092476770423138,
           "excluding_flagged": 0.01921505778874555,
-          "subject_excluding_routes": 0.02527295525868367
+          "excluding_routes": 0.035996382380356184
         },
         "direction_robust": true
       },
@@ -2065,7 +2304,7 @@
           "mean": -47.54298835804357,
           "median_day": 1.6129357149736734,
           "excluding_flagged": -7.5249914480545215,
-          "subject_excluding_routes": -75.13555654393977
+          "excluding_routes": -57.65193548387097
         },
         "direction_robust": false
       },
@@ -2074,7 +2313,7 @@
           "mean": -0.02109589434824124,
           "median_day": -0.02142248796184964,
           "excluding_flagged": -0.021721853436455836,
-          "subject_excluding_routes": -0.021476509934606272
+          "excluding_routes": -0.02242258064516129
         },
         "direction_robust": true
       }
