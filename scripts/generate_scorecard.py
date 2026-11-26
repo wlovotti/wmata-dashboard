@@ -26,6 +26,7 @@ Database URLs come from each agency's configured env var
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -63,21 +64,54 @@ def open_read_only_session(db_url: str) -> Session:
     return sessionmaker(bind=engine)()
 
 
-def _git_commit() -> str | None:
-    """Return the current git commit hash, or None outside a git checkout."""
+# Files whose content determines the report, hashed into the provenance stamp.
+SOURCE_FILES = (
+    "src/scorecard.py",
+    "scripts/generate_scorecard.py",
+    "config/scorecard_annotations.yaml",
+    "config/frequent_routes.yaml",
+)
+
+
+def _git(*args: str) -> str | None:
+    """Run a git command in the repo and return stdout, or None if git is unavailable."""
     try:
-        return (
-            subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            or None
-        )
+        return subprocess.run(
+            ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def build_provenance(out_dir: Path) -> dict:
+    """Record what generated the report: commit, uncommitted paths, source hashes.
+
+    ``git_dirty_paths`` lists paths with uncommitted changes, ignoring the
+    output directory (whose files are being regenerated); None when git is
+    unavailable. ``source_sha256`` hashes `SOURCE_FILES` so the generating
+    code stays identifiable even if the commit later becomes unreachable
+    (e.g. a squash merge deletes the branch).
+    """
+    commit = (_git("rev-parse", "HEAD") or "").strip() or None
+    porcelain = _git("status", "--porcelain")
+    dirty = None
+    if porcelain is not None:
+        try:
+            out_rel = out_dir.resolve().relative_to(REPO_ROOT).as_posix().rstrip("/") + "/"
+        except ValueError:
+            out_rel = None
+        dirty = []
+        for line in porcelain.splitlines():
+            path = line[3:].strip()
+            if out_rel and (path + "/").startswith(out_rel):
+                continue
+            dirty.append(path)
+    hashes = {}
+    for rel in SOURCE_FILES:
+        f = REPO_ROOT / rel
+        if f.exists():
+            hashes[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return {"git_commit": commit, "git_dirty_paths": dirty, "source_sha256": hashes}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -132,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
             args.end,
             subject=args.agency,
             generated_at_utc=utcnow_naive(),
-            git_commit=_git_commit(),
+            provenance=build_provenance(args.out),
         )
     finally:
         for session in sessions.values():

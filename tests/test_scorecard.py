@@ -5,7 +5,7 @@ touches a real database.
 """
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import event
@@ -19,6 +19,7 @@ from src.models import (
     Route,
     RouteMetricsDailyOverlay,
     SystemMetricsDaily,
+    Trip,
 )
 
 START = date(2026, 10, 1)  # Thursday
@@ -412,8 +413,17 @@ def _seed(session):
 def test_build_scorecard_end_to_end(db_session):
     """Headline means exclude the partial day; pooled figures and rankings skip it too."""
     _seed(db_session)
+    annotations = {
+        "route_dominance_issue": "#269",
+        "dates": [{"agency": "wmata", "date": "2026-10-02", "issue": "#999", "note": "test"}],
+    }
     card = sc.build_scorecard(
-        {"wmata": db_session, "sfmta": db_session}, START, END, generated_at_utc=GENERATED
+        {"wmata": db_session, "sfmta": db_session},
+        START,
+        END,
+        generated_at_utc=GENERATED,
+        annotations=annotations,
+        provenance={"git_commit": "abc123", "git_dirty_paths": [], "source_sha256": {}},
     )
     json.dumps(card)  # fully JSON-serializable
 
@@ -438,7 +448,17 @@ def test_build_scorecard_end_to_end(db_session):
         "2026-10-03",
         "2026-10-04",
     ]
-    assert [e["date"] for e in w["schedule_exception_dates"]] == ["2026-10-02"]
+    # 10/02's only service is removed -> no service, holiday-type, footnoted in the split.
+    patterns = w["service_pattern_dates"]
+    assert [(p["date"], p["kind"], p["holiday_type"]) for p in patterns] == [
+        ("2026-10-02", "no_service", True)
+    ]
+    weekday = w["day_types"]["weekday"]
+    assert weekday["holiday_type_dates"] == ["2026-10-02"]
+    assert weekday["otp"]["mean"] == pytest.approx(70.0)  # 10/01 + 10/02
+    assert weekday["excluding_holiday_type"]["otp"]["mean"] == pytest.approx(60.0)
+    assert w["known_issues"][0]["issue"] == "#999"
+    assert w["robustness"]["otp"]["median_day"] == pytest.approx(70.0)
 
     ranks = w["routes"]["rankings"]
     # D50 is on the real frequent list; with tiny test volumes it falls below the floor.
@@ -448,10 +468,13 @@ def test_build_scorecard_end_to_end(db_session):
     assert card["caveats"]
 
     md = sc.render_markdown(card)
-    assert "70.0%" in md
+    assert "70.0% (median day 70.0%; 3 days)" in md
     assert "2026-10-03 (partial)" in md
     assert "feed_version FV7" in md
     assert "Comparability caveats" in md
+    assert "holiday-type service dates: 2026-10-02 (no scheduled service)" in md
+    assert "may not be reachable after a squash merge" in md
+    assert "Known issue for 2026-10-02: test (#999)" in md
 
 
 @pytest.mark.smoke
@@ -521,3 +544,275 @@ def test_fmt_metric_units():
     assert sc.fmt_metric("bunching", 0.0384) == "3.8%"
     assert sc.fmt_metric("ewt", 173.0) == "2.88 min (173 s)"
     assert sc.fmt_metric("ewt", None) == "n/a"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: service patterns, dominance guard, clamp, filters, floors
+# ---------------------------------------------------------------------------
+
+_VALID_FROM = datetime(2026, 8, 1)
+_WEEKDAY_FIELDS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def _cal(service_id: str, days: str, snapshot_id: int = 9) -> Calendar:
+    """Calendar row active on the weekdays in ``days`` (letters from "MTWRFSU")."""
+    flags = {f: int(c in days) for f, c in zip(_WEEKDAY_FIELDS, "MTWRFSU", strict=True)}
+    return Calendar(
+        service_id=service_id,
+        start_date="20260801",
+        end_date="20261231",
+        snapshot_id=snapshot_id,
+        valid_from=_VALID_FROM,
+        is_current=True,
+        **flags,
+    )
+
+
+def _cal_date(service_id: str, d: date, exception_type: int, snapshot_id: int = 9) -> CalendarDate:
+    """calendar_dates row for ``d``."""
+    return CalendarDate(
+        service_id=service_id,
+        date=d.strftime("%Y%m%d"),
+        exception_type=exception_type,
+        snapshot_id=snapshot_id,
+        valid_from=_VALID_FROM,
+        is_current=True,
+    )
+
+
+def _trips(session, service_id: str, n: int, snapshot_id: int = 9) -> None:
+    """Add ``n`` trips for ``service_id``."""
+    session.add_all(
+        Trip(
+            trip_id=f"{service_id}-{i}",
+            route_id="R",
+            service_id=service_id,
+            snapshot_id=snapshot_id,
+            valid_from=_VALID_FROM,
+            is_current=True,
+        )
+        for i in range(n)
+    )
+
+
+def _october_snapshots(snapshot_id: int = 9) -> dict:
+    """Map every October 2026 ISO date to ``snapshot_id``."""
+    return {
+        d.isoformat(): snapshot_id for d in sc.period_dates(date(2026, 10, 1), date(2026, 10, 31))
+    }
+
+
+@pytest.mark.smoke
+def test_service_pattern_detects_additions_only_feed(db_session):
+    """SFMTA-style feed: weekdays exist only as type-1 additions; 10/12 adds Saturday service."""
+    db_session.add(GTFSSnapshot(snapshot_id=9, snapshot_date=_VALID_FROM, feed_version="AO"))
+    db_session.flush()
+    db_session.add_all([_cal("SAT", "S"), _cal("SUN", "U")])
+    d = date(2026, 8, 1)
+    while d <= date(2026, 12, 31):
+        if d.weekday() < 5:
+            service = "SAT" if d == date(2026, 10, 12) else "WK"
+            db_session.add(_cal_date(service, d, 1))
+        d += timedelta(days=1)
+    _trips(db_session, "WK", 10)
+    _trips(db_session, "SAT", 7)
+    _trips(db_session, "SUN", 7)
+    db_session.commit()
+
+    out = sc.service_pattern_dates(db_session, _october_snapshots())
+    assert len(out) == 1
+    p = out[0]
+    assert (p["date"], p["kind"], p["runs_as"], p["holiday_type"]) == (
+        "2026-10-12",
+        "other_day_type",
+        "saturday",
+        True,
+    )
+    assert p["usual_services"] == ["WK"] and p["active_services"] == ["SAT"]
+
+
+@pytest.mark.smoke
+def test_service_pattern_separates_reduced_from_substitution(db_session):
+    """WMATA-style feed: a fewer-trips holiday is 'reduced'; a one-for-one swap is 'substitution'."""
+    db_session.add(GTFSSnapshot(snapshot_id=9, snapshot_date=_VALID_FROM, feed_version="W"))
+    db_session.flush()
+    db_session.add_all(
+        [
+            _cal("WD", "MTWRF"),
+            _cal("SAT", "S"),
+            _cal("SUN", "U"),
+            _cal_date("WD", date(2026, 10, 12), 2),
+            _cal_date("HOL", date(2026, 10, 12), 1),
+            _cal_date("WD", date(2026, 10, 13), 2),
+            _cal_date("SWAP", date(2026, 10, 13), 1),
+        ]
+    )
+    _trips(db_session, "WD", 100)
+    _trips(db_session, "HOL", 78)
+    _trips(db_session, "SWAP", 99)
+    _trips(db_session, "SAT", 70)
+    _trips(db_session, "SUN", 60)
+    db_session.commit()
+
+    out = {p["date"]: p for p in sc.service_pattern_dates(db_session, _october_snapshots())}
+    assert set(out) == {"2026-10-12", "2026-10-13"}
+    assert out["2026-10-12"]["kind"] == "reduced" and out["2026-10-12"]["holiday_type"]
+    assert out["2026-10-12"]["trip_ratio"] == pytest.approx(0.78)
+    assert out["2026-10-13"]["kind"] == "substitution"
+    assert out["2026-10-13"]["holiday_type"] is False
+    assert "timetable substitution" in sc._describe_pattern(out["2026-10-13"])
+    assert "reduced service, 78%" in sc._describe_pattern(out["2026-10-12"])
+
+
+@pytest.mark.smoke
+def test_day_type_split_with_excluded_and_holiday_days():
+    """An excluded weekday drops out of n and the mean; a holiday-type date is footnoted."""
+    rows = {
+        "2026-10-01": {"data_quality": "complete", "otp": 60.0},
+        "2026-10-02": {"data_quality": "partial", "otp": 10.0},
+        "2026-10-05": {"data_quality": "complete", "otp": 70.0},
+        "2026-10-06": {"data_quality": "complete", "otp": 80.0},
+    }
+    dates = [date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5), date(2026, 10, 6)]
+    split = sc.day_type_split(dates, rows, frozenset({"2026-10-05"}))
+    wk = split["weekday"]
+    assert wk["otp"] == {"mean": pytest.approx(70.0), "n_days_included": 3, "n_days": 4}
+    assert wk["holiday_type_dates"] == ["2026-10-05"]
+    assert wk["excluding_holiday_type"]["otp"] == {"mean": 70.0, "n_days_included": 2}
+    assert split["saturday"]["excluding_holiday_type"] is None
+
+
+@pytest.mark.smoke
+def test_dominance_guard_withholds_route_from_ranking():
+    """A route whose pooled EWT is ~11x its median day is listed, not ranked worst."""
+    big_h = sc.ROUTE_EWT_MIN_OBSERVED_HEADWAYS
+    big_otp = sc.ROUTE_OTP_MIN_OBSERVATIONS
+    big_trips = sc.ROUTE_OTP_MIN_DELIVERED_TRIPS
+    metrics = {
+        "D50": _fields(ewt=1869.0, ewt_n=big_h, cov=0.9),
+        "A40": _fields(ewt=75.0, ewt_n=big_h, cov=0.9),
+        "C53": _fields(ewt=272.0, ewt_n=big_h, cov=0.9),
+        "N1": _fields(otp=70.0, otp_n=big_otp, deliv=big_trips),
+        "N2": _fields(otp=40.0, otp_n=big_otp, deliv=big_trips),
+    }
+    metrics["D50"]["ewt_median_day"] = 170.0
+    metrics["C53"]["ewt_median_day"] = 170.0  # 1.6x: still ranked
+    metrics["N2"]["otp_median_day"] = 65.0  # 25 pp off: withheld
+    r = sc.rank_routes(metrics, frozenset({"D50", "A40", "C53"}), {}, dominance_issue="#269")
+    freq = r["frequent"]
+    ranked = [e["route_id"] for e in freq["best"] + freq["worst"]]
+    assert "D50" not in ranked and "C53" in ranked
+    assert [e["route_id"] for e in freq["dominated"]] == ["D50"]
+    assert freq["dominance_issue"] == "#269"
+    assert [e["route_id"] for e in r["non_frequent"]["dominated"]] == ["N2"]
+
+    assert sc.is_dominated("ewt", 200.0, 50.0) is True  # +150 s > max(50, 60)
+    assert sc.is_dominated("ewt", 100.0, 50.0) is False  # +50 s < 60 s floor
+    assert sc.is_dominated("otp", 70.0, 61.0) is False
+    assert sc.is_dominated("ewt", None, 50.0) is False
+
+
+@pytest.mark.smoke
+def test_route_ewt_is_clamped_at_zero():
+    """Observed waits shorter than scheduled give a negative raw EWT; the ranked value is 0."""
+    bundles = {
+        "2026-10-01": {"R": _bundle(0, 0, 0, obs=(1200.0, 360000.0, 4), sch=(1200.0, 720000.0, 2))}
+    }
+    pooled = sc.pool_route_metrics(bundles)["R"]
+    assert pooled["ewt_seconds_unclamped"] < 0
+    assert pooled["ewt_seconds"] == 0.0
+    assert pooled["ewt_median_day"] == 0.0
+
+
+@pytest.mark.smoke
+def test_floors_apply_independently():
+    """Delivered trips alone, and observed headways alone, each keep a route out of the ranking."""
+    metrics = {
+        "TRIPS_THIN": _fields(otp=99.0, otp_n=10**6, deliv=sc.ROUTE_OTP_MIN_DELIVERED_TRIPS - 1),
+        "OK": _fields(otp=50.0, otp_n=10**6, deliv=10**6),
+        "HW_THIN": _fields(ewt=1.0, ewt_n=sc.ROUTE_EWT_MIN_OBSERVED_HEADWAYS - 1, cov=1.0),
+        "FOK": _fields(ewt=90.0, ewt_n=10**6, cov=1.0),
+    }
+    r = sc.rank_routes(metrics, frozenset({"HW_THIN", "FOK"}), {})
+    assert r["non_frequent"]["below_floor"] == ["TRIPS_THIN"]
+    assert r["frequent"]["below_floor"] == ["HW_THIN"]
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("system_quality", "overlay_quality", "pooled"),
+    [
+        ("complete", "complete", True),
+        ("partial", "complete", False),  # system-row eligibility filter alone
+        ("complete", "partial", False),  # overlay data_quality filter alone
+    ],
+)
+def test_route_pooling_filters_are_independent(db_session, system_quality, overlay_quality, pooled):
+    """Either a non-complete system row or a non-complete overlay row keeps a date out."""
+    db_session.add(_sys_row("2026-10-01", otp=60.0, sd=1.0, quality=system_quality))
+    db_session.add(
+        _overlay(
+            "R1", "2026-10-01", on_time=60, late=40, sched=10, deliv=10, quality=overlay_quality
+        )
+    )
+    db_session.commit()
+    dates = [date(2026, 10, 1)]
+    rows = sc.read_system_rows(db_session, dates[0], dates[0])
+    bundles = sc.read_overlay_bundles(db_session, sc.eligible_dates(dates, rows))
+    assert ("R1" in sc.pool_route_metrics(bundles)) is pooled
+
+
+def _rob(mean, median, wo_flagged=None, wo_routes=None):
+    """Minimal robustness block for comparison tests."""
+    return {
+        "mean": mean,
+        "median_day": median,
+        "mean_excluding_flagged": wo_flagged,
+        "mean_excluding_routes": wo_routes,
+    }
+
+
+@pytest.mark.smoke
+def test_compare_direction_flags_non_robust_difference():
+    """Mean says the peer is worse, median day says the subject is: not a finding."""
+    sections = {
+        "wmata": {"robustness": {m: _rob(173, 153, 149, 145) for m in sc.HEADLINE_METRICS}},
+        "sfmta": {"robustness": {m: _rob(221, 151, 157) for m in sc.HEADLINE_METRICS}},
+    }
+    sections["wmata"]["robustness"]["otp"] = _rob(67.8, 67.8, 67.9)
+    sections["sfmta"]["robustness"]["otp"] = _rob(65.8, 66.7, 66.6)
+    comp = sc.compare_direction(sections, "wmata")["sfmta"]
+    assert comp["ewt"]["direction_robust"] is False
+    assert comp["otp"]["direction_robust"] is True
+
+
+@pytest.mark.smoke
+def test_headline_robustness_marks_moved_figure_and_issue():
+    """Dropping one extreme flagged day moves the mean >5%; the day's issue is carried."""
+    dates = sc.period_dates(date(2026, 10, 1), date(2026, 10, 10))
+    rows = {
+        d.isoformat(): {
+            "data_quality": "complete",
+            **dict.fromkeys(sc.SYSTEM_METRICS, 150.0 + d.day),
+        }
+        for d in dates
+    }
+    rows["2026-10-07"]["ewt"] = 1900.0
+    metrics = {m: sc.summarize_daily_metric(dates, rows, m) for m in sc.SYSTEM_METRICS}
+    rob = sc.headline_robustness(dates, rows, metrics, {"2026-10-07": "#270"}, None, [])
+    assert rob["ewt"]["moved"] is True
+    assert rob["ewt"]["issues"] == ["#270"]
+    assert rob["otp"]["moved"] is False
+
+
+@pytest.mark.smoke
+def test_provenance_records_hashes_and_dirty_state(tmp_path):
+    """The CLI stamp carries source hashes and a dirty-path list; rendering is honest."""
+    prov = cli.build_provenance(tmp_path)
+    assert set(prov) == {"git_commit", "git_dirty_paths", "source_sha256"}
+    assert len(prov["source_sha256"]["src/scorecard.py"]) == 64
+    line = sc._render_provenance(
+        {"git_commit": "f" * 40, "git_dirty_paths": ["src/scorecard.py"], "source_sha256": {}}
+    )[0]
+    assert "uncommitted changes in `src/scorecard.py`" in line
+    assert "may not be reachable after a squash merge" in line

@@ -1,0 +1,15 @@
+# Known data issues referenced by generated scorecards (src/scorecard.py,
+# issue #267). Annotations only add issue references to a report; they never
+# change, drop or reweight a figure. Remove an entry once its issue is fixed
+# and the affected dates are re-derived.
+
+# Issue referenced when a route is withheld from a ranking because its pooled
+# figure is dominated by a few days (see src/scorecard.py:is_dominated).
+route_dominance_issue: "#269"
+
+# Specific agency-dates with a known data problem.
+dates:
+  - agency: sfmta
+    date: "2026-10-21"
+    issue: "#270"
+    note: "stamped complete (coverage 0.564) despite outage-like metrics"
