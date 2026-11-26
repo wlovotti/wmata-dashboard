@@ -1241,6 +1241,33 @@ effect of a neighbour's derive (like held/failed dates), and listed as
 wmata --date 2026-10-07` still processes it explicitly (re-folding), and
 success marks it `done`.
 
+**The newest derived SFMTA date is provisional (issue #279).** Muni's
+owl trips run past local midnight, and the GTFS-RT `start_date` flips to
+the next calendar day mid-trip, so the post-midnight part of service day
+D sits in D+1's state and VP. D+1's derive re-anchors those rows onto D
+and re-aggregates D. Until D+1 is derived, D is missing that tail: about
+14.5k `trip_update` stop_events and about 0.04 of service delivered on a
+weekday (SFMTA 2026-10-19 without its tail: 311,842 rows, 0.914; with it,
+about 326k and 0.95). Consequences:
+
+- Don't end a scorecard or report period on the latest derived SFMTA
+  date. End it at least one date earlier, or derive the next date first.
+- A single-date `--force` re-derive of D run *after* D+1 rewrites D-1's
+  tail (re-anchored from D's own raw data) and leaves D's tail, which
+  D+1's derive wrote, alone. Before the #279 fix the stale-key delete
+  removed D's tail in that case. If D's tail is missing anyway (D+1 was
+  never derived, or a range re-derive ended at D), re-derive D+1 too,
+  e.g. `--start D --end D+1 --force` or a follow-up `--date D+1
+  --force`. A range re-derive heals every date in it except the last.
+- WMATA is not affected. WMATA's feeds report the service day as
+  `start_date` past midnight, so the resolver never re-anchors a WMATA
+  row onto the previous day. A read-only check on 2026-11-26 found 0 of
+  roughly 2.9M `trip_update_state` rows (11/18–11/23) and 0
+  post-midnight owl-trip positions with a flipped `start_date`
+  (11/19–11/23) that would re-anchor. WMATA's post-midnight service
+  comes from D's own state and VP, so the latest WMATA date is whole
+  once its raw window has closed.
+
 **Single instance.** A non-dry run holds the main checkout's
 `logs/.pull-and-derive.lock.d` (§12.0). A second run exits 75 naming the
 holder. Arguments are validated first (`refresh_by_day --check-args`): a

@@ -91,6 +91,18 @@ that processed dates with no failure runs ``pipelines.apply_retention
 retention tiers and guards are in ``src/retention.py``. Off by default
 because DB deletes need the owner's explicit permission.
 
+Provisional newest date (issue #279): for SFMTA the post-midnight tail
+of service day D (owl trips whose feed ``start_date`` has already
+flipped) is read from D+1's raw files, so D+1's derive writes it onto D
+and re-aggregates D. Until D+1 is derived, D lacks about 14.5k
+``trip_update`` stop_events and about 0.04 of service delivered on a
+weekday, so a scorecard period should not end on the latest derived
+date. A ``--force`` re-derive of one date D only rewrites D-1's tail and
+D's own rows. It leaves D's tail (written by D+1's derive) in place. If
+that tail is missing (a range re-derive ended at D), re-derive D+1 too.
+WMATA does not re-anchor (its ``start_date`` stays on the service day),
+so it is unaffected. Details: ``docs/DEPLOYMENT.md`` §12.3.
+
 Pruned dates are never "holes": the zero-runs rule only looks back
 ``--lookback-days`` (14), retention windows are at least 15 days (35/100
 configured) counted from the latest derived date, and the hole scan

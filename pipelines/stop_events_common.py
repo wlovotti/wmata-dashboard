@@ -13,7 +13,10 @@ from datetime import date as date_type
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from src.models import StopTime
+from sqlalchemy import delete, tuple_
+from sqlalchemy.orm import Session
+
+from src.models import StopEvent, StopTime
 
 UTC = ZoneInfo("UTC")
 
@@ -47,6 +50,81 @@ def _iter_chunks[T](items: Iterable[T], size: int) -> Iterator[list[T]]:
             chunk = []
     if chunk:
         yield chunk
+
+
+# Issue #279: a stop_events row is treated as the misattributed copy of a
+# re-anchored observation only if its own stored deviation is more than 12.5
+# hours early. `resolve_scheduled_instants` keeps the same-day anchor iff the
+# same-day scheduled instant is at most half the anchor gap after the
+# observation; the gap is 86,400 s on ordinary nights and 82,800 / 90,000 s
+# across a DST change, so a row the resolver keeps at D always has
+# deviation_sec >= -45,000. Real misattributed rows sit near -86,400 (route
+# 14 cluster: -89,077 to -80,032). See `delete_misattributed_stop_events`.
+MISATTRIBUTED_MAX_DEVIATION_SEC = -45_000
+
+
+def delete_misattributed_stop_events(
+    db: Session,
+    service_date_str: str,
+    source: str,
+    keys: list[tuple[str, int]],
+    chunk_size: int = _TUPLE_IN_CHUNK_SIZE,
+) -> int:
+    """Delete the misattributed copies of observations re-anchored off ``service_date_str``.
+
+    Called by both derive pipelines before their upsert, when an observation
+    read under outer-loop service date D resolves to D-1 (NOTES-105 /
+    NOTES-110). A row written for that observation under D by older code
+    (pre-NOTES-110, or a run whose resolution differed) cannot be reached by
+    the upsert, because service_date is part of
+    ``uq_stop_events_run_stop_source``, so it has to be deleted explicitly.
+
+    The rule (issue #279): delete a row at ``(service_date_str, source,
+    trip_id, stop_sequence)`` for a key in ``keys`` only when its stored
+    ``deviation_sec`` is strictly below ``MISATTRIBUTED_MAX_DEVIATION_SEC``
+    (-45,000 s: the observation is more than 12.5 h earlier than the
+    schedule anchored on D). That is the signature of a schedule resolved
+    against the wrong (one-day-late) anchor, and it can never match a row
+    the current resolver wrote at D: ``resolve_scheduled_instants`` keeps
+    the D anchor only when the same-day instant is within half the anchor
+    gap of the observation (the ``|x - 86400| < |x| <=> x > 43200``
+    identity in its docstring; up to 45,000 s on a 25-hour DST night), so
+    every row it keeps at D has ``deviation_sec >= -45,000``. The
+    misattributed rows this exists for sit near -86,400.
+
+    Why the old ``(trip_id, stop_sequence)``-only key was wrong: trip_ids
+    repeat every service day, so for SFMTA owl routes the keys re-anchored
+    from D to D-1 are the same keys as D's *own* post-midnight tail, which
+    D+1's derive re-anchors onto D. Those tail rows have a small deviation
+    (their schedule is anchored on D and observed near it), so the deviation
+    predicate leaves them alone; the old delete removed them whenever D was
+    re-derived after D+1.
+
+    Rows with ``deviation_sec`` NULL (SKIPPED rows, rows with no scheduled
+    arrival) are never deleted: stop_events stores nothing that separates a
+    stale NULL-deviation copy from D's genuine tail row of the same trip, and
+    deleting a genuine row is the worse failure. Production had zero
+    deviation < -12 h rows on either agency when this rule was introduced
+    (2026-11-26), so the leftover risk is limited to a future resolver
+    change.
+
+    Chunked at ``chunk_size`` pairs per statement (see
+    ``_TUPLE_IN_CHUNK_SIZE``). Does not commit; the caller's upsert commits
+    the delete together with the new rows. Returns the number of rows
+    deleted (summed rowcounts).
+    """
+    deleted = 0
+    for chunk in _iter_chunks(keys, chunk_size):
+        result = db.execute(
+            delete(StopEvent).where(
+                StopEvent.service_date == service_date_str,
+                StopEvent.source == source,
+                StopEvent.deviation_sec < MISATTRIBUTED_MAX_DEVIATION_SEC,
+                tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(chunk),
+            )
+        )
+        deleted += result.rowcount or 0
+    return deleted
 
 
 def parse_gtfs_time_to_dt(

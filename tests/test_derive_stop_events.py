@@ -365,3 +365,75 @@ def test_derive_tz_name_widens_window_for_late_pacific_positions(pg_session):
     )
     pg_session.commit()
     assert result_pacific["rows_written"] == 1
+
+
+@pytest.mark.integration
+def test_out_of_order_rederive_keeps_own_post_midnight_tail(pg_session):
+    """Issue #279, proximity source: re-deriving D after D+1 must not delete
+    D's own post-midnight tail row (written by D+1's derive, which
+    re-anchors the flipped-start_date positions onto D). The old stale-key
+    DELETE matched (trip_id, stop_sequence) only, and SFMTA trip_ids repeat
+    daily, so the key re-anchored from D to D-1 was the same key as D's
+    tail. D's derive reads only trip_start_date == D positions, so it can't
+    rewrite the tail; it was lost.
+    """
+    from pipelines.derive_stop_events import derive_proximity_stop_events
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T_OWL", route_id="R14", direction_id=0, is_current=True),
+            Stop(
+                stop_id="S1",
+                stop_name="Test Stop",
+                stop_lat=STOP_LAT,
+                stop_lon=STOP_LON,
+                is_current=True,
+            ),
+            StopTime(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                stop_id="S1",
+                arrival_time="31:09:40",  # UTC-equivalent of 24:09:40 Pacific
+                departure_time="31:09:40",
+                is_current=True,
+            ),
+            # Tail of 7/21's run, start_date already flipped to 7/22.
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_OWL",
+                route_id="R14",
+                trip_start_date="20260722",
+                latitude=STOP_LAT,
+                longitude=STOP_LON,
+                timestamp=datetime(2026, 7, 22, 7, 8, 0),
+            ),
+            # Tail of 7/22's run, start_date already flipped to 7/23.
+            VehiclePosition(
+                vehicle_id="V2",
+                trip_id="T_OWL",
+                route_id="R14",
+                trip_start_date="20260723",
+                latitude=STOP_LAT,
+                longitude=STOP_LON,
+                timestamp=datetime(2026, 7, 23, 7, 10, 0),
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    for day in (date(2026, 7, 22), date(2026, 7, 23), date(2026, 7, 22)):
+        derive_proximity_stop_events(pg_session, route_id="R14", service_date=day, tz_name="UTC")
+        pg_session.commit()
+
+    events = (
+        pg_session.execute(
+            select(StopEvent)
+            .where(StopEvent.trip_id == "T_OWL", StopEvent.source == "proximity")
+            .order_by(StopEvent.service_date)
+        )
+        .scalars()
+        .all()
+    )
+    assert [e.service_date for e in events] == ["2026-07-21", "2026-07-22"]
+    assert events[1].observed_arrival_ts == datetime(2026, 7, 23, 7, 10, 0)
+    assert abs(events[1].deviation_sec) < 300
