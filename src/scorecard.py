@@ -1946,7 +1946,8 @@ def _render_summary(scorecard: dict, subject: dict, peers: list[dict]) -> list[s
                     dominated = s.get("dominated_routes") or []
                     if "routes" in s:  # deep agency: route detail may be printed
                         which = ", ".join(
-                            e["route_id"] + (f" ({e['issue']})" if e.get("issue") else "")
+                            e["route_id"]
+                            + (f" ({e['issue']})" if e.get("issue") else " (not yet tracked)")
                             for e in dominated
                         )
                     else:
