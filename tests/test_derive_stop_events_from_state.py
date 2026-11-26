@@ -509,7 +509,7 @@ def test_derive_skipped_branch_corrects_service_date_via_final_snapshot_ts(pg_se
 
 
 @pytest.mark.integration
-def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
+def test_derive_supersedes_misattributed_row_on_reresolve(pg_session, capsys):
     """PR #193 review: a stop_events row previously written under the
     misattributed service_date (pre-NOTES-110 code, or a prior run before
     this fix) must be deleted when re-deriving lands the corrected row on
@@ -599,6 +599,8 @@ def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
     assert len(events) == 1
     assert events[0].service_date == "2026-07-22"
     assert abs(events[0].deviation_sec) < 300
+    # Issue #279 review: a non-zero misattributed delete is logged loudly.
+    assert "deleted 1 misattributed trip_update stop_events" in capsys.readouterr().out
 
 
 @pytest.mark.integration
@@ -806,3 +808,185 @@ def test_derive_tz_name_widens_window_for_late_pacific_positions(pg_session):
     )
     pg_session.commit()
     assert result_pacific["rows_written"] == 1
+
+
+def _owl_tail_state(trip_id, stop_sequence, service_date, observed, *, skipped=False):
+    """Build a TripUpdateState row for an owl-route stop whose feed
+    start_date already flipped to ``service_date`` (the calendar day of
+    ``observed``), so the resolver re-anchors it to ``service_date - 1``.
+    ``skipped=True`` builds the SKIPPED variant (no prediction; the
+    resolver uses final_snapshot_ts as a proxy)."""
+    return TripUpdateState(
+        trip_id=trip_id,
+        stop_sequence=stop_sequence,
+        service_date=service_date,
+        stop_id=f"S{stop_sequence}",
+        vehicle_id="V1",
+        final_snapshot_ts=observed,
+        final_schedule_relationship="SKIPPED" if skipped else "SCHEDULED",
+        last_pred_snapshot_ts=None if skipped else observed,
+        last_predicted_arrival_ts=None if skipped else observed,
+    )
+
+
+@pytest.mark.integration
+def test_out_of_order_rederive_keeps_own_post_midnight_tail(pg_session):
+    """Issue #279: SFMTA trip_ids repeat every day, so re-deriving D after
+    D+1 used to delete D's own post-midnight tail -- rows D+1's derive
+    re-anchored onto D -- because the stale-key DELETE matched on
+    (trip_id, stop_sequence) alone. D's derive cannot rewrite those rows
+    (they come from state dated D+1), so they were simply lost.
+
+    Seeds two consecutive days of one owl trip (a SCHEDULED stop and a
+    SKIPPED stop), derives D, then D+1, then D again (the out-of-order
+    ``refresh_by_day --force`` case), and asserts every service date keeps
+    its row: D-1 (re-anchored from D's state) and D (re-anchored from
+    D+1's state), for both the SCHEDULED and the NULL-deviation SKIPPED
+    stop.
+    """
+    from pipelines.derive_stop_events_from_state import derive_for_route_date
+
+    pg_session.add_all(
+        [
+            Trip(trip_id="T_OWL", route_id="R14", direction_id=0, is_current=True),
+            # UTC-equivalents of 24:09:40 / 24:20:00 Pacific (tz_name="UTC").
+            StopTime(
+                trip_id="T_OWL",
+                stop_sequence=2,
+                stop_id="S2",
+                arrival_time="31:09:40",
+                departure_time="31:09:40",
+                is_current=True,
+            ),
+            StopTime(
+                trip_id="T_OWL",
+                stop_sequence=3,
+                stop_id="S3",
+                arrival_time="31:20:00",
+                departure_time="31:20:00",
+                is_current=True,
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_OWL",
+                route_id="R14",
+                trip_start_date="20260722",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 7, 22, 7, 7, 22),
+            ),
+            VehiclePosition(
+                vehicle_id="V1",
+                trip_id="T_OWL",
+                route_id="R14",
+                trip_start_date="20260723",
+                latitude=0,
+                longitude=0,
+                timestamp=datetime(2026, 7, 23, 7, 7, 22),
+            ),
+            # State filed under 7/22 is the tail of 7/21's run; state filed
+            # under 7/23 is the tail of 7/22's run.
+            _owl_tail_state("T_OWL", 2, date(2026, 7, 22), datetime(2026, 7, 22, 7, 11, 0)),
+            _owl_tail_state(
+                "T_OWL", 3, date(2026, 7, 22), datetime(2026, 7, 22, 7, 15, 0), skipped=True
+            ),
+            _owl_tail_state("T_OWL", 2, date(2026, 7, 23), datetime(2026, 7, 23, 7, 12, 0)),
+            _owl_tail_state(
+                "T_OWL", 3, date(2026, 7, 23), datetime(2026, 7, 23, 7, 16, 0), skipped=True
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    for day in (date(2026, 7, 22), date(2026, 7, 23), date(2026, 7, 22)):
+        derive_for_route_date(
+            pg_session,
+            route_id="R14",
+            service_date=day,
+            target_table_name="stop_events",
+            tz_name="UTC",
+        )
+        pg_session.commit()
+
+    events = (
+        pg_session.execute(
+            select(StopEvent)
+            .where(StopEvent.trip_id == "T_OWL", StopEvent.source == "trip_update")
+            .order_by(StopEvent.service_date, StopEvent.stop_sequence)
+        )
+        .scalars()
+        .all()
+    )
+    assert [(e.service_date, e.stop_sequence) for e in events] == [
+        ("2026-07-21", 2),
+        ("2026-07-21", 3),
+        ("2026-07-22", 2),
+        ("2026-07-22", 3),
+    ]
+    tail = {e.stop_sequence: e for e in events if e.service_date == "2026-07-22"}
+    assert tail[2].observed_arrival_ts == datetime(2026, 7, 23, 7, 12, 0)
+    assert abs(tail[2].deviation_sec) < 300
+    assert tail[3].schedule_relationship == "SKIPPED"
+    assert tail[3].deviation_sec is None
+
+
+def _stop_event(trip_id, stop_sequence, service_date, deviation_sec, *, source="trip_update"):
+    """Build a minimal StopEvent row for the misattributed-delete helper tests."""
+    return StopEvent(
+        service_date=service_date,
+        trip_id=trip_id,
+        route_id="R14",
+        direction_id=0,
+        stop_id=f"S{stop_sequence}",
+        stop_sequence=stop_sequence,
+        deviation_sec=deviation_sec,
+        source=source,
+        schedule_relationship="SCHEDULED" if deviation_sec is not None else "SKIPPED",
+    )
+
+
+@pytest.mark.integration
+def test_delete_misattributed_stop_events_only_removes_day_late_rows(pg_session):
+    """Issue #279: the shared helper deletes a keyed row at the given
+    service_date and source only when its deviation is below -45,000 s
+    (schedule resolved a day late). Small-deviation rows (another service
+    day's genuine run of the same trip_id), NULL-deviation rows, rows in
+    the -45,000..-43,200 DST margin, other sources, other dates and
+    un-keyed rows all survive."""
+    from pipelines.stop_events_common import delete_misattributed_stop_events
+
+    pg_session.add_all(
+        [
+            _stop_event("T_STALE", 1, "2026-07-22", -86_538),  # the only deletion
+            _stop_event("T_TAIL", 1, "2026-07-22", -138),
+            _stop_event("T_SKIP", 1, "2026-07-22", None),
+            _stop_event("T_DST", 1, "2026-07-22", -44_000),
+            _stop_event("T_STALE", 1, "2026-07-22", -86_538, source="proximity"),
+            _stop_event("T_STALE", 1, "2026-07-23", -86_538),
+            _stop_event("T_UNKEYED", 1, "2026-07-22", -86_538),
+        ]
+    )
+    pg_session.commit()
+
+    deleted = delete_misattributed_stop_events(
+        pg_session,
+        "2026-07-22",
+        "trip_update",
+        [("T_STALE", 1), ("T_TAIL", 1), ("T_SKIP", 1), ("T_DST", 1)],
+        chunk_size=2,
+    )
+    pg_session.commit()
+
+    assert deleted == 1
+    remaining = {
+        (e.trip_id, e.service_date, e.source)
+        for e in pg_session.execute(select(StopEvent)).scalars().all()
+    }
+    assert remaining == {
+        ("T_TAIL", "2026-07-22", "trip_update"),
+        ("T_SKIP", "2026-07-22", "trip_update"),
+        ("T_DST", "2026-07-22", "trip_update"),
+        ("T_STALE", "2026-07-22", "proximity"),
+        ("T_STALE", "2026-07-23", "trip_update"),
+        ("T_UNKEYED", "2026-07-22", "trip_update"),
+    }

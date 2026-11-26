@@ -29,10 +29,15 @@ from datetime import date as date_type
 from datetime import datetime
 
 from dotenv import load_dotenv
-from sqlalchemy import delete, tuple_, update
+from sqlalchemy import tuple_, update
 from sqlalchemy.orm import Session
 
-from pipelines.stop_events_common import _iter_chunks, resolve_scheduled_instants
+from pipelines.stop_events_common import (
+    MISATTRIBUTED_MAX_DEVIATION_SEC,
+    _iter_chunks,
+    delete_misattributed_stop_events,
+    resolve_scheduled_instants,
+)
 from src.agency_config import load_agency_config, resolve_agency_db_url
 from src.batch_iterator import run_route_date_grid
 from src.database import get_session
@@ -279,21 +284,27 @@ def derive_for_route_date(
         constraint_name = "uq_stop_events_run_stop_source"
 
         if stale_keys:
-            # PR #193 review: delete the superseded
-            # (service_date, trip_id, stop_sequence, source) rows before the
-            # upsert below, in the same transaction (upsert_rows commits
-            # both). Scoped to exactly the identities being rewritten this
-            # run — never a broad date-range delete. Chunked at
-            # _STATE_UPDATE_CHUNK_SIZE (finding 3) for the same reason the
-            # derived_at UPDATE below is: an unchunked tuple-IN list blows
-            # Postgres's max_stack_depth on large routes.
-            for chunk in _iter_chunks(stale_keys, _STATE_UPDATE_CHUNK_SIZE):
-                db.execute(
-                    delete(StopEvent).where(
-                        StopEvent.service_date == service_date_str,
-                        StopEvent.source == "trip_update",
-                        tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(chunk),
-                    )
+            # PR #193 review: delete the superseded misattributed rows
+            # before the upsert below, in the same transaction (upsert_rows
+            # commits both). Issue #279: only rows whose stored deviation
+            # shows the one-day-late schedule resolution -- never D's own
+            # post-midnight tail rows of the same trip_ids, which D+1's
+            # derive wrote. Rule and proof in the helper's docstring.
+            deleted_misattributed = delete_misattributed_stop_events(
+                db,
+                service_date_str,
+                "trip_update",
+                stale_keys,
+                chunk_size=_STATE_UPDATE_CHUNK_SIZE,
+            )
+            if deleted_misattributed:
+                # Expected 0 on current data; a non-zero count means day-late
+                # rows reappeared (e.g. a resolver regression) -- make it loud.
+                print(
+                    f"  WARNING {route_id} {service_date_str}: deleted "
+                    f"{deleted_misattributed} misattributed trip_update stop_events "
+                    f"(deviation < {MISATTRIBUTED_MAX_DEVIATION_SEC}s) on service_date "
+                    f"{service_date_str}"
                 )
 
         upsert_rows(

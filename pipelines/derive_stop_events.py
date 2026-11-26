@@ -38,12 +38,12 @@ from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
-from sqlalchemy import delete, tuple_
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import (
-    _iter_chunks,
+    MISATTRIBUTED_MAX_DEVIATION_SEC,
     build_stop_time_index,
+    delete_misattributed_stop_events,
     parse_trip_start_date,
     resolve_stop_time,
 )
@@ -58,7 +58,7 @@ from src.upsert_helpers import upsert_rows
 PROXIMITY_THRESHOLD_M = 50.0
 EARTH_RADIUS_M = 6_371_000
 
-# PR #193 review round 2 (finding 3): chunk size for the stale-row DELETE's
+# PR #193 review round 2 (finding 3): chunk size for the misattributed-row DELETE's
 # tuple_(trip_id, stop_sequence).in_(<pairs>) filter -- see
 # `pipelines.stop_events_common._TUPLE_IN_CHUNK_SIZE` for the full sizing
 # rationale (Postgres max_stack_depth on large tuple-IN lists).
@@ -298,20 +298,27 @@ def derive_proximity_stop_events(
     service_dates_written: list[str] = []
     if rows:
         if stale_keys:
-            # PR #193 review: delete the superseded
-            # (service_date, trip_id, stop_sequence, source) rows before the
-            # upsert below, in the same transaction (upsert_rows commits
-            # both). Scoped to exactly the identities being rewritten this
-            # run — never a broad date-range delete. Chunked at
-            # _DELETE_CHUNK_SIZE (finding 3): an unchunked tuple-IN list
-            # blows Postgres's max_stack_depth on large routes.
-            for chunk in _iter_chunks(stale_keys, _DELETE_CHUNK_SIZE):
-                db.execute(
-                    delete(StopEvent).where(
-                        StopEvent.service_date == service_date_str,
-                        StopEvent.source == "proximity",
-                        tuple_(StopEvent.trip_id, StopEvent.stop_sequence).in_(chunk),
-                    )
+            # PR #193 review: delete the superseded misattributed rows
+            # before the upsert below, in the same transaction (upsert_rows
+            # commits both). Issue #279: only rows whose stored deviation
+            # shows the one-day-late schedule resolution -- never D's own
+            # post-midnight tail rows of the same trip_ids, which D+1's
+            # derive wrote. Rule and proof in the helper's docstring.
+            deleted_misattributed = delete_misattributed_stop_events(
+                db,
+                service_date_str,
+                "proximity",
+                stale_keys,
+                chunk_size=_DELETE_CHUNK_SIZE,
+            )
+            if deleted_misattributed:
+                # Expected 0 on current data; a non-zero count means day-late
+                # rows reappeared (e.g. a resolver regression) -- make it loud.
+                print(
+                    f"  WARNING {route_id} {service_date_str}: deleted "
+                    f"{deleted_misattributed} misattributed proximity stop_events "
+                    f"(deviation < {MISATTRIBUTED_MAX_DEVIATION_SEC}s) on service_date "
+                    f"{service_date_str}"
                 )
 
         # Postgres upsert keyed on the stop_events natural key.
