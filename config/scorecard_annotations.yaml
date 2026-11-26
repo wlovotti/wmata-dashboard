@@ -1,26 +1,50 @@
 # Hand-entered known data issues referenced by generated scorecards
 # (src/scorecard.py, issue #267). Annotations only add issue references to a
 # report (which labels them as hand-entered); they never change, drop or
-# reweight a figure, and they are not checked against the data. Remove an
-# entry once its issue is fixed and the affected dates are re-derived. The
-# agency must match a config/agencies/<name>.yaml or loading fails.
+# reweight a figure, and they are not checked against the data. Remove a
+# known-issue entry once its issue is fixed and the affected dates are
+# re-derived. The agency must match a config/agencies/<name>.yaml or loading
+# fails.
+#
+# Exception: entries recording a hand correction to a stored completeness
+# stamp (data_quality) stay as the durable record after their issue closes;
+# the scorecard's method text points here for them. A report shows only the
+# date entries inside its period, so entries for other months stay here
+# without cluttering it.
 
 # Routes with a known cause behind a dominated pooled figure (see
 # src/scorecard.py:is_dominated). A dominated route not listed here is
 # reported as "not yet tracked".
-routes:
-  - agency: wmata
-    route_id: D50
-    issue: "#269"
-    note: "a few very long observed headways dominate the route's pooled EWT"
-  - agency: wmata
-    route_id: D10
-    issue: "#269"
-    note: "a few very long observed headways dominate the route's pooled EWT"
+routes: []
 
-# Specific agency-dates with a known data problem.
+# Specific agency-dates with a known data problem or a hand-corrected stamp.
 dates:
+  - agency: sfmta
+    date: "2026-08-08"
+    issue: "#270"
+    note: >-
+      stamp hand-corrected complete -> partial on 2026-11-26: the
+      vehicle-position feed was silent for 813 minutes inside the service
+      window (gap test from PR #274)
+  - agency: sfmta
+    date: "2026-08-09"
+    issue: "#270"
+    note: >-
+      stamp hand-corrected complete -> partial on 2026-11-26: the
+      vehicle-position feed was silent for 528 minutes inside the service
+      window (gap test from PR #274)
+  - agency: sfmta
+    date: "2026-09-29"
+    issue: "#272"
+    note: >-
+      stamp hand-corrected partial -> complete on 2026-11-26 and the date
+      re-derived from S3 (coverage 0.664): it had been wrongly demoted by an
+      end-of-run cleanup bug, not by its own data
   - agency: sfmta
     date: "2026-10-21"
     issue: "#270"
-    note: "stamped complete (coverage 0.564) despite outage-like metrics"
+    note: >-
+      stamp hand-corrected complete -> partial on 2026-11-26, so the date is
+      excluded: the Muni trip-updates feed was down 10:50-16:32 PDT while the
+      collector stayed up (stored coverage 0.564 passes the coverage test;
+      the outage fails the feed-gap test)

@@ -6,43 +6,43 @@
     "end": "2026-10-31",
     "n_days": 31
   },
-  "generated_at_utc": "2026-11-26T04:23:13",
+  "generated_at_utc": "2026-11-26T16:32:16",
   "generator": "scripts/generate_scorecard.py",
   "provenance": {
-    "git_commit": "083829d75403ebb751d5c60035d3196d212334b8",
+    "git_commit": "8455713b9b365b5a5592659c22b527b6476a0db4",
     "git_dirty_paths": [],
     "source_sha256": {
       "api/__init__.py": "e2580af7cfcec064492588a87e83020869db0d4d5c828664c812c58ed6ba0546",
-      "api/aggregations.py": "6146846495a2c33179a782225c73447ee2494c29f864c27d232a73c683d6c4e9",
-      "config/agencies/sfmta.yaml": "3769e8528132ed4d0b4a6684798e99ab3a97ff57e0dee0a346187ec3415dec75",
-      "config/agencies/wmata.yaml": "1bf440eac5cdaa1d9cb8bef7b056553158aa2f86c84808757b7c9dc4d8adf6b1",
+      "api/aggregations.py": "5e64f2df02ac719a76be31fb4622dc07b981552a5f4638dc28d0758f28dc1c26",
+      "config/agencies/sfmta.yaml": "334c8e6b4f8eeaa1483b5ecdf312771d7a4c5599b5931a43197ae65bf83eff30",
+      "config/agencies/wmata.yaml": "c1d35cc3b7af76275a58655c36ce95a1eebf9f9ad9d2848bb780ccbe580235a3",
       "config/frequent_routes.yaml": "01d0952f2674a6bf9efd50d0674cce5b38621c262bdc090e45a0a865349ca691",
-      "config/scorecard_annotations.yaml": "5b130e0e39dc1eaadfc11e15e820f91722f4d1b1f5c2f08357a4c917b6d067dd",
+      "config/scorecard_annotations.yaml": "a9d1023b70978dc1057a46ceb5bdd558fd47e0c4df128f9f0e4e15ac3ea393cf",
       "scripts/generate_scorecard.py": "c9519636399b3647007d5ed8da07234a5c2ef81cb1b1971babce5e3275926f30",
       "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "src/agency_config.py": "9b4d99798755968b9d97554d3c23e04558224f606d16d02613bbd0e4da208d0e",
+      "src/agency_config.py": "95073452cc613b0e4e60eb153d8d9e82ec96ed5740b5e598bb3b58daa0cc268b",
       "src/analytics.py": "2d8d32f9a11606cb25cc7f425f116bdced69db7ce1b3e0429af83c437ae74a20",
-      "src/bunching.py": "513f11fadb90810e8515b30b84c7477ab24ef6b05368351ef50ec692cc0fb7ad",
-      "src/data_completeness.py": "6db5ec5b7a0127e441b7bdc0bfb332318065120e1ff8d6e26e6f242a14a987ce",
+      "src/bunching.py": "0f59654c0142c4085ab59994983ba6d96e743089569a47ea75dd6842f7187bc2",
+      "src/data_completeness.py": "c4f6839c666d36e54b326e7d3ac77c27ca7fc63555457da365926ea877578d21",
       "src/database.py": "56346925bfcb28bbf718c9a6cb7be0ff089559cf2b2cff9f241395daaf58f539",
       "src/diagnosis_hash.py": "0a97faeef982509cce5601c12d2b921e5d5c5c2141a4416475ab0f5fee8d88d1",
-      "src/ewt.py": "98c8490b49067ce6ee38ec9b79a5e1fd20b0863dd3f8c0699982101476441cbb",
+      "src/ewt.py": "87431f0fb24827a69877fbcfc1a7a08dce971233b9883dd74201459af2f00bbb",
       "src/excess_trip_time.py": "dd0f8e746a140881187f7fc23c60d6ac9fbb522a9510d03e05b92a996690e3de",
       "src/frequent_routes.py": "48e4fc8d158fc1e151b4dd5a5028d9e04337ea9e983ece15eaddac2abbc0db2c",
       "src/gtfs_calendar.py": "0c2b836999863586a10c9ac7f4a9092b58e51fd10dc34e39d2c17ca363f65630",
       "src/gtfs_versioning.py": "977a5fd56387d0c7e92d5aeb25efed4bafdb2023a44e7e6434f70109d8ba5e5f",
-      "src/models.py": "a540c36f78de04cf621196bbb988e0dfa5705820184e4f9b6d52c7c624d5b5e3",
+      "src/models.py": "72c65c9e4183d960301ee5c6047739faf0157e0b9105274bae8649727e777b31",
       "src/otp_constants.py": "4e13e84cc670015df4fb09cd54930ea5a287e963924660e7f05e4e65e2291424",
       "src/otp_metrics.py": "62ea77456abc3cd959e1a23651d12cc1957e91dd65f62839c8226a3c72c2d075",
       "src/route_targets.py": "eb98f9ac64b30c635f23d74de7a8edae4ee0a0c7f937ee6b893c9deb337c48d9",
-      "src/scorecard.py": "92d19a1e8df59dffd6fe645198c4f6d21b655e017c351dfd9a53da1c13821d9d",
+      "src/scorecard.py": "e2b599c85fda0b657c7becc23ab7f723051bce927a1c0042cf847466a785d098",
       "src/service_delivered.py": "8710a5a1e2be3c84746fa272a590e143f9b369e7ad2ecb7e04e2c7c25cd286f6",
       "src/service_profile.py": "c14eee937468259dc0b60516106cb1030bb6e9d22a94c594088f4b39dbfe1fe4",
       "src/shape_simplify.py": "22bd7d7bdbb447e7daa9c6c415c6e84c04dee4ed4cbfcbacdc18e4bccd84a887",
       "src/time_periods.py": "20be4ebc7ceef4f734d161411042541894126f1c34dc5f0087d3f2ab27f6cc31",
       "src/timezones.py": "92c0168fda1794d546c938386a9b78471ddf765a415daefb4d2613cd682ef610"
     },
-    "source_digest": "570c203586e0f148941136f4377bdb6775ead4da1188304cc4bc71038b3a7b54"
+    "source_digest": "4fb57389fda291ef7d27d30538b78f3808cfffaaede015e2ba8a6a1be55ed4cb"
   },
   "subject": "wmata",
   "peers": [
@@ -82,6 +82,7 @@
       "high_freq": 900,
       "medium_freq": 1200
     },
+    "ewt_max_headway_sec": 7200,
     "outlier_rule": {
       "mad_multiplier": 3.0,
       "mad_to_sd": 1.4826
@@ -103,6 +104,15 @@
         "vehicle_positions_sec": 60
       },
       "completeness_threshold": 0.8,
+      "completeness": {
+        "coverage_threshold": 0.8,
+        "coverage_target": 0.8,
+        "cadence_ceiling": 1.0,
+        "feed_gap_max_minutes": 90,
+        "service_start_hour": 5,
+        "service_end_hour": 24,
+        "gap_rule_since": "2026-11-26"
+      },
       "n_days": 31,
       "n_days_complete": 31,
       "metrics": {
@@ -163,15 +173,15 @@
           ]
         },
         "ewt": {
-          "mean": 173.07482625041231,
-          "median": 152.9477345459706,
+          "mean": 131.7470596555883,
+          "median": 134.0725440886648,
           "min": {
-            "value": 114.77670488063887,
+            "value": 102.3441887521779,
             "date": "2026-10-11"
           },
           "max": {
-            "value": 387.2879927311837,
-            "date": "2026-10-25"
+            "value": 162.6261981315456,
+            "date": "2026-10-17"
           },
           "n_days": 31,
           "n_days_included": 31,
@@ -179,33 +189,13 @@
           "excluded": [],
           "flagged_days": [
             {
-              "date": "2026-10-02",
-              "value": 289.48990834286377,
+              "date": "2026-10-11",
+              "value": 102.3441887521779,
               "issue": null
             },
             {
-              "date": "2026-10-19",
-              "value": 237.95420477954372,
-              "issue": null
-            },
-            {
-              "date": "2026-10-21",
-              "value": 248.87838019973924,
-              "issue": null
-            },
-            {
-              "date": "2026-10-22",
-              "value": 231.9164988041947,
-              "issue": null
-            },
-            {
-              "date": "2026-10-23",
-              "value": 244.8463333604323,
-              "issue": null
-            },
-            {
-              "date": "2026-10-25",
-              "value": 387.2879927311837,
+              "date": "2026-10-17",
+              "value": 162.6261981315456,
               "issue": null
             }
           ]
@@ -259,12 +249,8 @@
             "2026-10-17"
           ],
           "mean_excluding_flagged": 67.87044366589838,
-          "routes_under_investigation": [
-            "D10",
-            "D50",
-            "M6X"
-          ],
-          "mean_excluding_routes": 67.9757035646168,
+          "routes_under_investigation": [],
+          "mean_excluding_routes": null,
           "moved": false,
           "issues": []
         },
@@ -277,34 +263,22 @@
             "2026-10-11"
           ],
           "mean_excluding_flagged": 0.9593193935887442,
-          "routes_under_investigation": [
-            "D10",
-            "D50",
-            "M6X"
-          ],
-          "mean_excluding_routes": 0.958716257764756,
+          "routes_under_investigation": [],
+          "mean_excluding_routes": null,
           "moved": false,
           "issues": []
         },
         "ewt": {
-          "mean": 173.07482625041231,
-          "median_day": 152.9477345459706,
+          "mean": 131.7470596555883,
+          "median_day": 134.0725440886648,
           "flagged_dates": [
-            "2026-10-02",
-            "2026-10-19",
-            "2026-10-21",
-            "2026-10-22",
-            "2026-10-23",
-            "2026-10-25"
+            "2026-10-11",
+            "2026-10-17"
           ],
-          "mean_excluding_flagged": 148.997851821793,
-          "routes_under_investigation": [
-            "D10",
-            "D50",
-            "M6X"
-          ],
-          "mean_excluding_routes": 144.69064516129032,
-          "moved": true,
+          "mean_excluding_flagged": 131.6961538772246,
+          "routes_under_investigation": [],
+          "mean_excluding_routes": null,
+          "moved": false,
           "issues": []
         },
         "bunching": {
@@ -314,12 +288,8 @@
             "2026-10-17"
           ],
           "mean_excluding_flagged": 0.038051963407834705,
-          "routes_under_investigation": [
-            "D10",
-            "D50",
-            "M6X"
-          ],
-          "mean_excluding_routes": 0.03769032258064516,
+          "routes_under_investigation": [],
+          "mean_excluding_routes": null,
           "moved": false,
           "issues": []
         }
@@ -337,7 +307,7 @@
             "n_days": 22
           },
           "ewt": {
-            "mean": 171.92667074206398,
+            "mean": 132.56322546052664,
             "n_days_included": 22,
             "n_days": 22
           },
@@ -364,7 +334,7 @@
               "n_days_included": 21
             },
             "ewt": {
-              "mean": 173.3138024520304,
+              "mean": 133.31435461355045,
               "n_days_included": 21
             },
             "swt": {
@@ -389,7 +359,7 @@
             "n_days": 5
           },
           "ewt": {
-            "mean": 151.36037935628377,
+            "mean": 129.5267904214611,
             "n_days_included": 5,
             "n_days": 5
           },
@@ -418,7 +388,7 @@
             "n_days": 4
           },
           "ewt": {
-            "mean": 206.53274016398893,
+            "mean": 130.03348427108625,
             "n_days_included": 4,
             "n_days": 4
           },
@@ -444,7 +414,7 @@
           "coverage_pct": 1.0,
           "otp": 67.789906813506,
           "service_delivered": 0.947418949855993,
-          "ewt": 152.957382761904,
+          "ewt": 143.19637631432,
           "swt": 427.9202681911579,
           "bunching": 0.045402982325869354
         },
@@ -455,7 +425,7 @@
           "coverage_pct": 1.0,
           "otp": 67.05899147419615,
           "service_delivered": 0.941272069143828,
-          "ewt": 289.48990834286377,
+          "ewt": 155.7288319635806,
           "swt": 427.96467931488445,
           "bunching": 0.04507566449198963
         },
@@ -466,7 +436,7 @@
           "coverage_pct": 1.0,
           "otp": 68.33078555441604,
           "service_delivered": 0.9589186068885895,
-          "ewt": 139.19360279399348,
+          "ewt": 119.15717946489144,
           "swt": 465.17236077625944,
           "bunching": 0.029526858769121308
         },
@@ -477,7 +447,7 @@
           "coverage_pct": 1.0,
           "otp": 69.74445119553951,
           "service_delivered": 0.9469552088575742,
-          "ewt": 150.61337026540917,
+          "ewt": 138.66666783132763,
           "swt": 465.1384194614997,
           "bunching": 0.025443842663265093
         },
@@ -488,7 +458,7 @@
           "coverage_pct": 1.0,
           "otp": 68.19535552755936,
           "service_delivered": 0.9641828520788716,
-          "ewt": 168.98273813731907,
+          "ewt": 132.08033733517732,
           "swt": 427.9202681911579,
           "bunching": 0.03954147569494489
         },
@@ -499,7 +469,7 @@
           "coverage_pct": 1.0,
           "otp": 67.42097139731166,
           "service_delivered": 0.9513329887009822,
-          "ewt": 163.04684185487065,
+          "ewt": 146.40022269841666,
           "swt": 427.9202681911579,
           "bunching": 0.03964460188014558
         },
@@ -510,7 +480,7 @@
           "coverage_pct": 1.0,
           "otp": 68.43407768343256,
           "service_delivered": 0.9644122858830478,
-          "ewt": 134.41311855063418,
+          "ewt": 118.41507437280256,
           "swt": 427.9202681911579,
           "bunching": 0.04009170853304816
         },
@@ -521,7 +491,7 @@
           "coverage_pct": 1.0,
           "otp": 67.89450719930188,
           "service_delivered": 0.9553947271250277,
-          "ewt": 155.78471304453262,
+          "ewt": 146.10570187697795,
           "swt": 427.9202681911579,
           "bunching": 0.04122560514738658
         },
@@ -532,7 +502,7 @@
           "coverage_pct": 1.0,
           "otp": 68.71899141950944,
           "service_delivered": 0.9461475954790574,
-          "ewt": 152.9477345459706,
+          "ewt": 137.83777004258178,
           "swt": 427.96467931488445,
           "bunching": 0.03926068765354691
         },
@@ -543,7 +513,7 @@
           "coverage_pct": 1.0,
           "otp": 68.97723239186654,
           "service_delivered": 0.967000192418703,
-          "ewt": 131.96701111714924,
+          "ewt": 108.55066772333987,
           "swt": 465.17236077625944,
           "bunching": 0.02919331671925065
         },
@@ -554,7 +524,7 @@
           "coverage_pct": 1.0,
           "otp": 67.66169864813718,
           "service_delivered": 0.9674886763965778,
-          "ewt": 114.77670488063887,
+          "ewt": 102.3441887521779,
           "swt": 465.1384194614997,
           "bunching": 0.024884931829468715
         },
@@ -565,7 +535,7 @@
           "coverage_pct": 1.0,
           "otp": 66.17973050387307,
           "service_delivered": 0.9712326157363307,
-          "ewt": 142.79690483276954,
+          "ewt": 116.789513247027,
           "swt": 465.1313949804294,
           "bunching": 0.03601324480951543
         },
@@ -576,7 +546,7 @@
           "coverage_pct": 1.0,
           "otp": 68.14322024107521,
           "service_delivered": 0.9686480877557071,
-          "ewt": 124.59283153181627,
+          "ewt": 113.8478723757363,
           "swt": 427.91401099863526,
           "bunching": 0.04016965924598868
         },
@@ -587,7 +557,7 @@
           "coverage_pct": 1.0,
           "otp": 68.13003745895404,
           "service_delivered": 0.9580626107501476,
-          "ewt": 220.19655942965073,
+          "ewt": 141.09825710201926,
           "swt": 427.9202681911579,
           "bunching": 0.04287097728199667
         },
@@ -598,7 +568,7 @@
           "coverage_pct": 1.0,
           "otp": 67.30199027614783,
           "service_delivered": 0.9632966546045344,
-          "ewt": 144.47674140984782,
+          "ewt": 136.84815972254933,
           "swt": 427.9202681911579,
           "bunching": 0.042609334789275415
         },
@@ -609,7 +579,7 @@
           "coverage_pct": 1.0,
           "otp": 66.03831668261992,
           "service_delivered": 0.9627687079855212,
-          "ewt": 145.10406720575435,
+          "ewt": 134.2069701757875,
           "swt": 427.96467931488445,
           "bunching": 0.04139583869864198
         },
@@ -620,7 +590,7 @@
           "coverage_pct": 1.0,
           "otp": 64.90093861572397,
           "service_delivered": 0.9555512795843756,
-          "ewt": 181.77566808944016,
+          "ewt": 162.6261981315456,
           "swt": 465.17236077625944,
           "bunching": 0.03984018094227483
         },
@@ -631,7 +601,7 @@
           "coverage_pct": 1.0,
           "otp": 68.57936238765474,
           "service_delivered": 0.9457473578258682,
-          "ewt": 173.452892778724,
+          "ewt": 143.93722939192315,
           "swt": 465.1384194614997,
           "bunching": 0.03132997670556037
         },
@@ -642,7 +612,7 @@
           "coverage_pct": 1.0,
           "otp": 67.9531274221051,
           "service_delivered": 0.962262757551141,
-          "ewt": 237.95420477954372,
+          "ewt": 126.92394123716076,
           "swt": 427.9202681911579,
           "bunching": 0.039058411905207854
         },
@@ -653,7 +623,7 @@
           "coverage_pct": 1.0,
           "otp": 67.52892529895946,
           "service_delivered": 0.957093272284174,
-          "ewt": 133.42134280588346,
+          "ewt": 126.95689289658662,
           "swt": 427.9202681911579,
           "bunching": 0.04083525876666834
         },
@@ -664,7 +634,7 @@
           "coverage_pct": 1.0,
           "otp": 67.73720053566407,
           "service_delivered": 0.9607206142941523,
-          "ewt": 248.87838019973924,
+          "ewt": 125.64738933976253,
           "swt": 427.9202681911579,
           "bunching": 0.04127681934630761
         },
@@ -675,7 +645,7 @@
           "coverage_pct": 1.0,
           "otp": 67.76965511920376,
           "service_delivered": 0.957831770179455,
-          "ewt": 231.9164988041947,
+          "ewt": 140.00795778001725,
           "swt": 427.9202681911579,
           "bunching": 0.0424622014391545
         },
@@ -686,7 +656,7 @@
           "coverage_pct": 1.0,
           "otp": 67.2872340425532,
           "service_delivered": 0.9621038634852627,
-          "ewt": 244.8463333604323,
+          "ewt": 127.60092670351509,
           "swt": 427.96467931488445,
           "bunching": 0.043942942549634434
         },
@@ -697,7 +667,7 @@
           "coverage_pct": 0.9951388888888889,
           "otp": 69.31611018155482,
           "service_delivered": 0.9698864729651722,
-          "ewt": 143.8224970491542,
+          "ewt": 123.22736269886377,
           "swt": 465.17236077625944,
           "bunching": 0.03127909640874148
         },
@@ -708,7 +678,7 @@
           "coverage_pct": 1.0,
           "otp": 68.28321588016087,
           "service_delivered": 0.9500754906894816,
-          "ewt": 387.2879927311837,
+          "ewt": 135.18585110891632,
           "swt": 465.1384194614997,
           "bunching": 0.030612217742472025
         },
@@ -719,7 +689,7 @@
           "coverage_pct": 1.0,
           "otp": 68.42241295230664,
           "service_delivered": 0.9617458090244443,
-          "ewt": 131.93954241405243,
+          "ewt": 126.3204289652557,
           "swt": 427.9202681911579,
           "bunching": 0.03777123163711277
         },
@@ -730,7 +700,7 @@
           "coverage_pct": 1.0,
           "otp": 68.12261239550081,
           "service_delivered": 0.9621889077616129,
-          "ewt": 124.5766670200976,
+          "ewt": 122.06788483298521,
           "swt": 427.9202681911579,
           "bunching": 0.04082414672892697
         },
@@ -741,7 +711,7 @@
           "coverage_pct": 1.0,
           "otp": 67.34801948739674,
           "service_delivered": 0.9652244536326049,
-          "ewt": 153.86958216837638,
+          "ewt": 141.61252846535513,
           "swt": 427.9202681911579,
           "bunching": 0.04570913033317882
         },
@@ -752,7 +722,7 @@
           "coverage_pct": 1.0,
           "otp": 67.32683347797209,
           "service_delivered": 0.960785761760579,
-          "ewt": 144.2473632774363,
+          "ewt": 140.07944347250077,
           "swt": 427.9202681911579,
           "bunching": 0.0442721582412161
         },
@@ -763,7 +733,7 @@
           "coverage_pct": 1.0,
           "otp": 67.68501997595128,
           "service_delivered": 0.95714709371293,
-          "ewt": 135.94729984771783,
+          "ewt": 116.61847921147108,
           "swt": 427.9585984093023,
           "bunching": 0.03701045884334294
         },
@@ -774,7 +744,7 @@
           "coverage_pct": 1.0,
           "otp": 66.73331635252165,
           "service_delivered": 0.9529536270925534,
-          "ewt": 160.04311773168183,
+          "ewt": 134.0725440886648,
           "swt": 465.17236077625944,
           "bunching": 0.03282412105406194
         }
@@ -783,7 +753,7 @@
         "pooled": {
           "otp": 67.75899293331317,
           "service_delivered": 0.9586066453968426,
-          "ewt": 172.89,
+          "ewt": 131.92,
           "swt": 438.5,
           "bunching": 0.0387
         },
@@ -904,32 +874,59 @@
         }
       ],
       "known_issues": [],
-      "dominated_routes": [
-        {
-          "route_id": "D10",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": "#269"
-        },
-        {
-          "route_id": "D50",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": "#269"
-        },
-        {
-          "route_id": "M6X",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
+      "dominated_routes": [],
+      "ewt_method": {
+        "rule_since_utc": "2026-11-26T06:00:00",
+        "status": "capped",
+        "n_dates": 31,
+        "capped_dates": [
+          "2026-10-01",
+          "2026-10-02",
+          "2026-10-03",
+          "2026-10-04",
+          "2026-10-05",
+          "2026-10-06",
+          "2026-10-07",
+          "2026-10-08",
+          "2026-10-09",
+          "2026-10-10",
+          "2026-10-11",
+          "2026-10-12",
+          "2026-10-13",
+          "2026-10-14",
+          "2026-10-15",
+          "2026-10-16",
+          "2026-10-17",
+          "2026-10-18",
+          "2026-10-19",
+          "2026-10-20",
+          "2026-10-21",
+          "2026-10-22",
+          "2026-10-23",
+          "2026-10-24",
+          "2026-10-25",
+          "2026-10-26",
+          "2026-10-27",
+          "2026-10-28",
+          "2026-10-29",
+          "2026-10-30",
+          "2026-10-31"
+        ],
+        "old_method_dates": [],
+        "means_by_method": {
+          "capped": {
+            "n_days": 31,
+            "mean": 131.7470596555883
+          },
+          "old": {
+            "n_days": 0,
+            "mean": null
+          }
         }
-      ],
+      },
       "aggregates_computed_at_utc": {
-        "min": "2026-11-24T20:33:04",
-        "max": "2026-11-25T10:20:52"
+        "min": "2026-11-26T15:07:42",
+        "max": "2026-11-26T15:14:09"
       },
       "routes": {
         "n_routes_with_data": 126,
@@ -943,48 +940,9 @@
               "min_coverage_ratio": 0.5
             },
             "n_designated": 43,
-            "n_ranked": 41,
+            "n_ranked": 43,
             "below_floor": [],
-            "dominated": [
-              {
-                "route_id": "D10",
-                "route_name": "D10",
-                "route_long_name": "Pennsylvania Av",
-                "in_current_gtfs": true,
-                "value": 353.86,
-                "median_day": 155.93,
-                "otp_pct": 60.37,
-                "otp_n": 84010,
-                "service_delivered_ratio": 0.9595,
-                "delivered_trips": 4602,
-                "scheduled_trips": 4796,
-                "ewt_seconds": 353.86,
-                "ewt_seconds_unclamped": 353.86,
-                "ewt_n_observed": 158895,
-                "ewt_coverage_ratio": 0.9121,
-                "days_with_data": 31,
-                "issue": "#269"
-              },
-              {
-                "route_id": "D50",
-                "route_name": "D50",
-                "route_long_name": "14 St",
-                "in_current_gtfs": true,
-                "value": 1868.87,
-                "median_day": 169.58,
-                "otp_pct": 62.62,
-                "otp_n": 103212,
-                "service_delivered_ratio": 0.9464,
-                "delivered_trips": 5443,
-                "scheduled_trips": 5751,
-                "ewt_seconds": 1868.87,
-                "ewt_seconds_unclamped": 1868.87,
-                "ewt_n_observed": 83595,
-                "ewt_coverage_ratio": 0.9042,
-                "days_with_data": 31,
-                "issue": "#269"
-              }
-            ],
+            "dominated": [],
             "no_data": [],
             "best": [
               {
@@ -1028,16 +986,16 @@
                 "route_name": "A58",
                 "route_long_name": "Wilson Blvd-Farragut Sq",
                 "in_current_gtfs": true,
-                "value": 87.82,
+                "value": 87.6,
                 "median_day": 81.48,
                 "otp_pct": 73.1,
                 "otp_n": 78088,
                 "service_delivered_ratio": 0.9886,
                 "delivered_trips": 4336,
                 "scheduled_trips": 4386,
-                "ewt_seconds": 87.82,
-                "ewt_seconds_unclamped": 87.82,
-                "ewt_n_observed": 112966,
+                "ewt_seconds": 87.6,
+                "ewt_seconds_unclamped": 87.6,
+                "ewt_n_observed": 112965,
                 "ewt_coverage_ratio": 0.9511,
                 "days_with_data": 31
               },
@@ -1060,61 +1018,25 @@
                 "days_with_data": 31
               },
               {
-                "route_id": "A1X",
-                "route_name": "A1X",
-                "route_long_name": "Pentagon City-Braddock Rd",
+                "route_id": "C41",
+                "route_name": "C41",
+                "route_long_name": "Bladensburg Rd",
                 "in_current_gtfs": true,
-                "value": 95.55,
-                "median_day": 76.43,
-                "otp_pct": 73.02,
-                "otp_n": 25546,
-                "service_delivered_ratio": 0.9506,
-                "delivered_trips": 4078,
-                "scheduled_trips": 4290,
-                "ewt_seconds": 95.55,
-                "ewt_seconds_unclamped": 95.55,
-                "ewt_n_observed": 47487,
-                "ewt_coverage_ratio": 0.8917,
+                "value": 92.16,
+                "median_day": 91.9,
+                "otp_pct": 65.98,
+                "otp_n": 108135,
+                "service_delivered_ratio": 0.9903,
+                "delivered_trips": 6709,
+                "scheduled_trips": 6775,
+                "ewt_seconds": 92.16,
+                "ewt_seconds_unclamped": 92.16,
+                "ewt_n_observed": 164774,
+                "ewt_coverage_ratio": 0.9602,
                 "days_with_data": 31
               }
             ],
             "worst": [
-              {
-                "route_id": "C53",
-                "route_name": "C53",
-                "route_long_name": "U St-Congress Hts",
-                "in_current_gtfs": true,
-                "value": 272.24,
-                "median_day": 170.41,
-                "otp_pct": 60.22,
-                "otp_n": 180776,
-                "service_delivered_ratio": 0.9609,
-                "delivered_trips": 7081,
-                "scheduled_trips": 7369,
-                "ewt_seconds": 272.24,
-                "ewt_seconds_unclamped": 272.24,
-                "ewt_n_observed": 316786,
-                "ewt_coverage_ratio": 0.9227,
-                "days_with_data": 31
-              },
-              {
-                "route_id": "D70",
-                "route_name": "D70",
-                "route_long_name": "Connecticut Av",
-                "in_current_gtfs": true,
-                "value": 253.11,
-                "median_day": 305.17,
-                "otp_pct": 65.82,
-                "otp_n": 64660,
-                "service_delivered_ratio": 0.9707,
-                "delivered_trips": 3678,
-                "scheduled_trips": 3789,
-                "ewt_seconds": 253.11,
-                "ewt_seconds_unclamped": 253.11,
-                "ewt_n_observed": 88103,
-                "ewt_coverage_ratio": 0.9294,
-                "days_with_data": 31
-              },
               {
                 "route_id": "D36",
                 "route_name": "D36",
@@ -1152,21 +1074,57 @@
                 "days_with_data": 31
               },
               {
-                "route_id": "D60",
-                "route_name": "D60",
-                "route_long_name": "16 St",
+                "route_id": "C51",
+                "route_name": "C51",
+                "route_long_name": "U St-Anacostia",
                 "in_current_gtfs": true,
-                "value": 192.06,
-                "median_day": 203.36,
-                "otp_pct": 71.2,
-                "otp_n": 90920,
-                "service_delivered_ratio": 0.9567,
-                "delivered_trips": 5795,
-                "scheduled_trips": 6057,
-                "ewt_seconds": 192.06,
-                "ewt_seconds_unclamped": 192.06,
-                "ewt_n_observed": 148194,
-                "ewt_coverage_ratio": 0.9215,
+                "value": 185.1,
+                "median_day": 173.76,
+                "otp_pct": 55.79,
+                "otp_n": 83981,
+                "service_delivered_ratio": 0.9603,
+                "delivered_trips": 3336,
+                "scheduled_trips": 3474,
+                "ewt_seconds": 185.1,
+                "ewt_seconds_unclamped": 185.1,
+                "ewt_n_observed": 135454,
+                "ewt_coverage_ratio": 0.9214,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "P41",
+                "route_name": "P41",
+                "route_long_name": "Landover Rd",
+                "in_current_gtfs": true,
+                "value": 175.72,
+                "median_day": 157.92,
+                "otp_pct": 72.16,
+                "otp_n": 37705,
+                "service_delivered_ratio": 0.9127,
+                "delivered_trips": 3147,
+                "scheduled_trips": 3448,
+                "ewt_seconds": 175.72,
+                "ewt_seconds_unclamped": 175.72,
+                "ewt_n_observed": 81077,
+                "ewt_coverage_ratio": 0.8757,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "D40",
+                "route_name": "D40",
+                "route_long_name": "7 St-Georgia Av",
+                "in_current_gtfs": true,
+                "value": 166.4,
+                "median_day": 152.61,
+                "otp_pct": 65.97,
+                "otp_n": 152579,
+                "service_delivered_ratio": 0.9488,
+                "delivered_trips": 5981,
+                "scheduled_trips": 6304,
+                "ewt_seconds": 166.4,
+                "ewt_seconds_unclamped": 166.4,
+                "ewt_n_observed": 216691,
+                "ewt_coverage_ratio": 0.903,
                 "days_with_data": 31
               }
             ]
@@ -1381,12 +1339,21 @@
         "vehicle_positions_sec": 180
       },
       "completeness_threshold": 0.5333333333333333,
+      "completeness": {
+        "coverage_threshold": 0.5333333333333333,
+        "coverage_target": 0.8,
+        "cadence_ceiling": 0.6666666666666666,
+        "feed_gap_max_minutes": 90,
+        "service_start_hour": 5,
+        "service_end_hour": 24,
+        "gap_rule_since": "2026-11-26"
+      },
       "n_days": 31,
-      "n_days_complete": 31,
+      "n_days_complete": 30,
       "metrics": {
         "otp": {
-          "mean": 65.80402360391928,
-          "median": 66.66008457981603,
+          "mean": 65.75487528729869,
+          "median": 66.60512235428465,
           "min": {
             "value": 57.94508634612996,
             "date": "2026-10-31"
@@ -1396,32 +1363,37 @@
             "date": "2026-10-12"
           },
           "n_days": 31,
-          "n_days_included": 31,
-          "coverage": 1.0,
-          "excluded": [],
+          "n_days_included": 30,
+          "coverage": 0.967741935483871,
+          "excluded": [
+            {
+              "date": "2026-10-21",
+              "reason": "partial"
+            }
+          ],
           "flagged_days": []
         },
         "service_delivered": {
-          "mean": 0.9334699023943908,
-          "median": 0.9426281375237292,
+          "mean": 0.9392146876524362,
+          "median": 0.9439991562961401,
           "min": {
-            "value": 0.7611263446530268,
-            "date": "2026-10-21"
+            "value": 0.8926345248696095,
+            "date": "2026-10-31"
           },
           "max": {
             "value": 0.9646699008647964,
             "date": "2026-10-22"
           },
           "n_days": 31,
-          "n_days_included": 31,
-          "coverage": 1.0,
-          "excluded": [],
-          "flagged_days": [
+          "n_days_included": 30,
+          "coverage": 0.967741935483871,
+          "excluded": [
             {
               "date": "2026-10-21",
-              "value": 0.7611263446530268,
-              "issue": "#270"
-            },
+              "reason": "partial"
+            }
+          ],
+          "flagged_days": [
             {
               "date": "2026-10-30",
               "value": 0.913414891373128,
@@ -1430,35 +1402,35 @@
           ]
         },
         "ewt": {
-          "mean": 220.6178146084559,
-          "median": 151.33479883099693,
+          "mean": 145.70909867476811,
+          "median": 144.80388121821392,
           "min": {
-            "value": 88.54302307773793,
-            "date": "2026-10-12"
+            "value": 74.6509510264566,
+            "date": "2026-10-22"
           },
           "max": {
-            "value": 1929.0405348121308,
-            "date": "2026-10-21"
+            "value": 370.94926322442353,
+            "date": "2026-10-17"
           },
           "n_days": 31,
-          "n_days_included": 31,
-          "coverage": 1.0,
-          "excluded": [],
+          "n_days_included": 30,
+          "coverage": 0.967741935483871,
+          "excluded": [
+            {
+              "date": "2026-10-21",
+              "reason": "partial"
+            }
+          ],
           "flagged_days": [
             {
               "date": "2026-10-17",
               "value": 370.94926322442353,
               "issue": null
-            },
-            {
-              "date": "2026-10-21",
-              "value": 1929.0405348121308,
-              "issue": "#270"
             }
           ]
         },
         "swt": {
-          "mean": 330.9948038642592,
+          "mean": 331.046314059315,
           "median": 329.44949801258326,
           "min": {
             "value": 329.44949801258326,
@@ -1469,14 +1441,19 @@
             "date": "2026-10-31"
           },
           "n_days": 31,
-          "n_days_included": 31,
-          "coverage": 1.0,
-          "excluded": [],
+          "n_days_included": 30,
+          "coverage": 0.967741935483871,
+          "excluded": [
+            {
+              "date": "2026-10-21",
+              "reason": "partial"
+            }
+          ],
           "flagged_days": []
         },
         "bunching": {
-          "mean": 0.05920554219267079,
-          "median": 0.06126266890412447,
+          "mean": 0.05962549977860918,
+          "median": 0.06153099568211148,
           "min": {
             "value": 0.03482226704791904,
             "date": "2026-10-25"
@@ -1486,9 +1463,14 @@
             "date": "2026-10-30"
           },
           "n_days": 31,
-          "n_days_included": 31,
-          "coverage": 1.0,
-          "excluded": [],
+          "n_days_included": 30,
+          "coverage": 0.967741935483871,
+          "excluded": [
+            {
+              "date": "2026-10-21",
+              "reason": "partial"
+            }
+          ],
           "flagged_days": [
             {
               "date": "2026-10-12",
@@ -1500,118 +1482,76 @@
       },
       "robustness": {
         "otp": {
-          "mean": 65.80402360391928,
-          "median_day": 66.66008457981603,
+          "mean": 65.75487528729869,
+          "median_day": 66.60512235428465,
           "flagged_dates": [],
           "mean_excluding_flagged": null,
           "routes_under_investigation": [
-            "19",
-            "28R",
-            "45",
-            "48",
-            "5R",
-            "7",
-            "8",
-            "9R",
+            "5",
             "F",
-            "K",
             "KBUS",
-            "L",
             "M",
-            "NBUS",
-            "T"
+            "T",
+            "TBUS"
           ],
-          "mean_excluding_routes": 65.30807299767369,
+          "mean_excluding_routes": 65.46013118232996,
           "moved": false,
           "issues": []
         },
         "service_delivered": {
-          "mean": 0.9334699023943908,
-          "median_day": 0.9426281375237292,
+          "mean": 0.9392146876524362,
+          "median_day": 0.9439991562961401,
           "flagged_dates": [
-            "2026-10-21",
             "2026-10-30"
           ],
           "mean_excluding_flagged": 0.9401043357999986,
           "routes_under_investigation": [
-            "19",
-            "28R",
-            "45",
-            "48",
-            "5R",
-            "7",
-            "8",
-            "9R",
+            "5",
             "F",
-            "K",
             "KBUS",
-            "L",
             "M",
-            "NBUS",
-            "T"
+            "T",
+            "TBUS"
           ],
-          "mean_excluding_routes": 0.9227198753843998,
+          "mean_excluding_routes": 0.935853594504682,
           "moved": false,
-          "issues": [
-            "#270"
-          ]
+          "issues": []
         },
         "ewt": {
-          "mean": 220.6178146084559,
-          "median_day": 151.33479883099693,
+          "mean": 145.70909867476811,
+          "median_day": 144.80388121821392,
           "flagged_dates": [
-            "2026-10-17",
-            "2026-10-21"
+            "2026-10-17"
           ],
-          "mean_excluding_flagged": 156.52284326984753,
+          "mean_excluding_flagged": 137.94219644891794,
           "routes_under_investigation": [
-            "19",
-            "28R",
-            "45",
-            "48",
-            "5R",
-            "7",
-            "8",
-            "9R",
+            "5",
             "F",
-            "K",
             "KBUS",
-            "L",
             "M",
-            "NBUS",
-            "T"
+            "T",
+            "TBUS"
           ],
-          "mean_excluding_routes": 202.3425806451613,
+          "mean_excluding_routes": 106.80866666666665,
           "moved": true,
-          "issues": [
-            "#270"
-          ]
+          "issues": []
         },
         "bunching": {
-          "mean": 0.05920554219267079,
-          "median_day": 0.06126266890412447,
+          "mean": 0.05962549977860918,
+          "median_day": 0.06153099568211148,
           "flagged_dates": [
             "2026-10-12"
           ],
-          "mean_excluding_flagged": 0.05977381684429054,
+          "mean_excluding_flagged": 0.060227851403937833,
           "routes_under_investigation": [
-            "19",
-            "28R",
-            "45",
-            "48",
-            "5R",
-            "7",
-            "8",
-            "9R",
+            "5",
             "F",
-            "K",
             "KBUS",
-            "L",
             "M",
-            "NBUS",
-            "T"
+            "T",
+            "TBUS"
           ],
-          "mean_excluding_routes": 0.06011290322580645,
+          "mean_excluding_routes": 0.05879666666666667,
           "moved": false,
           "issues": []
         }
@@ -1619,28 +1559,28 @@
       "day_types": {
         "weekday": {
           "otp": {
-            "mean": 67.23983091210077,
-            "n_days_included": 22,
+            "mean": 67.23799080779428,
+            "n_days_included": 21,
             "n_days": 22
           },
           "service_delivered": {
-            "mean": 0.9390906430155282,
-            "n_days_included": 22,
+            "mean": 0.9475651334137426,
+            "n_days_included": 21,
             "n_days": 22
           },
           "ewt": {
-            "mean": 238.17401622137433,
-            "n_days_included": 22,
+            "mean": 135.01167030989578,
+            "n_days_included": 21,
             "n_days": 22
           },
           "swt": {
-            "mean": 329.66724565531945,
-            "n_days_included": 22,
+            "mean": 329.67761459068777,
+            "n_days_included": 21,
             "n_days": 22
           },
           "bunching": {
-            "mean": 0.062081976509674335,
-            "n_days_included": 22,
+            "mean": 0.0628188889808722,
+            "n_days_included": 21,
             "n_days": 22
           },
           "holiday_type_dates": [
@@ -1648,24 +1588,24 @@
           ],
           "excluding_holiday_type": {
             "otp": {
-              "mean": 67.16565956759783,
-              "n_days_included": 21
+              "mean": 67.16001889085086,
+              "n_days_included": 20
             },
             "service_delivered": {
-              "mean": 0.9382740229607979,
-              "n_days_included": 21
+              "mean": 0.9471314068761865,
+              "n_days_included": 20
             },
             "ewt": {
-              "mean": 245.29930160916658,
-              "n_days_included": 21
+              "mean": 137.33510267150365,
+              "n_days_included": 20
             },
             "swt": {
               "mean": 329.44949801258326,
-              "n_days_included": 21
+              "n_days_included": 20
             },
             "bunching": {
-              "mean": 0.06303077050327414,
-              "n_days_included": 21
+              "mean": 0.0638519682977119,
+              "n_days_included": 20
             }
           }
         },
@@ -1681,7 +1621,7 @@
             "n_days": 5
           },
           "ewt": {
-            "mean": 195.3337860746905,
+            "mean": 186.71563669244068,
             "n_days_included": 5,
             "n_days": 5
           },
@@ -1710,7 +1650,7 @@
             "n_days": 4
           },
           "ewt": {
-            "mean": 155.66374140461122,
+            "mean": 150.61242506825727,
             "n_days_included": 4,
             "n_days": 4
           },
@@ -1945,18 +1885,18 @@
           "coverage_pct": 0.6527777777777778,
           "otp": 68.38363013587441,
           "service_delivered": 0.9363003585741405,
-          "ewt": 122.65141295320842,
+          "ewt": 79.12172393478897,
           "swt": 329.44949801258326,
           "bunching": 0.05465339435223654
         },
         {
           "date": "2026-10-21",
           "day_type": "weekday",
-          "data_quality": "complete",
+          "data_quality": "partial",
           "coverage_pct": 0.5638888888888889,
           "otp": 67.27847310253709,
           "service_delivered": 0.7611263446530268,
-          "ewt": 1929.0405348121308,
+          "ewt": 77.39431481953773,
           "swt": 329.44949801258326,
           "bunching": 0.04660681461451914
         },
@@ -1967,7 +1907,7 @@
           "coverage_pct": 0.6444444444444445,
           "otp": 67.43899511960957,
           "service_delivered": 0.9646699008647964,
-          "ewt": 150.73630884700276,
+          "ewt": 74.6509510264566,
           "swt": 329.44949801258326,
           "bunching": 0.057303448754423704
         },
@@ -1978,7 +1918,7 @@
           "coverage_pct": 0.66875,
           "otp": 67.37918961889926,
           "service_delivered": 0.9469521198059481,
-          "ewt": 150.41338310545643,
+          "ewt": 107.34934291108368,
           "swt": 329.44949801258326,
           "bunching": 0.06685945674257923
         },
@@ -1989,7 +1929,7 @@
           "coverage_pct": 0.66875,
           "otp": 65.49237783446142,
           "service_delivered": 0.9299071364966289,
-          "ewt": 103.48555797378049,
+          "ewt": 100.55743250380868,
           "swt": 334.2399461527786,
           "bunching": 0.04993396955124212
         },
@@ -2000,7 +1940,7 @@
           "coverage_pct": 0.6680555555555555,
           "otp": 62.09695603156709,
           "service_delivered": 0.9315608701183056,
-          "ewt": 111.10693518775071,
+          "ewt": 90.90166984233497,
           "swt": 334.2399461527786,
           "bunching": 0.03482226704791904
         },
@@ -2011,7 +1951,7 @@
           "coverage_pct": 0.6736111111111112,
           "otp": 67.7379440591319,
           "service_delivered": 0.9355621176966885,
-          "ewt": 126.25747992504205,
+          "ewt": 82.88333023127325,
           "swt": 329.44949801258326,
           "bunching": 0.05561655420410977
         },
@@ -2022,7 +1962,7 @@
           "coverage_pct": 0.6263888888888889,
           "otp": 67.7307302638985,
           "service_delivered": 0.9566547141953174,
-          "ewt": 184.50129477803807,
+          "ewt": 84.19729483291871,
           "swt": 329.44949801258326,
           "bunching": 0.06126266890412447
         },
@@ -2033,7 +1973,7 @@
           "coverage_pct": 0.6375,
           "otp": 68.56303674616096,
           "service_delivered": 0.9453701750685509,
-          "ewt": 139.84269063575823,
+          "ewt": 76.30927097678233,
           "swt": 329.44949801258326,
           "bunching": 0.05954339561878225
         },
@@ -2044,7 +1984,7 @@
           "coverage_pct": 0.6402777777777777,
           "otp": 67.79827876401284,
           "service_delivered": 0.9545454545454546,
-          "ewt": 140.5817265047666,
+          "ewt": 78.42434052144694,
           "swt": 329.44949801258326,
           "bunching": 0.06478588718806054
         },
@@ -2055,7 +1995,7 @@
           "coverage_pct": 0.6381944444444444,
           "otp": 65.16361462985407,
           "service_delivered": 0.913414891373128,
-          "ewt": 168.46520584267807,
+          "ewt": 124.97050260690634,
           "swt": 329.44949801258326,
           "bunching": 0.07702188427026668
         },
@@ -2066,22 +2006,22 @@
           "coverage_pct": 0.6506944444444445,
           "otp": 57.94508634612996,
           "service_delivered": 0.8926345248696095,
-          "ewt": 214.9700510134448,
+          "ewt": 174.80742957216768,
           "swt": 334.2399461527786,
           "bunching": 0.054667728519600035
         }
       ],
       "pooled_crosscheck": {
         "pooled": {
-          "otp": 66.02764269976848,
-          "service_delivered": 0.9340587328791785,
-          "ewt": 225.33,
-          "swt": 330.7,
-          "bunching": 0.0597
+          "otp": 65.98714679109085,
+          "service_delivered": 0.9401714818266542,
+          "ewt": 144.26,
+          "swt": 330.75,
+          "bunching": 0.0601
         },
         "consistency": {
-          "dates_checked": 31,
-          "dates_matching": 31,
+          "dates_checked": 30,
+          "dates_matching": 30,
           "mismatches": [],
           "tolerance": {
             "otp": 0.01,
@@ -2162,61 +2102,12 @@
           "agency": "sfmta",
           "date": "2026-10-21",
           "issue": "#270",
-          "note": "stamped complete (coverage 0.564) despite outage-like metrics"
+          "note": "stamp hand-corrected complete -> partial on 2026-11-26, so the date is excluded: the Muni trip-updates feed was down 10:50-16:32 PDT while the collector stayed up (stored coverage 0.564 passes the coverage test; the outage fails the feed-gap test)"
         }
       ],
       "dominated_routes": [
         {
-          "route_id": "19",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "28R",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "45",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "48",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "5R",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "7",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "8",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "9R",
+          "route_id": "5",
           "metrics": [
             "ewt"
           ],
@@ -2224,13 +2115,6 @@
         },
         {
           "route_id": "F",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "K",
           "metrics": [
             "ewt"
           ],
@@ -2245,21 +2129,7 @@
           "issue": null
         },
         {
-          "route_id": "L",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
           "route_id": "M",
-          "metrics": [
-            "ewt"
-          ],
-          "issue": null
-        },
-        {
-          "route_id": "NBUS",
           "metrics": [
             "ewt"
           ],
@@ -2271,11 +2141,67 @@
             "ewt"
           ],
           "issue": null
+        },
+        {
+          "route_id": "TBUS",
+          "metrics": [
+            "ewt"
+          ],
+          "issue": null
         }
       ],
+      "ewt_method": {
+        "rule_since_utc": "2026-11-26T06:00:00",
+        "status": "mixed",
+        "n_dates": 30,
+        "capped_dates": [
+          "2026-10-20",
+          "2026-10-22",
+          "2026-10-23",
+          "2026-10-24",
+          "2026-10-25",
+          "2026-10-26",
+          "2026-10-27",
+          "2026-10-28",
+          "2026-10-29",
+          "2026-10-30",
+          "2026-10-31"
+        ],
+        "old_method_dates": [
+          "2026-10-01",
+          "2026-10-02",
+          "2026-10-03",
+          "2026-10-04",
+          "2026-10-05",
+          "2026-10-06",
+          "2026-10-07",
+          "2026-10-08",
+          "2026-10-09",
+          "2026-10-10",
+          "2026-10-11",
+          "2026-10-12",
+          "2026-10-13",
+          "2026-10-14",
+          "2026-10-15",
+          "2026-10-16",
+          "2026-10-17",
+          "2026-10-18",
+          "2026-10-19"
+        ],
+        "means_by_method": {
+          "capped": {
+            "n_days": 11,
+            "mean": 97.65211717817893
+          },
+          "old": {
+            "n_days": 19,
+            "mean": 173.53156164647766
+          }
+        }
+      },
       "aggregates_computed_at_utc": {
         "min": "2026-11-24T21:10:48",
-        "max": "2026-11-25T10:51:30"
+        "max": "2026-11-26T14:42:15"
       }
     }
   },
@@ -2283,39 +2209,43 @@
     "sfmta": {
       "otp": {
         "differences": {
-          "mean": 1.9706295764895998,
-          "median_day": 1.1298222336899642,
-          "excluding_flagged": 2.0664200619791018,
-          "excluding_routes": 2.667630566943103
+          "mean": 2.019777893110188,
+          "median_day": 1.1847844592213477,
+          "excluding_flagged": 2.11556837859969,
+          "excluding_routes": 2.3145219980789165
         },
-        "direction_robust": true
+        "direction_robust": true,
+        "method_comparable": true
       },
       "service_delivered": {
         "differences": {
-          "mean": 0.025105947976715615,
-          "median_day": 0.018092476770423138,
+          "mean": 0.019361162718670166,
+          "median_day": 0.01672145799801228,
           "excluding_flagged": 0.01921505778874555,
-          "excluding_routes": 0.035996382380356184
+          "excluding_routes": 0.0227222558664244
         },
-        "direction_robust": true
+        "direction_robust": true,
+        "method_comparable": true
       },
       "ewt": {
         "differences": {
-          "mean": -47.54298835804357,
-          "median_day": 1.6129357149736734,
-          "excluding_flagged": -7.5249914480545215,
-          "excluding_routes": -57.65193548387097
+          "mean": -13.962039019179826,
+          "median_day": -10.731337129549104,
+          "excluding_flagged": -6.246042571693351,
+          "excluding_routes": 24.938392988921635
         },
-        "direction_robust": false
+        "direction_robust": false,
+        "method_comparable": false
       },
       "bunching": {
         "differences": {
-          "mean": -0.02109589434824124,
-          "median_day": -0.02142248796184964,
-          "excluding_flagged": -0.021721853436455836,
-          "excluding_routes": -0.02242258064516129
+          "mean": -0.021515851934179632,
+          "median_day": -0.021690814739836653,
+          "excluding_flagged": -0.02217588799610313,
+          "excluding_routes": -0.02068701882223712
         },
-        "direction_robust": true
+        "direction_robust": true,
+        "method_comparable": true
       }
     }
   },
@@ -2323,7 +2253,7 @@
     "Different networks. WMATA's GTFS feed is bus-only. SFMTA's feed also carries Muni Metro light rail and cable car. OTP and service delivered pool every route in each feed (so Muni's include rail and cable car); EWT, SWT and bunching are restricted to bus routes (GTFS route_type 3) for both agencies.",
     "One OTP window for both. Both agencies are measured on the same -2/+7 minute window at every observed stop. Neither agency publishes OTP this way (WMATA's scorecard uses timepoints; SFMTA publishes against its own standard), so these figures do not match either agency's official reporting.",
     "Frequent-service scope differs. WMATA's per-route EWT gate uses WMATA's published frequent-route list (15 min for high-frequency and undesignated routes, 20 min for medium-frequency). SFMTA has no equivalent list, so every Muni route uses the 15-minute per-cell-hour gate. System EWT and SWT pool only cell-hours that pass the gate.",
-    "Feed semantics differ. Muni real-time data comes through the 511.org regional aggregator, which has a known duplicate stop_sequence artifact affecting per-stop matching; treat Muni figures as directionally reliable rather than exact. Polling cadence and completeness thresholds differ by agency (WMATA Metrobus: trip updates every 30 s, vehicle positions every 60 s, 'complete' at coverage >= 0.800; SFMTA (Muni): trip updates every 120 s, vehicle positions every 180 s, 'complete' at coverage >= 0.533).",
+    "Feed semantics differ. Muni real-time data comes through the 511.org regional aggregator, which has a known duplicate stop_sequence artifact affecting per-stop matching; treat Muni figures as directionally reliable rather than exact. Polling cadence and completeness thresholds differ by agency (WMATA Metrobus: trip updates every 30 s, vehicle positions every 60 s, 'complete' at ingest coverage >= 0.800, and neither the trip-update nor the vehicle-position feed silent for more than 90 minutes between 05:00-24:00 Eastern; SFMTA (Muni): trip updates every 120 s, vehicle positions every 180 s, 'complete' at ingest coverage >= 0.533, i.e. 0.80 x the 0.667 ceiling its polling cadence allows, and neither the trip-update nor the vehicle-position feed silent for more than 90 minutes between 05:00-24:00 Pacific).",
     "No ridership weighting. Neither dataset carries passenger counts; system figures weight observations (stops, trips, headways) within a day and days equally across the period, not riders.",
     "Service dates are agency-local (Eastern for WMATA, Pacific for SFMTA)."
   ]
