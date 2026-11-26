@@ -1144,10 +1144,20 @@ agency in `config/agencies/*.yaml` (issue #270: the coverage union alone
 missed a 5.7 h Muni trip-update outage on 2026-10-21 and can never see a
 single-feed outage at WMATA). The trip-update leg reads D's own
 `trip_update_state` rows, the VP leg distinct `vehicle_positions.collected_at`.
-A leg whose inputs are gone (state and raw VP are kept 7 days) is *not
-assessed*: it never demotes a date and never upgrades one — a date that
-already has a stamp keeps it and its stored coverage (logged as kept),
-unless a leg that *is* assessable fails. That is also why the end-of-run
+Whether an absent leg means "the feed delivered nothing" or "the rows
+were pruned" (state and raw VP are kept 7 days) is read from the
+never-pruned load manifests: files replayed for D with 0 rows in
+`tu_archive_replayed_files` = an empty feed (assessed: the whole window
+is the gap); rows replayed but no state = pruned; per VP UTC day, fewer
+rows than `vp_archive_loaded_files` manifested = pruned (fully or
+partly), more = VM-era rows (usable). A pruned or evidence-less leg is
+*not assessed*: on a date that already has a stamp it never demotes and
+never upgrades — the stamp and its stored coverage are kept (logged as
+kept) unless a leg that *is* assessable fails; on a FIRST stamp it counts
+as a failure, so a day is certified only on evidence from both feeds.
+`cleanup_trip_update_state` deletes one service date per transaction, so
+an interrupted cleanup never leaves a remnant date that would read as a
+sparse feed. That is also why the end-of-run
 cleanup deleting the last processed date's state is harmless: when the
 next run's derive re-aggregates that date as D−1, its trip-update leg is
 not assessable (no rows with its `service_date`, whatever the next

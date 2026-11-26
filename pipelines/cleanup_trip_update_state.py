@@ -171,7 +171,7 @@ def main() -> int:
 
     Parses ``--retention-days`` and ``--dry-run`` from argv, opens a DB
     session, and calls :func:`run_cleanup`. ``run_cleanup`` itself
-    commits per batch (or, for ``--dry-run``, only counts and never
+    commits once per service date (or, for ``--dry-run``, only counts and never
     touches the transaction) -- there is nothing left for this function
     to commit or roll back afterward.
 

@@ -754,6 +754,15 @@ def apply_retention(
     UTC days, then ``trip_update_state``. Every batch commits, so an
     interruption loses nothing that a rerun would not redo. A date or day
     whose guard no longer passes is skipped and listed in ``skipped``.
+
+    Partial deletes and the completeness stamp (issue #270):
+    ``trip_update_state`` goes one whole service date per transaction
+    (``run_cleanup``); a manifested VP day left partly deleted reads as
+    pruned (fewer rows than manifested), not as a gap. An interrupted
+    ``--include-unmanifested-vp`` delete of a VM-era day, which has no
+    manifest to compare against, can leave a remnant that would read as a
+    VP gap on that date's next re-aggregation — rerun retention to finish
+    the day before re-aggregating.
     """
     progress = progress or {}
     release_dates = release_dates or set()
