@@ -1,0 +1,1717 @@
+{
+  "schema_version": 1,
+  "title": "WMATA Metrobus bus scorecard, 2026-10-01 to 2026-10-31",
+  "period": {
+    "start": "2026-10-01",
+    "end": "2026-10-31",
+    "n_days": 31
+  },
+  "generated_at_utc": "2026-11-26T03:45:22",
+  "generator": "scripts/generate_scorecard.py",
+  "git_commit": "0264dbde5ce27a6e81da1a68447036accb3cbd6a",
+  "subject": "wmata",
+  "peers": [
+    "sfmta"
+  ],
+  "method": {
+    "otp_window_sec": {
+      "early": -120,
+      "late": 420
+    },
+    "system_period_rule": "mean_of_daily_values",
+    "route_period_rule": "pooled_sufficient_statistics",
+    "excluded_when": [
+      "no system_metrics_daily row",
+      "row not 'complete'",
+      "metric null"
+    ],
+    "route_floors": {
+      "otp_min_observations": 1000,
+      "otp_min_delivered_trips": 300,
+      "ewt_min_observed_headways": 1000,
+      "ewt_min_coverage_ratio": 0.5,
+      "top_n": 5
+    },
+    "ewt_gate_sec": {
+      "high_freq": 900,
+      "medium_freq": 1200
+    },
+    "outlier_rule": {
+      "mad_multiplier": 3.0,
+      "mad_to_sd": 1.4826
+    },
+    "sources": {
+      "system": "system_metrics_daily",
+      "routes": "route_metrics_daily_overlay",
+      "route_names": "routes (is_current)",
+      "feed_versions": "gtfs_snapshots + calendar / calendar_dates"
+    }
+  },
+  "agencies": {
+    "wmata": {
+      "agency": "wmata",
+      "display_name": "WMATA Metrobus",
+      "timezone": "America/New_York",
+      "polling": {
+        "trip_updates_sec": 30,
+        "vehicle_positions_sec": 60
+      },
+      "completeness_threshold": 0.8,
+      "n_days": 31,
+      "n_days_complete": 31,
+      "metrics": {
+        "otp": {
+          "mean": 67.77465318040888,
+          "median": 67.789906813506,
+          "min": {
+            "value": 64.90093861572397,
+            "date": "2026-10-17"
+          },
+          "max": {
+            "value": 69.74445119553951,
+            "date": "2026-10-04"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": [
+            {
+              "date": "2026-10-17",
+              "value": 64.90093861572397
+            }
+          ]
+        },
+        "service_delivered": {
+          "mean": 0.9585758503711064,
+          "median": 0.9607206142941523,
+          "min": {
+            "value": 0.941272069143828,
+            "date": "2026-10-02"
+          },
+          "max": {
+            "value": 0.9712326157363307,
+            "date": "2026-10-12"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": [
+            {
+              "date": "2026-10-02",
+              "value": 0.941272069143828
+            },
+            {
+              "date": "2026-10-09",
+              "value": 0.9461475954790574
+            },
+            {
+              "date": "2026-10-11",
+              "value": 0.9674886763965778
+            }
+          ]
+        },
+        "ewt": {
+          "mean": 173.07482625041231,
+          "median": 152.9477345459706,
+          "min": {
+            "value": 114.77670488063887,
+            "date": "2026-10-11"
+          },
+          "max": {
+            "value": 387.2879927311837,
+            "date": "2026-10-25"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": [
+            {
+              "date": "2026-10-02",
+              "value": 289.48990834286377
+            },
+            {
+              "date": "2026-10-19",
+              "value": 237.95420477954372
+            },
+            {
+              "date": "2026-10-21",
+              "value": 248.87838019973924
+            },
+            {
+              "date": "2026-10-22",
+              "value": 231.9164988041947
+            },
+            {
+              "date": "2026-10-23",
+              "value": 244.8463333604323
+            },
+            {
+              "date": "2026-10-25",
+              "value": 387.2879927311837
+            }
+          ]
+        },
+        "swt": {
+          "mean": 439.9381363304055,
+          "median": 427.9202681911579,
+          "min": {
+            "value": 427.91401099863526,
+            "date": "2026-10-13"
+          },
+          "max": {
+            "value": 465.17236077625944,
+            "date": "2026-10-31"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": []
+        },
+        "bunching": {
+          "mean": 0.03810964784442955,
+          "median": 0.03984018094227483,
+          "min": {
+            "value": 0.024884931829468715,
+            "date": "2026-10-11"
+          },
+          "max": {
+            "value": 0.04570913033317882,
+            "date": "2026-10-28"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": [
+            {
+              "date": "2026-10-17",
+              "value": 0.03984018094227483
+            }
+          ]
+        }
+      },
+      "day_types": {
+        "weekday": {
+          "otp": {
+            "mean": 67.65850624477729,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "service_delivered": {
+            "mean": 0.9591488385811547,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "ewt": {
+            "mean": 171.92667074206398,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "swt": {
+            "mean": 429.6212156597851,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "bunching": {
+            "mean": 0.041202933651959074,
+            "n_days_included": 22,
+            "n_days": 22
+          }
+        },
+        "saturday": {
+          "otp": {
+            "mean": 67.6516766192166,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "service_delivered": {
+            "mean": 0.9608620357898788,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "ewt": {
+            "mean": 151.36037935628377,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "swt": {
+            "mean": 465.1723607762595,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "bunching": {
+            "mean": 0.03253271477869004,
+            "n_days_included": 5,
+            "n_days": 5
+          }
+        },
+        "sunday": {
+          "otp": {
+            "mean": 68.56718202787307,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "service_delivered": {
+            "mean": 0.9525666834423754,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "ewt": {
+            "mean": 206.53274016398893,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "swt": {
+            "mean": 465.1384194614997,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "bunching": {
+            "mean": 0.02806774223519155,
+            "n_days_included": 4,
+            "n_days": 4
+          }
+        }
+      },
+      "daily": [
+        {
+          "date": "2026-10-01",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.789906813506,
+          "service_delivered": 0.947418949855993,
+          "ewt": 152.957382761904,
+          "swt": 427.9202681911579,
+          "bunching": 0.045402982325869354
+        },
+        {
+          "date": "2026-10-02",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.05899147419615,
+          "service_delivered": 0.941272069143828,
+          "ewt": 289.48990834286377,
+          "swt": 427.96467931488445,
+          "bunching": 0.04507566449198963
+        },
+        {
+          "date": "2026-10-03",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.33078555441604,
+          "service_delivered": 0.9589186068885895,
+          "ewt": 139.19360279399348,
+          "swt": 465.17236077625944,
+          "bunching": 0.029526858769121308
+        },
+        {
+          "date": "2026-10-04",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 69.74445119553951,
+          "service_delivered": 0.9469552088575742,
+          "ewt": 150.61337026540917,
+          "swt": 465.1384194614997,
+          "bunching": 0.025443842663265093
+        },
+        {
+          "date": "2026-10-05",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.19535552755936,
+          "service_delivered": 0.9641828520788716,
+          "ewt": 168.98273813731907,
+          "swt": 427.9202681911579,
+          "bunching": 0.03954147569494489
+        },
+        {
+          "date": "2026-10-06",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.42097139731166,
+          "service_delivered": 0.9513329887009822,
+          "ewt": 163.04684185487065,
+          "swt": 427.9202681911579,
+          "bunching": 0.03964460188014558
+        },
+        {
+          "date": "2026-10-07",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.43407768343256,
+          "service_delivered": 0.9644122858830478,
+          "ewt": 134.41311855063418,
+          "swt": 427.9202681911579,
+          "bunching": 0.04009170853304816
+        },
+        {
+          "date": "2026-10-08",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.89450719930188,
+          "service_delivered": 0.9553947271250277,
+          "ewt": 155.78471304453262,
+          "swt": 427.9202681911579,
+          "bunching": 0.04122560514738658
+        },
+        {
+          "date": "2026-10-09",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.71899141950944,
+          "service_delivered": 0.9461475954790574,
+          "ewt": 152.9477345459706,
+          "swt": 427.96467931488445,
+          "bunching": 0.03926068765354691
+        },
+        {
+          "date": "2026-10-10",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.97723239186654,
+          "service_delivered": 0.967000192418703,
+          "ewt": 131.96701111714924,
+          "swt": 465.17236077625944,
+          "bunching": 0.02919331671925065
+        },
+        {
+          "date": "2026-10-11",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.66169864813718,
+          "service_delivered": 0.9674886763965778,
+          "ewt": 114.77670488063887,
+          "swt": 465.1384194614997,
+          "bunching": 0.024884931829468715
+        },
+        {
+          "date": "2026-10-12",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 66.17973050387307,
+          "service_delivered": 0.9712326157363307,
+          "ewt": 142.79690483276954,
+          "swt": 465.1313949804294,
+          "bunching": 0.03601324480951543
+        },
+        {
+          "date": "2026-10-13",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.14322024107521,
+          "service_delivered": 0.9686480877557071,
+          "ewt": 124.59283153181627,
+          "swt": 427.91401099863526,
+          "bunching": 0.04016965924598868
+        },
+        {
+          "date": "2026-10-14",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.13003745895404,
+          "service_delivered": 0.9580626107501476,
+          "ewt": 220.19655942965073,
+          "swt": 427.9202681911579,
+          "bunching": 0.04287097728199667
+        },
+        {
+          "date": "2026-10-15",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.30199027614783,
+          "service_delivered": 0.9632966546045344,
+          "ewt": 144.47674140984782,
+          "swt": 427.9202681911579,
+          "bunching": 0.042609334789275415
+        },
+        {
+          "date": "2026-10-16",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 66.03831668261992,
+          "service_delivered": 0.9627687079855212,
+          "ewt": 145.10406720575435,
+          "swt": 427.96467931488445,
+          "bunching": 0.04139583869864198
+        },
+        {
+          "date": "2026-10-17",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 64.90093861572397,
+          "service_delivered": 0.9555512795843756,
+          "ewt": 181.77566808944016,
+          "swt": 465.17236077625944,
+          "bunching": 0.03984018094227483
+        },
+        {
+          "date": "2026-10-18",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.57936238765474,
+          "service_delivered": 0.9457473578258682,
+          "ewt": 173.452892778724,
+          "swt": 465.1384194614997,
+          "bunching": 0.03132997670556037
+        },
+        {
+          "date": "2026-10-19",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.9531274221051,
+          "service_delivered": 0.962262757551141,
+          "ewt": 237.95420477954372,
+          "swt": 427.9202681911579,
+          "bunching": 0.039058411905207854
+        },
+        {
+          "date": "2026-10-20",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.52892529895946,
+          "service_delivered": 0.957093272284174,
+          "ewt": 133.42134280588346,
+          "swt": 427.9202681911579,
+          "bunching": 0.04083525876666834
+        },
+        {
+          "date": "2026-10-21",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.73720053566407,
+          "service_delivered": 0.9607206142941523,
+          "ewt": 248.87838019973924,
+          "swt": 427.9202681911579,
+          "bunching": 0.04127681934630761
+        },
+        {
+          "date": "2026-10-22",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.76965511920376,
+          "service_delivered": 0.957831770179455,
+          "ewt": 231.9164988041947,
+          "swt": 427.9202681911579,
+          "bunching": 0.0424622014391545
+        },
+        {
+          "date": "2026-10-23",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.2872340425532,
+          "service_delivered": 0.9621038634852627,
+          "ewt": 244.8463333604323,
+          "swt": 427.96467931488445,
+          "bunching": 0.043942942549634434
+        },
+        {
+          "date": "2026-10-24",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 0.9951388888888889,
+          "otp": 69.31611018155482,
+          "service_delivered": 0.9698864729651722,
+          "ewt": 143.8224970491542,
+          "swt": 465.17236077625944,
+          "bunching": 0.03127909640874148
+        },
+        {
+          "date": "2026-10-25",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.28321588016087,
+          "service_delivered": 0.9500754906894816,
+          "ewt": 387.2879927311837,
+          "swt": 465.1384194614997,
+          "bunching": 0.030612217742472025
+        },
+        {
+          "date": "2026-10-26",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.42241295230664,
+          "service_delivered": 0.9617458090244443,
+          "ewt": 131.93954241405243,
+          "swt": 427.9202681911579,
+          "bunching": 0.03777123163711277
+        },
+        {
+          "date": "2026-10-27",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 68.12261239550081,
+          "service_delivered": 0.9621889077616129,
+          "ewt": 124.5766670200976,
+          "swt": 427.9202681911579,
+          "bunching": 0.04082414672892697
+        },
+        {
+          "date": "2026-10-28",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.34801948739674,
+          "service_delivered": 0.9652244536326049,
+          "ewt": 153.86958216837638,
+          "swt": 427.9202681911579,
+          "bunching": 0.04570913033317882
+        },
+        {
+          "date": "2026-10-29",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.32683347797209,
+          "service_delivered": 0.960785761760579,
+          "ewt": 144.2473632774363,
+          "swt": 427.9202681911579,
+          "bunching": 0.0442721582412161
+        },
+        {
+          "date": "2026-10-30",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 67.68501997595128,
+          "service_delivered": 0.95714709371293,
+          "ewt": 135.94729984771783,
+          "swt": 427.9585984093023,
+          "bunching": 0.03701045884334294
+        },
+        {
+          "date": "2026-10-31",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 1.0,
+          "otp": 66.73331635252165,
+          "service_delivered": 0.9529536270925534,
+          "ewt": 160.04311773168183,
+          "swt": 465.17236077625944,
+          "bunching": 0.03282412105406194
+        }
+      ],
+      "pooled_crosscheck": {
+        "pooled": {
+          "otp": 67.75899293331317,
+          "service_delivered": 0.9586066453968426,
+          "ewt": 172.89,
+          "swt": 438.5,
+          "bunching": 0.0387
+        },
+        "consistency": {
+          "dates_checked": 31,
+          "dates_matching": 31,
+          "mismatches": [],
+          "tolerance": {
+            "otp": 0.01,
+            "service_delivered": 0.0001,
+            "ewt": 0.1,
+            "swt": 0.1,
+            "bunching": 0.0001
+          }
+        }
+      },
+      "gtfs_feed_versions": [
+        {
+          "snapshot_id": 22,
+          "feed_version": "S1000251",
+          "loaded_at_utc": "2026-11-24T18:17:19",
+          "reasons": [
+            "covers"
+          ],
+          "dates": [
+            "2026-10-01",
+            "2026-10-02",
+            "2026-10-03",
+            "2026-10-04",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08",
+            "2026-10-09",
+            "2026-10-10",
+            "2026-10-11",
+            "2026-10-12",
+            "2026-10-13",
+            "2026-10-14",
+            "2026-10-15",
+            "2026-10-16",
+            "2026-10-17",
+            "2026-10-18",
+            "2026-10-19",
+            "2026-10-20",
+            "2026-10-21",
+            "2026-10-22",
+            "2026-10-23",
+            "2026-10-24",
+            "2026-10-25",
+            "2026-10-26",
+            "2026-10-27",
+            "2026-10-28",
+            "2026-10-29",
+            "2026-10-30",
+            "2026-10-31"
+          ]
+        }
+      ],
+      "schedule_exception_dates": [
+        {
+          "date": "2026-10-12",
+          "day_type": "weekday",
+          "services_removed": 1,
+          "services_added": 1
+        },
+        {
+          "date": "2026-10-13",
+          "day_type": "weekday",
+          "services_removed": 1,
+          "services_added": 1
+        },
+        {
+          "date": "2026-10-30",
+          "day_type": "weekday",
+          "services_removed": 1,
+          "services_added": 1
+        }
+      ],
+      "aggregates_computed_at_utc": {
+        "min": "2026-11-24T20:33:04",
+        "max": "2026-11-25T10:20:52"
+      },
+      "routes": {
+        "n_routes_with_data": 126,
+        "frequent_designation_source": "config/frequent_routes.yaml",
+        "rankings": {
+          "frequent": {
+            "metric": "ewt",
+            "direction": "lower_is_better",
+            "floor": {
+              "min_observed_headways": 1000,
+              "min_coverage_ratio": 0.5
+            },
+            "n_designated": 43,
+            "n_ranked": 43,
+            "below_floor": [],
+            "no_data": [],
+            "best": [
+              {
+                "route_id": "A40",
+                "route_name": "A40",
+                "route_long_name": "Columbia Pike-National Landing",
+                "in_current_gtfs": true,
+                "value": 75.3,
+                "median_day": 67.58,
+                "otp_pct": 82.17,
+                "otp_n": 69984,
+                "service_delivered_ratio": 0.9769,
+                "delivered_trips": 6653,
+                "scheduled_trips": 6810,
+                "ewt_seconds": 75.3,
+                "ewt_n_observed": 146365,
+                "ewt_coverage_ratio": 0.9353,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "D6X",
+                "route_name": "D6X",
+                "route_long_name": "16 St Limited",
+                "in_current_gtfs": true,
+                "value": 81.9,
+                "median_day": 82.55,
+                "otp_pct": 73.72,
+                "otp_n": 60367,
+                "service_delivered_ratio": 0.9689,
+                "delivered_trips": 5705,
+                "scheduled_trips": 5888,
+                "ewt_seconds": 81.9,
+                "ewt_n_observed": 123729,
+                "ewt_coverage_ratio": 0.9246,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "A58",
+                "route_name": "A58",
+                "route_long_name": "Wilson Blvd-Farragut Sq",
+                "in_current_gtfs": true,
+                "value": 87.82,
+                "median_day": 81.48,
+                "otp_pct": 73.1,
+                "otp_n": 78088,
+                "service_delivered_ratio": 0.9886,
+                "delivered_trips": 4336,
+                "scheduled_trips": 4386,
+                "ewt_seconds": 87.82,
+                "ewt_n_observed": 112966,
+                "ewt_coverage_ratio": 0.9511,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "M70",
+                "route_name": "M70",
+                "route_long_name": "East West Hwy",
+                "in_current_gtfs": true,
+                "value": 91.53,
+                "median_day": 82.93,
+                "otp_pct": 74.38,
+                "otp_n": 75556,
+                "service_delivered_ratio": 0.9705,
+                "delivered_trips": 5720,
+                "scheduled_trips": 5894,
+                "ewt_seconds": 91.53,
+                "ewt_n_observed": 183788,
+                "ewt_coverage_ratio": 0.9297,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "A1X",
+                "route_name": "A1X",
+                "route_long_name": "Pentagon City-Braddock Rd",
+                "in_current_gtfs": true,
+                "value": 95.55,
+                "median_day": 76.43,
+                "otp_pct": 73.02,
+                "otp_n": 25546,
+                "service_delivered_ratio": 0.9506,
+                "delivered_trips": 4078,
+                "scheduled_trips": 4290,
+                "ewt_seconds": 95.55,
+                "ewt_n_observed": 47487,
+                "ewt_coverage_ratio": 0.8917,
+                "days_with_data": 31
+              }
+            ],
+            "worst": [
+              {
+                "route_id": "D50",
+                "route_name": "D50",
+                "route_long_name": "14 St",
+                "in_current_gtfs": true,
+                "value": 1868.87,
+                "median_day": 169.58,
+                "otp_pct": 62.62,
+                "otp_n": 103212,
+                "service_delivered_ratio": 0.9464,
+                "delivered_trips": 5443,
+                "scheduled_trips": 5751,
+                "ewt_seconds": 1868.87,
+                "ewt_n_observed": 83595,
+                "ewt_coverage_ratio": 0.9042,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "D10",
+                "route_name": "D10",
+                "route_long_name": "Pennsylvania Av",
+                "in_current_gtfs": true,
+                "value": 353.86,
+                "median_day": 155.93,
+                "otp_pct": 60.37,
+                "otp_n": 84010,
+                "service_delivered_ratio": 0.9595,
+                "delivered_trips": 4602,
+                "scheduled_trips": 4796,
+                "ewt_seconds": 353.86,
+                "ewt_n_observed": 158895,
+                "ewt_coverage_ratio": 0.9121,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "C53",
+                "route_name": "C53",
+                "route_long_name": "U St-Congress Hts",
+                "in_current_gtfs": true,
+                "value": 272.24,
+                "median_day": 170.41,
+                "otp_pct": 60.22,
+                "otp_n": 180776,
+                "service_delivered_ratio": 0.9609,
+                "delivered_trips": 7081,
+                "scheduled_trips": 7369,
+                "ewt_seconds": 272.24,
+                "ewt_n_observed": 316786,
+                "ewt_coverage_ratio": 0.9227,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "D70",
+                "route_name": "D70",
+                "route_long_name": "Connecticut Av",
+                "in_current_gtfs": true,
+                "value": 253.11,
+                "median_day": 305.17,
+                "otp_pct": 65.82,
+                "otp_n": 64660,
+                "service_delivered_ratio": 0.9707,
+                "delivered_trips": 3678,
+                "scheduled_trips": 3789,
+                "ewt_seconds": 253.11,
+                "ewt_n_observed": 88103,
+                "ewt_coverage_ratio": 0.9294,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "D36",
+                "route_name": "D36",
+                "route_long_name": "K St-Ivy City",
+                "in_current_gtfs": true,
+                "value": 230.44,
+                "median_day": 199.68,
+                "otp_pct": 56.32,
+                "otp_n": 50412,
+                "service_delivered_ratio": 0.9345,
+                "delivered_trips": 3141,
+                "scheduled_trips": 3361,
+                "ewt_seconds": 230.44,
+                "ewt_n_observed": 66080,
+                "ewt_coverage_ratio": 0.8928,
+                "days_with_data": 31
+              }
+            ]
+          },
+          "non_frequent": {
+            "metric": "otp",
+            "direction": "higher_is_better",
+            "floor": {
+              "min_otp_observations": 1000,
+              "min_delivered_trips": 300
+            },
+            "n_ranked": 81,
+            "below_floor": [
+              "F19",
+              "F83"
+            ],
+            "best": [
+              {
+                "route_id": "F44",
+                "route_name": "F44",
+                "route_long_name": "Columbia Pike-Pentagon",
+                "in_current_gtfs": true,
+                "value": 83.74,
+                "median_day": 83.82,
+                "otp_pct": 83.74,
+                "otp_n": 37906,
+                "service_delivered_ratio": 0.968,
+                "delivered_trips": 1996,
+                "scheduled_trips": 2062,
+                "ewt_seconds": null,
+                "ewt_n_observed": 0,
+                "ewt_coverage_ratio": null,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "P33",
+                "route_name": "P33",
+                "route_long_name": "Queens Chapel Rd",
+                "in_current_gtfs": true,
+                "value": 80.89,
+                "median_day": 81.25,
+                "otp_pct": 80.89,
+                "otp_n": 28550,
+                "service_delivered_ratio": 0.9403,
+                "delivered_trips": 2408,
+                "scheduled_trips": 2561,
+                "ewt_seconds": null,
+                "ewt_n_observed": 0,
+                "ewt_coverage_ratio": null,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "A28",
+                "route_name": "A28",
+                "route_long_name": "Pentagon-Holmes Run-Landmark",
+                "in_current_gtfs": true,
+                "value": 80.45,
+                "median_day": 79.84,
+                "otp_pct": 80.45,
+                "otp_n": 5304,
+                "service_delivered_ratio": 0.9562,
+                "delivered_trips": 502,
+                "scheduled_trips": 525,
+                "ewt_seconds": 109.61,
+                "ewt_n_observed": 6336,
+                "ewt_coverage_ratio": 0.9115,
+                "days_with_data": 21
+              },
+              {
+                "route_id": "A76",
+                "route_name": "A76",
+                "route_long_name": "Carlin Springs Rd",
+                "in_current_gtfs": true,
+                "value": 80.18,
+                "median_day": 80.87,
+                "otp_pct": 80.18,
+                "otp_n": 32337,
+                "service_delivered_ratio": 0.978,
+                "delivered_trips": 2001,
+                "scheduled_trips": 2046,
+                "ewt_seconds": 118.03,
+                "ewt_n_observed": 9232,
+                "ewt_coverage_ratio": 0.9275,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "A27",
+                "route_name": "A27",
+                "route_long_name": "Pentagon-Shirlington-Van Dorn St",
+                "in_current_gtfs": true,
+                "value": 79.78,
+                "median_day": 80.36,
+                "otp_pct": 79.78,
+                "otp_n": 41047,
+                "service_delivered_ratio": 0.9846,
+                "delivered_trips": 3448,
+                "scheduled_trips": 3502,
+                "ewt_seconds": 76.78,
+                "ewt_n_observed": 24310,
+                "ewt_coverage_ratio": 0.9321,
+                "days_with_data": 31
+              }
+            ],
+            "worst": [
+              {
+                "route_id": "A90",
+                "route_name": "A90",
+                "route_long_name": "Pentagon-Mark Center",
+                "in_current_gtfs": true,
+                "value": 44.52,
+                "median_day": 44.44,
+                "otp_pct": 44.52,
+                "otp_n": 3201,
+                "service_delivered_ratio": 0.9801,
+                "delivered_trips": 2614,
+                "scheduled_trips": 2667,
+                "ewt_seconds": 42.96,
+                "ewt_n_observed": 3690,
+                "ewt_coverage_ratio": 0.5857,
+                "days_with_data": 21
+              },
+              {
+                "route_id": "A29",
+                "route_name": "A29",
+                "route_long_name": "Metro Ctr-Alexandria W",
+                "in_current_gtfs": true,
+                "value": 56.21,
+                "median_day": 55.45,
+                "otp_pct": 56.21,
+                "otp_n": 4586,
+                "service_delivered_ratio": 0.9664,
+                "delivered_trips": 345,
+                "scheduled_trips": 357,
+                "ewt_seconds": null,
+                "ewt_n_observed": 0,
+                "ewt_coverage_ratio": null,
+                "days_with_data": 21
+              },
+              {
+                "route_id": "C71",
+                "route_name": "C71",
+                "route_long_name": "18 St",
+                "in_current_gtfs": true,
+                "value": 58.89,
+                "median_day": 58.33,
+                "otp_pct": 58.89,
+                "otp_n": 43672,
+                "service_delivered_ratio": 0.9648,
+                "delivered_trips": 2497,
+                "scheduled_trips": 2588,
+                "ewt_seconds": null,
+                "ewt_n_observed": 0,
+                "ewt_coverage_ratio": null,
+                "days_with_data": 31
+              },
+              {
+                "route_id": "P15",
+                "route_name": "P15",
+                "route_long_name": "Riggs Rd-Adelphi",
+                "in_current_gtfs": true,
+                "value": 59.08,
+                "median_day": 60.23,
+                "otp_pct": 59.08,
+                "otp_n": 9682,
+                "service_delivered_ratio": 0.941,
+                "delivered_trips": 494,
+                "scheduled_trips": 525,
+                "ewt_seconds": null,
+                "ewt_n_observed": 0,
+                "ewt_coverage_ratio": null,
+                "days_with_data": 21
+              },
+              {
+                "route_id": "C27",
+                "route_name": "C27",
+                "route_long_name": "Naylor Rd-Shepherd Pkwy",
+                "in_current_gtfs": true,
+                "value": 59.42,
+                "median_day": 60.11,
+                "otp_pct": 59.42,
+                "otp_n": 56773,
+                "service_delivered_ratio": 0.9712,
+                "delivered_trips": 3074,
+                "scheduled_trips": 3165,
+                "ewt_seconds": 140.96,
+                "ewt_n_observed": 51358,
+                "ewt_coverage_ratio": 0.9367,
+                "days_with_data": 31
+              }
+            ]
+          }
+        }
+      }
+    },
+    "sfmta": {
+      "agency": "sfmta",
+      "display_name": "SFMTA (Muni)",
+      "timezone": "America/Los_Angeles",
+      "polling": {
+        "trip_updates_sec": 120,
+        "vehicle_positions_sec": 180
+      },
+      "completeness_threshold": 0.5333333333333333,
+      "n_days": 31,
+      "n_days_complete": 31,
+      "metrics": {
+        "otp": {
+          "mean": 65.80402360391928,
+          "median": 66.66008457981603,
+          "min": {
+            "value": 57.94508634612996,
+            "date": "2026-10-31"
+          },
+          "max": {
+            "value": 68.79742914666254,
+            "date": "2026-10-12"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": []
+        },
+        "service_delivered": {
+          "mean": 0.9334699023943908,
+          "median": 0.9426281375237292,
+          "min": {
+            "value": 0.7611263446530268,
+            "date": "2026-10-21"
+          },
+          "max": {
+            "value": 0.9646699008647964,
+            "date": "2026-10-22"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": [
+            {
+              "date": "2026-10-21",
+              "value": 0.7611263446530268
+            },
+            {
+              "date": "2026-10-30",
+              "value": 0.913414891373128
+            }
+          ]
+        },
+        "ewt": {
+          "mean": 220.6178146084559,
+          "median": 151.33479883099693,
+          "min": {
+            "value": 88.54302307773793,
+            "date": "2026-10-12"
+          },
+          "max": {
+            "value": 1929.0405348121308,
+            "date": "2026-10-21"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": [
+            {
+              "date": "2026-10-17",
+              "value": 370.94926322442353
+            },
+            {
+              "date": "2026-10-21",
+              "value": 1929.0405348121308
+            }
+          ]
+        },
+        "swt": {
+          "mean": 330.9948038642592,
+          "median": 329.44949801258326,
+          "min": {
+            "value": 329.44949801258326,
+            "date": "2026-10-01"
+          },
+          "max": {
+            "value": 334.2399461527786,
+            "date": "2026-10-31"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": []
+        },
+        "bunching": {
+          "mean": 0.05920554219267079,
+          "median": 0.06126266890412447,
+          "min": {
+            "value": 0.03482226704791904,
+            "date": "2026-10-25"
+          },
+          "max": {
+            "value": 0.07702188427026668,
+            "date": "2026-10-30"
+          },
+          "n_days": 31,
+          "n_days_included": 31,
+          "coverage": 1.0,
+          "excluded": [],
+          "flagged_days": [
+            {
+              "date": "2026-10-12",
+              "value": 0.04215730264407821
+            }
+          ]
+        }
+      },
+      "day_types": {
+        "weekday": {
+          "otp": {
+            "mean": 67.23983091210077,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "service_delivered": {
+            "mean": 0.9390906430155282,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "ewt": {
+            "mean": 238.17401622137433,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "swt": {
+            "mean": 329.66724565531945,
+            "n_days_included": 22,
+            "n_days": 22
+          },
+          "bunching": {
+            "mean": 0.062081976509674335,
+            "n_days_included": 22,
+            "n_days": 22
+          }
+        },
+        "saturday": {
+          "otp": {
+            "mean": 61.889492868191084,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "service_delivered": {
+            "mean": 0.9186617478692278,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "ewt": {
+            "mean": 195.3337860746905,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "swt": {
+            "mean": 334.2399461527786,
+            "n_days_included": 5,
+            "n_days": 5
+          },
+          "bunching": {
+            "mean": 0.05885717034055593,
+            "n_days_included": 5,
+            "n_days": 5
+          }
+        },
+        "sunday": {
+          "otp": {
+            "mean": 62.800246828581365,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "service_delivered": {
+            "mean": 0.9210660221345885,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "ewt": {
+            "mean": 155.66374140461122,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "swt": {
+            "mean": 334.2399461527786,
+            "n_days_included": 4,
+            "n_days": 4
+          },
+          "bunching": {
+            "mean": 0.04382061826429488,
+            "n_days_included": 4,
+            "n_days": 4
+          }
+        }
+      },
+      "daily": [
+        {
+          "date": "2026-10-01",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6597222222222222,
+          "otp": 67.69474037278985,
+          "service_delivered": 0.9528580468255642,
+          "ewt": 156.30738507611716,
+          "swt": 329.44949801258326,
+          "bunching": 0.0671319086168329
+        },
+        {
+          "date": "2026-10-02",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.65625,
+          "otp": 66.2759286058852,
+          "service_delivered": 0.9495886943682768,
+          "ewt": 151.33479883099693,
+          "swt": 329.44949801258326,
+          "bunching": 0.07252734088731044
+        },
+        {
+          "date": "2026-10-03",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6638888888888889,
+          "otp": 63.8918335100106,
+          "service_delivered": 0.9327057626256201,
+          "ewt": 151.07937855449586,
+          "swt": 334.2399461527786,
+          "bunching": 0.059192457127545554
+        },
+        {
+          "date": "2026-10-04",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6645833333333333,
+          "otp": 64.46950046021254,
+          "service_delivered": 0.9168044778018064,
+          "ewt": 221.94026799426632,
+          "swt": 334.2399461527786,
+          "bunching": 0.04170813238408737
+        },
+        {
+          "date": "2026-10-05",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6555555555555556,
+          "otp": 67.55509664096027,
+          "service_delivered": 0.9521198059481122,
+          "ewt": 196.13526702409092,
+          "swt": 329.44949801258326,
+          "bunching": 0.05711173358232182
+        },
+        {
+          "date": "2026-10-06",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6576388888888889,
+          "otp": 66.10569158214355,
+          "service_delivered": 0.9479012866483865,
+          "ewt": 173.2258251502094,
+          "swt": 329.44949801258326,
+          "bunching": 0.06654622846960997
+        },
+        {
+          "date": "2026-10-07",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6381944444444444,
+          "otp": 66.67930000329565,
+          "service_delivered": 0.9547563805104409,
+          "ewt": 131.60905931419256,
+          "swt": 329.44949801258326,
+          "bunching": 0.06426822941149843
+        },
+        {
+          "date": "2026-10-08",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6277777777777778,
+          "otp": 66.51525702709546,
+          "service_delivered": 0.957814807002742,
+          "ewt": 214.1032437617721,
+          "swt": 329.44949801258326,
+          "bunching": 0.06460097866618611
+        },
+        {
+          "date": "2026-10-09",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6652777777777777,
+          "otp": 65.33952949878596,
+          "service_delivered": 0.9488504534908248,
+          "ewt": 217.2966992093303,
+          "swt": 329.44949801258326,
+          "bunching": 0.0701796398750515
+        },
+        {
+          "date": "2026-10-10",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6659722222222222,
+          "otp": 60.07381546134663,
+          "service_delivered": 0.9211296272738837,
+          "ewt": 136.18467960730771,
+          "swt": 334.2399461527786,
+          "bunching": 0.06566644284035589
+        },
+        {
+          "date": "2026-10-11",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6659722222222222,
+          "otp": 59.33758459135867,
+          "service_delivered": 0.8949243098842387,
+          "ewt": 143.40793888022904,
+          "swt": 334.2399461527786,
+          "bunching": 0.05686868557744342
+        },
+        {
+          "date": "2026-10-12",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6659722222222222,
+          "otp": 68.79742914666254,
+          "service_delivered": 0.9562396641648645,
+          "ewt": 88.54302307773793,
+          "swt": 334.2399461527786,
+          "bunching": 0.04215730264407821
+        },
+        {
+          "date": "2026-10-13",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6638888888888889,
+          "otp": 66.55016012875326,
+          "service_delivered": 0.9419953596287703,
+          "ewt": 163.16340598087112,
+          "swt": 329.44949801258326,
+          "bunching": 0.06865960592705006
+        },
+        {
+          "date": "2026-10-14",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6666666666666666,
+          "otp": 68.74288425047438,
+          "service_delivered": 0.9521198059481122,
+          "ewt": 164.34170044286395,
+          "swt": 329.44949801258326,
+          "bunching": 0.06179932246009849
+        },
+        {
+          "date": "2026-10-15",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6618055555555555,
+          "otp": 67.93317208348684,
+          "service_delivered": 0.9426281375237292,
+          "ewt": 177.8158850260017,
+          "swt": 329.44949801258326,
+          "bunching": 0.06702768511872088
+        },
+        {
+          "date": "2026-10-16",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6625,
+          "otp": 66.95311370608927,
+          "service_delivered": 0.9368276734866062,
+          "ewt": 151.6475053887761,
+          "swt": 329.44949801258326,
+          "bunching": 0.0667908224607821
+        },
+        {
+          "date": "2026-10-17",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6604166666666667,
+          "otp": 62.04435118900683,
+          "service_delivered": 0.9169316880803969,
+          "ewt": 370.94926322442353,
+          "swt": 334.2399461527786,
+          "bunching": 0.06482525366403608
+        },
+        {
+          "date": "2026-10-18",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6638888888888889,
+          "otp": 65.29694623118716,
+          "service_delivered": 0.9409744307340033,
+          "ewt": 146.1998235561988,
+          "swt": 334.2399461527786,
+          "bunching": 0.041883388047729696
+        },
+        {
+          "date": "2026-10-19",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6625,
+          "otp": 66.66008457981603,
+          "service_delivered": 0.9516979540181396,
+          "ewt": 141.81452118319413,
+          "swt": 329.44949801258326,
+          "bunching": 0.05334918044419215
+        },
+        {
+          "date": "2026-10-20",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6527777777777778,
+          "otp": 68.38363013587441,
+          "service_delivered": 0.9363003585741405,
+          "ewt": 122.65141295320842,
+          "swt": 329.44949801258326,
+          "bunching": 0.05465339435223654
+        },
+        {
+          "date": "2026-10-21",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.5638888888888889,
+          "otp": 67.27847310253709,
+          "service_delivered": 0.7611263446530268,
+          "ewt": 1929.0405348121308,
+          "swt": 329.44949801258326,
+          "bunching": 0.04660681461451914
+        },
+        {
+          "date": "2026-10-22",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6444444444444445,
+          "otp": 67.43899511960957,
+          "service_delivered": 0.9646699008647964,
+          "ewt": 150.73630884700276,
+          "swt": 329.44949801258326,
+          "bunching": 0.057303448754423704
+        },
+        {
+          "date": "2026-10-23",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.66875,
+          "otp": 67.37918961889926,
+          "service_delivered": 0.9469521198059481,
+          "ewt": 150.41338310545643,
+          "swt": 329.44949801258326,
+          "bunching": 0.06685945674257923
+        },
+        {
+          "date": "2026-10-24",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 0.66875,
+          "otp": 65.49237783446142,
+          "service_delivered": 0.9299071364966289,
+          "ewt": 103.48555797378049,
+          "swt": 334.2399461527786,
+          "bunching": 0.04993396955124212
+        },
+        {
+          "date": "2026-10-25",
+          "day_type": "sunday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6680555555555555,
+          "otp": 62.09695603156709,
+          "service_delivered": 0.9315608701183056,
+          "ewt": 111.10693518775071,
+          "swt": 334.2399461527786,
+          "bunching": 0.03482226704791904
+        },
+        {
+          "date": "2026-10-26",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6736111111111112,
+          "otp": 67.7379440591319,
+          "service_delivered": 0.9355621176966885,
+          "ewt": 126.25747992504205,
+          "swt": 329.44949801258326,
+          "bunching": 0.05561655420410977
+        },
+        {
+          "date": "2026-10-27",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6263888888888889,
+          "otp": 67.7307302638985,
+          "service_delivered": 0.9566547141953174,
+          "ewt": 184.50129477803807,
+          "swt": 329.44949801258326,
+          "bunching": 0.06126266890412447
+        },
+        {
+          "date": "2026-10-28",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6375,
+          "otp": 68.56303674616096,
+          "service_delivered": 0.9453701750685509,
+          "ewt": 139.84269063575823,
+          "swt": 329.44949801258326,
+          "bunching": 0.05954339561878225
+        },
+        {
+          "date": "2026-10-29",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6402777777777777,
+          "otp": 67.79827876401284,
+          "service_delivered": 0.9545454545454546,
+          "ewt": 140.5817265047666,
+          "swt": 329.44949801258326,
+          "bunching": 0.06478588718806054
+        },
+        {
+          "date": "2026-10-30",
+          "day_type": "weekday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6381944444444444,
+          "otp": 65.16361462985407,
+          "service_delivered": 0.913414891373128,
+          "ewt": 168.46520584267807,
+          "swt": 329.44949801258326,
+          "bunching": 0.07702188427026668
+        },
+        {
+          "date": "2026-10-31",
+          "day_type": "saturday",
+          "data_quality": "complete",
+          "coverage_pct": 0.6506944444444445,
+          "otp": 57.94508634612996,
+          "service_delivered": 0.8926345248696095,
+          "ewt": 214.9700510134448,
+          "swt": 334.2399461527786,
+          "bunching": 0.054667728519600035
+        }
+      ],
+      "pooled_crosscheck": {
+        "pooled": {
+          "otp": 66.02764269976848,
+          "service_delivered": 0.9340587328791785,
+          "ewt": 225.33,
+          "swt": 330.7,
+          "bunching": 0.0597
+        },
+        "consistency": {
+          "dates_checked": 31,
+          "dates_matching": 31,
+          "mismatches": [],
+          "tolerance": {
+            "otp": 0.01,
+            "service_delivered": 0.0001,
+            "ewt": 0.1,
+            "swt": 0.1,
+            "bunching": 0.0001
+          }
+        }
+      },
+      "gtfs_feed_versions": [
+        {
+          "snapshot_id": 5,
+          "feed_version": "20260829",
+          "loaded_at_utc": "2026-11-24T19:05:26",
+          "reasons": [
+            "covers"
+          ],
+          "dates": [
+            "2026-10-01",
+            "2026-10-02",
+            "2026-10-03",
+            "2026-10-04",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08",
+            "2026-10-09",
+            "2026-10-10",
+            "2026-10-11",
+            "2026-10-12",
+            "2026-10-13",
+            "2026-10-14",
+            "2026-10-15",
+            "2026-10-16",
+            "2026-10-17",
+            "2026-10-18",
+            "2026-10-19",
+            "2026-10-20",
+            "2026-10-21",
+            "2026-10-22",
+            "2026-10-23",
+            "2026-10-24",
+            "2026-10-25",
+            "2026-10-26",
+            "2026-10-27",
+            "2026-10-28",
+            "2026-10-29",
+            "2026-10-30",
+            "2026-10-31"
+          ]
+        }
+      ],
+      "schedule_exception_dates": [],
+      "aggregates_computed_at_utc": {
+        "min": "2026-11-24T21:10:48",
+        "max": "2026-11-25T10:51:30"
+      }
+    }
+  },
+  "caveats": [
+    "Different networks. WMATA's GTFS feed is bus-only. SFMTA's feed also carries Muni Metro light rail and cable car. OTP and service delivered pool every route in each feed (so Muni's include rail and cable car); EWT, SWT and bunching are restricted to bus routes (GTFS route_type 3) for both agencies.",
+    "One OTP window for both. Both agencies are measured on the same -2/+7 minute window at every observed stop. Neither agency publishes OTP this way (WMATA's scorecard uses timepoints; SFMTA publishes against its own standard), so these figures do not match either agency's official reporting.",
+    "Frequent-service scope differs. WMATA's per-route EWT gate uses WMATA's published frequent-route list (15 min for high-frequency and undesignated routes, 20 min for medium-frequency). SFMTA has no equivalent list, so every Muni route uses the 15-minute per-cell-hour gate. System EWT and SWT pool only cell-hours that pass the gate.",
+    "Feed semantics differ. Muni real-time data comes through the 511.org regional aggregator, which has a known duplicate stop_sequence artifact affecting per-stop matching; treat Muni figures as directionally reliable rather than exact. Polling cadence and completeness thresholds differ by agency (WMATA Metrobus: trip updates every 30 s, vehicle positions every 60 s, 'complete' at coverage >= 0.800; SFMTA (Muni): trip updates every 120 s, vehicle positions every 180 s, 'complete' at coverage >= 0.533).",
+    "No ridership weighting. Neither dataset carries passenger counts; system figures weight observations (stops, trips, headways) within a day and days equally across the period, not riders.",
+    "Service dates are agency-local (Eastern for WMATA, Pacific for SFMTA)."
+  ]
+}
