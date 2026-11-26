@@ -64,13 +64,33 @@ def open_read_only_session(db_url: str) -> Session:
     return sessionmaker(bind=engine)()
 
 
-# Files whose content determines the report, hashed into the provenance stamp.
-SOURCE_FILES = (
-    "src/scorecard.py",
-    "scripts/generate_scorecard.py",
+# Config files read while generating (modules are discovered from sys.modules).
+CONFIG_FILES = (
     "config/scorecard_annotations.yaml",
     "config/frequent_routes.yaml",
+    "config/agencies/wmata.yaml",
+    "config/agencies/sfmta.yaml",
 )
+
+
+def _source_files() -> list[str]:
+    """Repo-relative paths of every repository module currently loaded, plus `CONFIG_FILES`.
+
+    Called after the scorecard is built, so every module that computed a
+    number (``src/``, ``api/``, this script) has been imported.
+    """
+    paths = set(CONFIG_FILES)
+    for module in list(sys.modules.values()):
+        f = getattr(module, "__file__", None)
+        if not f:
+            continue
+        try:
+            rel = Path(f).resolve().relative_to(REPO_ROOT)
+        except ValueError:
+            continue
+        if rel.parts and rel.parts[0] in ("src", "api", "scripts", "pipelines"):
+            paths.add(rel.as_posix())
+    return sorted(p for p in paths if (REPO_ROOT / p).exists())
 
 
 def _git(*args: str) -> str | None:
@@ -88,9 +108,11 @@ def build_provenance(out_dir: Path) -> dict:
 
     ``git_dirty_paths`` lists paths with uncommitted changes, ignoring the
     output directory (whose files are being regenerated); None when git is
-    unavailable. ``source_sha256`` hashes `SOURCE_FILES` so the generating
-    code stays identifiable even if the commit later becomes unreachable
-    (e.g. a squash merge deletes the branch).
+    unavailable. ``source_sha256`` hashes every loaded repository module and
+    the config files read (`_source_files`); ``source_digest`` is the sha256
+    of the sorted ``path:hash`` lines, so the generating code stays
+    identifiable if the commit becomes unreachable (e.g. after a squash
+    merge). Library versions and database contents are not covered.
     """
     commit = (_git("rev-parse", "HEAD") or "").strip() or None
     porcelain = _git("status", "--porcelain")
@@ -106,12 +128,18 @@ def build_provenance(out_dir: Path) -> dict:
             if out_rel and (path + "/").startswith(out_rel):
                 continue
             dirty.append(path)
-    hashes = {}
-    for rel in SOURCE_FILES:
-        f = REPO_ROOT / rel
-        if f.exists():
-            hashes[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
-    return {"git_commit": commit, "git_dirty_paths": dirty, "source_sha256": hashes}
+    hashes = {
+        rel: hashlib.sha256((REPO_ROOT / rel).read_bytes()).hexdigest() for rel in _source_files()
+    }
+    digest = hashlib.sha256(
+        "".join(f"{rel}:{h}\n" for rel, h in sorted(hashes.items())).encode()
+    ).hexdigest()
+    return {
+        "git_commit": commit,
+        "git_dirty_paths": dirty,
+        "source_sha256": hashes,
+        "source_digest": digest,
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -166,13 +194,13 @@ def main(argv: list[str] | None = None) -> int:
             args.end,
             subject=args.agency,
             generated_at_utc=utcnow_naive(),
-            provenance=build_provenance(args.out),
         )
     finally:
         for session in sessions.values():
             session.rollback()
             session.close()
 
+    scorecard["provenance"] = build_provenance(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
     stem = f"scorecard_{args.agency}_{args.start}_{args.end}"
     json_path = args.out / f"{stem}.json"

@@ -69,6 +69,7 @@ from api.aggregations import (
     _reduce_otp_split,
     _reduce_service_delivered,
 )
+from src.agency_config import CONFIG_DIR as AGENCY_CONFIG_DIR
 from src.agency_config import load_agency_config
 from src.data_completeness import agency_coverage_threshold
 from src.ewt import _day_type_for, bus_route_ids
@@ -78,7 +79,7 @@ from src.frequent_routes import (
     load_frequent_route_ids,
 )
 from src.gtfs_calendar import scheduled_service_ids_for_date
-from src.gtfs_versioning import resolve_gtfs_snapshot_for_date
+from src.gtfs_versioning import REASON_COVERS, resolve_gtfs_snapshot_for_date
 from src.models import (
     GTFSSnapshot,
     Route,
@@ -562,16 +563,21 @@ def gtfs_snapshots_for_period(
     dates: list[date_type],
     rows: dict[str, dict],
     tz_name: str,
-) -> tuple[dict[str, int | None], list[dict]]:
-    """Resolve the GTFS snapshot each date's aggregates were derived against.
+) -> tuple[dict[str, int | None], list[dict], dict[str, str]]:
+    """Resolve each date's GTFS snapshot with the pipelines' rule over the retained snapshots.
 
-    Uses the derivation pipelines' own rule
-    (``resolve_gtfs_snapshot_for_date``), considering only snapshots loaded
-    before the date's ``system_metrics_daily.computed_at`` -- a snapshot
-    loaded afterwards cannot have been used. Returns
-    ``({iso_date: snapshot_id}, feed_versions)`` where ``feed_versions``
-    lists each distinct snapshot with its ``feed_version``, load time,
-    resolution reasons and the dates it served.
+    Uses ``resolve_gtfs_snapshot_for_date`` over every snapshot still in the
+    database -- what a re-derivation today would use. Snapshots loaded after
+    a date's aggregates were computed are NOT excluded: the snapshot de-dup
+    (``scripts/dedup_gtfs_snapshots.py``) keeps the newest of a run of
+    content-identical loads and proves no date's resolved content changes,
+    so the load actually used may be gone while an identical later load
+    remains. Excluding by load time would then fall back to an older feed
+    that never covered the date. Each feed-version entry instead lists the
+    dates whose aggregates were computed before that snapshot was loaded
+    (``dates_computed_before_load``), so the report can say so. Returns
+    ``({iso_date: snapshot_id}, feed_versions, {iso_date: reason})``, where
+    ``reason`` is ``covers`` or a fallback.
     """
     loaded = {
         sid: (loaded_at, feed_version)
@@ -580,17 +586,14 @@ def gtfs_snapshots_for_period(
         ).all()
     }
     by_date: dict[str, int | None] = {}
+    reason_by_date: dict[str, str] = {}
     grouped: dict[int | None, dict] = {}
     for d in dates:
         iso = d.isoformat()
         computed_at = (rows.get(iso) or {}).get("computed_at")
-        exclude = frozenset(
-            sid
-            for sid, (loaded_at, _) in loaded.items()
-            if computed_at is not None and loaded_at is not None and loaded_at > computed_at
-        )
-        choice = resolve_gtfs_snapshot_for_date(db, d, tz_name, exclude_snapshot_ids=exclude)
+        choice = resolve_gtfs_snapshot_for_date(db, d, tz_name)
         by_date[iso] = choice.snapshot_id
+        reason_by_date[iso] = choice.reason
         entry = grouped.setdefault(
             choice.snapshot_id,
             {
@@ -599,16 +602,20 @@ def gtfs_snapshots_for_period(
                 "loaded_at_utc": _iso_or_none(loaded.get(choice.snapshot_id, (None, None))[0]),
                 "reasons": set(),
                 "dates": [],
+                "dates_computed_before_load": [],
             },
         )
         entry["reasons"].add(choice.reason)
         entry["dates"].append(iso)
+        loaded_at = loaded.get(choice.snapshot_id, (None, None))[0]
+        if computed_at is not None and loaded_at is not None and loaded_at > computed_at:
+            entry["dates_computed_before_load"].append(iso)
     feed_versions = []
     for entry in grouped.values():
         entry["reasons"] = sorted(entry["reasons"])
         feed_versions.append(entry)
     feed_versions.sort(key=lambda e: e["dates"][0])
-    return by_date, feed_versions
+    return by_date, feed_versions, reason_by_date
 
 
 class _ServiceCalendar:
@@ -646,98 +653,213 @@ class _ServiceCalendar:
                 self._trips[key] = int(q.scalar() or 0)
         return self._trips[key]
 
-    def usual(self, d: date_type, snapshot_id: int | None) -> frozenset[str] | None:
+    def usual(self, d: date_type, snapshot_id: int | None) -> tuple[str, list[frozenset[str]]]:
         """The most common non-empty service set on ``d``'s weekday within +/- N weeks.
 
-        ``d`` itself is left out. Returns None when no unique most-common
-        set exists (too few neighbours, or a tie).
+        ``d`` itself is left out. Returns ``(status, sets)``: ``("unique",
+        [set])`` when one set is most common, ``("tie", [sets...])`` when
+        several sets share the top count (typically a schedule change in
+        the middle of the window), ``("none", [])`` when no neighbouring
+        date has scheduled service.
         """
-        sets = []
-        for k in range(-SERVICE_BASELINE_WEEKS, SERVICE_BASELINE_WEEKS + 1):
-            if k == 0:
-                continue
-            s = self.active(d + timedelta(weeks=k), snapshot_id)
-            if s:
-                sets.append(s)
+        sets = [
+            s
+            for k in range(-SERVICE_BASELINE_WEEKS, SERVICE_BASELINE_WEEKS + 1)
+            if k != 0
+            for s in [self.active(d + timedelta(weeks=k), snapshot_id)]
+            if s
+        ]
         if not sets:
-            return None
-        ranked = Counter(sets).most_common(2)
-        if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
-            return None
-        return ranked[0][0]
+            return "none", []
+        ranked = Counter(sets).most_common()
+        top = [s for s, n in ranked if n == ranked[0][1]]
+        if len(top) > 1:
+            return "tie", top
+        return "unique", top
+
+    def recurs(self, d: date_type, snapshot_id: int | None, active: frozenset[str]) -> bool:
+        """True when ``active`` is a recurring pattern rather than a one-off on ``d``.
+
+        Recurring means another date of the same day type in the same
+        Monday-Sunday week runs the same set, or the same weekday one week
+        before or after does -- i.e. the set persists, as after a schedule
+        change inside a feed. An alternate timetable used on scattered dates
+        (WMATA's service 1 on 10/13 and 11/03, three weeks apart) does not
+        persist and stays a substitution. Holiday-type dates are detected
+        before this check.
+        """
+        if not active:
+            return False
+        day_type = _day_type_for(d)
+        week_start = d - timedelta(days=d.weekday())
+        for offset in range(7):
+            other = week_start + timedelta(days=offset)
+            if other != d and _day_type_for(other) == day_type:
+                if self.active(other, snapshot_id) == active:
+                    return True
+        return any(self.active(d + timedelta(weeks=k), snapshot_id) == active for k in (-1, 1))
+
+    def comparison_trips(self, d: date_type, snapshot_id: int | None) -> int | None:
+        """Median scheduled trips on comparable dates, or None with fewer than two.
+
+        Weekday: the other weekdays of the same Monday-Friday week. Weekend
+        day: the same weekday +/- 1..N weeks. Dates with no scheduled service
+        are ignored.
+        """
+        if _day_type_for(d) == "weekday":
+            week_start = d - timedelta(days=d.weekday())
+            others = [week_start + timedelta(days=i) for i in range(5)]
+        else:
+            others = [
+                d + timedelta(weeks=k)
+                for k in range(-SERVICE_BASELINE_WEEKS, SERVICE_BASELINE_WEEKS + 1)
+            ]
+        counts = [
+            self.trips(snapshot_id, s)
+            for o in others
+            if o != d
+            for s in [self.active(o, snapshot_id)]
+            if s
+        ]
+        return statistics.median(counts) if len(counts) >= 2 else None
+
+    def weekend_set(self, d: date_type, snapshot_id: int | None, day_type: str) -> frozenset[str]:
+        """The service set of the Saturday or Sunday in ``d``'s Monday-Sunday week."""
+        week_start = d - timedelta(days=d.weekday())
+        return self.active(
+            week_start + timedelta(days=5 if day_type == "saturday" else 6), snapshot_id
+        )
 
 
-def service_pattern_dates(db: Session, snapshot_by_date: dict[str, int | None]) -> list[dict]:
-    """Dates whose scheduled service differs from the usual service for that weekday.
+# Service-pattern kinds. Holiday-type kinds are footnoted in the day-type
+# split; the others are listed but leave the split alone.
+HOLIDAY_TYPE_KINDS = frozenset({"other_day_type", "no_service", "reduced"})
+
+
+def service_pattern_dates(
+    db: Session,
+    snapshot_by_date: dict[str, int | None],
+    reason_by_date: dict[str, str] | None = None,
+    observed_service_dates: frozenset[str] = frozenset(),
+) -> list[dict]:
+    """Dates whose scheduled service is not the regular service for that weekday, or is unknown.
 
     Works for feeds that express regular service through ``calendar`` (WMATA)
     and for feeds that add each weekday through ``calendar_dates`` type-1
-    rows (SFMTA): the comparison is between the *active* service set on the
-    date and the most common active set on the same weekday in the
-    surrounding weeks, not between raw exception rows. A differing date is
-    classified as:
+    rows (SFMTA): it compares *active* service sets and scheduled-trip
+    counts, never raw exception rows. Checks, in order:
 
-    * ``other_day_type`` -- it runs the usual service set of a weekday with a
-      different day type (e.g. a Monday running the Saturday schedule);
-    * ``no_service`` -- nothing is scheduled;
-    * ``reduced`` -- different services with fewer scheduled trips than
-      usual (below ``1 - SERVICE_TRIP_RATIO_TOLERANCE``), holiday-type;
-    * ``increased`` -- more scheduled trips than usual;
-    * ``substitution`` -- different service ids with a comparable trip count
-      (a one-for-one swap of the timetable, not reduced service).
+    1. ``feed_not_covering`` -- the resolved feed does not schedule the date
+       (snapshot resolution fell back, per ``reason_by_date``, or the active
+       set is empty although the system row shows observed service, per
+       ``observed_service_dates``). Pattern unknown; not holiday-type.
+    2. Holiday-type, judged locally so schedule changes nearby don't matter:
+       ``other_day_type`` (a weekday running the same week's Saturday or
+       Sunday set), ``no_service`` (nothing scheduled, feed covers it),
+       ``reduced`` (scheduled trips below ``1 - SERVICE_TRIP_RATIO_TOLERANCE``
+       of the median of comparable dates, see `comparison_trips`).
+    Between 1 and 2, a date running the unique usual set for its weekday
+    (most common within +/- N weeks) is regular and not listed -- so a feed
+    whose weekdays and weekends share one service id is not misread.
 
-    ``holiday_type`` is True for the first three; those dates are footnoted
-    in the day-type split. Returns ``[{date, day_type, kind, holiday_type,
-    runs_as, active_services, usual_services, scheduled_trips,
-    usual_scheduled_trips, trip_ratio}]``.
+    3. Against that usual set: ``service_change``
+       when the set recurs (`_ServiceCalendar.recurs`) or is one of tied
+       usual sets -- a schedule change inside the feed, not an exception;
+       ``undetermined`` when no usual set can be established (no
+       neighbour with service, or a tie the date does not match) and the
+       set does not recur; ``increased`` when trips exceed the comparison
+       by more than the tolerance; else ``substitution`` (a one-off swap of
+       service ids with a comparable trip count).
+
+    Returns ``[{date, day_type, kind, holiday_type, detail, runs_as,
+    active_services, usual_services, scheduled_trips, comparison_trips,
+    trip_ratio}]``; ``trip_ratio`` is scheduled / comparison trips.
     """
+    reason_by_date = reason_by_date or {}
     cal = _ServiceCalendar(db)
     out = []
     for iso, snapshot_id in sorted(snapshot_by_date.items()):
         d = date_type.fromisoformat(iso)
-        active = cal.active(d, snapshot_id)
-        usual = cal.usual(d, snapshot_id)
-        if usual is None or active == usual:
-            continue
         day_type = _day_type_for(d)
+        active = cal.active(d, snapshot_id)
         trips = cal.trips(snapshot_id, active)
-        usual_trips = cal.trips(snapshot_id, usual)
-        ratio = (trips / usual_trips) if usual_trips else None
+        entry = {
+            "date": iso,
+            "day_type": day_type,
+            "kind": None,
+            "holiday_type": False,
+            "detail": None,
+            "runs_as": None,
+            "active_services": sorted(active),
+            "usual_services": [],
+            "scheduled_trips": trips,
+            "comparison_trips": None,
+            "trip_ratio": None,
+        }
+        reason = reason_by_date.get(iso, REASON_COVERS)
+        if reason != REASON_COVERS or (not active and iso in observed_service_dates):
+            entry["kind"] = "feed_not_covering"
+            entry["detail"] = (
+                f"snapshot resolution: {reason}"
+                if reason != REASON_COVERS
+                else "no scheduled service in the resolved feed, but service was observed"
+            )
+            out.append(entry)
+            continue
 
-        runs_as = None
-        week_start = d - timedelta(days=d.weekday())
-        for offset in range(7):
-            other = week_start + timedelta(days=offset)
-            if other == d or _day_type_for(other) == day_type:
+        comparison = cal.comparison_trips(d, snapshot_id)
+        ratio = (trips / comparison) if comparison else None
+        entry["comparison_trips"] = comparison
+        entry["trip_ratio"] = ratio
+
+        # A date running the unique usual set for its weekday is regular. When
+        # the window is tied (a schedule change inside it), a date running one
+        # of the tied sets is regular if it matches the previous week's same
+        # weekday (or, with no service then, the next week's).
+        status, top = cal.usual(d, snapshot_id)
+        entry["usual_services"] = [sorted(t) for t in top]
+        if status == "unique" and active == top[0]:
+            continue
+        if status == "tie" and active in top:
+            reference = cal.active(d - timedelta(weeks=1), snapshot_id) or cal.active(
+                d + timedelta(weeks=1), snapshot_id
+            )
+            if active == reference:
                 continue
-            if active and cal.usual(other, snapshot_id) == active:
-                runs_as = _day_type_for(other)
-                break
 
-        if runs_as is not None:
-            kind = "other_day_type"
+        # 2. Holiday-type, judged against the same week / nearby same weekdays.
+        if day_type == "weekday" and active:
+            for weekend in ("saturday", "sunday"):
+                if active == cal.weekend_set(d, snapshot_id, weekend):
+                    entry["runs_as"] = weekend
+                    break
+        if entry["runs_as"] is not None:
+            entry["kind"] = "other_day_type"
         elif not active:
-            kind = "no_service"
+            entry["kind"] = "no_service"
         elif ratio is not None and ratio < 1 - SERVICE_TRIP_RATIO_TOLERANCE:
-            kind = "reduced"
+            entry["kind"] = "reduced"
+        if entry["kind"] is not None:
+            entry["holiday_type"] = True
+            out.append(entry)
+            continue
+
+        # 3. Otherwise classify the difference from the usual set.
+        if status == "none":
+            # No earlier or later pattern to compare with: nothing to call a change.
+            entry["kind"] = "undetermined"
+            entry["detail"] = "no neighbouring same-weekday date with scheduled service"
+        elif cal.recurs(d, snapshot_id, active) or (status == "tie" and active in top):
+            entry["kind"] = "service_change"
+            entry["detail"] = "recurring pattern; a schedule change within the feed"
+        elif status == "tie":
+            entry["kind"] = "undetermined"
+            entry["detail"] = "neighbouring dates are split between patterns"
         elif ratio is not None and ratio > 1 + SERVICE_TRIP_RATIO_TOLERANCE:
-            kind = "increased"
+            entry["kind"] = "increased"
         else:
-            kind = "substitution"
-        out.append(
-            {
-                "date": iso,
-                "day_type": day_type,
-                "kind": kind,
-                "holiday_type": kind in ("other_day_type", "no_service", "reduced"),
-                "runs_as": runs_as,
-                "active_services": sorted(active),
-                "usual_services": sorted(usual),
-                "scheduled_trips": trips,
-                "usual_scheduled_trips": usual_trips,
-                "trip_ratio": ratio,
-            }
-        )
+            entry["kind"] = "substitution"
+        out.append(entry)
     return out
 
 
@@ -809,12 +931,43 @@ def is_dominated(metric: str, pooled: float | None, median_day: float | None) ->
     return abs(pooled - median_day) > ROUTE_OTP_DOMINANCE_PP
 
 
+def dominated_routes(route_metrics: dict[str, dict]) -> list[dict]:
+    """Routes whose pooled EWT or OTP clears its floor but is dominated by a few days.
+
+    Applied identically to every agency, regardless of frequent-route
+    designation (which only WMATA has), so the "without these routes"
+    robustness variant uses one rule for subject and peers. Returns
+    ``[{route_id, metrics: ["ewt" | "otp", ...]}]`` sorted by route_id.
+    """
+    out = []
+    for route_id in sorted(route_metrics):
+        f = route_metrics[route_id]
+        hits = []
+        if (
+            f.get("ewt_seconds") is not None
+            and (f.get("ewt_n_observed") or 0) >= ROUTE_EWT_MIN_OBSERVED_HEADWAYS
+            and (f.get("ewt_coverage_ratio") or 0) >= ROUTE_EWT_MIN_COVERAGE
+            and is_dominated("ewt", f.get("ewt_seconds"), f.get("ewt_median_day"))
+        ):
+            hits.append("ewt")
+        if (
+            f.get("otp_all_pct") is not None
+            and (f.get("otp_n") or 0) >= ROUTE_OTP_MIN_OBSERVATIONS
+            and (f.get("service_delivered_delivered") or 0) >= ROUTE_OTP_MIN_DELIVERED_TRIPS
+            and is_dominated("otp", f.get("otp_all_pct"), f.get("otp_median_day"))
+        ):
+            hits.append("otp")
+        if hits:
+            out.append({"route_id": route_id, "metrics": hits})
+    return out
+
+
 def rank_routes(
     route_metrics: dict[str, dict],
     frequent_ids: frozenset[str],
     names: dict[str, dict],
     top_n: int = RANKING_TOP_N,
-    dominance_issue: str | None = None,
+    route_issues: dict[str, str] | None = None,
 ) -> dict:
     """Best / worst routes under the headline rule, with stated floors and a dominance guard.
 
@@ -824,8 +977,9 @@ def rank_routes(
     ``below_floor`` instead of ranked; designated routes with no overlay
     data at all are listed in ``no_data``. Routes that clear the floor but
     whose pooled figure is far from their median day (`is_dominated`) are
-    listed in ``dominated`` (with ``dominance_issue``, the tracking issue)
-    instead of ranked. Ties break on route_id.
+    listed in ``dominated`` instead of ranked, each with the tracking issue
+    from ``route_issues`` when one is annotated (else None). Ties break on
+    route_id.
     """
     frequent_ranked, frequent_below, frequent_dominated = [], [], []
     other_ranked, other_below, other_dominated = [], [], []
@@ -873,10 +1027,12 @@ def rank_routes(
             "n_ranked": len(frequent_ranked),
             "below_floor": frequent_below,
             "dominated": [
-                _ranking_entry(r, route_metrics[r], names, "ewt_seconds")
+                {
+                    **_ranking_entry(r, route_metrics[r], names, "ewt_seconds"),
+                    "issue": (route_issues or {}).get(r),
+                }
                 for r in frequent_dominated
             ],
-            "dominance_issue": dominance_issue,
             "no_data": sorted(frequent_ids - set(route_metrics)),
             "best": [_ranking_entry(r, route_metrics[r], names, "ewt_seconds") for r in f_best],
             "worst": [_ranking_entry(r, route_metrics[r], names, "ewt_seconds") for r in f_worst],
@@ -891,9 +1047,12 @@ def rank_routes(
             "n_ranked": len(other_ranked),
             "below_floor": other_below,
             "dominated": [
-                _ranking_entry(r, route_metrics[r], names, "otp_all_pct") for r in other_dominated
+                {
+                    **_ranking_entry(r, route_metrics[r], names, "otp_all_pct"),
+                    "issue": (route_issues or {}).get(r),
+                }
+                for r in other_dominated
             ],
-            "dominance_issue": dominance_issue,
             "best": [_ranking_entry(r, route_metrics[r], names, "otp_all_pct") for r in o_best],
             "worst": [_ranking_entry(r, route_metrics[r], names, "otp_all_pct") for r in o_worst],
         },
@@ -910,29 +1069,42 @@ def _iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat(timespec="seconds") if value is not None else None
 
 
-def load_annotations(path: Path | None = None) -> dict:
-    """Load known data-issue annotations (``config/scorecard_annotations.yaml``).
+EMPTY_ANNOTATIONS: dict = {"dates": [], "routes": []}
 
-    Returns ``{"route_dominance_issue": str | None, "dates": [{agency, date,
-    issue, note}]}``; a missing file yields no annotations. Annotations only
-    add issue references to the report -- they never change a figure.
+
+def load_annotations(path: Path | None = None) -> dict:
+    """Load hand-entered known-issue annotations (``config/scorecard_annotations.yaml``).
+
+    Returns ``{"dates": [{agency, date, issue, note}], "routes": [{agency,
+    route_id, issue, note}]}``; a missing file yields no annotations.
+    Annotations only add issue references to the report -- they never change
+    a figure -- and the report labels them as hand-entered. An entry naming
+    an agency with no ``config/agencies/<name>.yaml`` raises ValueError, so a
+    typo cannot silently drop it.
     """
     path = path or ANNOTATIONS_PATH
     if not path.exists():
-        return {"route_dominance_issue": None, "dates": []}
+        return {"dates": [], "routes": []}
     raw = yaml.safe_load(path.read_text()) or {}
-    return {
-        "route_dominance_issue": raw.get("route_dominance_issue"),
-        "dates": [
-            {
-                "agency": str(e["agency"]),
-                "date": str(e["date"]),
-                "issue": e.get("issue"),
-                "note": e.get("note"),
-            }
-            for e in raw.get("dates") or []
-        ],
-    }
+    known_agencies = {p.stem for p in AGENCY_CONFIG_DIR.glob("*.yaml")}
+    out: dict = {"dates": [], "routes": []}
+    for key, id_field in (("dates", "date"), ("routes", "route_id")):
+        for e in raw.get(key) or []:
+            agency = str(e["agency"])
+            if agency not in known_agencies:
+                raise ValueError(
+                    f"{path}: annotation {e!r} names unknown agency {agency!r} "
+                    f"(known: {', '.join(sorted(known_agencies))})"
+                )
+            out[key].append(
+                {
+                    "agency": agency,
+                    id_field: str(e[id_field]),
+                    "issue": e.get("issue"),
+                    "note": e.get("note"),
+                }
+            )
+    return out
 
 
 def _mean_excluding(summary_values: dict[str, float], drop: set[str]) -> float | None:
@@ -1007,9 +1179,9 @@ def compare_direction(sections: dict[str, dict], subject: str) -> dict[str, dict
     """Whether the subject-vs-peer difference keeps its direction across robust variants.
 
     For each peer and headline metric, compares the sign of (subject -
-    peer) using the period means, the median days, and the means with
-    flagged days (and, for the subject, routes under investigation)
-    removed. ``direction_robust`` is False when the signs disagree -- the
+    peer) using the period means, the median days, the means with flagged
+    days removed, and the means with dominated routes removed (the same
+    rule applied to every agency; an agency with none keeps its mean). ``direction_robust`` is False when the signs disagree -- the
     report then says the difference is not a finding.
     """
     out: dict[str, dict] = {}
@@ -1033,8 +1205,15 @@ def compare_direction(sections: dict[str, dict], subject: str) -> dict[str, dict
                     else b["mean"],
                 ),
             }
-            if a["mean_excluding_routes"] is not None:
-                variants["subject_excluding_routes"] = (a["mean_excluding_routes"], b["mean"])
+            if a["mean_excluding_routes"] is not None or b["mean_excluding_routes"] is not None:
+                variants["excluding_routes"] = (
+                    a["mean_excluding_routes"]
+                    if a["mean_excluding_routes"] is not None
+                    else a["mean"],
+                    b["mean_excluding_routes"]
+                    if b["mean_excluding_routes"] is not None
+                    else b["mean"],
+                )
             signs = {
                 name: (x > y) - (x < y)
                 for name, (x, y) in variants.items()
@@ -1068,7 +1247,7 @@ def build_agency_section(
     identically. ``annotations`` (see `load_annotations`) attaches known
     issue references to dates and dominated routes.
     """
-    annotations = annotations or {"route_dominance_issue": None, "dates": []}
+    annotations = annotations or EMPTY_ANNOTATIONS
     cfg = load_agency_config(agency)
     dates = period_dates(start, end)
     rows = read_system_rows(db, start, end)
@@ -1078,8 +1257,15 @@ def build_agency_section(
         a for a in annotations["dates"] if a["agency"] == agency and a["date"] in period_isos
     ]
     date_issues = {a["date"]: a["issue"] for a in known_dates if a.get("issue")}
+    route_issues = {
+        a["route_id"]: a["issue"]
+        for a in annotations.get("routes", [])
+        if a["agency"] == agency and a.get("issue")
+    }
 
-    snapshot_by_date, feed_versions = gtfs_snapshots_for_period(db, dates, rows, cfg.timezone)
+    snapshot_by_date, feed_versions, reason_by_date = gtfs_snapshots_for_period(
+        db, dates, rows, cfg.timezone
+    )
     bus_ids_cache: dict[int | None, set[str]] = {}
     bus_ids_by_date: dict[str, set[str]] = {}
     for d in eligible:
@@ -1090,35 +1276,36 @@ def build_agency_section(
 
     bundles = read_overlay_bundles(db, eligible)
     computed = [r["computed_at"] for r in rows.values() if r.get("computed_at") is not None]
-    service_patterns = service_pattern_dates(db, snapshot_by_date)
+    observed = frozenset(
+        iso
+        for iso, r in rows.items()
+        if r.get("otp") is not None or (r.get("service_delivered") or 0) > 0
+    )
+    service_patterns = service_pattern_dates(db, snapshot_by_date, reason_by_date, observed)
     holiday_type = frozenset(p["date"] for p in service_patterns if p["holiday_type"])
     metrics = {m: summarize_daily_metric(dates, rows, m) for m in SYSTEM_METRICS}
     for m in SYSTEM_METRICS:
         for f in metrics[m]["flagged_days"]:
             f["issue"] = date_issues.get(f["date"])
 
+    # Every agency gets the same dominance rule for the robustness variant;
+    # only the deep subject gets rankings (and printed route detail).
+    route_metrics = pool_route_metrics(bundles)
+    dominated = dominated_routes(route_metrics)
+    under_investigation = [e["route_id"] for e in dominated]
+    for e in dominated:
+        e["issue"] = route_issues.get(e["route_id"])
     routes_block = None
-    under_investigation: list[str] = []
     if deep:
         frequent_ids = load_frequent_route_ids(agency)
-        route_metrics = pool_route_metrics(bundles)
-        rankings = rank_routes(
-            route_metrics,
-            frequent_ids,
-            current_route_names(db),
-            dominance_issue=annotations.get("route_dominance_issue"),
-        )
-        under_investigation = sorted(
-            e["route_id"]
-            for group in ("frequent", "non_frequent")
-            for e in rankings[group]["dominated"]
-        )
         routes_block = {
             "n_routes_with_data": len(route_metrics),
             "frequent_designation_source": (
                 "config/frequent_routes.yaml" if frequent_ids else "none (no designated list)"
             ),
-            "rankings": rankings,
+            "rankings": rank_routes(
+                route_metrics, frequent_ids, current_route_names(db), route_issues=route_issues
+            ),
         }
     excluding_routes_daily = (
         system_daily_excluding_routes(bundles, bus_ids_by_date, set(under_investigation))
@@ -1147,6 +1334,7 @@ def build_agency_section(
         "gtfs_feed_versions": feed_versions,
         "service_pattern_dates": service_patterns,
         "known_issues": known_dates,
+        "dominated_routes": dominated,
         "aggregates_computed_at_utc": {
             "min": _iso_or_none(min(computed)) if computed else None,
             "max": _iso_or_none(max(computed)) if computed else None,
@@ -1376,17 +1564,69 @@ def _render_day_types(section: dict) -> list[str]:
 
 def _describe_pattern(p: dict) -> str:
     """Plain description of one service-pattern date's classification."""
-    if p["kind"] == "other_day_type":
+    kind = p["kind"]
+    if kind == "feed_not_covering":
+        return "schedule pattern unknown: the feed in use did not cover this date"
+    if kind == "undetermined":
+        return f"schedule pattern undetermined ({p['detail']})"
+    if kind == "service_change":
+        return "schedule change within the feed (a new pattern that persists, not an exception)"
+    if kind == "other_day_type":
         return f"ran the usual {p['runs_as']} service"
-    if p["kind"] == "no_service":
+    if kind == "no_service":
         return "no scheduled service"
     ratio = p.get("trip_ratio")
-    share = f"{ratio * 100:.0f}% of the usual scheduled trips" if ratio is not None else ""
-    if p["kind"] == "reduced":
+    share = (
+        f"{ratio * 100:.0f}% of the scheduled trips on comparable dates"
+        if ratio is not None
+        else "no comparable dates"
+    )
+    if kind == "reduced":
         return f"reduced service, {share}"
-    if p["kind"] == "increased":
+    if kind == "increased":
         return f"added service, {share}"
-    return f"timetable substitution with a comparable trip count ({share})"
+    return f"timetable substitution not seen on nearby dates, comparable trip count ({share})"
+
+
+def group_pattern_runs(patterns: list[dict]) -> list[dict]:
+    """Collapse consecutive same-description pattern dates into runs for display.
+
+    Dates join a run when they share kind, description and (except for
+    schedule changes, which may use per-weekday service ids) active services,
+    and fall within 3 days of the previous date (so a weekday run spans the
+    weekend). Returns ``[{start, end, n_dates, day_types, description}]``.
+    """
+    runs: list[dict] = []
+    for p in patterns:
+        desc = _describe_pattern(p)
+        # A schedule change may use different service ids per weekday (WMATA),
+        # so its run is keyed on the description alone.
+        services = () if p["kind"] == "service_change" else tuple(p["active_services"])
+        key = (p["kind"], services, desc)
+        d = date_type.fromisoformat(p["date"])
+        if (
+            runs
+            and runs[-1]["_key"] == key
+            and (d - date_type.fromisoformat(runs[-1]["end"])).days <= 3
+        ):
+            runs[-1]["end"] = p["date"]
+            runs[-1]["n_dates"] += 1
+            if p["day_type"] not in runs[-1]["day_types"]:
+                runs[-1]["day_types"].append(p["day_type"])
+        else:
+            runs.append(
+                {
+                    "_key": key,
+                    "start": p["date"],
+                    "end": p["date"],
+                    "n_dates": 1,
+                    "day_types": [p["day_type"]],
+                    "description": desc,
+                }
+            )
+    for r in runs:
+        del r["_key"]
+    return runs
 
 
 def _render_ranking_table(entries: list[dict], metric: str) -> list[str]:
@@ -1482,19 +1722,21 @@ def _render_routes(section: dict) -> list[str]:
     return lines
 
 
+def _issue_suffix(e: dict) -> str:
+    """Tracking-issue suffix for a dominated route: annotated issue, or 'not yet tracked'."""
+    return f" (hand-entered annotation: {e['issue']})" if e.get("issue") else " (not yet tracked)"
+
+
 def _render_dominated(group: dict, metric: str) -> list[str]:
     """List routes withheld from a ranking because a few days dominate their pooled figure."""
     if not group.get("dominated"):
         return []
-    issue = group.get("dominance_issue")
     return [
-        "Not ranked: pooled figure dominated by a few days"
-        + (f"; under investigation ({issue})" if issue else "")
-        + ". "
+        "Not ranked: pooled figure dominated by a few days. "
         + "; ".join(
             f"{e['route_name']} {e['route_long_name'] or ''}".rstrip()
             + f": pooled {fmt_metric(metric, e['value'])}, median day "
-            f"{fmt_metric(metric, e['median_day'])}"
+            f"{fmt_metric(metric, e['median_day'])}" + _issue_suffix(e)
             for e in group["dominated"]
         )
         + ".",
@@ -1572,14 +1814,24 @@ def _render_data_quality(section: dict) -> list[str]:
     patterns = section["service_pattern_dates"]
     if patterns:
         lines.append(
-            "- Dates whose scheduled service differs from the usual service for that weekday "
-            "(day type still follows the calendar): "
-            + "; ".join(f"{p['date']} ({p['day_type']}: {_describe_pattern(p)})" for p in patterns)
+            "- Dates whose scheduled service is not the usual service for that weekday, or "
+            "could not be determined (day type still follows the calendar): "
+            + "; ".join(
+                (
+                    r["start"]
+                    if r["n_dates"] == 1
+                    else f"{r['start']} to {r['end']} ({r['n_dates']} dates)"
+                )
+                + f" ({'/'.join(r['day_types'])}: {r['description']})"
+                for r in group_pattern_runs(patterns)
+            )
         )
     else:
         lines.append("- Every date ran the usual scheduled service for its weekday.")
     for k in section.get("known_issues", []):
-        lines.append(f"- Known issue for {k['date']}: {k['note']} ({k['issue']}).")
+        lines.append(
+            f"- Known issue for {k['date']} (hand-entered annotation): {k['note']} ({k['issue']})."
+        )
     lines += ["", "<details><summary>Daily values</summary>", ""]
     body = [
         [
@@ -1619,6 +1871,12 @@ def _render_feed_versions(section: dict) -> list[str]:
             f"- {section['display_name']}: feed_version {fv['feed_version']} "
             f"(snapshot {fv['snapshot_id']}, loaded {fv['loaded_at_utc']} UTC) for {span}; "
             f"resolution: {', '.join(fv['reasons'])}"
+            + (
+                f". {len(fv['dates_computed_before_load'])} of these dates were computed before "
+                "this snapshot was loaded, against an earlier load no longer retained"
+                if fv.get("dates_computed_before_load")
+                else ""
+            )
         )
     return lines
 
@@ -1640,14 +1898,19 @@ def _render_provenance(prov: dict) -> list[str]:
         state = "uncommitted changes in " + ", ".join(f"`{p}`" for p in dirty)
     else:
         state = "working tree clean apart from the output directory"
-    hashes = "; ".join(
-        f"`{path}` sha256 `{digest[:16]}`"
-        for path, digest in sorted(prov.get("source_sha256", {}).items())
+    files = prov.get("source_sha256", {})
+    combined = prov.get("source_digest")
+    hashes = (
+        f"sha256 `{combined[:16]}` over {len(files)} files (every repository module loaded "
+        "during generation plus the config files read; per-file hashes in the JSON)"
+        if combined
+        else "not recorded"
     )
     return [
         f"Provenance: generator commit `{commit[:12] if commit else 'unknown'}` (the commit "
         "checked out at generation time; it may not be reachable after a squash merge), "
-        f"{state}. Source content hashes: {hashes or 'not recorded'}."
+        f"{state}. Source content digest: {hashes}. Library versions and the databases' "
+        "contents are not covered by the digest."
     ]
 
 
@@ -1680,17 +1943,17 @@ def _render_summary(scorecard: dict, subject: dict, peers: list[dict]) -> list[s
                         f"{fmt_metric(metric, rob['mean_excluding_flagged'])}"
                     )
                 if rob["mean_excluding_routes"] is not None:
-                    routes = ", ".join(rob["routes_under_investigation"])
-                    issue = (
-                        (s.get("routes") or {})
-                        .get("rankings", {})
-                        .get("frequent", {})
-                        .get("dominance_issue")
-                    )
+                    dominated = s.get("dominated_routes") or []
+                    if "routes" in s:  # deep agency: route detail may be printed
+                        which = ", ".join(
+                            e["route_id"] + (f" ({e['issue']})" if e.get("issue") else "")
+                            for e in dominated
+                        )
+                    else:
+                        which = f"{len(dominated)} routes; route detail not shown for peers"
                     parts.append(
-                        f"without routes whose figures are dominated by a few days ({routes}"
-                        + (f"; {issue}" if issue else "")
-                        + f") it is {fmt_metric(metric, rob['mean_excluding_routes'])}"
+                        f"without routes whose figures are dominated by a few days ({which}) "
+                        f"it is {fmt_metric(metric, rob['mean_excluding_routes'])}"
                     )
                 notes.append(
                     f"{s['display_name']} {METRIC_LABELS[metric].lower()}: "
@@ -1854,25 +2117,36 @@ def render_markdown(scorecard: dict) -> str:
         "the current GTFS feed.",
         "",
         "**Day types and service changes.** Day type is the calendar weekday. A date's "
-        "scheduled service (the GTFS services active that day, from `calendar` and "
-        "`calendar_dates`) is compared with the most common service set on the same weekday "
-        f"within {m['service_pattern']['baseline_weeks']} weeks either side. A date that "
-        "differs is described as running another day type's usual service, reduced service "
-        f"(more than {m['service_pattern']['trip_ratio_tolerance'] * 100:.0f}% fewer scheduled "
-        "trips), added service, or a timetable substitution with a comparable trip count. "
-        "Dates with reduced, no, or another day type's service stay in their calendar day "
-        "type and are footnoted under the day-type table, with the means recomputed without "
-        "them.",
+        "scheduled service is the set of GTFS services active that day (from `calendar` and "
+        "`calendar_dates`). If the feed in use did not cover the date (snapshot resolution "
+        "fell back to a feed whose calendar excludes it, or no service is scheduled although "
+        "service was observed), its schedule pattern is reported as unknown. A date running "
+        "the most common service set for its weekday within "
+        f"{m['service_pattern']['baseline_weeks']} weeks either side is regular. Otherwise a "
+        "date is holiday-type when a weekday runs the same week's Saturday or Sunday service, "
+        "has no scheduled service, or has more than "
+        f"{m['service_pattern']['trip_ratio_tolerance'] * 100:.0f}% fewer scheduled trips "
+        "than comparable dates (the other weekdays of its week; for weekend days, the same "
+        "weekday in nearby weeks). Holiday-type dates stay in their calendar day type and "
+        "are footnoted under the day-type table, with the means recomputed without them. "
+        "Remaining differences are a schedule change within the feed when the new service set "
+        "persists (elsewhere in the week for the same day type, or on the same weekday a week "
+        "before or after), "
+        "added service, or a timetable substitution not seen on nearby dates; and "
+        "undetermined when no usual set can be established (no nearby date with service, or "
+        "nearby dates split between patterns the date does not match). Unknown, undetermined, "
+        "schedule-change and substitution dates are listed but do not alter the split.",
         "",
         "**Robustness notes.** For each headline figure the report also computes the mean "
-        "without that metric's unusual days and, for the deep agency, the mean of daily "
-        "system values re-derived from the per-route table without routes withheld from the "
-        f"rankings. A figure that either moves by more than "
+        "without that metric's unusual days, and the mean of daily system values re-derived "
+        "from the per-route table without routes whose pooled EWT or OTP is dominated by a "
+        "few days (the ranking guard and floors, applied to every route of every agency "
+        f"alike). A figure that either moves by more than "
         f"{m['material_shift'] * 100:.0f}% is marked in the Summary. A cross-agency "
         "difference whose direction is not the same for the mean, the median day and those "
-        "variants is called out as not a finding. Known data issues are referenced by their "
-        "issue numbers (`config/scorecard_annotations.yaml`); references never change a "
-        "figure.",
+        "variants is called out as not a finding. Known data issues are referenced by issue "
+        "number from hand-entered annotations (`config/scorecard_annotations.yaml`), labelled "
+        "as such; an annotation is not checked against the data and never changes a figure.",
         "",
         "**Sources.** Only the kept-forever daily aggregate tables are read: "
         "`system_metrics_daily` (one row per service date) and `route_metrics_daily_overlay` "
@@ -1881,8 +2155,11 @@ def render_markdown(scorecard: dict) -> str:
         "past periods. Nothing is written to either database.",
         "",
         "**GTFS feed versions in force.** For each date, the snapshot the derivation pipeline "
-        "resolves (the newest loaded snapshot whose calendar schedules service that date), "
-        "considering only snapshots loaded before that date's aggregates were computed:",
+        "resolves today among the retained snapshots (the newest whose calendar schedules "
+        "service that date). Duplicate loads of the same feed are de-duplicated, keeping the "
+        "newest, after checking that no date's resolved schedule changes; so where a date's "
+        "aggregates predate the retained snapshot's load, the load actually used is gone and "
+        "the retained one is reported, with a count of such dates:",
         "",
     ]
     for s in [subject, *peers]:

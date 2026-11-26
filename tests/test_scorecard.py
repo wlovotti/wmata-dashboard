@@ -414,7 +414,7 @@ def test_build_scorecard_end_to_end(db_session):
     """Headline means exclude the partial day; pooled figures and rankings skip it too."""
     _seed(db_session)
     annotations = {
-        "route_dominance_issue": "#269",
+        "routes": [],
         "dates": [{"agency": "wmata", "date": "2026-10-02", "issue": "#999", "note": "test"}],
     }
     card = sc.build_scorecard(
@@ -423,7 +423,12 @@ def test_build_scorecard_end_to_end(db_session):
         END,
         generated_at_utc=GENERATED,
         annotations=annotations,
-        provenance={"git_commit": "abc123", "git_dirty_paths": [], "source_sha256": {}},
+        provenance={
+            "git_commit": "abc123",
+            "git_dirty_paths": [],
+            "source_sha256": {"src/scorecard.py": "0" * 64},
+            "source_digest": "1" * 64,
+        },
     )
     json.dumps(card)  # fully JSON-serializable
 
@@ -448,15 +453,15 @@ def test_build_scorecard_end_to_end(db_session):
         "2026-10-03",
         "2026-10-04",
     ]
-    # 10/02's only service is removed -> no service, holiday-type, footnoted in the split.
+    # 10/02's only service is removed, yet service was observed: the feed did not
+    # cover the date -> pattern unknown, listed, NOT holiday-type, split untouched.
     patterns = w["service_pattern_dates"]
     assert [(p["date"], p["kind"], p["holiday_type"]) for p in patterns] == [
-        ("2026-10-02", "no_service", True)
+        ("2026-10-02", "feed_not_covering", False)
     ]
     weekday = w["day_types"]["weekday"]
-    assert weekday["holiday_type_dates"] == ["2026-10-02"]
-    assert weekday["otp"]["mean"] == pytest.approx(70.0)  # 10/01 + 10/02
-    assert weekday["excluding_holiday_type"]["otp"]["mean"] == pytest.approx(60.0)
+    assert weekday["holiday_type_dates"] == []
+    assert weekday["excluding_holiday_type"] is None
     assert w["known_issues"][0]["issue"] == "#999"
     assert w["robustness"]["otp"]["median_day"] == pytest.approx(70.0)
 
@@ -472,9 +477,10 @@ def test_build_scorecard_end_to_end(db_session):
     assert "2026-10-03 (partial)" in md
     assert "feed_version FV7" in md
     assert "Comparability caveats" in md
-    assert "holiday-type service dates: 2026-10-02 (no scheduled service)" in md
+    assert "2026-10-02 (weekday: schedule pattern unknown" in md
     assert "may not be reachable after a squash merge" in md
-    assert "Known issue for 2026-10-02: test (#999)" in md
+    assert "Known issue for 2026-10-02 (hand-entered annotation): test (#999)" in md
+    assert "sha256 `1111111111111111` over 1 files" in md
 
 
 @pytest.mark.smoke
@@ -628,7 +634,7 @@ def test_service_pattern_detects_additions_only_feed(db_session):
         "saturday",
         True,
     )
-    assert p["usual_services"] == ["WK"] and p["active_services"] == ["SAT"]
+    assert p["usual_services"] == [["WK"]] and p["active_services"] == ["SAT"]
 
 
 @pytest.mark.smoke
@@ -645,6 +651,9 @@ def test_service_pattern_separates_reduced_from_substitution(db_session):
             _cal_date("HOL", date(2026, 10, 12), 1),
             _cal_date("WD", date(2026, 10, 13), 2),
             _cal_date("SWAP", date(2026, 10, 13), 1),
+            # The same alternate timetable three weeks later: scattered, not persistent.
+            _cal_date("WD", date(2026, 11, 3), 2),
+            _cal_date("SWAP", date(2026, 11, 3), 1),
         ]
     )
     _trips(db_session, "WD", 100)
@@ -698,12 +707,15 @@ def test_dominance_guard_withholds_route_from_ranking():
     metrics["D50"]["ewt_median_day"] = 170.0
     metrics["C53"]["ewt_median_day"] = 170.0  # 1.6x: still ranked
     metrics["N2"]["otp_median_day"] = 65.0  # 25 pp off: withheld
-    r = sc.rank_routes(metrics, frozenset({"D50", "A40", "C53"}), {}, dominance_issue="#269")
+    r = sc.rank_routes(metrics, frozenset({"D50", "A40", "C53"}), {}, route_issues={"D50": "#269"})
     freq = r["frequent"]
     ranked = [e["route_id"] for e in freq["best"] + freq["worst"]]
     assert "D50" not in ranked and "C53" in ranked
     assert [e["route_id"] for e in freq["dominated"]] == ["D50"]
-    assert freq["dominance_issue"] == "#269"
+    assert freq["dominated"][0]["issue"] == "#269"
+    assert r["non_frequent"]["dominated"][0]["issue"] is None  # not tracked
+    assert "(170 s) (hand-entered annotation: #269)" in "".join(sc._render_dominated(freq, "ewt"))
+    assert "(not yet tracked)" in "".join(sc._render_dominated(r["non_frequent"], "otp"))
     assert [e["route_id"] for e in r["non_frequent"]["dominated"]] == ["N2"]
 
     assert sc.is_dominated("ewt", 200.0, 50.0) is True  # +150 s > max(50, 60)
@@ -809,10 +821,149 @@ def test_headline_robustness_marks_moved_figure_and_issue():
 def test_provenance_records_hashes_and_dirty_state(tmp_path):
     """The CLI stamp carries source hashes and a dirty-path list; rendering is honest."""
     prov = cli.build_provenance(tmp_path)
-    assert set(prov) == {"git_commit", "git_dirty_paths", "source_sha256"}
-    assert len(prov["source_sha256"]["src/scorecard.py"]) == 64
+    assert set(prov) == {"git_commit", "git_dirty_paths", "source_sha256", "source_digest"}
+    # Every loaded repo module that computes a number is hashed, not just the scorecard.
+    for rel in ("src/scorecard.py", "api/aggregations.py", "src/gtfs_calendar.py", "src/ewt.py"):
+        assert len(prov["source_sha256"][rel]) == 64
+    assert len(prov["source_digest"]) == 64
     line = sc._render_provenance(
         {"git_commit": "f" * 40, "git_dirty_paths": ["src/scorecard.py"], "source_sha256": {}}
     )[0]
     assert "uncommitted changes in `src/scorecard.py`" in line
     assert "may not be reachable after a squash merge" in line
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: uncovered feeds, undetermined dates, ties, schedule changes
+# ---------------------------------------------------------------------------
+
+
+def _cal_range(service_id: str, days: str, start: str, end: str, snapshot_id: int = 9) -> Calendar:
+    """Calendar row for ``days`` (letters from "MTWRFSU") between start and end (YYYYMMDD)."""
+    row = _cal(service_id, days, snapshot_id)
+    row.start_date, row.end_date = start, end
+    return row
+
+
+def _seed_snapshot(session, rows: list) -> None:
+    """Snapshot 9 plus the given calendar / calendar_dates rows."""
+    session.add(GTFSSnapshot(snapshot_id=9, snapshot_date=_VALID_FROM, feed_version="T"))
+    session.flush()
+    session.add_all(rows)
+    session.commit()
+
+
+@pytest.mark.smoke
+def test_feed_not_covering_is_unknown_not_holiday(db_session):
+    """A date past the feed's calendar is 'pattern unknown', unless nothing says service ran."""
+    _seed_snapshot(db_session, [_cal_range("WD", "MTWRF", "20260801", "20260912")])
+    sep16 = {"2026-09-16": 9}
+
+    by_reason = sc.service_pattern_dates(
+        db_session, sep16, reason_by_date={"2026-09-16": "fallback_loaded_by_date"}
+    )
+    by_observed = sc.service_pattern_dates(
+        db_session, sep16, observed_service_dates=frozenset({"2026-09-16"})
+    )
+    for out in (by_reason, by_observed):
+        assert [(p["kind"], p["holiday_type"]) for p in out] == [("feed_not_covering", False)]
+    assert "did not cover this date" in sc._describe_pattern(by_reason[0])
+
+    # With no fallback and no observed service, an empty set against a usual WD
+    # set is a genuine no-service day (holiday-type).
+    genuine = sc.service_pattern_dates(db_session, {"2026-09-09": 9})
+    assert genuine == []  # 9/09 is covered and runs WD
+    db_session.add(_cal_date("WD", date(2026, 9, 9), 2))
+    db_session.commit()
+    genuine = sc.service_pattern_dates(db_session, {"2026-09-09": 9})
+    assert [(p["kind"], p["holiday_type"]) for p in genuine] == [("no_service", True)]
+
+
+@pytest.mark.smoke
+def test_date_without_neighbour_baseline_is_listed_undetermined(db_session):
+    """No same-weekday neighbour has service: listed as undetermined, never skipped."""
+    _seed_snapshot(db_session, [_cal_range("WK", "MTWRF", "20261012", "20261016")])
+    out = sc.service_pattern_dates(db_session, {"2026-10-14": 9})
+    assert [(p["kind"], p["holiday_type"]) for p in out] == [("undetermined", False)]
+    assert "no neighbouring" in out[0]["detail"]
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("added", "expected"),
+    [
+        ("C", [("undetermined", False)]),  # matches neither tied pattern
+        ("B", [("service_change", False)]),  # first day of the new pattern
+        ("A", []),  # same as last week: regular, not listed
+    ],
+)
+def test_tied_baseline_guard(db_session, added, expected):
+    """Neighbours split 4/4 between A and B (a schedule change at the date)."""
+    _seed_snapshot(
+        db_session,
+        [
+            _cal_range("A", "MTWRF", "20260801", "20261013"),
+            _cal_range("B", "MTWRF", "20261015", "20261231"),
+            _cal_date(added, date(2026, 10, 14), 1),
+        ],
+    )
+    out = sc.service_pattern_dates(db_session, {"2026-10-14": 9})
+    assert [(p["kind"], p["holiday_type"]) for p in out] == expected
+    if out:
+        assert out[0]["usual_services"] == [["A"], ["B"]]
+
+
+@pytest.mark.smoke
+def test_schedule_change_run_is_a_service_change_not_exceptions(db_session):
+    """A new weekday pattern for two weeks is a schedule change, rendered as one run."""
+    _seed_snapshot(
+        db_session,
+        [
+            _cal_range("OLD", "MTWRF", "20260801", "20261016"),
+            _cal_range("NEW", "MTWRF", "20261019", "20261030"),
+        ],
+    )
+    snaps = {d.isoformat(): 9 for d in sc.period_dates(date(2026, 10, 19), date(2026, 10, 23))}
+    out = sc.service_pattern_dates(db_session, snaps)
+    assert {p["kind"] for p in out} == {"service_change"}
+    assert not any(p["holiday_type"] for p in out)
+    runs = sc.group_pattern_runs(out)
+    assert len(runs) == 1 and runs[0]["n_dates"] == len(out)
+    assert runs[0]["start"] == "2026-10-19"
+
+
+@pytest.mark.smoke
+def test_comparison_route_variant_cleans_both_agencies():
+    """The excluding-routes variant uses each agency's own dominated-route mean."""
+    sections = {
+        "wmata": {"robustness": {m: _rob(173, 160, None, 145) for m in sc.HEADLINE_METRICS}},
+        "sfmta": {"robustness": {m: _rob(221, 170, None, 150) for m in sc.HEADLINE_METRICS}},
+    }
+    comp = sc.compare_direction(sections, "wmata")["sfmta"]["ewt"]
+    assert comp["differences"]["excluding_routes"] == pytest.approx(145 - 150)
+    assert comp["direction_robust"] is True
+
+
+@pytest.mark.smoke
+def test_dominated_routes_applies_both_guards_to_any_route():
+    """Peers have no frequent list, so the variant rule ignores designation entirely."""
+    big_h = sc.ROUTE_EWT_MIN_OBSERVED_HEADWAYS
+    metrics = {
+        "R1": _fields(ewt=900.0, ewt_n=big_h, cov=0.9),
+        "R2": _fields(ewt=100.0, ewt_n=big_h, cov=0.9),
+    }
+    metrics["R1"]["ewt_median_day"] = 100.0
+    metrics["R2"]["ewt_median_day"] = 90.0
+    assert sc.dominated_routes(metrics) == [{"route_id": "R1", "metrics": ["ewt"]}]
+
+
+@pytest.mark.smoke
+def test_annotation_with_unknown_agency_fails(tmp_path):
+    """A typo'd agency is an error, not a silently dropped annotation."""
+    bad = tmp_path / "ann.yaml"
+    bad.write_text('dates:\n  - agency: wmta\n    date: "2026-10-21"\n    issue: "#1"\n')
+    with pytest.raises(ValueError, match="unknown agency 'wmta'"):
+        sc.load_annotations(bad)
+    good = tmp_path / "ok.yaml"
+    good.write_text('routes:\n  - agency: wmata\n    route_id: D50\n    issue: "#269"\n')
+    assert sc.load_annotations(good)["routes"][0]["route_id"] == "D50"
