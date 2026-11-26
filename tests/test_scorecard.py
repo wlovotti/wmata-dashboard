@@ -1148,3 +1148,24 @@ def test_committed_october_report_rerenders_byte_identical():
     stem = "scorecard_wmata_2026-10-01_2026-10-31"
     card = json.loads((reports / f"{stem}.json").read_text())
     assert sc.render_markdown(card) == (reports / f"{stem}.md").read_text()
+
+
+@pytest.mark.smoke
+def test_pre_completeness_report_fixture_rerenders_byte_identical():
+    """A report JSON from before the completeness / EWT-method blocks still renders verbatim.
+
+    The fixture is the October 2026 report as first published (issue #267),
+    kept because the committed report was regenerated (issue #275) and now
+    carries both blocks. Re-rendering it must reproduce its Markdown exactly,
+    so the older-JSON fallbacks stay covered: the sentences those blocks
+    drive must not appear when the blocks are absent.
+    """
+    from pathlib import Path
+
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "scorecard"
+    card = json.loads((fixtures / "pre_completeness_2026-10.json").read_text())
+    assert all("completeness" not in s and "ewt_method" not in s for s in card["agencies"].values())
+    md = sc.render_markdown(card)
+    assert md == (fixtures / "pre_completeness_2026-10.md").read_text()
+    assert "120-minute long-gap rule" not in md
+    assert "feed-gap test" not in md
