@@ -41,6 +41,7 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from pipelines.stop_events_common import (
+    MISATTRIBUTED_MAX_DEVIATION_SEC,
     build_stop_time_index,
     delete_misattributed_stop_events,
     parse_trip_start_date,
@@ -303,13 +304,22 @@ def derive_proximity_stop_events(
             # shows the one-day-late schedule resolution -- never D's own
             # post-midnight tail rows of the same trip_ids, which D+1's
             # derive wrote. Rule and proof in the helper's docstring.
-            delete_misattributed_stop_events(
+            deleted_misattributed = delete_misattributed_stop_events(
                 db,
                 service_date_str,
                 "proximity",
                 stale_keys,
                 chunk_size=_DELETE_CHUNK_SIZE,
             )
+            if deleted_misattributed:
+                # Expected 0 on current data; a non-zero count means day-late
+                # rows reappeared (e.g. a resolver regression) -- make it loud.
+                print(
+                    f"  WARNING {route_id} {service_date_str}: deleted "
+                    f"{deleted_misattributed} misattributed proximity stop_events "
+                    f"(deviation < {MISATTRIBUTED_MAX_DEVIATION_SEC}s) on service_date "
+                    f"{service_date_str}"
+                )
 
         # Postgres upsert keyed on the stop_events natural key.
         upsert_rows(

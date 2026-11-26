@@ -173,7 +173,7 @@ def test_derive_corrects_owl_route_service_date_off_by_one(pg_session):
 
 
 @pytest.mark.integration
-def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
+def test_derive_supersedes_misattributed_row_on_reresolve(pg_session, capsys):
     """PR #193 review: a stop_events row previously written under the
     misattributed service_date (pre-NOTES-110 code, or a prior run before
     this fix) must be deleted when re-deriving lands the corrected row on
@@ -254,6 +254,8 @@ def test_derive_supersedes_misattributed_row_on_reresolve(pg_session):
     assert len(events) == 1
     assert events[0].service_date == "2026-07-22"
     assert abs(events[0].deviation_sec) < 300
+    # Issue #279 review: a non-zero misattributed delete is logged loudly.
+    assert "deleted 1 misattributed proximity stop_events" in capsys.readouterr().out
 
 
 @pytest.mark.integration

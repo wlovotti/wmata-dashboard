@@ -57,9 +57,11 @@ def _iter_chunks[T](items: Iterable[T], size: int) -> Iterator[list[T]]:
 # hours early. `resolve_scheduled_instants` keeps the same-day anchor iff the
 # same-day scheduled instant is at most half the anchor gap after the
 # observation; the gap is 86,400 s on ordinary nights and 82,800 / 90,000 s
-# across a DST change, so a row the resolver keeps at D always has
-# deviation_sec >= -45,000. Real misattributed rows sit near -86,400 (route
-# 14 cluster: -89,077 to -80,032). See `delete_misattributed_stop_events`.
+# across a DST change, so a row D's own derive keeps at D always has
+# deviation_sec >= -45,000 (tail rows D+1's derive writes onto D are bounded
+# differently; see the helper's docstring). Real misattributed rows sit near
+# -86,400 (route 14 cluster: -89,077 to -80,032). See
+# `delete_misattributed_stop_events`.
 MISATTRIBUTED_MAX_DEVIATION_SEC = -45_000
 
 
@@ -84,29 +86,52 @@ def delete_misattributed_stop_events(
     ``deviation_sec`` is strictly below ``MISATTRIBUTED_MAX_DEVIATION_SEC``
     (-45,000 s: the observation is more than 12.5 h earlier than the
     schedule anchored on D). That is the signature of a schedule resolved
-    against the wrong (one-day-late) anchor, and it can never match a row
-    the current resolver wrote at D: ``resolve_scheduled_instants`` keeps
-    the D anchor only when the same-day instant is within half the anchor
-    gap of the observation (the ``|x - 86400| < |x| <=> x > 43200``
-    identity in its docstring; up to 45,000 s on a 25-hour DST night), so
-    every row it keeps at D has ``deviation_sec >= -45,000``. The
-    misattributed rows this exists for sit near -86,400.
+    against the wrong (one-day-late) anchor; the misattributed rows this
+    exists for sit near -86,400.
+
+    What the current code can write at D, and why the rule spares it. Let
+    ``g`` be the gap between the D and D-1 parses of the same GTFS time
+    (86,400 s; 82,800 / 90,000 s across a DST change) and ``x`` the
+    scheduled instant under the *derive's own* date minus the observation
+    (unguarded argmin in ``resolve_scheduled_instants``):
+
+    - Rows D's own derive writes with the same-day anchor: the anchor is
+      kept only when ``x <= g/2``, so ``deviation_sec = -x >= -g/2 >=
+      -45,000``. Never deletable.
+    - Tail rows D+1's derive writes onto D with the prior-day anchor
+      (``x > g/2`` against D+1): ``deviation_sec = g - x``, which is
+      bounded *above* (``< g/2``), not below. It falls under -45,000 only
+      when the observation is more than ``g + 45,000`` s (~35.5-37.5 h)
+      before its D+1-anchored schedule, i.e. more than 12.5 h before its
+      D-anchored one. That does not occur: production minima on
+      2026-11-26 were SFMTA proximity -10,142 s and trip_update -4,342 s,
+      and WMATA had no rows below -43,200. (The SKIPPED branch's guarded
+      prior-day anchor writes NULL deviation, so it is never deletable.)
 
     Why the old ``(trip_id, stop_sequence)``-only key was wrong: trip_ids
     repeat every service day, so for SFMTA owl routes the keys re-anchored
     from D to D-1 are the same keys as D's *own* post-midnight tail, which
-    D+1's derive re-anchors onto D. Those tail rows have a small deviation
-    (their schedule is anchored on D and observed near it), so the deviation
-    predicate leaves them alone; the old delete removed them whenever D was
-    re-derived after D+1.
+    D+1's derive re-anchors onto D. The old delete removed those tail rows
+    whenever D was re-derived after D+1.
 
-    Rows with ``deviation_sec`` NULL (SKIPPED rows, rows with no scheduled
-    arrival) are never deleted: stop_events stores nothing that separates a
-    stale NULL-deviation copy from D's genuine tail row of the same trip, and
-    deleting a genuine row is the worse failure. Production had zero
-    deviation < -12 h rows on either agency when this rule was introduced
-    (2026-11-26), so the leftover risk is limited to a future resolver
-    change.
+    Stale classes this rule deliberately does NOT remove, because nothing
+    on ``stop_events`` separates them from D's genuine run of the same
+    trip_id, and deleting a genuine row is the worse failure:
+
+    (a) a copy filed under the wrong service_date but with a clean
+        few-minute deviation (the post-#192 / pre-#193 class in PR #193's
+        runbook);
+    (b) a copy an earlier run resolved to D for the same key, e.g. after a
+        GTFS snapshot change or a re-fold that moved the observation by
+        more than 12 h;
+    (c) NULL-deviation copies (SKIPPED rows, rows with no scheduled
+        arrival).
+
+    The natural key is unique per (service_date, trip_id, stop_sequence,
+    source), so such a copy and a genuine D row of the same key cannot
+    coexist; a leftover copy double-counts only when D has no genuine run
+    of that trip_id at that stop. None exist in current data: on 2026-11-26 both databases had
+    0 rows below -43,200 and SFMTA had 0 NULL-deviation stop_events.
 
     Chunked at ``chunk_size`` pairs per statement (see
     ``_TUPLE_IN_CHUNK_SIZE``). Does not commit; the caller's upsert commits
