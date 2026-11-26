@@ -18,6 +18,7 @@ from datetime import date as date_type
 
 from sqlalchemy.orm import Session
 
+from src.agency_config import CompletenessPolicy
 from src.models import SystemMetricsDaily
 from src.timezones import utcnow_naive
 
@@ -149,6 +150,7 @@ def upsert_system_metrics_for_date(
     completeness_threshold: float | None = None,
     agency: str = "wmata",
     force: bool = False,
+    gap_policy: CompletenessPolicy | None = None,
 ) -> dict | None:
     """Compute and upsert one row of `system_metrics_daily` for `service_date`.
 
@@ -193,6 +195,9 @@ def upsert_system_metrics_for_date(
             though the date has no stop-level rows left (see
             :class:`AggregateOverwriteRefused`, raised otherwise — before
             anything is written).
+        gap_policy: The agency's per-feed gap rule
+            (``AgencyConfig.completeness``, issue #270); None uses the
+            defaults (90 min inside 05:00–24:00 local).
 
     Returns:
         The metrics dict written (includes ``data_quality`` and
@@ -200,7 +205,7 @@ def upsert_system_metrics_for_date(
     """
     from src.data_completeness import (
         MIN_COVERAGE_FOR_MATERIALIZATION,
-        resolve_data_quality,
+        assess_data_quality,
     )
 
     threshold = (
@@ -214,34 +219,46 @@ def upsert_system_metrics_for_date(
         .filter(SystemMetricsDaily.service_date == service_date_iso)
         .first()
     )
-    # The prior stamp lets resolve_data_quality keep an earned 'complete'
-    # when the trip-update signal has since been pruned by retention
-    # (NOTES-104) instead of misreporting the re-derive as an outage.
+    # The prior stamp lets assess_data_quality keep an earned stamp when an
+    # input (trip_update_state, raw VP) has since been pruned (NOTES-104,
+    # issues #270/#272) instead of misreporting the re-derive as an outage.
     if not force:
         refuse_if_detail_missing(db, service_date, system_row_required_sources(existing))
     prior = (existing.data_quality, existing.coverage_pct) if existing else None
-    data_quality, pct, kept = resolve_data_quality(
-        db, service_date, threshold=threshold, tz_name=tz_name, prior=prior
+    decision = assess_data_quality(
+        db,
+        service_date,
+        threshold=threshold,
+        tz_name=tz_name,
+        prior=prior,
+        gap_policy=gap_policy,
     )
+    data_quality, pct = decision.data_quality, decision.coverage_pct
     is_complete = data_quality == "complete"
 
-    if kept:
+    if decision.kept:
         # The stamp is preserved but the metrics below are still
         # re-derived from whatever stop_events/runs exist now. If this
-        # re-run follows a runs-delete recovery past the trip-update
-        # retention window, those rows are gone and the metrics will be
-        # NULL under a 'complete' stamp (the API's null guards keep them
-        # out of windowed means) — hence a warning, not a notice.
+        # re-run follows a runs-delete recovery past the raw retention
+        # window, those rows are gone and the metrics will be NULL under
+        # the kept stamp (the API's null guards keep them out of windowed
+        # means) — hence a warning, not a notice.
         print(
-            f"  ⚠ System metrics for {service_date_iso}: trip-update signal no longer "
-            f"retained; keeping prior 'complete' stamp and its stored coverage, but "
-            f"re-deriving metrics from current stop_events — check they are non-null"
+            f"  ⚠ System metrics for {service_date_iso}: an input is no longer retained "
+            f"({'; '.join(decision.not_assessed)}); keeping prior '{data_quality}' stamp "
+            f"and its stored coverage, but re-deriving metrics from current stop_events "
+            f"— check they are non-null"
         )
     elif not is_complete:
         print(
-            f"  ⚠ System metrics for {service_date_iso}: "
-            f"ingest coverage {pct:.1%} below threshold — flagging as partial"
+            f"  ⚠ System metrics for {service_date_iso}: flagging as partial — {decision.describe()}"
         )
+    elif decision.not_assessed:
+        print(
+            f"  ⚠ System metrics for {service_date_iso}: complete on the legs that could be "
+            f"assessed; NOT assessed: {'; '.join(decision.not_assessed)}"
+        )
+    print(f"  · completeness {service_date_iso}: {decision.describe()}")
 
     try:
         metrics = compute_system_metrics_for_date(
@@ -258,8 +275,9 @@ def upsert_system_metrics_for_date(
         existing.swt_seconds = metrics["swt_seconds"]
         existing.bunching_rate = metrics["bunching_rate"]
         existing.data_quality = data_quality
-        if not kept:
-            # A kept stamp's coverage is deliberately not re-measured.
+        if decision.coverage_measured:
+            # Coverage carried over from the prior row (an input is
+            # pruned) is deliberately not re-measured or overwritten.
             existing.coverage_pct = pct
         existing.computed_at = utcnow_naive()
     else:

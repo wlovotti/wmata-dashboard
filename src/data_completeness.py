@@ -10,8 +10,31 @@ day's aggregates? A day that fails is still materialized, but stamped
 (a collection-outage day's thin PM sample would otherwise stand in for,
 or disproportionately swing, a whole window) and the UI can badge it.
 
-Coverage is the fraction of the local clock-day's minutes that have at
-least one ingest row, unioned across three signals (NOTES-104):
+A date is ``complete`` only if it passes BOTH legs of the check
+(:func:`assess_data_quality`):
+
+1. **Coverage** — the fraction of the local clock-day's minutes that have
+   at least one ingest row, unioned across three signals (NOTES-104),
+   must reach the agency's cadence-aware threshold
+   (:func:`agency_coverage_threshold`).
+2. **Per-feed gap** (issue #270) — separately for the trip-update feed
+   and the vehicle-position feed, the longest silence inside the
+   agency-local service-hours window (default 05:00–24:00) must not
+   exceed ``CompletenessPolicy.feed_gap_max_minutes`` (default 90; both
+   per-agency in ``config/agencies/*.yaml`` ``completeness:``).
+
+Why the second leg exists: the coverage union cannot see a single-feed
+outage. Losing one stream costs SFMTA only ~0.33 × hours/24 of coverage,
+so a trip-update blackout of up to ~9 h still clears 0.533 (SFMTA
+2026-10-21: a 5.7 h trip-update outage passed at 0.564); at WMATA either
+stream alone reaches ~1.00, so an outage of one feed of any length was
+invisible. The per-feed gap catches exactly those days. Raising the
+coverage threshold was rejected (it flags healthy SFMTA days and does
+nothing for WMATA), as was a service-delivered or EWT floor (those would
+exclude genuinely bad service days, which are what an advocacy profile
+must report, not hide).
+
+The coverage signals:
 
 - ``collector_heartbeats.ts`` — written by a *live* collector on every
   TripUpdates poll. Only present on a database the collector writes to
@@ -32,42 +55,52 @@ least one ingest row, unioned across three signals (NOTES-104):
   passed during it with that single poll's timestamp, so it cannot
   back-fill the gap.
 
-Measured on the system of record: a healthy WMATA day reaches ~1.00
-(VP alone does; TU alone reads 0.999). A healthy SFMTA day reaches
-0.56–0.81 against a cadence-aware threshold of 0.533 — VP alone sat at
-0.33, which is why every SFMTA date was stamped ``partial`` before the
-TU leg existed. The SFMTA spread is wide because the two poller streams
-(NOTES-133 per-stream isolation) drift in phase relative to each other
-and to the clock-minute grid; the headroom above the tick-derived
-ceiling is real but variable, not a structural constant.
+The gap legs' timestamps:
 
-Two limits worth knowing:
+- **Trip updates**: ``trip_update_state.final_snapshot_ts`` of rows whose
+  ``service_date`` is the date being stamped. Keying on the row's own
+  service date (not on the clock window) makes the leg all-or-nothing
+  under every deletion path — per-date and end-of-run
+  ``cleanup_trip_update_state`` and retention all delete whole service
+  dates — so a pruned date reads as *not assessable* rather than as a
+  day-long gap (issue #272: the next date's replay leaves a few rows in
+  the earlier date's evening window). In ``pipelines/refresh_by_day.py``
+  the date's state is present when it is stamped: the per-date flow
+  replays D, derives and aggregates D, and only then deletes state for
+  dates *before* D, so D's own stamp — and D-1's re-aggregation by D's
+  derive — both see their rows.
+- **Vehicle positions**: distinct ``vehicle_positions.collected_at`` (the
+  poll time). Retention and the VP loader both work in whole UTC days of
+  ``collected_at``, so the leg is assessable only when every UTC day the
+  service window overlaps has at least one row.
 
-- **The TU signal is subject to retention.** ``trip_update_state`` is
-  pruned (7 days for SFMTA in ``bin/pull-and-derive.sh``, 30 for WMATA),
-  so re-deriving an old date would see VP only. :func:`resolve_data_quality`
-  therefore never downgrades an existing ``complete`` stamp when the TU
-  leg has *no rows at all* for the date — that is retention, not an
-  outage (an outage day was stamped while the signal was present).
-- **A failed VP archive load is no longer caught by this check.** TU
-  alone certifies a WMATA day, and ``bin/pull-and-derive.sh`` tolerates a
-  VP loader failure by design; proximity-sourced OTP (origin / all-
-  timepoints) is computed from ``vehicle_positions`` and would be thin
-  on such a day while the stamp reads ``complete``. The loader's own
-  summary flags the failure loudly; this module does not.
+Honesty about missing inputs: raw VP and ``trip_update_state`` are kept
+only 7 days (``retention.raw_days``), so re-aggregating an older date
+sees neither. A leg whose inputs are absent is *not assessable*: it never
+stamps a date ``partial`` and never upgrades one. When a date that
+already carries a stamp is re-evaluated with any leg not assessable, the
+stored stamp and its coverage are kept (``kept``), unless an assessable
+gap leg fails outright — a real gap is real evidence. A date stamped for
+the first time with a leg not assessable is decided by the legs that are
+(and the decision records which leg was skipped): the WMATA pull
+tolerates a VP loader failure by design, and such a day is still stamped
+from the trip-update legs, with a loud warning.
 
 ``trip_update_snapshots`` has been retired (Phase F, PR #155) and plays
 no part here.
 """
 
+from dataclasses import dataclass, field
 from datetime import date as date_type
+from datetime import datetime, time, timedelta
 from math import lcm
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from src.agency_config import AgencyConfig
-from src.timezones import local_day_bounds_utc
+from src.agency_config import AgencyConfig, CompletenessPolicy
+from src.timezones import UTC, local_day_bounds_utc
 
 MIN_COVERAGE_FOR_MATERIALIZATION = 0.80
 
@@ -97,8 +130,10 @@ def agency_coverage_threshold(cfg: AgencyConfig) -> float:
     SFMTA day missing ~6 of 24 hours can still clear 0.533. The threshold
     is deliberately left anchored to the tick-derived ceiling rather than
     re-tuned to the measured one, because the measured ceiling moves with
-    poller phase drift (see the module docstring); revisit if an SFMTA
-    outage ever slips through as ``complete``.
+    poller phase drift (see the module docstring). One did slip through
+    (SFMTA 2026-10-21, a 5.7 h trip-update outage at 0.564); the answer
+    was the per-feed gap leg in :func:`assess_data_quality` (issue #270),
+    not a higher threshold, which would flag healthy SFMTA days.
 
     Exact when ``tick_sec`` is a multiple of 60 (both configured agencies)
     or when every tick is active (WMATA); a sub-minute tick with a
@@ -211,29 +246,36 @@ def _coverage_minutes(
 def has_trip_update_signal(
     db: Session, service_date: date_type, tz_name: str = "America/New_York"
 ) -> bool:
-    """Return True iff any ``trip_update_state`` row was polled inside the local day.
+    """Return True iff ``trip_update_state`` holds any row for this service date.
 
     Distinguishes "the trip-update signal is absent for this date"
-    (retention has pruned it, or the date predates trip-update
-    collection) from "the signal is present but thin" (a real outage).
-    :func:`resolve_data_quality` uses it to avoid downgrading a stamp
-    that was earned while the signal was still available.
+    (retention or the refresh's state cleanup has pruned it, or the date
+    predates trip-update collection) from "the signal is present but thin"
+    (a real outage). :func:`assess_data_quality` uses it to avoid
+    re-measuring a stamp that was earned while the signal was available,
+    and as the trip-update gap leg's assessability test.
+
+    Keys on the row's ``service_date`` column, not on whether its
+    ``final_snapshot_ts`` falls in the local day (issue #272): the next
+    date's replay leaves a few rows polled inside this date's evening
+    window, which made a date whose own state had been deleted look
+    "present but thin" and demoted it. Every deletion path removes whole
+    service dates, so this test is all-or-nothing.
 
     Args:
         db: SQLAlchemy session.
         service_date: Operational date in ``tz_name``.
-        tz_name: IANA timezone name.
+        tz_name: Unused (kept for call-site compatibility; the
+            ``service_date`` column already carries the agency-local date).
 
     Returns:
-        True when at least one row has ``final_snapshot_ts`` in the window.
+        True when at least one ``trip_update_state`` row has
+        ``service_date == service_date``.
     """
-    start_utc, end_utc = local_day_bounds_utc(service_date, tz_name)
+    del tz_name  # the service_date column is already agency-local
     row = db.execute(
-        text(
-            "SELECT 1 FROM trip_update_state "
-            "WHERE final_snapshot_ts >= :start AND final_snapshot_ts < :end LIMIT 1"
-        ),
-        {"start": start_utc, "end": end_utc},
+        text("SELECT 1 FROM trip_update_state WHERE service_date = :sd LIMIT 1"),
+        {"sd": service_date},
     ).first()
     return row is not None
 
@@ -271,9 +313,9 @@ def is_date_sufficiently_complete(
     """Return True iff the date has enough coverage to materialize aggregates for.
 
     The default threshold is the flat 80% constant; per-agency callers
-    pass :func:`agency_coverage_threshold` instead. This is the raw
-    comparison with no memory of a prior stamp — see
-    :func:`resolve_data_quality` for the stamp the pipelines actually
+    pass :func:`agency_coverage_threshold` instead. This is the coverage
+    leg alone, with no memory of a prior stamp and no per-feed gap test —
+    see :func:`assess_data_quality` for the stamp the pipelines actually
     write.
 
     Args:
@@ -289,29 +331,317 @@ def is_date_sufficiently_complete(
     return coverage_pct_for_date(db, service_date, tz_name) >= threshold
 
 
-def resolve_data_quality(
+TRIP_UPDATE_FEED = "trip_update"
+VEHICLE_POSITION_FEED = "vehicle_position"
+
+
+def service_window_utc(
+    service_date: date_type,
+    tz_name: str = "America/New_York",
+    policy: CompletenessPolicy | None = None,
+) -> tuple[datetime, datetime]:
+    """Return the naive-UTC bounds of the agency-local service-hours window.
+
+    The window runs from ``service_start_hour`` to ``service_end_hour``
+    agency-local wall-clock time on ``service_date`` (24 = the following
+    local midnight). Each bound is converted separately through the zone,
+    so the window always starts and ends at those local wall-clock times.
+    US transitions happen at 02:00, outside the default 05–24 window, so
+    on a DST day that window is still 19 real hours; a configured window
+    spanning 02:00 would be one hour shorter or longer that day.
+
+    Args:
+        service_date: Operational date in ``tz_name``.
+        tz_name: IANA timezone name of the agency.
+        policy: Gap policy; None means the defaults.
+
+    Returns:
+        ``(start_utc, end_utc)`` as naive UTC datetimes.
+    """
+    policy = policy or CompletenessPolicy()
+    zone = ZoneInfo(tz_name)
+
+    def _at(hour: int) -> datetime:
+        """Naive UTC for ``hour`` o'clock local on the service date (24 = next midnight)."""
+        day = service_date + timedelta(days=hour // 24)
+        local = datetime.combine(day, time(hour % 24), tzinfo=zone)
+        return local.astimezone(UTC).replace(tzinfo=None)
+
+    return _at(policy.service_start_hour), _at(policy.service_end_hour)
+
+
+@dataclass(frozen=True)
+class FeedGap:
+    """The longest silence of one feed inside a date's service-hours window.
+
+    Attributes:
+        feed: ``TRIP_UPDATE_FEED`` or ``VEHICLE_POSITION_FEED``.
+        assessable: False when the feed's rows for the date are absent
+            (pruned, never loaded, or the date predates collection); the
+            gap fields are then None and the leg decides nothing.
+        longest_gap_min: Longest gap in minutes, including the stretch from
+            the window start to the first poll and from the last poll to the
+            window end (so an outage running into midnight counts).
+        gap_start_utc: Naive-UTC start of that gap.
+        gap_end_utc: Naive-UTC end of that gap.
+        note: Why the leg is not assessable (empty when it is).
+    """
+
+    feed: str
+    assessable: bool
+    longest_gap_min: float | None = None
+    gap_start_utc: datetime | None = None
+    gap_end_utc: datetime | None = None
+    note: str = ""
+
+    def describe(self) -> str:
+        """One-line human-readable summary for logs and the restamp report."""
+        if not self.assessable:
+            return f"{self.feed} gap not assessed ({self.note})"
+        return (
+            f"{self.feed} longest gap {self.longest_gap_min:.0f} min "
+            f"({self.gap_start_utc:%H:%M}Z-{self.gap_end_utc:%H:%M}Z)"
+        )
+
+
+def _as_datetime(value) -> datetime:
+    """Coerce a DB timestamp to ``datetime`` (SQLite raw SQL returns strings)."""
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
+def longest_gap(
+    timestamps, start_utc: datetime, end_utc: datetime
+) -> tuple[float, datetime, datetime]:
+    """Return the longest silence within ``[start_utc, end_utc]`` given poll timestamps.
+
+    Edges count: the gap from ``start_utc`` to the first timestamp and from
+    the last timestamp to ``end_utc`` are candidates, so a feed that stops
+    at 18:00 and never returns shows a gap running to the window end. With
+    no timestamps at all the whole window is one gap.
+
+    Args:
+        timestamps: Iterable of naive-UTC datetimes (any order; values
+            outside the window are ignored).
+        start_utc: Window start.
+        end_utc: Window end.
+
+    Returns:
+        ``(gap_minutes, gap_start, gap_end)``.
+    """
+    points = sorted(t for t in (_as_datetime(v) for v in timestamps) if start_utc <= t <= end_utc)
+    best = (0.0, start_utc, start_utc)
+    prev = start_utc
+    for t in [*points, end_utc]:
+        gap = (t - prev).total_seconds() / 60.0
+        if gap > best[0]:
+            best = (gap, prev, t)
+        prev = t
+    return best
+
+
+def trip_update_feed_gap(
+    db: Session,
+    service_date: date_type,
+    tz_name: str = "America/New_York",
+    policy: CompletenessPolicy | None = None,
+) -> FeedGap:
+    """Measure the trip-update feed's longest service-hours gap for a date.
+
+    Timestamps are ``trip_update_state.final_snapshot_ts`` of the date's
+    own rows (``service_date = service_date``) — see the module docstring
+    for why the row's service date, not the clock window, decides which
+    rows count. Not assessable when the date has no state rows at all.
+
+    Args:
+        db: SQLAlchemy session.
+        service_date: Operational date in ``tz_name``.
+        tz_name: IANA timezone name of the agency.
+        policy: Gap policy; None means the defaults.
+
+    Returns:
+        A :class:`FeedGap` for ``TRIP_UPDATE_FEED``.
+    """
+    if not has_trip_update_signal(db, service_date, tz_name):
+        return FeedGap(
+            TRIP_UPDATE_FEED, False, note="no trip_update_state rows for the date (pruned?)"
+        )
+    start_utc, end_utc = service_window_utc(service_date, tz_name, policy)
+    rows = db.execute(
+        text(
+            "SELECT DISTINCT final_snapshot_ts FROM trip_update_state "
+            "WHERE service_date = :sd AND final_snapshot_ts >= :start "
+            "AND final_snapshot_ts <= :end"
+        ),
+        {"sd": service_date, "start": start_utc, "end": end_utc},
+    ).all()
+    gap, gap_start, gap_end = longest_gap((r[0] for r in rows), start_utc, end_utc)
+    return FeedGap(TRIP_UPDATE_FEED, True, gap, gap_start, gap_end)
+
+
+def vehicle_position_feed_gap(
+    db: Session,
+    service_date: date_type,
+    tz_name: str = "America/New_York",
+    policy: CompletenessPolicy | None = None,
+) -> FeedGap:
+    """Measure the vehicle-position feed's longest service-hours gap for a date.
+
+    Timestamps are distinct ``vehicle_positions.collected_at`` (poll time).
+    VP is loaded and pruned in whole UTC days of ``collected_at``, so the
+    leg is assessable only when every UTC day the service window overlaps
+    has at least one row; otherwise a pruned or never-loaded day would read
+    as a many-hour gap. (A real outage covering an entire UTC day is
+    therefore reported as not assessable, not as a gap — the trip-update
+    legs still apply.)
+
+    Args:
+        db: SQLAlchemy session.
+        service_date: Operational date in ``tz_name``.
+        tz_name: IANA timezone name of the agency.
+        policy: Gap policy; None means the defaults.
+
+    Returns:
+        A :class:`FeedGap` for ``VEHICLE_POSITION_FEED``.
+    """
+    start_utc, end_utc = service_window_utc(service_date, tz_name, policy)
+    utc_day = start_utc.date()
+    while datetime.combine(utc_day, time()) < end_utc:
+        day_start = datetime.combine(utc_day, time())
+        present = db.execute(
+            text(
+                "SELECT 1 FROM vehicle_positions "
+                "WHERE collected_at >= :start AND collected_at < :end LIMIT 1"
+            ),
+            {"start": day_start, "end": day_start + timedelta(days=1)},
+        ).first()
+        if present is None:
+            return FeedGap(
+                VEHICLE_POSITION_FEED,
+                False,
+                note=f"no vehicle_positions collected on UTC {utc_day} (pruned or not loaded)",
+            )
+        utc_day += timedelta(days=1)
+    rows = db.execute(
+        text(
+            "SELECT DISTINCT collected_at FROM vehicle_positions "
+            "WHERE collected_at >= :start AND collected_at <= :end"
+        ),
+        {"start": start_utc, "end": end_utc},
+    ).all()
+    gap, gap_start, gap_end = longest_gap((r[0] for r in rows), start_utc, end_utc)
+    return FeedGap(VEHICLE_POSITION_FEED, True, gap, gap_start, gap_end)
+
+
+@dataclass(frozen=True)
+class QualityDecision:
+    """The ``data_quality`` stamp for one date and everything that decided it.
+
+    Attributes:
+        data_quality: ``'complete'`` or ``'partial'``.
+        coverage_pct: The coverage to store: the fresh measurement when
+            ``coverage_measured``, else the prior row's stored value
+            (possibly None for rows that predate the column).
+        coverage_measured: False when the coverage was carried over from
+            the prior row because an input was absent; callers must then
+            leave the stored ``coverage_pct`` untouched.
+        kept: True when the prior stamp was kept because a leg could not be
+            assessed (the stamp is neither demoted nor upgraded).
+        measured_coverage: The raw coverage measured now, for disclosure
+            (understated when inputs are pruned).
+        threshold: Coverage threshold applied.
+        feed_gap_max_minutes: Gap limit applied.
+        trip_update_gap: Trip-update gap leg.
+        vehicle_position_gap: Vehicle-position gap leg.
+        reasons: Why the date is ``partial`` (empty when complete or kept).
+        not_assessed: Legs that could not be assessed, with the reason.
+    """
+
+    data_quality: str
+    coverage_pct: float | None
+    coverage_measured: bool
+    kept: bool
+    measured_coverage: float
+    threshold: float
+    feed_gap_max_minutes: int
+    trip_update_gap: FeedGap
+    vehicle_position_gap: FeedGap
+    reasons: tuple[str, ...] = field(default_factory=tuple)
+    not_assessed: tuple[str, ...] = field(default_factory=tuple)
+
+    @classmethod
+    def fixed(
+        cls, data_quality: str, coverage_pct: float | None, kept: bool = False
+    ) -> "QualityDecision":
+        """A decision with a given stamp and no measured legs (tests and stubs).
+
+        Args:
+            data_quality: ``'complete'`` or ``'partial'``.
+            coverage_pct: Coverage to report/store.
+            kept: When True the coverage counts as carried over (not
+                re-measured), like a real kept decision.
+
+        Returns:
+            A :class:`QualityDecision` whose gap legs are marked not assessed.
+        """
+        return cls(
+            data_quality=data_quality,
+            coverage_pct=coverage_pct,
+            coverage_measured=not kept,
+            kept=kept,
+            measured_coverage=coverage_pct or 0.0,
+            threshold=MIN_COVERAGE_FOR_MATERIALIZATION,
+            feed_gap_max_minutes=CompletenessPolicy().feed_gap_max_minutes,
+            trip_update_gap=FeedGap(TRIP_UPDATE_FEED, False, note="stub"),
+            vehicle_position_gap=FeedGap(VEHICLE_POSITION_FEED, False, note="stub"),
+        )
+
+    def describe(self) -> str:
+        """One-line disclosure of the decision for logs and the restamp report."""
+        parts = [
+            f"{self.data_quality}{' (kept)' if self.kept else ''}",
+            f"coverage {self.measured_coverage:.3f} vs {self.threshold:.3f}",
+            self.trip_update_gap.describe(),
+            self.vehicle_position_gap.describe(),
+            f"gap limit {self.feed_gap_max_minutes} min",
+        ]
+        if self.reasons:
+            parts.append("partial because: " + "; ".join(self.reasons))
+        return " | ".join(parts)
+
+
+def assess_data_quality(
     db: Session,
     service_date: date_type,
     threshold: float = MIN_COVERAGE_FOR_MATERIALIZATION,
     tz_name: str = "America/New_York",
     prior: tuple[str, float | None] | None = None,
-) -> tuple[str, float | None, bool]:
+    gap_policy: CompletenessPolicy | None = None,
+) -> QualityDecision:
     """Decide the ``data_quality`` stamp for a date, honoring an earned prior.
 
-    The rule:
+    The rule (see the module docstring for the why):
 
-    1. Measure coverage once; if it meets ``threshold`` the date is
-       ``complete``.
-    2. Otherwise, if the date already carries a ``complete`` stamp AND
-       the trip-update leg has no rows at all for the date, keep the
-       prior stamp and its recorded coverage — the signal that earned
-       the stamp has since been pruned by retention, and re-measuring
-       without it would misreport a healthy day as an outage.
-    3. Otherwise the date is ``partial``.
+    1. Measure coverage and both feed-gap legs. A gap leg is assessable
+       only when its feed has rows for the date; the coverage leg is
+       assessed when every input is present, or when the date has never
+       been stamped (``prior`` is None).
+    2. Any assessed failure — coverage below ``threshold``, or a feed gap
+       longer than ``gap_policy.feed_gap_max_minutes`` — makes the date
+       ``partial``. (With a prior and a missing input, the stored coverage
+       is carried over rather than replaced by an understated number.)
+    3. Otherwise, if every leg was assessed, the date is ``complete``.
+    4. Otherwise (a leg is not assessable and nothing assessed failed): a
+       date with a prior stamp keeps it and its stored coverage
+       (``kept``) — never demoted for missing inputs, never upgraded; a
+       date stamped for the first time is ``complete`` on the legs that
+       were assessed, and ``not_assessed`` records the skipped leg.
 
-    Rule 2 can never *promote* a date and never fires for a date whose
-    trip-update rows are present-but-thin (a genuine outage), so a bad
-    day still stamps ``partial`` on first materialization and stays so.
+    This keeps the NOTES-104 retention rule (an earned ``complete`` is not
+    demoted once its trip-update rows are pruned) and extends it to the gap
+    legs; a genuine outage still stamps ``partial`` at first
+    materialization, while the inputs are present, and stays so.
 
     Args:
         db: SQLAlchemy session.
@@ -320,22 +650,74 @@ def resolve_data_quality(
         tz_name: IANA timezone name.
         prior: ``(data_quality, coverage_pct)`` from the row being
             re-stamped, or None when the date has never been materialized.
+        gap_policy: Per-agency gap rule (``AgencyConfig.completeness``);
+            None means the defaults (90 min, 05:00–24:00 local).
 
     Returns:
-        ``(data_quality, coverage_pct, kept)``. When ``kept`` is True the
-        returned coverage is the prior's stored value — possibly ``None``
-        for rows that predate the column — and callers must NOT overwrite
-        the stored coverage with anything else: a kept stamp is
-        deliberately not re-measured, so a fresh (signal-less) number
-        would be a fabrication.
+        A :class:`QualityDecision`.
     """
+    policy = gap_policy or CompletenessPolicy()
     pct = coverage_pct_for_date(db, service_date, tz_name)
-    if pct >= threshold:
-        return "complete", pct, False
-    if (
-        prior is not None
-        and prior[0] == "complete"
-        and not has_trip_update_signal(db, service_date, tz_name)
-    ):
-        return "complete", prior[1], True
-    return "partial", pct, False
+    tu_gap = trip_update_feed_gap(db, service_date, tz_name, policy)
+    vp_gap = vehicle_position_feed_gap(db, service_date, tz_name, policy)
+
+    all_assessable = tu_gap.assessable and vp_gap.assessable
+    coverage_measured = all_assessable or prior is None
+    not_assessed = tuple(f"{g.feed}: {g.note}" for g in (tu_gap, vp_gap) if not g.assessable)
+    if not coverage_measured:
+        not_assessed += ("coverage: an input is missing; stored value kept",)
+
+    reasons: list[str] = []
+    if coverage_measured and pct < threshold:
+        reasons.append(f"coverage {pct:.3f} < threshold {threshold:.3f}")
+    for g in (tu_gap, vp_gap):
+        if g.assessable and g.longest_gap_min > policy.feed_gap_max_minutes:
+            reasons.append(
+                f"{g.feed} gap {g.longest_gap_min:.0f} min > {policy.feed_gap_max_minutes} min "
+                f"({g.gap_start_utc:%Y-%m-%d %H:%M}Z-{g.gap_end_utc:%H:%M}Z)"
+            )
+
+    stored = pct if coverage_measured else prior[1]
+    common = {
+        "measured_coverage": pct,
+        "threshold": threshold,
+        "feed_gap_max_minutes": policy.feed_gap_max_minutes,
+        "trip_update_gap": tu_gap,
+        "vehicle_position_gap": vp_gap,
+        "not_assessed": not_assessed,
+    }
+    if reasons:
+        return QualityDecision(
+            "partial", stored, coverage_measured, False, reasons=tuple(reasons), **common
+        )
+    if all_assessable or prior is None:
+        return QualityDecision("complete", stored, coverage_measured, False, **common)
+    return QualityDecision(prior[0], prior[1], False, True, **common)
+
+
+def resolve_data_quality(
+    db: Session,
+    service_date: date_type,
+    threshold: float = MIN_COVERAGE_FOR_MATERIALIZATION,
+    tz_name: str = "America/New_York",
+    prior: tuple[str, float | None] | None = None,
+    gap_policy: CompletenessPolicy | None = None,
+) -> tuple[str, float | None, bool]:
+    """Tuple form of :func:`assess_data_quality`: ``(data_quality, coverage_pct, kept)``.
+
+    The third element means "the returned coverage is the prior's stored
+    value and must NOT overwrite it" — ``not decision.coverage_measured``.
+
+    Args:
+        db: SQLAlchemy session.
+        service_date: Operational date in ``tz_name``.
+        threshold: Minimum coverage fraction for ``complete``.
+        tz_name: IANA timezone name.
+        prior: ``(data_quality, coverage_pct)`` of the existing row, or None.
+        gap_policy: Per-agency gap rule; None means the defaults.
+
+    Returns:
+        ``(data_quality, coverage_pct, coverage_not_remeasured)``.
+    """
+    d = assess_data_quality(db, service_date, threshold, tz_name, prior, gap_policy)
+    return d.data_quality, d.coverage_pct, not d.coverage_measured

@@ -1116,8 +1116,9 @@ near-empty day that reads as a real 0% (the #258 failure, across two
 invocations).
 
 **trip_update_state between dates.** Derive of D reads only
-`service_date = D`; D's completeness rollup reads state polled inside
-local day D, which includes D−1's owl trips. So after D, state before D
+`service_date = D`; D's completeness stamp reads D's own state (the
+trip-update gap leg) plus state polled inside local day D, which
+includes D−1's owl trips (the coverage leg). So after D, state before D
 (but never inside the normal 7-day window) is dead: the per-date cleanup
 deletes it and VACUUMs on its own autocommit connection (VACUUM cannot
 run in a transaction; plain VACUUM takes only SHARE UPDATE EXCLUSIVE),
@@ -1131,6 +1132,44 @@ After the last date: WMATA housekeeping once (`run_daily_batch.py
 7-day cleanup) and SFMTA's 7-day cleanup once; each is skipped if a date
 of that agency failed this run (so the failed date's state survives for
 the retry), and WMATA's with `--skip-housekeeping`.
+
+**Completeness stamp (`data_quality`).** Each aggregate rollup stamps
+the date `complete` or `partial` (`src/data_completeness.py:assess_data_quality`).
+A date is `complete` only if (1) minute coverage — heartbeats ∪ VP ∪
+trip-update snapshot times — reaches the cadence-aware threshold (0.80
+WMATA, 0.533 SFMTA) AND (2) neither feed is silent for more than
+`completeness.feed_gap_max_minutes` (90) inside the agency-local
+`service_start_hour`–`service_end_hour` window (05–24), both set per
+agency in `config/agencies/*.yaml` (issue #270: the coverage union alone
+missed a 5.7 h Muni trip-update outage on 2026-10-21 and can never see a
+single-feed outage at WMATA). The trip-update leg reads D's own
+`trip_update_state` rows, the VP leg distinct `vehicle_positions.collected_at`.
+A leg whose inputs are gone (state and raw VP are kept 7 days) is *not
+assessed*: it never demotes a date and never upgrades one — a date that
+already has a stamp keeps it and its stored coverage (logged as kept),
+unless a leg that *is* assessable fails. That is also why the end-of-run
+cleanup deleting the last processed date's state is harmless: when the
+next run's derive re-aggregates that date as D−1, its trip-update leg is
+not assessable (no rows with its `service_date`, whatever the next
+date's replay left in its evening window), so its stamp and coverage are
+kept rather than re-measured from VP alone (issue #272, SFMTA 9/29). The
+upsert logs one `completeness <date>: …` disclosure line per date
+(coverage, each feed's longest gap, the rule that made it partial, any
+leg not assessed); nothing is stored beyond `data_quality` and
+`coverage_pct`.
+
+`pipelines/restamp_data_quality.py --agency X --start A --end B`
+re-evaluates stamps after a rule change (dry-run by default; prints the
+same disclosure per date). It writes only dates whose stamp flips, and
+writes `coverage_pct` only when it was re-measured with every input
+present, so it can never overwrite a real stored coverage with the ~0 a
+pruned date measures; dates whose inputs are pruned are listed as kept.
+Correcting the stamp of such a date needs an owner-run, backed-up
+`UPDATE` of `data_quality` in `system_metrics_daily` and
+`route_metrics_daily_overlay` (see PR for #270/#272 for the runbook);
+afterwards a re-aggregation keeps the corrected stamp, because the date's
+inputs are absent (keep rule) and its stop-level rows, once pruned, make
+the aggregate-overwrite guard refuse the rollup.
 
 **Which dates.** Default, per agency: the day after `max(runs.service_date)`
 through the latest date whose **raw window is complete**, plus zero-`runs`

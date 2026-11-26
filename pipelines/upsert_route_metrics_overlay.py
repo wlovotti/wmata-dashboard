@@ -15,7 +15,8 @@ agency-local (window: see ``upsert_route_metrics_for_date``'s
 ``src.data_completeness.agency_coverage_threshold`` — an agency whose
 collector cadence doesn't poll every feed on every tick, e.g. SFMTA,
 can never reach the flat 80% WMATA threshold even under perfect
-collection). The EWT/bunching hour-of-day bucketing inside the metric
+collection), and the per-feed gap rule comes from the agency YAML's
+``completeness:`` block (issue #270). The EWT/bunching hour-of-day bucketing inside the metric
 computation itself is also agency-local, via the same ``tz_name`` (the
 agency-local hour bucketing fix, PR #190). ``--agency`` is also forwarded
 as ``agency`` into the EWT cell-hour gate lookup (PR #242 round-2 review
@@ -101,6 +102,7 @@ def main() -> int:
             completeness_threshold=agency_coverage_threshold(cfg),
             agency=args.agency,
             force=args.force_overwrite_aggregates,
+            gap_policy=cfg.completeness,
         )
         return 0 if result is not None else 1
     except AggregateOverwriteRefused as exc:

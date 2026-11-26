@@ -7,20 +7,24 @@ writes from leaking into the dev DB. All tests target a far-future
 service date (year 2099) so they don't collide with real ingest rows.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import text
 
-from src.agency_config import load_agency_config
+from src.agency_config import CompletenessPolicy, load_agency_config
 from src.data_completeness import (
     MIN_COVERAGE_FOR_MATERIALIZATION,
     agency_coverage_threshold,
+    assess_data_quality,
     coverage_pct_for_date,
     expected_minutes_for_date,
     has_trip_update_signal,
     is_date_sufficiently_complete,
+    longest_gap,
     resolve_data_quality,
+    service_window_utc,
 )
 from src.timezones import eastern_day_bounds_utc, local_day_bounds_utc
 
@@ -52,21 +56,28 @@ def _insert_vehicle_position_minutes(
     offset_minutes: int = 0,
     step_minutes: int = 1,
     tz_name: str = "America/New_York",
+    skip: tuple[int, int] | None = None,
 ):
     """Insert one vehicle_positions row every ``step_minutes`` minutes.
 
     ``minute_count`` rows land at ``offset_minutes + i * step_minutes``
     after local midnight in ``tz_name``; ``step_minutes=3`` models SFMTA's
-    VehiclePositions cadence (every 3rd 60 s tick).
+    VehiclePositions cadence (every 3rd 60 s tick). ``collected_at`` (the
+    poll time the #270 gap leg reads) equals ``timestamp``. ``skip`` is a
+    ``(first, last)`` minute-offset range (inclusive) left empty — a feed
+    outage.
     """
     start_utc, _ = local_day_bounds_utc(service_date, tz_name)
     for i in range(minute_count):
-        ts = start_utc + timedelta(minutes=offset_minutes + i * step_minutes)
+        minute = offset_minutes + i * step_minutes
+        if skip is not None and skip[0] <= minute <= skip[1]:
+            continue
+        ts = start_utc + timedelta(minutes=minute)
         db.execute(
             text(
                 "INSERT INTO vehicle_positions "
-                "(vehicle_id, latitude, longitude, timestamp) "
-                "VALUES (:v, :lat, :lon, :ts)"
+                "(vehicle_id, latitude, longitude, timestamp, collected_at) "
+                "VALUES (:v, :lat, :lon, :ts, :ts)"
             ),
             {"v": f"v-{i}", "lat": 38.9, "lon": -77.0, "ts": ts},
         )
@@ -81,6 +92,7 @@ def _insert_trip_update_state_minutes(
     step_minutes: int = 1,
     tz_name: str = "America/New_York",
     state_service_date: date | None = None,
+    skip: tuple[int, int] | None = None,
 ):
     """Insert one trip_update_state row every ``step_minutes`` minutes.
 
@@ -89,12 +101,16 @@ def _insert_trip_update_state_minutes(
     poll-time signal available in every data-arrival regime).
     ``state_service_date`` overrides the row's ``service_date`` column
     (default: ``service_date``) so tests can show the coverage query keys
-    on the snapshot timestamp alone, not the row's service date.
+    on the snapshot timestamp alone, not the row's service date. ``skip``
+    is a ``(first, last)`` minute-offset range (inclusive) left empty.
     """
     start_utc, _ = local_day_bounds_utc(service_date, tz_name)
     sd = state_service_date or service_date
     for i in range(minute_count):
-        ts = start_utc + timedelta(minutes=offset_minutes + i * step_minutes)
+        minute = offset_minutes + i * step_minutes
+        if skip is not None and skip[0] <= minute <= skip[1]:
+            continue
+        ts = start_utc + timedelta(minutes=minute)
         db.execute(
             text(
                 "INSERT INTO trip_update_state "
@@ -175,10 +191,12 @@ def test_coverage_unions_all_three_signals(pg_session):
 
 
 def test_trip_update_state_leg_keys_on_snapshot_time_not_service_date(pg_session):
-    """The leg is a plain range scan on ``final_snapshot_ts`` (indexed): a
-    past-midnight owl snapshot stamped with the previous service date still
-    counts toward the clock-day it landed in, and the row's ``service_date``
-    column is not consulted at all.
+    """The coverage leg is a plain range scan on ``final_snapshot_ts``
+    (indexed): a past-midnight owl snapshot stamped with the previous
+    service date still counts toward the clock-day it landed in. The
+    *signal* test, by contrast, keys on the row's own service date
+    (issue #272) — rows that belong to another date do not make this date's
+    trip-update signal "present".
     """
     _insert_trip_update_state_minutes(
         pg_session,
@@ -187,11 +205,31 @@ def test_trip_update_state_leg_keys_on_snapshot_time_not_service_date(pg_session
         state_service_date=TEST_DATE - timedelta(days=1),
     )
     assert coverage_pct_for_date(pg_session, TEST_DATE) == pytest.approx(100 / 1440)
+    assert has_trip_update_signal(pg_session, TEST_DATE) is False
+    assert has_trip_update_signal(pg_session, TEST_DATE - timedelta(days=1)) is True
+
+
+def test_has_trip_update_signal_ignores_next_dates_rows_in_this_window(pg_session):
+    """Issue #272: SFMTA 9/29 was demoted because the 9/30 replay left a few
+    rows (service_date 9/30) polled inside 9/29's evening window after 9/29's
+    own state had been deleted. Those rows must not count as 9/29's signal;
+    a row whose service_date IS the date does, wherever it was polled."""
+    _insert_trip_update_state_minutes(
+        pg_session,
+        TEST_DATE,
+        minute_count=5,
+        offset_minutes=1430,
+        state_service_date=TEST_DATE + timedelta(days=1),
+    )
+    assert has_trip_update_signal(pg_session, TEST_DATE) is False
+    _insert_trip_update_state_minutes(
+        pg_session, TEST_DATE + timedelta(days=2), minute_count=1, state_service_date=TEST_DATE
+    )
     assert has_trip_update_signal(pg_session, TEST_DATE) is True
 
 
 def test_has_trip_update_signal_false_when_no_rows_in_window(pg_session):
-    """No trip_update_state rows inside the local day → no signal, even if
+    """No trip_update_state rows for the date → no signal, even if
     heartbeats / positions are present."""
     _insert_heartbeat_minutes(pg_session, TEST_DATE, minute_count=1440)
     assert has_trip_update_signal(pg_session, TEST_DATE) is False
@@ -229,35 +267,53 @@ def test_resolve_keeps_earned_complete_when_tu_signal_pruned(pg_session):
 
 def test_resolve_demotes_when_tu_signal_present_but_thin(pg_session):
     """A genuine outage: trip_update_state rows exist but cover little of
-    the day. The prior 'complete' does not protect it."""
+    the day. The prior 'complete' does not protect it; with every input
+    present the coverage is re-measured and both legs name the cause."""
     cfg = load_agency_config("sfmta")
     tz = "America/Los_Angeles"
+    _insert_vehicle_position_minutes(
+        pg_session, TEST_DATE, minute_count=480, step_minutes=3, tz_name=tz
+    )
     _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=120, tz_name=tz)
 
-    quality, pct, kept = resolve_data_quality(
+    decision = assess_data_quality(
         pg_session,
         TEST_DATE,
         threshold=agency_coverage_threshold(cfg),
         tz_name=tz,
         prior=("complete", 0.731),
+        gap_policy=cfg.completeness,
     )
-    assert quality == "partial" and kept is False
-    assert pct == pytest.approx(120 / 1440)
+    assert decision.data_quality == "partial" and not decision.kept
+    assert decision.coverage_measured
+    assert decision.coverage_pct == pytest.approx((480 + 80) / 1440)
+    assert any(r.startswith("coverage") for r in decision.reasons)
+    assert any(r.startswith("trip_update gap") for r in decision.reasons)
 
 
 def test_resolve_never_promotes_via_prior_and_ignores_prior_when_complete(pg_session):
-    """A prior 'partial' cannot rescue a thin day; a day that clears the
-    threshold is complete regardless of any prior."""
+    """A prior 'partial' cannot be upgraded while an input is missing (here
+    VP), however good the trip-update leg looks; once every leg is
+    assessable and passes, the day is complete regardless of the prior."""
     cfg = load_agency_config("sfmta")
     tz = "America/Los_Angeles"
     thr = agency_coverage_threshold(cfg)
     assert resolve_data_quality(pg_session, TEST_DATE, thr, tz, prior=("partial", 0.3)) == (
         "partial",
-        0.0,
-        False,
+        0.3,
+        True,
     )
 
     _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440, tz_name=tz)
+    assert resolve_data_quality(pg_session, TEST_DATE, thr, tz, prior=("partial", 0.3)) == (
+        "partial",
+        0.3,
+        True,
+    )
+
+    _insert_vehicle_position_minutes(
+        pg_session, TEST_DATE, minute_count=480, step_minutes=3, tz_name=tz
+    )
     quality, pct, kept = resolve_data_quality(
         pg_session, TEST_DATE, thr, tz, prior=("partial", 0.3)
     )
@@ -411,3 +467,252 @@ def test_agency_coverage_threshold_keeps_relative_safety_margin():
         s3_vp_prefix="",
     )
     assert agency_coverage_threshold(cfg) == pytest.approx(MIN_COVERAGE_FOR_MATERIALIZATION * 0.25)
+
+
+# ---------------------------------------------------------------------------
+# Issue #270: per-feed service-hours gap leg
+# ---------------------------------------------------------------------------
+
+WMATA = load_agency_config("wmata")
+SFMTA = load_agency_config("sfmta")
+EASTERN_TZ = "America/New_York"
+PACIFIC_TZ = "America/Los_Angeles"
+
+
+def _dst_days(year: int, tz_name: str) -> tuple[date, date]:
+    """Return (spring-forward, fall-back) local dates for ``year`` in ``tz_name``."""
+    zone = ZoneInfo(tz_name)
+    found = []
+    d = date(year, 1, 1)
+    while d.year == year:
+        a = datetime.combine(d, time(0), tzinfo=zone).utcoffset()
+        b = datetime.combine(d + timedelta(days=1), time(0), tzinfo=zone).utcoffset()
+        if a != b:
+            found.append(d)
+        d += timedelta(days=1)
+    return found[0], found[1]
+
+
+@pytest.mark.smoke
+def test_longest_gap_counts_window_edges_and_ignores_outside_points():
+    """The edges count (a feed that stops for good shows a gap to the window
+    end); points outside the window are ignored; no points = whole window."""
+    s = datetime(2099, 1, 15, 10, 0)
+    e = s + timedelta(hours=10)
+    pts = [s + timedelta(minutes=m) for m in (5, 10, 100)] + [s - timedelta(hours=1)]
+    gap, g0, g1 = longest_gap(pts, s, e)
+    assert gap == pytest.approx(500.0)
+    assert (g0, g1) == (s + timedelta(minutes=100), e)
+    assert longest_gap([], s, e)[0] == pytest.approx(600.0)
+    # SQLite raw SQL hands timestamps back as strings.
+    assert longest_gap([(s + timedelta(minutes=300)).isoformat(sep=" ")], s, e)[0] == 300.0
+
+
+@pytest.mark.smoke
+def test_service_window_is_agency_local_and_dst_safe():
+    """05:00–24:00 local maps to the right UTC instants in each zone, on an
+    ordinary day and on both DST transition days (the 02:00 transition lies
+    outside the default window, so it stays 19 real hours)."""
+    start, end = service_window_utc(TEST_DATE, PACIFIC_TZ)
+    assert (start, end) == (datetime(2099, 1, 15, 13, 0), datetime(2099, 1, 16, 8, 0))
+    start, end = service_window_utc(TEST_DATE, EASTERN_TZ)
+    assert (start, end) == (datetime(2099, 1, 15, 10, 0), datetime(2099, 1, 16, 5, 0))
+    for tz in (EASTERN_TZ, PACIFIC_TZ):
+        spring, fall = _dst_days(2099, tz)
+        for d in (spring, fall):
+            start, end = service_window_utc(d, tz)
+            assert end - start == timedelta(hours=19)
+        # A whole-day window shows the DST day's real length.
+        whole = CompletenessPolicy(service_start_hour=0, service_end_hour=24)
+        s0, e0 = service_window_utc(spring, tz, whole)
+        s1, e1 = service_window_utc(fall, tz, whole)
+        assert (e0 - s0, e1 - s1) == (timedelta(hours=23), timedelta(hours=25))
+
+
+def test_single_trip_update_outage_partial_although_coverage_passes(pg_session):
+    """SFMTA 2026-10-21 shape: trip updates silent 10:50–16:42 local while
+    VP keeps polling every 3 minutes. Coverage still clears SFMTA's 0.533
+    (the flaw #270 describes), but the trip-update gap leg stamps the date
+    partial and says why."""
+    thr = agency_coverage_threshold(SFMTA)
+    _insert_vehicle_position_minutes(
+        pg_session, TEST_DATE, minute_count=480, step_minutes=3, tz_name=PACIFIC_TZ
+    )
+    _insert_trip_update_state_minutes(
+        pg_session, TEST_DATE, minute_count=1440, tz_name=PACIFIC_TZ, skip=(650, 1001)
+    )
+
+    decision = assess_data_quality(pg_session, TEST_DATE, thr, PACIFIC_TZ, None, SFMTA.completeness)
+
+    assert decision.measured_coverage >= thr
+    assert decision.data_quality == "partial"
+    assert decision.trip_update_gap.longest_gap_min == pytest.approx(353.0)
+    assert decision.vehicle_position_gap.longest_gap_min == pytest.approx(3.0)
+    assert len(decision.reasons) == 1 and decision.reasons[0].startswith("trip_update gap 353")
+    assert "partial because" in decision.describe()
+
+
+def test_single_vehicle_position_outage_partial_at_wmata(pg_session):
+    """At WMATA either feed alone reads ~1.00 coverage, so a VP-only outage
+    was invisible; the VP gap leg catches it."""
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440)
+    _insert_vehicle_position_minutes(pg_session, TEST_DATE, minute_count=1440, skip=(600, 719))
+
+    decision = assess_data_quality(
+        pg_session, TEST_DATE, 0.80, EASTERN_TZ, None, WMATA.completeness
+    )
+
+    assert decision.measured_coverage == pytest.approx(1.0)
+    assert decision.data_quality == "partial"
+    assert decision.vehicle_position_gap.longest_gap_min == pytest.approx(121.0)
+    assert decision.reasons[0].startswith("vehicle_position gap 121")
+
+
+def test_gap_limit_is_strict_and_per_agency_configurable(pg_session):
+    """A gap of exactly the limit passes; the limit comes from the policy."""
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440)
+    _insert_vehicle_position_minutes(pg_session, TEST_DATE, minute_count=1440, skip=(600, 688))
+
+    ninety = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, None, WMATA.completeness)
+    assert ninety.vehicle_position_gap.longest_gap_min == pytest.approx(90.0)
+    assert ninety.data_quality == "complete" and not ninety.reasons
+
+    sixty = assess_data_quality(
+        pg_session, TEST_DATE, 0.80, EASTERN_TZ, None, CompletenessPolicy(feed_gap_max_minutes=60)
+    )
+    assert sixty.data_quality == "partial"
+
+
+def test_gap_outside_service_hours_is_ignored(pg_session):
+    """A 4-hour overnight silence (00:00–04:00 local) is outside 05–24 and
+    does not stamp the date partial."""
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440, skip=(0, 239))
+    _insert_vehicle_position_minutes(pg_session, TEST_DATE, minute_count=1440, skip=(0, 239))
+
+    decision = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, None)
+
+    assert decision.measured_coverage == pytest.approx(1200 / 1440)  # still >= 0.80
+    assert decision.data_quality == "complete" and not decision.reasons
+    assert decision.trip_update_gap.longest_gap_min <= 1.0
+    assert decision.vehicle_position_gap.longest_gap_min <= 1.0
+
+
+def test_dst_day_with_full_data_is_complete(pg_session):
+    """A spring-forward day (23 h local) with both feeds polling every minute
+    shows no phantom gap from the transition."""
+    spring, _ = _dst_days(2099, EASTERN_TZ)
+    _insert_trip_update_state_minutes(pg_session, spring, minute_count=1380)
+    _insert_vehicle_position_minutes(pg_session, spring, minute_count=1380)
+
+    decision = assess_data_quality(pg_session, spring, 0.80, EASTERN_TZ, None)
+
+    assert decision.measured_coverage == pytest.approx(1.0)
+    assert decision.data_quality == "complete"
+    assert decision.trip_update_gap.longest_gap_min <= 1.0
+    assert decision.vehicle_position_gap.longest_gap_min <= 1.0
+
+
+def test_vp_leg_not_assessable_when_a_utc_day_is_missing(pg_session):
+    """VP is pruned in whole UTC days. If one UTC day the window overlaps has
+    no rows, the leg is not assessable: it neither stamps partial nor lets a
+    prior partial be upgraded, and the decision says so."""
+    # Rows only for the first local hours (UTC TEST_DATE); the window's
+    # second UTC day (TEST_DATE + 1, from 19:00 local) has none.
+    _insert_trip_update_state_minutes(pg_session, TEST_DATE, minute_count=1440)
+    _insert_vehicle_position_minutes(pg_session, TEST_DATE, minute_count=600)
+
+    fresh = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, None)
+    assert not fresh.vehicle_position_gap.assessable
+    assert fresh.data_quality == "complete"  # first stamp: decided by assessed legs
+    assert any(n.startswith("vehicle_position") for n in fresh.not_assessed)
+
+    kept = assess_data_quality(pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("partial", 0.42))
+    assert (kept.data_quality, kept.coverage_pct, kept.kept) == ("partial", 0.42, True)
+    assert not kept.coverage_measured
+
+
+def test_assessable_vp_gap_demotes_even_when_tu_pruned_but_keeps_coverage(pg_session):
+    """A real VP gap is evidence even after the trip-update rows are gone:
+    the date is demoted, but its stored coverage is carried over rather than
+    replaced by a number measured without the trip-update leg."""
+    _insert_vehicle_position_minutes(pg_session, TEST_DATE, minute_count=1440, skip=(600, 799))
+
+    decision = assess_data_quality(
+        pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 0.97), WMATA.completeness
+    )
+
+    assert decision.data_quality == "partial" and not decision.kept
+    assert not decision.coverage_measured and decision.coverage_pct == 0.97
+    assert decision.reasons[0].startswith("vehicle_position gap")
+    assert resolve_data_quality(
+        pg_session, TEST_DATE, 0.80, EASTERN_TZ, ("complete", 0.97), WMATA.completeness
+    ) == ("partial", 0.97, True)
+
+
+# ---------------------------------------------------------------------------
+# Issue #272: a two-run backfill must not re-stamp the boundary date
+# ---------------------------------------------------------------------------
+
+BOUNDARY = date(2020, 3, 10)  # older than any cleanup cutoff, predates real data
+
+
+def test_two_run_backfill_leaves_boundary_stamp_and_coverage_unchanged(pg_session):
+    """Run 1 derives BOUNDARY and stamps it complete; its end-of-run cleanup
+    (the real ``run_cleanup``, 7-day window) deletes BOUNDARY's state. Run 2
+    starts at BOUNDARY+1: the replay leaves a few BOUNDARY+1 rows polled in
+    BOUNDARY's evening window, and the derive re-aggregates BOUNDARY as D-1.
+    Its stamp and stored coverage must not change (SFMTA 9/29, issue #272).
+    """
+    from pipelines.cleanup_trip_update_state import run_cleanup
+    from src.models import SystemMetricsDaily
+    from src.system_metrics import upsert_system_metrics_for_date
+
+    thr = agency_coverage_threshold(SFMTA)
+    kwargs = {
+        "tz_name": PACIFIC_TZ,
+        "completeness_threshold": thr,
+        "agency": "sfmta",
+        "gap_policy": SFMTA.completeness,
+    }
+
+    # Run 1: VP (every 3 min, two days so both UTC days are present) + state.
+    for d in (BOUNDARY, BOUNDARY + timedelta(days=1)):
+        _insert_vehicle_position_minutes(
+            pg_session, d, minute_count=480, step_minutes=3, tz_name=PACIFIC_TZ
+        )
+    _insert_trip_update_state_minutes(
+        pg_session, BOUNDARY, minute_count=720, step_minutes=2, tz_name=PACIFIC_TZ
+    )
+    first = upsert_system_metrics_for_date(pg_session, BOUNDARY, **kwargs)
+    assert first["data_quality"] == "complete"
+    row = pg_session.get(SystemMetricsDaily, BOUNDARY.isoformat())
+    stored = (row.data_quality, row.coverage_pct)
+    assert stored[1] == pytest.approx(2 / 3)
+
+    # End of run 1: the 7-day cleanup removes BOUNDARY's state.
+    run_cleanup(pg_session, retention_days=7, tz_name=PACIFIC_TZ)
+    assert has_trip_update_signal(pg_session, BOUNDARY) is False
+
+    # Run 2: BOUNDARY+1's replay, with a few rows inside BOUNDARY's evening.
+    _insert_trip_update_state_minutes(
+        pg_session,
+        BOUNDARY,
+        minute_count=10,
+        offset_minutes=1430,
+        tz_name=PACIFIC_TZ,
+        state_service_date=BOUNDARY + timedelta(days=1),
+    )
+    _insert_trip_update_state_minutes(
+        pg_session,
+        BOUNDARY + timedelta(days=1),
+        minute_count=720,
+        step_minutes=2,
+        tz_name=PACIFIC_TZ,
+    )
+    # Without the fix this is exactly the demotion: thin, "signal present".
+    assert coverage_pct_for_date(pg_session, BOUNDARY, PACIFIC_TZ) < thr
+
+    upsert_system_metrics_for_date(pg_session, BOUNDARY, **kwargs)  # D-1 re-aggregation
+
+    row = pg_session.get(SystemMetricsDaily, BOUNDARY.isoformat())
+    assert (row.data_quality, row.coverage_pct) == stored

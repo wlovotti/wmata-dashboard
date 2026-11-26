@@ -10,6 +10,7 @@ from datetime import date
 
 import pytest
 
+from src.data_completeness import QualityDecision
 from src.models import (
     RouteHeadwayMetrics,
     RouteMetricsDailyOverlay,
@@ -25,8 +26,8 @@ D = date(2026, 6, 1)
 def _complete(monkeypatch):
     """Bypass the ingest-coverage guard (these tests seed derived tables directly)."""
     monkeypatch.setattr(
-        "src.data_completeness.resolve_data_quality",
-        lambda *args, **kwargs: ("complete", 1.0, False),
+        "src.data_completeness.assess_data_quality",
+        lambda *args, **kwargs: QualityDecision.fixed("complete", 1.0),
     )
 
 

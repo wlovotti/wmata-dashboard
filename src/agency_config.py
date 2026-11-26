@@ -99,6 +99,74 @@ def parse_retention(raw: dict | None, source: str = "<config>") -> RetentionPoli
 
 
 @dataclass(frozen=True)
+class CompletenessPolicy:
+    """Per-feed gap rule for one agency's ``data_quality`` stamp (issue #270).
+
+    Read from the optional ``completeness:`` block of the agency YAML; the
+    coverage threshold itself stays derived from the collector cadence
+    (``src.data_completeness.agency_coverage_threshold``). A date is
+    stamped ``partial`` when either feed (trip updates or vehicle
+    positions) goes silent for longer than ``feed_gap_max_minutes`` inside
+    the agency-local service-hours window — see
+    ``src/data_completeness.py`` for the full rule and how a feed whose
+    rows were pruned is treated.
+
+    Defaults come from the 2026-11-25 investigation (#270): over every
+    date in both databases a 90-minute limit inside 05:00–24:00 local
+    flagged exactly the three known outage days (SFMTA 10/21, 8/08, 8/09)
+    and nothing else; 60 minutes also flagged SFMTA 11/13 and WMATA 7/03.
+
+    Attributes:
+        feed_gap_max_minutes: Longest tolerated silence of either feed, in
+            minutes, inside the service-hours window. A longer gap stamps
+            the date ``partial``.
+        service_start_hour: Agency-local wall-clock hour the window opens
+            on the service date (0–23).
+        service_end_hour: Agency-local wall-clock hour it closes; 24 means
+            the following local midnight. Must exceed ``service_start_hour``.
+    """
+
+    feed_gap_max_minutes: int = 90
+    service_start_hour: int = 5
+    service_end_hour: int = 24
+
+
+def parse_completeness(raw: dict | None, source: str = "<config>") -> CompletenessPolicy:
+    """Build a CompletenessPolicy from a YAML ``completeness:`` block (None = defaults).
+
+    Raises ValueError for unknown keys, non-integer values, or a window
+    that is empty or outside a single local day, so a typo can never
+    silently disable the gap rule.
+    """
+    if raw is None:
+        return CompletenessPolicy()
+    if not isinstance(raw, dict):
+        raise ValueError(f"completeness in {source} must be a mapping, got {type(raw).__name__}")
+    allowed = {"feed_gap_max_minutes", "service_start_hour", "service_end_hour"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"Unknown completeness key(s) {sorted(unknown)} in {source}")
+    values = {}
+    for key in allowed:
+        value = raw.get(key, getattr(CompletenessPolicy, key))
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(
+                f"completeness.{key} in {source} must be an integer, got {value!r} "
+                f"({type(value).__name__})"
+            )
+        values[key] = value
+    policy = CompletenessPolicy(**values)
+    if policy.feed_gap_max_minutes <= 0:
+        raise ValueError(f"completeness.feed_gap_max_minutes in {source} must be positive")
+    if not (0 <= policy.service_start_hour < policy.service_end_hour <= 24):
+        raise ValueError(
+            f"completeness service hours in {source} must satisfy 0 <= start < end <= 24, "
+            f"got {policy.service_start_hour}..{policy.service_end_hour}"
+        )
+    return policy
+
+
+@dataclass(frozen=True)
 class AgencyConfig:
     """Immutable snapshot of one agency's collection parameters."""
 
@@ -126,6 +194,8 @@ class AgencyConfig:
     s3_vp_prefix: str
     # Local-DB retention tiers (optional YAML block; shallow-tier default).
     retention: RetentionPolicy = RetentionPolicy()
+    # Per-feed gap rule for the data_quality stamp (optional YAML block).
+    completeness: CompletenessPolicy = CompletenessPolicy()
 
 
 def load_agency_config(name: str) -> AgencyConfig:
@@ -168,6 +238,7 @@ def load_agency_config(name: str) -> AgencyConfig:
         s3_tu_prefix=raw["s3"]["tu_prefix"],
         s3_vp_prefix=raw["s3"]["vp_prefix"],
         retention=parse_retention(raw.get("retention"), str(path)),
+        completeness=parse_completeness(raw.get("completeness"), str(path)),
     )
 
 
