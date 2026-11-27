@@ -1288,6 +1288,8 @@ def test_mixed_ewt_method_report_fixture_rerenders_byte_identical():
     report was regenerated after those dates were re-derived (issue #278)
     and is now single-method, so this pair keeps a real-data check of the
     mixed-method markers (dagger, method coverage note, "not a finding").
+    It predates the frequent-service scope check, so it also covers that
+    older-JSON fallback.
     """
     from pathlib import Path
 
@@ -1297,4 +1299,64 @@ def test_mixed_ewt_method_report_fixture_rerenders_byte_identical():
     md = sc.render_markdown(card)
     assert md == (fixtures / "mixed_ewt_method_2026-10.md").read_text()
     assert "not all computed under the same method" in md
+    assert "Excess wait time method coverage:" in md
     assert "† marks an old-method date." in md
+    # Written before the frequent-service scope check: no like-for-like line.
+    assert "not like-for-like" not in md
+
+
+def _scope_card(wmata_tiers: dict, sfmta_tiers: dict) -> dict:
+    """The pre-completeness fixture with given EWT gate scopes and a recomputed comparison."""
+    from pathlib import Path
+
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "scorecard"
+    card = json.loads((fixtures / "pre_completeness_2026-10.json").read_text())
+    for agency, tiers in (("wmata", wmata_tiers), ("sfmta", sfmta_tiers)):
+        card["agencies"][agency]["ewt_scope"] = {"default_gate_sec": 900, "tiers": tiers}
+    card["comparison"] = sc.compare_direction(card["agencies"], "wmata")
+    return card
+
+
+@pytest.mark.smoke
+def test_ewt_scopes_equal_truth_table():
+    """Only one shared gate on every route counts as equal; tiers or unknown scope never do."""
+    uniform = {"default_gate_sec": 900, "tiers": {}}
+    tiered = {"default_gate_sec": 900, "tiers": {"medium_freq": {"gate_sec": 1200, "n_routes": 3}}}
+    assert sc.ewt_scopes_equal(uniform, uniform)
+    assert not sc.ewt_scopes_equal(tiered, uniform)
+    assert not sc.ewt_scopes_equal(tiered, tiered)  # each tier is an agency's own list
+    assert not sc.ewt_scopes_equal({"default_gate_sec": 1200, "tiers": {}}, uniform)
+    assert not sc.ewt_scopes_equal(None, uniform)  # cannot be established
+    assert sc.ewt_gate_scope("sfmta")["tiers"] == {}  # no designation outside WMATA
+
+
+@pytest.mark.smoke
+def test_ewt_scope_differs_renders_not_like_for_like():
+    """A differing frequent-service scope flags the EWT comparison and explains it with SWT."""
+    card = _scope_card({"medium_freq": {"gate_sec": 1200, "n_routes": 3}}, {})
+    comp = card["comparison"]["sfmta"]["ewt"]
+    assert comp["like_for_like"] is False
+    assert comp["not_like_for_like_reasons"] == ["frequent_service_scope_differs"]
+    w, s = card["agencies"]["wmata"]["metrics"], card["agencies"]["sfmta"]["metrics"]
+    assert comp["swt_mean"] == {"subject": w["swt"]["mean"], "peer": s["swt"]["mean"]}
+    assert comp["ewt_share_of_swt"]["peer"] == pytest.approx(s["ewt"]["mean"] / s["swt"]["mean"])
+    # direction_robust keeps its sensitivity meaning; like_for_like carries the scope.
+    assert "direction_robust" in comp
+    md = sc.render_markdown(card)
+    assert "| Excess wait time (frequent service) (not like-for-like across agencies" in md
+    assert "Differences that are not like-for-like:" in md
+    assert "or up to 20 minutes on its 3 designated medium-frequency routes" in md
+    assert "SFMTA (Muni) uses the 15-minute limit on every route" in md
+    assert f"{comp['ewt_share_of_swt']['peer'] * 100:.1f}% for SFMTA (Muni)" in md
+    assert "is therefore not a like-for-like comparison and is not a finding" in md
+
+
+@pytest.mark.smoke
+def test_ewt_scope_equal_renders_no_like_for_like_line():
+    """With one shared gate on every route, the EWT comparison is like-for-like and unmarked."""
+    card = _scope_card({}, {})
+    comp = card["comparison"]["sfmta"]["ewt"]
+    assert comp["like_for_like"] is True
+    assert comp["not_like_for_like_reasons"] == []
+    md = sc.render_markdown(card)
+    assert "not like-for-like" not in md

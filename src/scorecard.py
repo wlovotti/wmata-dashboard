@@ -80,9 +80,11 @@ from src.ewt import (
     ewt_computed_with_cap,
 )
 from src.frequent_routes import (
+    DEFAULT_GATE_SEC,
     HIGH_FREQ_GATE_SEC,
     MEDIUM_FREQ_GATE_SEC,
     load_frequent_route_ids,
+    load_medium_freq_route_ids,
 )
 from src.gtfs_calendar import scheduled_service_ids_for_date
 from src.gtfs_versioning import REASON_COVERS, resolve_gtfs_snapshot_for_date
@@ -1257,6 +1259,77 @@ def ewt_methods_comparable(a: dict | None, b: dict | None) -> bool:
     return sa == sb and sa in ("capped", "old")
 
 
+def ewt_gate_scope(agency: str) -> dict:
+    """The EWT cell-hour gate each of an agency's routes gets, as the current code resolves it.
+
+    Mirrors `src/frequent_routes.py:get_cell_hour_gate_sec`: every route
+    gets ``DEFAULT_GATE_SEC`` unless the agency has a designated
+    medium-frequency list, whose routes get ``MEDIUM_FREQ_GATE_SEC``.
+    ``tiers`` lists only tiers with at least one route, so an agency with
+    no designation has ``tiers == {}`` (one gate on every route). System
+    EWT and SWT pool only cell-hours that pass the gate, so two agencies
+    whose scopes differ pool different scheduled service.
+    """
+    medium = load_medium_freq_route_ids(agency)
+    tiers = {}
+    if medium:
+        tiers["medium_freq"] = {"gate_sec": MEDIUM_FREQ_GATE_SEC, "n_routes": len(medium)}
+    return {"default_gate_sec": DEFAULT_GATE_SEC, "tiers": tiers}
+
+
+def ewt_scopes_equal(a: dict | None, b: dict | None) -> bool:
+    """True only when two agencies' EWT figures provably pool the same frequent-service scope.
+
+    Equal means both apply one and the same gate to every route (no
+    agency-specific designated tier). A designated tier is an agency's own
+    route list, so two agencies with tiers are not treated as equal even
+    if the gate values match. A missing scope block cannot be established
+    as equal and counts as differing.
+    """
+    if a is None or b is None:
+        return False
+    return not a["tiers"] and not b["tiers"] and a["default_gate_sec"] == b["default_gate_sec"]
+
+
+def _ewt_like_for_like(subject: dict, peer: dict) -> dict:
+    """Whether the subject-vs-peer EWT difference is like-for-like, with the context numbers.
+
+    ``like_for_like`` is False when the two periods were not computed
+    under one EWT method (`ewt_methods_comparable`) or their frequent-
+    service scope differs (`ewt_scopes_equal`); ``not_like_for_like_reasons``
+    names which.
+    It is separate from ``direction_robust``, which answers only whether
+    the sign survives the sensitivity variants. The scheduled wait time
+    (SWT) means and EWT as a share of SWT are recorded as context for why
+    an absolute gap in seconds is not comparable; the share is not a
+    cross-agency metric.
+    """
+    reasons = []
+    if not ewt_methods_comparable(subject.get("ewt_method"), peer.get("ewt_method")):
+        reasons.append("ewt_method_differs")
+    if not ewt_scopes_equal(subject.get("ewt_scope"), peer.get("ewt_scope")):
+        reasons.append("frequent_service_scope_differs")
+
+    def _means(section: dict) -> tuple[float | None, float | None]:
+        """Period mean EWT and SWT for one agency section (None when absent)."""
+        metrics = section.get("metrics") or {}
+        return (
+            (metrics.get("ewt") or {}).get("mean"),
+            (metrics.get("swt") or {}).get("mean"),
+        )
+
+    (s_ewt, s_swt), (p_ewt, p_swt) = _means(subject), _means(peer)
+    return {
+        "like_for_like": not reasons,
+        "not_like_for_like_reasons": reasons,
+        "swt_mean": {"subject": s_swt, "peer": p_swt},
+        "ewt_share_of_swt": {
+            "subject": s_ewt / s_swt if s_ewt is not None and s_swt else None,
+            "peer": p_ewt / p_swt if p_ewt is not None and p_swt else None,
+        },
+    }
+
+
 def compare_direction(sections: dict[str, dict], subject: str) -> dict[str, dict]:
     """Whether the subject-vs-peer difference keeps its direction across robust variants.
 
@@ -1315,6 +1388,8 @@ def compare_direction(sections: dict[str, dict], subject: str) -> dict[str, dict
                 "direction_robust": len(set(signs.values())) <= 1 and comparable,
                 "method_comparable": comparable,
             }
+            if metric == "ewt":
+                out[peer][metric].update(_ewt_like_for_like(sections[subject], section))
     return out
 
 
@@ -1426,6 +1501,7 @@ def build_agency_section(
         "known_issues": known_dates,
         "dominated_routes": dominated,
         "ewt_method": ewt_method_coverage(db, dates, rows, metrics["ewt"]),
+        "ewt_scope": ewt_gate_scope(agency),
         "aggregates_computed_at_utc": {
             "min": _iso_or_none(min(computed)) if computed else None,
             "max": _iso_or_none(max(computed)) if computed else None,
@@ -1532,7 +1608,7 @@ def comparability_caveats(sections: dict[str, dict]) -> list[str]:
         "per-cell-hour gate. System EWT and SWT pool only cell-hours that pass the gate.",
         "Feed semantics differ. Muni real-time data comes through the 511.org regional "
         "aggregator, which has a known duplicate stop_sequence artifact affecting per-stop "
-        "matching; treat Muni figures as directionally reliable rather than exact. Polling "
+        "matching; treat Muni figures as approximate rather than exact. Polling "
         f"cadence and completeness thresholds differ by agency ({cadence}).",
         "No ridership weighting. Neither dataset carries passenger counts; system figures "
         "weight observations (stops, trips, headways) within a day and days equally across the "
@@ -2206,19 +2282,84 @@ def _render_provenance(prov: dict) -> list[str]:
     ]
 
 
+def _gate_scope_text(section: dict) -> str | None:
+    """Plain description of the EWT cell-hour gate an agency applies (None if unknown)."""
+    scope = section.get("ewt_scope")
+    if scope is None:
+        return None
+    default_min = f"{scope['default_gate_sec'] / 60:g}"
+    medium = scope["tiers"].get("medium_freq")
+    if medium is None:
+        return f"{section['display_name']} uses the {default_min}-minute limit on every route"
+    return (
+        f"{section['display_name']} counts cell-hours with a scheduled headway up to "
+        f"{default_min} minutes, or up to {medium['gate_sec'] / 60:g} minutes on its "
+        f"{medium['n_routes']} designated medium-frequency routes"
+    )
+
+
+def _scope_differs_lines(scorecard: dict, subject: dict) -> list[str]:
+    """Summary lines for EWT comparisons whose frequent-service scope differs.
+
+    Driven by ``comparison[peer]["ewt"]["not_like_for_like_reasons"]``;
+    absent in older JSON, which therefore renders no line. Each line gives
+    both agencies' gates, scheduled wait times and EWT as a share of SWT,
+    and says the absolute gap in seconds is not a like-for-like comparison.
+    The share is context for the caution, not an endorsed metric.
+    """
+    lines = []
+    for peer, by_metric in (scorecard.get("comparison") or {}).items():
+        comp = by_metric.get("ewt") or {}
+        if "frequent_service_scope_differs" not in comp.get("not_like_for_like_reasons", []):
+            continue
+        peer_section = scorecard["agencies"][peer]
+        s_name, p_name = subject["display_name"], peer_section["display_name"]
+        gates = [_gate_scope_text(subject), _gate_scope_text(peer_section)]
+        if None in gates:
+            scope_text = (
+                f"the frequent-service scope of {s_name} and {p_name} could not be established "
+                "as the same, so the two figures may pool different scheduled service."
+            )
+        else:
+            scope_text = (
+                "the frequent-service scope differs, so the two figures pool different "
+                f"scheduled service: {gates[0]}; {gates[1]}."
+            )
+        swt, share = comp["swt_mean"], comp["ewt_share_of_swt"]
+        diff = (comp.get("differences") or {}).get("mean")
+        diff_text = f"{abs(diff):.0f} s " if diff is not None else ""
+        lines.append(
+            f"- {METRIC_LABELS['ewt']}: {scope_text} Scheduled wait time is "
+            f"{fmt_metric('swt', swt['subject'])} for {s_name} and "
+            f"{fmt_metric('swt', swt['peer'])} for {p_name}; excess wait time is "
+            f"{_fmt_pct(share['subject'], 1)} of scheduled wait time for {s_name} and "
+            f"{_fmt_pct(share['peer'], 1)} for {p_name}. The {diff_text}difference in excess "
+            "wait time is therefore not a like-for-like comparison and is not a finding; the "
+            "share of scheduled wait time is shown only as context for this caution, not as a "
+            "cross-agency measure."
+        )
+    return lines
+
+
 def _render_summary(scorecard: dict, subject: dict, peers: list[dict]) -> list[str]:
     """Summary table (mean with median day) plus robustness notes and comparison cautions.
 
     A cell gets a numbered note when removing flagged days or routes under
     investigation moves its mean by more than the material-shift threshold;
     a metric whose subject-vs-peer difference changes direction across the
-    robust variants gets an explicit "not a finding" line.
+    robust variants gets an explicit "not a finding" line. An EWT
+    comparison whose frequent-service scope differs gets a "not
+    like-for-like" line and a marker on the table row (older JSON without
+    ``not_like_for_like_reasons`` renders as before).
     """
     header = ["Metric", subject["display_name"], *[p["display_name"] for p in peers]]
     body: list[list[str]] = []
     notes: list[str] = []
+    scope_lines = _scope_differs_lines(scorecard, subject)
     for metric in HEADLINE_METRICS:
         row = [METRIC_LABELS[metric]]
+        if metric == "ewt" and scope_lines:
+            row = [f"{METRIC_LABELS[metric]} (not like-for-like across agencies, see below)"]
         for s in [subject, *peers]:
             ms = s["metrics"][metric]
             rob = s["robustness"][metric]
@@ -2288,6 +2429,8 @@ def _render_summary(scorecard: dict, subject: dict, peers: list[dict]) -> list[s
                 )
     if cautions:
         lines += ["", "Differences that are not robust:", "", *cautions]
+    if scope_lines:
+        lines += ["", "Differences that are not like-for-like:", "", *scope_lines]
     method_notes = [
         n for s in [subject, *peers] if (n := _ewt_method_note(s, scorecard["method"])) is not None
     ]
