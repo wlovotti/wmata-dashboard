@@ -6,10 +6,10 @@
     "end": "2026-10-31",
     "n_days": 31
   },
-  "generated_at_utc": "2026-11-27T00:32:54",
+  "generated_at_utc": "2026-11-27T00:44:50",
   "generator": "scripts/generate_scorecard.py",
   "provenance": {
-    "git_commit": "9b7f0b3ee19a2fd4dc137960c0e2d36e5d32f753",
+    "git_commit": "60ff3f99546a1509ff00009c7bf3c169e455e782",
     "git_dirty_paths": [],
     "source_sha256": {
       "api/__init__.py": "e2580af7cfcec064492588a87e83020869db0d4d5c828664c812c58ed6ba0546",
@@ -35,14 +35,14 @@
       "src/otp_constants.py": "4e13e84cc670015df4fb09cd54930ea5a287e963924660e7f05e4e65e2291424",
       "src/otp_metrics.py": "62ea77456abc3cd959e1a23651d12cc1957e91dd65f62839c8226a3c72c2d075",
       "src/route_targets.py": "eb98f9ac64b30c635f23d74de7a8edae4ee0a0c7f937ee6b893c9deb337c48d9",
-      "src/scorecard.py": "e2b599c85fda0b657c7becc23ab7f723051bce927a1c0042cf847466a785d098",
+      "src/scorecard.py": "e132109310087af97e9fa31350e69e6048560c804dc10d8d2060d97b3e3e32e5",
       "src/service_delivered.py": "8710a5a1e2be3c84746fa272a590e143f9b369e7ad2ecb7e04e2c7c25cd286f6",
       "src/service_profile.py": "c14eee937468259dc0b60516106cb1030bb6e9d22a94c594088f4b39dbfe1fe4",
       "src/shape_simplify.py": "22bd7d7bdbb447e7daa9c6c415c6e84c04dee4ed4cbfcbacdc18e4bccd84a887",
       "src/time_periods.py": "20be4ebc7ceef4f734d161411042541894126f1c34dc5f0087d3f2ab27f6cc31",
       "src/timezones.py": "92c0168fda1794d546c938386a9b78471ddf765a415daefb4d2613cd682ef610"
     },
-    "source_digest": "cf6903eb9c6eeef043e47922987891c3089847f262975fbbfac6188d75caf5b9"
+    "source_digest": "a63a6a2904712a5bdf4a65dd67f42be50d72bd06fefa251d23a1ef8aa1700a84"
   },
   "subject": "wmata",
   "peers": [
@@ -921,6 +921,15 @@
           "old": {
             "n_days": 0,
             "mean": null
+          }
+        }
+      },
+      "ewt_scope": {
+        "default_gate_sec": 900,
+        "tiers": {
+          "medium_freq": {
+            "gate_sec": 1200,
+            "n_routes": 19
           }
         }
       },
@@ -2145,6 +2154,10 @@
           }
         }
       },
+      "ewt_scope": {
+        "default_gate_sec": 900,
+        "tiers": {}
+      },
       "aggregates_computed_at_utc": {
         "min": "2026-11-26T14:41:19",
         "max": "2026-11-27T00:30:31"
@@ -2181,7 +2194,19 @@
           "excluding_routes": 30.777726322254964
         },
         "direction_robust": true,
-        "method_comparable": true
+        "method_comparable": true,
+        "like_for_like": false,
+        "not_like_for_like_reasons": [
+          "frequent_service_scope_differs"
+        ],
+        "swt_mean": {
+          "subject": 439.9381363304055,
+          "peer": 331.046314059315
+        },
+        "ewt_share_of_swt": {
+          "subject": 0.29946724045001333,
+          "peer": 0.30585887973830755
+        }
       },
       "bunching": {
         "differences": {
@@ -2199,7 +2224,7 @@
     "Different networks. WMATA's GTFS feed is bus-only. SFMTA's feed also carries Muni Metro light rail and cable car. OTP and service delivered pool every route in each feed (so Muni's include rail and cable car); EWT, SWT and bunching are restricted to bus routes (GTFS route_type 3) for both agencies.",
     "One OTP window for both. Both agencies are measured on the same -2/+7 minute window at every observed stop. Neither agency publishes OTP this way (WMATA's scorecard uses timepoints; SFMTA publishes against its own standard), so these figures do not match either agency's official reporting.",
     "Frequent-service scope differs. WMATA's per-route EWT gate uses WMATA's published frequent-route list (15 min for high-frequency and undesignated routes, 20 min for medium-frequency). SFMTA has no equivalent list, so every Muni route uses the 15-minute per-cell-hour gate. System EWT and SWT pool only cell-hours that pass the gate.",
-    "Feed semantics differ. Muni real-time data comes through the 511.org regional aggregator, which has a known duplicate stop_sequence artifact affecting per-stop matching; treat Muni figures as directionally reliable rather than exact. Polling cadence and completeness thresholds differ by agency (WMATA Metrobus: trip updates every 30 s, vehicle positions every 60 s, 'complete' at ingest coverage >= 0.800, and neither the trip-update nor the vehicle-position feed silent for more than 90 minutes between 05:00-24:00 Eastern; SFMTA (Muni): trip updates every 120 s, vehicle positions every 180 s, 'complete' at ingest coverage >= 0.533, i.e. 0.80 x the 0.667 ceiling its polling cadence allows, and neither the trip-update nor the vehicle-position feed silent for more than 90 minutes between 05:00-24:00 Pacific).",
+    "Feed semantics differ. Muni real-time data comes through the 511.org regional aggregator, which has a known duplicate stop_sequence artifact affecting per-stop matching; treat Muni figures as approximate rather than exact. Polling cadence and completeness thresholds differ by agency (WMATA Metrobus: trip updates every 30 s, vehicle positions every 60 s, 'complete' at ingest coverage >= 0.800, and neither the trip-update nor the vehicle-position feed silent for more than 90 minutes between 05:00-24:00 Eastern; SFMTA (Muni): trip updates every 120 s, vehicle positions every 180 s, 'complete' at ingest coverage >= 0.533, i.e. 0.80 x the 0.667 ceiling its polling cadence allows, and neither the trip-update nor the vehicle-position feed silent for more than 90 minutes between 05:00-24:00 Pacific).",
     "No ridership weighting. Neither dataset carries passenger counts; system figures weight observations (stops, trips, headways) within a day and days equally across the period, not riders.",
     "Service dates are agency-local (Eastern for WMATA, Pacific for SFMTA)."
   ]
