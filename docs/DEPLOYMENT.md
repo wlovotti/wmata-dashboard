@@ -1347,11 +1347,17 @@ D-1, which is the normal way a date gets its tail. When D-1's stop-level
 rows were already pruned this leaves a small fragment on a pruned date
 (SFMTA 2026-09-28 after `--date 2026-09-29 --force`: 14,508 `trip_update` +
 1,825 `proximity` rows, no `runs`). `refresh_by_day` is unchanged. The
-fragment is outside the stop-level window, so the dry run below lists it as
-deletable and the owner's `--apply` removes it. Until then the aggregate-
-overwrite guard keeps the date's stored aggregate, and
+fragment is outside the stop-level window, so when D-1 otherwise passes the
+stop-level guards the dry run below lists it as deletable and the owner's
+`--apply` removes it. The dry run KEEPS it instead when (a) D-1's aggregate
+is not final (e.g. `system_metrics_daily` stamped partial, or a date
+previously pruned via `--release-date`), which needs releasing again, or
+(b) D-1 predates the 2026-08-22 S3 VP archive start, which needs
+`--allow-unrederivable`. Until the fragment is deleted, and in both kept
+cases, the aggregate-overwrite guard keeps the date's stored aggregate and
 `scripts/recompute_ewt_aggregates.py` refuses the date as a fragment
-(recomputed observed headways below 50% of stored).
+(recomputed observed headways below 50% of stored), so nothing is
+overwritten.
 
 **Window anchor.** Both windows count back from the latest *fully derived*
 service date — newest `system_metrics_daily` row stamped `complete` with

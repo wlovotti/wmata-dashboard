@@ -190,6 +190,12 @@ def is_fragment_of_stored(stored_n: int | None, recomputed_n: int | None) -> boo
 
     A NULL or zero stored count gives nothing to compare against, so the
     guard cannot judge and returns False (it does not refuse on that ground).
+
+    Known limit (issue #283): the check is per date, summed over routes, so a
+    date that is a fragment for only some routes passes (e.g. one that lost
+    its own post-midnight tail: the system total drops only a few percent
+    but owl routes lose most of their observed headways), and those routes'
+    overlay EWT would be rewritten from partial data.
     """
     if not stored_n:
         return False
