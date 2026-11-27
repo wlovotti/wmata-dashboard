@@ -324,3 +324,68 @@ def test_dates_without_trip_update_rows_and_excluded_dates_are_skipped(pg_sessio
         )
         == []
     )
+
+
+def _fake_overlay_n(n_observed: int):
+    """Fake overlay compute whose recomputed observed-headway count per route is ``n_observed``."""
+
+    def _compute(db, service_date, gtfs_snapshot_id=None, tz_name=None, agency=None):
+        """Return one recomputed overlay row per stored route with the given count."""
+        return [
+            {
+                "route_id": r,
+                "service_date": ISO,
+                "day_type": "weekday",
+                **OTHER,
+                **{**NEW_EWT, "ewt_n_observed_headways": n_observed},
+            }
+            for r in ("D50", "D10")
+        ]
+
+    return _compute
+
+
+def test_is_fragment_of_stored_threshold_and_unjudgeable_cases():
+    """Below FRAGMENT_MIN_RATIO of the stored count is a fragment; NULL/0 stored cannot be judged."""
+    stored = 1000
+    cut = int(stored * tool.FRAGMENT_MIN_RATIO)
+    assert tool.is_fragment_of_stored(stored, cut - 1)
+    assert not tool.is_fragment_of_stored(stored, cut)
+    assert tool.is_fragment_of_stored(stored, 0)
+    assert not tool.is_fragment_of_stored(stored, 1000)
+    assert not tool.is_fragment_of_stored(None, 5)
+    assert not tool.is_fragment_of_stored(0, 5)
+
+
+@pytest.mark.integration
+def test_fragment_date_is_refused_and_not_writable(pg_session):
+    """A date whose stop-level rows yield a small share of the stored headway count is REFUSED."""
+    _seed(pg_session)
+    (plan,) = tool.plan_recompute(
+        pg_session,
+        WMATA,
+        D,
+        D,
+        compute_overlay=_fake_overlay_n(5),  # 10 recomputed vs 40 stored
+        compute_system=_fake_system(ewt=377.81),
+    )
+    assert plan.status == "refused"
+    assert "fragment" in plan.reason
+    assert tool.format_plan(plan).startswith("REFUSED")
+    with pytest.raises(ValueError):
+        tool.apply_plan(pg_session, plan)
+
+
+@pytest.mark.integration
+def test_thin_date_matching_stored_aggregate_still_passes(pg_session):
+    """A genuinely thin date whose recompute equals its stored counts is not a fragment."""
+    _seed(pg_session)
+    (plan,) = tool.plan_recompute(
+        pg_session,
+        WMATA,
+        D,
+        D,
+        compute_overlay=_fake_overlay_n(20),  # same as stored
+        compute_system=_fake_system(),
+    )
+    assert plan.status == "write"

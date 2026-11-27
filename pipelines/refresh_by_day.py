@@ -103,6 +103,23 @@ that tail is missing (a range re-derive ended at D), re-derive D+1 too.
 WMATA does not re-anchor (its ``start_date`` stays on the service day),
 so it is unaffected. Details: ``docs/DEPLOYMENT.md`` §12.3.
 
+Spillover fragments on pruned dates (issue #276): re-deriving D with
+``--force`` writes D-1's tail onto D-1. If D-1's own stop-level rows were
+already pruned, that leaves a small fragment (SFMTA 2026-09-28: 14,508
+``trip_update`` + 1,825 ``proximity`` rows, no ``runs``) on a date past the
+retention tier. The refresh deliberately does not suppress or remove it:
+writing D-1's tail from D's files is the normal way a date gets its
+post-midnight tail, and a fragment on a pruned date is just retention
+eligible rows. The owner-run ``pipelines.apply_retention`` (dry run by
+default) lists it as deletable when D-1 otherwise passes the stop-level
+guards (``src/retention.py:stop_level_refusal``). It KEEPS it when (a) D-1's
+aggregate is not final (e.g. ``system_metrics_daily`` stamped partial, or a
+date previously pruned via ``--release-date``), which needs releasing
+again, or (b) D-1 predates the 2026-08-22 S3 VP archive start, which needs
+``--allow-unrederivable``. In both kept cases the aggregate-overwrite guard
+keeps D-1's stored aggregate and ``scripts/recompute_ewt_aggregates.py``
+refuses such a date as a fragment, so nothing is overwritten.
+
 Pruned dates are never "holes": the zero-runs rule only looks back
 ``--lookback-days`` (14), retention windows are at least 15 days (35/100
 configured) counted from the latest derived date, and the hole scan

@@ -48,7 +48,14 @@ Refused (skipped and listed; nothing written for the date):
   with no observed headways that the recompute no longer produces is
   harmless — the cap cannot change it — so it is kept as stored and only
   its ``computed_at`` is stamped (reported as "kept as stored");
-- the recompute would null a stored non-null system ``ewt_seconds``.
+- the recompute would null a stored non-null system ``ewt_seconds``;
+- the date's stop-level rows are a fragment of what the stored aggregate was
+  built from (issue #276): the recomputed ``ewt_n_observed_headways``,
+  summed over routes, is below ``FRAGMENT_MIN_RATIO`` of the stored sum. A
+  forced single-date re-derive can leave a small tail of rows on the
+  previous, already-pruned date; without this guard that date would look
+  recomputable and a good kept aggregate would be overwritten from ~5% of
+  the day. A stored total of NULL/0 cannot be judged and is not refused.
 
 Failures (an exception while computing or writing) are reported separately
 as FAILED and make the exit status 1. Use ``--exclude-date`` to leave
@@ -117,6 +124,12 @@ OTHER_SYSTEM_COLUMNS: tuple[str, ...] = (
     "bunching_rate",
 )
 
+# Refuse a date when its recomputed observed-headway count (summed over routes)
+# is below this share of the stored count (issue #276). The 120-minute long-gap
+# rule (#269) legitimately lowers the count a little; fragments sit at a few
+# percent. Retune here only.
+FRAGMENT_MIN_RATIO = 0.5
+
 OVERLAY_CONSTRAINT = "uq_route_metrics_overlay_route_date"
 SYSTEM_CONSTRAINT = "system_metrics_daily_pkey"
 
@@ -170,6 +183,23 @@ def _differs(old, new) -> bool:
     if old is None or new is None:
         return (old is None) != (new is None)
     return not math.isclose(float(old), float(new), rel_tol=1e-9, abs_tol=1e-9)
+
+
+def is_fragment_of_stored(stored_n: int | None, recomputed_n: int | None) -> bool:
+    """True when the recomputed observed-headway count is under ``FRAGMENT_MIN_RATIO`` of stored.
+
+    A NULL or zero stored count gives nothing to compare against, so the
+    guard cannot judge and returns False (it does not refuse on that ground).
+
+    Known limit (issue #283): the check is per date, summed over routes, so a
+    date that is a fragment for only some routes passes (e.g. one that lost
+    its own post-midnight tail: the system total drops only a few percent
+    but owl routes lose most of their observed headways), and those routes'
+    overlay EWT would be rewritten from partial data.
+    """
+    if not stored_n:
+        return False
+    return (recomputed_n or 0) < FRAGMENT_MIN_RATIO * stored_n
 
 
 def candidate_dates(db: Session, start: date | None, end: date | None) -> list[date]:
@@ -281,6 +311,16 @@ def plan_date(
         plan.status, plan.reason = "refused", "; ".join(parts)
     elif stored_system.ewt_seconds is not None and new_system.get("ewt_seconds") is None:
         plan.status, plan.reason = "refused", "recompute would null a stored ewt_seconds"
+    else:
+        stored_n = sum(r.ewt_n_observed_headways or 0 for r in stored_rows.values())
+        new_n = sum(r.get("ewt_n_observed_headways") or 0 for r in new_rows)
+        if is_fragment_of_stored(stored_n, new_n):
+            plan.status = "refused"
+            plan.reason = (
+                f"stop-level rows look like a fragment of the stored aggregate: recomputed "
+                f"{new_n} observed headways vs {stored_n} stored "
+                f"(< {FRAGMENT_MIN_RATIO:.0%}); likely spillover rows on a pruned date"
+            )
     return plan
 
 

@@ -50,16 +50,6 @@ dates:
       re-derived from S3 (coverage 0.664): it had been wrongly demoted by an
       end-of-run cleanup bug, not by its own data
   - agency: sfmta
-    date: "2026-09-29"
-    issue: "#279"
-    note: >-
-      OTP, EWT and bunching lack the date's post-midnight tail: the
-      out-of-order re-derive of 2026-09-29 deleted it (315,426 trip_update
-      stop_events against ~330k on a comparable weekday) and service
-      delivered looks whole only because the orphaned runs remain. Restored
-      by re-deriving 2026-09-30 with the fixed code (PR #280); remove this
-      entry once that is done
-  - agency: sfmta
     date: "2026-10-21"
     issue: "#270"
     note: >-
