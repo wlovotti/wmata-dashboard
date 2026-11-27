@@ -1277,3 +1277,24 @@ def test_pre_completeness_report_fixture_rerenders_byte_identical():
     assert md == (fixtures / "pre_completeness_2026-10.md").read_text()
     assert "120-minute long-gap rule" not in md
     assert "feed-gap test" not in md
+
+
+@pytest.mark.smoke
+def test_mixed_ewt_method_report_fixture_rerenders_byte_identical():
+    """A real mixed-method EWT report still renders verbatim, markers included.
+
+    The fixture is the October 2026 report as published by PR #277, when
+    Muni's 2026-10-01..10-19 still carried old-method EWT. The committed
+    report was regenerated after those dates were re-derived (issue #278)
+    and is now single-method, so this pair keeps a real-data check of the
+    mixed-method markers (dagger, method coverage note, "not a finding").
+    """
+    from pathlib import Path
+
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "scorecard"
+    card = json.loads((fixtures / "mixed_ewt_method_2026-10.json").read_text())
+    assert card["agencies"]["sfmta"]["ewt_method"]["status"] == "mixed"
+    md = sc.render_markdown(card)
+    assert md == (fixtures / "mixed_ewt_method_2026-10.md").read_text()
+    assert "not all computed under the same method" in md
+    assert "† marks an old-method date." in md
