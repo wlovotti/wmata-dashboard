@@ -18,6 +18,15 @@
 routes: []
 
 # Specific agency-dates with a known data problem or a hand-corrected stamp.
+#
+# Record, not an entry (a re-derive under the current method is not a data
+# problem, and per-date entries would print as known issues in the report):
+# SFMTA 2026-10-01..10-19 were re-derived from the S3 raw archive on
+# 2026-11-26 (issue #278) and 10-20 re-derived again after the #279 fix to
+# restore 10-19's post-midnight tail, so every complete Muni October date
+# carries EWT under the 120-minute long-gap rule. Before that, 10-01..10-19
+# kept the old EWT method and the October report marked Muni EWT as
+# mixed-method (PR #277).
 dates:
   - agency: sfmta
     date: "2026-08-08"
@@ -40,6 +49,16 @@ dates:
       stamp hand-corrected partial -> complete on 2026-11-26 and the date
       re-derived from S3 (coverage 0.664): it had been wrongly demoted by an
       end-of-run cleanup bug, not by its own data
+  - agency: sfmta
+    date: "2026-09-29"
+    issue: "#279"
+    note: >-
+      OTP, EWT and bunching lack the date's post-midnight tail: the
+      out-of-order re-derive of 2026-09-29 deleted it (315,426 trip_update
+      stop_events against ~330k on a comparable weekday) and service
+      delivered looks whole only because the orphaned runs remain. Restored
+      by re-deriving 2026-09-30 with the fixed code (PR #280); remove this
+      entry once that is done
   - agency: sfmta
     date: "2026-10-21"
     issue: "#270"
